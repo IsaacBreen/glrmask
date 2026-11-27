@@ -9992,11 +9992,11 @@ mod tests {
                 eprintln!("WEIGHT_TRANSPORT {name} labels={labels:?} empty={} memberships={memberships:?}", weight.is_empty());
             }
             for key in [22_i32, DEFAULT_LABEL] {
-                if let Some(weight) = constraint.parser_top_accept.get(&key) {
+                if let Some(weight) = constraint.non_dwa_weights.materialized().and_then(|w| w.parser_top_accept.get(&key)) {
                     let memberships = tsids.iter().map(|&tsid| (tsid, weight.tokens_for_tsid(tsid).contains(internal_token), weight.tokens_for_tsid(tsid).len())).collect::<Vec<_>>();
                     eprintln!("WEIGHT_TRANSPORT {name} top_accept key={key} memberships={memberships:?}");
                 }
-                if let Some(parts) = constraint.parser_top_accept_parts.get(&key) {
+                if let Some(parts) = constraint.non_dwa_weights.materialized().and_then(|w| w.parser_top_accept_parts.get(&key)) {
                     for (part, weight) in parts.iter().enumerate() {
                         let memberships = tsids.iter().map(|&tsid| (tsid, weight.tokens_for_tsid(tsid).contains(internal_token), weight.tokens_for_tsid(tsid).len())).collect::<Vec<_>>();
                         eprintln!("WEIGHT_TRANSPORT {name} top_part key={key} part={part} memberships={memberships:?}");

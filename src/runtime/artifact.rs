@@ -35,8 +35,6 @@ use crate::ds::u8set::U8Set;
 
 use super::mask_cache_payload::DynamicMaskCachePayload;
 
-pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
-
 /// Optional composition-boundary metadata, independent of the masking optimization. `None` adds no metadata; `Tokens` is a conservative parser-state-independent candidate set; `Exact` adds state-sensitive metadata where supported.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BoundaryTriggerDetail {
@@ -234,14 +232,162 @@ pub(crate) struct CompositionGrammarSummary {
     pub(crate) root_nullable: bool,
 }
 
+/// Non-DWA weight relations share the final constraint TSID/token coordinate.
+/// Runtime storage changes the value representation, never the keys or order.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct NonDwaWeights<W> {
+    /// Exact depth-one acceptance: encoded parser-state label to the
+    /// transition/final-weight intersection after one stack symbol.
+    pub(crate) parser_top_accept: BTreeMap<i32, W>,
+    /// Direct-regular grammars retain uncombined completion parts, avoiding
+    /// construction of one large union weight for each parser state.
+    pub(crate) parser_top_accept_parts: BTreeMap<i32, Vec<W>>,
+    /// Immediate L1 completion, shared once per grammar terminal.
+    pub(crate) direct_regular_l1_complete_by_terminal: BTreeMap<TerminalID, W>,
+    /// Exact possible_matches keyed by grammar terminal id.
+    ///
+    /// An empty table may represent deferred possible-match construction in
+    /// legacy code only.
+    ///
+    /// IMPORTANT: the dynamic possible-matches fallback is intentionally
+    /// terrible and is planned for removal. New compiler paths MUST construct
+    /// complete exact possible matches and MUST NOT set
+    /// possible_matches_complete to false as an implementation shortcut.
+    /// DO NOT REMOVE OR WEAKEN THIS COMMENT.
+    ///
+    /// Each Weight maps final shared internal tokenizer-state ids to token sets
+    /// in the final shared constraint-internal vocab space. Parser-DWA weights
+    /// and possible_matches weights are reconciled into this same space during
+    /// compilation.
+    pub(crate) possible_matches: BTreeMap<TerminalID, W>,
+}
+
+impl<W> Default for NonDwaWeights<W> {
+    fn default() -> Self {
+        Self {
+            parser_top_accept: BTreeMap::new(),
+            parser_top_accept_parts: BTreeMap::new(),
+            direct_regular_l1_complete_by_terminal: BTreeMap::new(),
+            possible_matches: BTreeMap::new(),
+        }
+    }
+}
+
+impl<W> NonDwaWeights<W> {
+    pub(crate) fn final_weights(&self) -> impl Iterator<Item = &W> {
+        self.parser_top_accept.values()
+            .chain(self.parser_top_accept_parts.values().flatten())
+            .chain(self.direct_regular_l1_complete_by_terminal.values())
+    }
+
+    pub(crate) fn weights(&self) -> impl Iterator<Item = &W> {
+        self.final_weights().chain(self.possible_matches.values())
+    }
+
+    pub(crate) fn map_weights<T>(&self, mut map: impl FnMut(&W) -> T) -> NonDwaWeights<T> {
+        NonDwaWeights {
+            parser_top_accept: self.parser_top_accept.iter()
+                .map(|(&key, value)| (key, map(value))).collect(),
+            parser_top_accept_parts: self.parser_top_accept_parts.iter()
+                .map(|(&key, values)| (key, values.iter().map(&mut map).collect())).collect(),
+            direct_regular_l1_complete_by_terminal: self.direct_regular_l1_complete_by_terminal.iter()
+                .map(|(&key, value)| (key, map(value))).collect(),
+            possible_matches: self.possible_matches.iter()
+                .map(|(&key, value)| (key, map(value))).collect(),
+        }
+    }
+
+    pub(crate) fn top_accept(&self, label: i32) -> Option<&W> {
+        self.parser_top_accept.get(&label)
+            .or_else(|| self.parser_top_accept.get(&DEFAULT_LABEL))
+    }
+
+    pub(crate) fn top_parts(&self, label: i32) -> &[W] {
+        self.parser_top_accept_parts.get(&label)
+            .or_else(|| self.parser_top_accept_parts.get(&DEFAULT_LABEL))
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PackedNonDwaWeights {
     pub(crate) final_masks: Arc<super::constraint::packed_final_masks::PackedFinalMaskCache>,
     pub(crate) pool: Arc<crate::ds::weight::PackedRuntimeWeightPool>,
-    pub(crate) parser_top_accept: BTreeMap<i32, u32>,
-    pub(crate) parser_top_accept_parts: BTreeMap<i32, Vec<u32>>,
-    pub(crate) direct_regular_l1_complete_by_terminal: BTreeMap<TerminalID, u32>,
-    pub(crate) possible_matches: BTreeMap<TerminalID, u32>,
+    pub(crate) relations: NonDwaWeights<u32>,
+}
+
+impl PackedNonDwaWeights {
+    pub(crate) fn new(
+        pool: Arc<crate::ds::weight::PackedRuntimeWeightPool>,
+        relations: NonDwaWeights<u32>,
+    ) -> Result<Self, String> {
+        if let Some(&id) = relations.weights().find(|&&id| id as usize >= pool.weight_count()) {
+            return Err(format!("packed non-DWA Weight id {id} is out of range"));
+        }
+        Ok(Self { final_masks: Default::default(), pool, relations })
+    }
+
+    fn materialize(&self) -> Result<NonDwaWeights<Weight>, String> {
+        let weights = crate::ds::weight::unpack_pooled_weights(self.pool.packed_bytes())?;
+        if weights.len() != self.pool.weight_count() {
+            return Err("packed non-DWA Weight count mismatch".to_owned());
+        }
+        // IDs were checked against the immutable pool when attached.
+        Ok(self.relations.map_weights(|&id| weights[id as usize].clone()))
+    }
+}
+
+/// Exactly one representation of the labeled non-DWA weights is live.
+/// Loaded/compacted constraints do not retain placeholder Weight maps.
+#[derive(Debug, Clone)]
+pub(crate) enum NonDwaWeightStorage {
+    Materialized(NonDwaWeights<Weight>),
+    Pooled(Arc<PackedNonDwaWeights>),
+}
+
+impl Default for NonDwaWeightStorage {
+    fn default() -> Self {
+        Self::Materialized(NonDwaWeights::default())
+    }
+}
+
+impl NonDwaWeightStorage {
+    pub(crate) fn materialized(&self) -> Option<&NonDwaWeights<Weight>> {
+        match self {
+            Self::Materialized(weights) => Some(weights),
+            Self::Pooled(_) => None,
+        }
+    }
+
+    pub(crate) fn materialized_mut(&mut self) -> &mut NonDwaWeights<Weight> {
+        match self {
+            Self::Materialized(weights) => weights,
+            Self::Pooled(_) => panic!("compiler mutation requires materialized non-DWA weights"),
+        }
+    }
+
+    pub(crate) fn pooled(&self) -> Option<&Arc<PackedNonDwaWeights>> {
+        match self {
+            Self::Materialized(_) => None,
+            Self::Pooled(weights) => Some(weights),
+        }
+    }
+
+    pub(crate) fn pooled_mut(&mut self) -> Option<&mut Arc<PackedNonDwaWeights>> {
+        match self {
+            Self::Materialized(_) => None,
+            Self::Pooled(weights) => Some(weights),
+        }
+    }
+
+    pub(crate) fn materialized_for_compilation(
+        &self,
+    ) -> Result<std::borrow::Cow<'_, NonDwaWeights<Weight>>, String> {
+        match self {
+            Self::Materialized(weights) => Ok(std::borrow::Cow::Borrowed(weights)),
+            Self::Pooled(weights) => weights.materialize().map(std::borrow::Cow::Owned),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -9480,24 +9626,10 @@ constraint_data_schema! {
     @serde(skip, default)
     pub(crate) packed_parser_dwa:
         Option<Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>>,
-    /// Exact depth-one parser acceptance kept separate from the deeper parser
-    /// DWA. Keys are encoded parser-state labels; values are already the
-    /// transition/final-weight intersection for accepting after that one
-    /// stack symbol.
-    @serde(default)
-    pub(crate) parser_top_accept: BTreeMap<i32, Weight>,
-    /// Uncombined exact depth-one acceptance parts. Direct-regular grammars
-    /// retain terminal completion weights separately to avoid constructing one
-    /// large union weight per parser state at compile time.
-    @serde(default)
-    pub(crate) parser_top_accept_parts: BTreeMap<i32, Vec<Weight>>,
-    /// Immediate-completion L1 terminal weights for direct-regular parsers.
-    /// Kept once per grammar terminal rather than duplicated across every
-    /// epsilon-closed parser row.
-    @serde(default)
-    pub(crate) direct_regular_l1_complete_by_terminal: BTreeMap<TerminalID, Weight>,
+    /// Labeled non-DWA weights. The current core carries the same relation
+    /// schema using validated pool IDs, not this runtime representation.
     @serde(skip, default)
-    pub(crate) packed_non_dwa_weights: Option<Arc<PackedNonDwaWeights>>,
+    pub(crate) non_dwa_weights: NonDwaWeightStorage,
     /// Runtime-derived exact acceptance summaries for wide direct-regular
     /// replace-top frontiers. Rebuilt after compile/load from the table and
     /// parser-top acceptance artifacts.
@@ -9551,22 +9683,6 @@ constraint_data_schema! {
     @serde(skip, default)
     pub(crate) empty_byte_token_ids: Arc<[u32]>,
 
-    /// possible_matches keyed by grammar terminal id.
-    ///
-    /// An empty table may represent deferred possible-match construction in
-    /// legacy code only.
-    ///
-    /// IMPORTANT: the dynamic possible-matches fallback is intentionally
-    /// terrible and is planned for removal. New compiler paths MUST construct
-    /// complete exact possible matches and MUST NOT set
-    /// `possible_matches_complete` to false as an implementation shortcut.
-    /// DO NOT REMOVE OR WEAKEN THIS COMMENT.
-    ///
-    /// Each Weight maps final shared internal tokenizer-state ids to token sets
-    /// in the final shared constraint-internal vocab space. Parser-DWA weights
-    /// and possible_matches weights are reconciled into this same space during
-    /// compilation.
-    pub(crate) possible_matches: PossibleMatchesByTerminal,
     /// Whether `possible_matches` is a complete table. New static constraints
     /// must set this to true. False exists only for legacy dynamic/deferred
     /// construction and is not permitted as a fallback strategy for new

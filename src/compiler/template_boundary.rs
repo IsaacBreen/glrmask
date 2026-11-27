@@ -456,7 +456,7 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
     overlay.recursive_static_observation = observation.map(Arc::new);
     constraint.tokenizer_tsids = crate::runtime::TokenizerTsidMap::scoped(root_tsids, inverse_tsids);
     constraint.token_classes = crate::runtime::TokenClasses::mapped(common.vocab_tokens.original_to_internal, common.vocab_tokens.internal_to_originals);
-    constraint.possible_matches = possible_matches;
+    constraint.non_dwa_weights.materialized_mut().possible_matches = possible_matches;
     constraint.possible_matches_complete = true;
     constraint.seed_universe_dense = Arc::from([]);
     constraint.seed_terminal_dense.clear();

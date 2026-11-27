@@ -123,7 +123,7 @@ impl NativeSectionSource<'_> {
 const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R38\0";
 const CURRENT_RUNTIME_HEADER_LEN: usize = CURRENT_RUNTIME_MAGIC.len() + 2 * 8;
 const STATIC_RESIDUAL_MASK_MAGIC: [u8; 4] = *b"SRM3";
-const CURRENT_CORE_MAGIC: [u8; 4] = *b"C28\0";
+const CURRENT_CORE_MAGIC: [u8; 4] = *b"C29\0";
 const CURRENT_CORE_HEADER_LEN: usize = CURRENT_CORE_MAGIC.len() + 2 * 8;
 
 /// Clone a large already-serialized artifact without forcing one core to move
@@ -212,6 +212,7 @@ impl serde::Serialize for SerializedConstraint<'_> {
 struct ConstraintArtifactCurrentCoreBaseRef<'a> {
     #[serde(serialize_with = "serialize_constraint")]
     constraint: &'a Constraint,
+    non_dwa_weight_ids: &'a crate::runtime::artifact::NonDwaWeights<u32>,
     ignore_expr: &'a Option<Expr>,
     parser_state_domain_labels: &'a [i32],
     static_dynamic_overlay: &'a Option<crate::runtime::artifact::StaticDynamicOverlayMetadata>,
@@ -222,6 +223,7 @@ struct ConstraintArtifactCurrentCoreBaseRef<'a> {
 struct ConstraintArtifactCurrentCoreBase {
     #[serde(deserialize_with = "deserialize_boxed_constraint")]
     constraint: Box<Constraint>,
+    non_dwa_weight_ids: crate::runtime::artifact::NonDwaWeights<u32>,
     ignore_expr: Option<Expr>,
     parser_state_domain_labels: Vec<i32>,
     static_dynamic_overlay: Option<crate::runtime::artifact::StaticDynamicOverlayMetadata>,
@@ -821,7 +823,7 @@ struct DecodedNativeArtifactLoad {
     runtime: Option<DecodedConstraintRuntime>,
     token_mask_cache: Option<TokenMaskCacheArtifact>,
     terminal_exprs: Option<Vec<Expr>>,
-    post_decode_ms: [f64; 2],
+    post_decode_ms: f64,
 }
 
 struct DecodedConstraintCore {
@@ -2909,75 +2911,24 @@ fn write_native_section_header(
     }
 }
 
-fn constraint_serialized_weight_pool_with_ids(
-    constraint: &Constraint,
-) -> (Vec<Weight>, Vec<u32>, usize) {
+fn intern_non_dwa_weights(
+    relations: &crate::runtime::artifact::NonDwaWeights<Weight>,
+) -> (Vec<Weight>, crate::runtime::artifact::NonDwaWeights<u32>) {
     let mut by_ptr = FxHashMap::<usize, u32>::default();
     let mut weights = Vec::new();
-    let mut ids = Vec::new();
-    let mut total_ranges = 0usize;
-    let mut push = |weight: &Weight| {
+    let ids = relations.map_weights(|weight| {
         let key = weight.ptr_key();
-        let id = if let Some(&id) = by_ptr.get(&key) {
-            id
-        } else {
-            let id = weights.len() as u32;
-            by_ptr.insert(key, id);
-            if !weight.is_full() {
-                total_ranges = total_ranges.saturating_add(weight.num_ranges());
-            }
+        *by_ptr.entry(key).or_insert_with(|| {
+            let id = u32::try_from(weights.len()).expect("too many non-DWA weights");
             weights.push(weight.clone());
             id
-        };
-        ids.push(id);
-    };
-
-    for weight in constraint.parser_top_accept.values() {
-        push(weight);
-    }
-    for parts in constraint.parser_top_accept_parts.values() {
-        for weight in parts {
-            push(weight);
-        }
-    }
-    for weight in constraint.direct_regular_l1_complete_by_terminal.values() {
-        push(weight);
-    }
-    for weight in constraint.possible_matches.values() {
-        push(weight);
-    }
-    (weights, ids, total_ranges)
-}
-
-fn constraint_serialized_weight_pool(constraint: &Constraint) -> Vec<Weight> {
-    constraint_serialized_weight_pool_with_ids(constraint).0
-}
-
-/// IDs in the same field/map order used by ConstraintSerde. Structural Weight
-/// values are placeholders when a packed non-DWA pool is present; interning
-/// those empty values would collapse distinct references to the same pool ID.
-fn packed_constraint_serialized_weight_ids(constraint: &Constraint) -> Option<Vec<u32>> {
-    let packed = constraint.packed_non_dwa_weights.as_ref()?;
-    let mut ids = Vec::new();
-    for key in constraint.parser_top_accept.keys() {
-        ids.push(packed.parser_top_accept[key]);
-    }
-    for (key, parts) in &constraint.parser_top_accept_parts {
-        let packed_parts = &packed.parser_top_accept_parts[key];
-        assert_eq!(parts.len(), packed_parts.len(), "packed acceptance-part count mismatch");
-        ids.extend_from_slice(packed_parts);
-    }
-    for key in constraint.direct_regular_l1_complete_by_terminal.keys() {
-        ids.push(packed.direct_regular_l1_complete_by_terminal[key]);
-    }
-    for key in constraint.possible_matches.keys() {
-        ids.push(packed.possible_matches[key]);
-    }
-    Some(ids)
+        })
+    });
+    (weights, ids)
 }
 
 fn constraint_serialized_weight_ranges_at_least(
-    constraint: &Constraint,
+    relations: &crate::runtime::artifact::NonDwaWeights<Weight>,
     min_weight_ranges: usize,
 ) -> bool {
     if min_weight_ranges == 0 {
@@ -2985,147 +2936,39 @@ fn constraint_serialized_weight_ranges_at_least(
     }
     let mut seen = FxHashSet::<usize>::default();
     let mut total_ranges = 0usize;
-    let mut crosses_threshold = |weight: &Weight| {
+    relations.weights().any(|weight| {
         if !seen.insert(weight.ptr_key()) || weight.is_full() {
             return false;
         }
         total_ranges = total_ranges.saturating_add(weight.num_ranges());
         total_ranges >= min_weight_ranges
-    };
-
-    for weight in constraint.parser_top_accept.values() {
-        if crosses_threshold(weight) {
-            return true;
-        }
-    }
-    for parts in constraint.parser_top_accept_parts.values() {
-        for weight in parts {
-            if crosses_threshold(weight) {
-                return true;
-            }
-        }
-    }
-    for weight in constraint.direct_regular_l1_complete_by_terminal.values() {
-        if crosses_threshold(weight) {
-            return true;
-        }
-    }
-    for weight in constraint.possible_matches.values() {
-        if crosses_threshold(weight) {
-            return true;
-        }
-    }
-    false
+    })
 }
 
 fn compact_non_dwa_weight_runtime_if_at_least(
     constraint: &mut Constraint,
     min_weight_ranges: usize,
 ) -> bool {
-    if constraint.packed_non_dwa_weights.is_some() {
+    use crate::runtime::artifact::{NonDwaWeightStorage, PackedNonDwaWeights};
+    let Some(relations) = constraint.non_dwa_weights.materialized() else {
+        return false;
+    };
+    if !constraint_serialized_weight_ranges_at_least(relations, min_weight_ranges) {
         return false;
     }
-    if !constraint_serialized_weight_ranges_at_least(constraint, min_weight_ranges) {
-        return false;
-    }
-    let (weights, ids, _) = constraint_serialized_weight_pool_with_ids(constraint);
+    let (weights, ids) = intern_non_dwa_weights(relations);
     let wire = crate::ds::weight::pack_pooled_weights(&weights);
     let pool = crate::ds::weight::PackedRuntimeWeightPool::from_packed_bytes(&wire)
         .expect("fresh packed non-DWA Weight runtime should decode");
-    attach_packed_non_dwa_weights(constraint, std::sync::Arc::new(pool), ids)
+    let packed = PackedNonDwaWeights::new(Arc::new(pool), ids)
         .expect("fresh packed non-DWA Weight ids should match runtime maps");
+    constraint.non_dwa_weights = NonDwaWeightStorage::Pooled(Arc::new(packed));
     true
 }
 
 pub(crate) fn compact_large_non_dwa_weight_runtime(constraint: &mut Constraint) -> bool {
     const MIN_WEIGHT_RANGES: usize = 100_000;
     compact_non_dwa_weight_runtime_if_at_least(constraint, MIN_WEIGHT_RANGES)
-}
-
-fn attach_packed_non_dwa_weights(
-    constraint: &mut Constraint,
-    pool: std::sync::Arc<crate::ds::weight::PackedRuntimeWeightPool>,
-    ids: Vec<u32>,
-) -> Result<(), String> {
-    let top_len = constraint.parser_top_accept.len();
-    let parts_len = constraint
-        .parser_top_accept_parts
-        .values()
-        .map(Vec::len)
-        .sum::<usize>();
-    let direct_len = constraint.direct_regular_l1_complete_by_terminal.len();
-    let possible_len = constraint.possible_matches.len();
-    let expected = top_len
-        .checked_add(parts_len)
-        .and_then(|value| value.checked_add(direct_len))
-        .and_then(|value| value.checked_add(possible_len))
-        .ok_or_else(|| "packed Weight id count overflow".to_owned())?;
-    if ids.len() != expected {
-        return Err(format!(
-            "packed Weight id count mismatch: expected {expected}, found {}",
-            ids.len(),
-        ));
-    }
-
-    let (top_ids, rest) = ids.split_at(top_len);
-    let (part_ids, rest) = rest.split_at(parts_len);
-    let (direct_ids, possible_ids) = rest.split_at(direct_len);
-
-    let build_small = || {
-        let parser_top_accept = constraint
-            .parser_top_accept
-            .keys()
-            .copied()
-            .zip(top_ids.iter().copied())
-            .collect::<BTreeMap<_, _>>();
-        let mut part_pos = 0usize;
-        let parser_top_accept_parts = constraint
-            .parser_top_accept_parts
-            .iter()
-            .map(|(&label, parts)| {
-                let end = part_pos + parts.len();
-                let ids = part_ids[part_pos..end].to_vec();
-                part_pos = end;
-                (label, ids)
-            })
-            .collect::<BTreeMap<_, _>>();
-        debug_assert_eq!(part_pos, part_ids.len());
-        (parser_top_accept, parser_top_accept_parts)
-    };
-    let build_direct = || {
-        constraint
-            .direct_regular_l1_complete_by_terminal
-            .keys()
-            .copied()
-            .zip(direct_ids.iter().copied())
-            .collect::<BTreeMap<_, _>>()
-    };
-    let build_possible = || {
-        constraint
-            .possible_matches
-            .keys()
-            .copied()
-            .zip(possible_ids.iter().copied())
-            .collect::<BTreeMap<_, _>>()
-    };
-    let ((parser_top_accept, parser_top_accept_parts), (direct_regular_l1_complete_by_terminal, possible_matches)) =
-        if expected >= 1_024 && rayon::current_num_threads() > 1 {
-            rayon::join(build_small, || rayon::join(build_direct, build_possible))
-        } else {
-            (build_small(), (build_direct(), build_possible()))
-        };
-
-    constraint.packed_non_dwa_weights = Some(std::sync::Arc::new(
-        crate::runtime::artifact::PackedNonDwaWeights {
-            final_masks: Default::default(),
-            pool,
-            parser_top_accept,
-            parser_top_accept_parts,
-            direct_regular_l1_complete_by_terminal,
-            possible_matches,
-        },
-    ));
-    Ok(())
 }
 
 fn envelope(version: u16, payload: &[u8]) -> Vec<u8> {
@@ -3557,15 +3400,20 @@ impl Constraint {
             || rayon::join(
             || {
                 let branch_started = profile.then(std::time::Instant::now);
-                let weights = if self.packed_non_dwa_weights.is_some() {
-                    Vec::new()
-                } else {
-                    constraint_serialized_weight_pool(self)
+                use crate::runtime::artifact::NonDwaWeightStorage;
+                let (weights, relations) = match &self.non_dwa_weights {
+                    NonDwaWeightStorage::Materialized(relations) => {
+                        let (weights, ids) = intern_non_dwa_weights(relations);
+                        (weights, std::borrow::Cow::Owned(ids))
+                    }
+                    NonDwaWeightStorage::Pooled(packed) => {
+                        (Vec::new(), std::borrow::Cow::Borrowed(&packed.relations))
+                    }
                 };
                 let (weight_pool, encoded) = rayon::join(
                     || {
                         let weights_started = profile.then(std::time::Instant::now);
-                        let weight_pool = self.packed_non_dwa_weights.as_ref().map_or_else(
+                        let weight_pool = self.non_dwa_weights.pooled().map_or_else(
                             || crate::ds::weight::pack_pooled_weights(&weights),
                             |packed| packed.pool.packed_bytes().to_vec(),
                         );
@@ -3579,16 +3427,6 @@ impl Constraint {
                         weight_pool
                     },
                     || {
-                        // The pooled Weight-id map is thread-local, so install
-                        // it inside the core branch rather than on the parent
-                        // Rayon worker.  Packing WPL3 only reads the same
-                        // immutable Weight slice and is independent once ids
-                        // have been defined by stable slice order.
-                        if let Some(ids) = packed_constraint_serialized_weight_ids(self) {
-                            crate::ds::weight::begin_pooled_weight_serde_encode_ids(ids);
-                        } else {
-                            crate::ds::weight::begin_pooled_weight_serde_encode(&weights);
-                        }
                         let previous_external =
                             crate::automata::weighted::dwa::set_external_serde(true);
                         let previous_external_table =
@@ -3616,6 +3454,7 @@ impl Constraint {
                             &mut encoded,
                             &ConstraintArtifactCurrentCoreBaseRef {
                                 constraint: self,
+                                non_dwa_weight_ids: relations.as_ref(),
                                 ignore_expr: &self.ignore_expr,
                                 parser_state_domain_labels: &self.parser_state_domain_labels,
                                 static_dynamic_overlay: &self.static_dynamic_overlay,
@@ -3646,7 +3485,6 @@ impl Constraint {
                             previous_external_table,
                         );
                         crate::automata::weighted::dwa::set_external_serde(previous_external);
-                        crate::ds::weight::end_pooled_weight_serde_encode();
                         encode_result.expect("Constraint core serialization should succeed");
                         if let Some(started) = started {
                             eprintln!(
@@ -4558,21 +4396,15 @@ impl Constraint {
                     ),
                 ),
             ),
-            || -> Result<
-                (
-                    DecodedConstraintCore,
-                    Option<(
-                        std::sync::Arc<crate::ds::weight::PackedRuntimeWeightPool>,
-                        Vec<u32>,
-                    )>,
-                ),
-                String,
-            > {
+            || -> Result<DecodedConstraintCore, String> {
+                use crate::runtime::artifact::{NonDwaWeightStorage, PackedNonDwaWeights};
                 let section_started = profile.then(std::time::Instant::now);
-                let weight_count = crate::ds::weight::PackedRuntimeWeightPool::peek_weight_count(weight_section)?;
-
+                let weights_started = profile.then(std::time::Instant::now);
+                let pool = Arc::new(crate::ds::weight::PackedRuntimeWeightPool::from_packed_bytes(weight_section)?);
+                if let Some(started) = weights_started {
+                    eprintln!("[glrmask/profile][constraint_section] name=weights_packed ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
+                }
                 let decode_core = || -> Result<_, String> {
-                    crate::ds::weight::begin_pooled_weight_serde_deferred_decode(weight_count);
                     let previous_external =
                         crate::automata::weighted::dwa::set_external_serde(true);
                     let previous_external_table =
@@ -4592,11 +4424,12 @@ impl Constraint {
                                 Some((std::sync::Arc::clone(backing), start))
                             });
                             decode_current_core(core_section, core_backing)
-                            .map(|(artifact, terminal_exprs_blob)| {
+                            .and_then(|(artifact, terminal_exprs_blob)| {
                                 let mut constraint = artifact.constraint;
+                                constraint.non_dwa_weights = NonDwaWeightStorage::Pooled(Arc::new(PackedNonDwaWeights::new(Arc::clone(&pool), artifact.non_dwa_weight_ids)?));
                                 constraint.static_dynamic_overlay = artifact.static_dynamic_overlay;
                                 constraint.late_grammar_slots = artifact.late_grammar_slots;
-                                DecodedConstraintCore {
+                                Ok(DecodedConstraintCore {
                                     constraint,
                                     ignore_expr: artifact.ignore_expr,
                                     terminal_exprs: None,
@@ -4604,13 +4437,12 @@ impl Constraint {
                                     parser_state_domain_labels:
                                         artifact.parser_state_domain_labels,
                                     internal_token_buf_masks: Vec::new(),
-                                }
+                                })
                             })
                         } else {
                             Err("unsupported constraint core version".to_owned())
                         }
                     };
-                    let deferred_weight_ids = crate::ds::weight::take_pooled_weight_serde_deferred_ids();
                     if let Some(started) = core_started {
                         eprintln!("[glrmask/profile][constraint_section] name=core_bincode ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
                     }
@@ -4624,37 +4456,13 @@ impl Constraint {
                         previous_external_table,
                     );
                     crate::automata::weighted::dwa::set_external_serde(previous_external);
-                    crate::ds::weight::end_pooled_weight_serde_decode();
-                    decoded.map(|artifact| {
-                        (artifact, deferred_weight_ids)
-                    })
+                    decoded
                 };
-
-                let (artifact, packed_weights) =
-                    {
-                        let weights_started = profile.then(std::time::Instant::now);
-                        // WPL3 current-format runtime indexing is now only
-                        // a small linear framing scan + one section copy.
-                        // Running that tiny job as another nested Rayon
-                        // branch competes with the much heavier core/DWA
-                        // decoders and increases wall time on Windows.
-                        let packed_weights =
-                            crate::ds::weight::PackedRuntimeWeightPool::from_packed_bytes(
-                                weight_section,
-                            )?;
-                        if let Some(started) = weights_started {
-                            eprintln!("[glrmask/profile][constraint_section] name=weights_packed ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
-                        }
-                        let (artifact, deferred_weight_ids) = decode_core()?;
-                        (
-                            artifact,
-                            Some((std::sync::Arc::new(packed_weights), deferred_weight_ids)),
-                        )
-                    };
+                let artifact = decode_core()?;
                 if let Some(started) = section_started {
                     eprintln!("[glrmask/profile][constraint_section] name=core_total ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
                 }
-                Ok((artifact, packed_weights))
+                Ok(artifact)
             },
         );
         let parser_dwa = dwa_result.map_err(crate::Error::Serialization)?;
@@ -4668,20 +4476,12 @@ impl Constraint {
             internal_token_buf_masks_result.map_err(crate::Error::Serialization)?;
         let token_mask_cache =
             token_mask_cache_result.map_err(crate::Error::Serialization)?;
-        let (artifact, packed_weights) =
-            core_result.map_err(crate::Error::Serialization)?;
+        let artifact = core_result.map_err(crate::Error::Serialization)?;
         let mut constraint = artifact.constraint;
         if let Some(tokenizer) = tokenizer {
             constraint.tokenizer = tokenizer.into();
         }
         constraint.token_classes = original_token_map;
-        let attach_weights_started = profile.then(std::time::Instant::now);
-        if let Some((pool, ids)) = packed_weights {
-            attach_packed_non_dwa_weights(&mut constraint, pool, ids)
-                .map_err(crate::Error::Serialization)?;
-        }
-        let attach_weights_ms = attach_weights_started
-            .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let attach_dwa_started = profile.then(std::time::Instant::now);
         constraint.parser_dwa = crate::automata::weighted::dwa::DWA::new(0, 0);
         constraint.packed_parser_dwa = Some(parser_dwa);
@@ -4755,7 +4555,7 @@ impl Constraint {
             runtime,
             token_mask_cache,
             terminal_exprs: artifact.terminal_exprs,
-            post_decode_ms: [attach_weights_ms, attach_dwa_ms],
+            post_decode_ms: attach_dwa_ms,
         })
     }
 
@@ -4831,7 +4631,7 @@ impl Constraint {
             let runtime = decoded.runtime;
             let token_mask_cache = decoded.token_mask_cache;
             let terminal_exprs = decoded.terminal_exprs;
-            let [attach_weights_ms, attach_dwa_ms] = decoded.post_decode_ms;
+            let attach_dwa_ms = decoded.post_decode_ms;
             if !deferred
                 && let Some(cache) = token_mask_cache {
                     install_token_mask_cache(&mut constraint, cache)
@@ -4953,7 +4753,7 @@ impl Constraint {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             if profile {
                 eprintln!(
-                    "[glrmask/profile][constraint_post_decode] attach_weights_ms={attach_weights_ms:.3} attach_dwa_ms={attach_dwa_ms:.3} restore_exprs_ms={restore_exprs_ms:.3}"
+                    "[glrmask/profile][constraint_post_decode] attach_dwa_ms={attach_dwa_ms:.3} restore_exprs_ms={restore_exprs_ms:.3}"
                 );
             }
             constraint
@@ -5283,18 +5083,17 @@ mod tests {
             &vocab,
         ).unwrap();
         let mut loaded = Constraint::load(original.save(), &vocab).unwrap();
-        let packed = loaded.packed_non_dwa_weights.as_ref().unwrap();
-        let distinct_ids = packed.parser_top_accept.values()
+        let packed = loaded.non_dwa_weights.pooled().unwrap();
+        let distinct_ids = packed.relations.parser_top_accept.values()
             .copied().collect::<std::collections::BTreeSet<_>>();
         assert!(distinct_ids.len() >= 2, "regression needs distinct packed references");
 
         // Linking can invalidate a cached artifact while retaining its packed
-        // runtime pools. Re-serialization must preserve the sidecar IDs, not
-        // intern the empty structural Weight placeholders by pointer.
+        // runtime pools. Re-serialization must preserve the labeled IDs.
         loaded.serialized_artifact_cache = None;
         let again = Constraint::load(loaded.save(), &vocab).unwrap();
-        assert_eq!(loaded.packed_non_dwa_weights.as_ref().unwrap().parser_top_accept,
-                   again.packed_non_dwa_weights.as_ref().unwrap().parser_top_accept);
+        assert_eq!(loaded.non_dwa_weights.pooled().unwrap().relations.parser_top_accept,
+                   again.non_dwa_weights.pooled().unwrap().relations.parser_top_accept);
         for path in [&[][..], &[1], &[1, 3], &[9], &[9, 2]] {
             let mut expected = original.start();
             let mut actual = again.start();
@@ -5491,14 +5290,24 @@ mod tests {
     }
 
     #[test]
+    fn non_dwa_weight_relations_reject_out_of_range_pool_ids() {
+        use crate::runtime::artifact::{NonDwaWeights, PackedNonDwaWeights};
+        let wire = crate::ds::weight::pack_pooled_weights(&[Weight::empty()]);
+        let pool = Arc::new(crate::ds::weight::PackedRuntimeWeightPool::from_packed_bytes(&wire).unwrap());
+        let mut relations = NonDwaWeights::default();
+        relations.possible_matches.insert(0, 1);
+        assert!(PackedNonDwaWeights::new(pool, relations).is_err());
+    }
+
+    #[test]
     fn fresh_packed_non_dwa_weight_runtime_matches_materialized_and_roundtrips() {
         let baseline = tiny_constraint();
         let mut packed = tiny_constraint();
-        let (weights, _, _) = constraint_serialized_weight_pool_with_ids(&packed);
+        let (weights, _) = intern_non_dwa_weights(packed.non_dwa_weights.materialized().unwrap());
         assert!(!weights.is_empty());
-        assert!(packed.packed_non_dwa_weights.is_none());
+        assert!(packed.non_dwa_weights.pooled().is_none());
         assert!(compact_non_dwa_weight_runtime_if_at_least(&mut packed, 0));
-        assert!(packed.packed_non_dwa_weights.is_some());
+        assert!(packed.non_dwa_weights.pooled().is_some());
 
         let mut expected = baseline.start();
         let mut actual = packed.start();

@@ -1270,32 +1270,30 @@ fn add_transition_for_mapped_label(
     Ok(())
 }
 
-fn materialized_top_acceptance(constraint: &Constraint) -> BTreeMap<i32, Weight> {
+fn materialized_top_acceptance(constraint: &Constraint, weights: &crate::runtime::artifact::NonDwaWeights<Weight>) -> BTreeMap<i32, Weight> {
     let mut result = BTreeMap::new();
-    let default_combined = constraint.parser_top_accept.get(&DEFAULT_LABEL);
-    let default_parts = constraint.parser_top_accept_parts.get(&DEFAULT_LABEL);
+    let default_combined = weights.parser_top_accept.get(&DEFAULT_LABEL);
+    let default_parts = weights.parser_top_accept_parts.get(&DEFAULT_LABEL);
     for parser_state in 0..constraint.parser_symbol_count() {
         let label = encode_positive_label(parser_state);
         let mut parts = Vec::<Weight>::new();
-        if let Some(weight) = constraint
-            .parser_top_accept
+        if let Some(weight) = weights.parser_top_accept
             .get(&label)
             .or_else(|| {
                 constraint
                     .parser_state_domain_label(parser_state)
-                    .and_then(|domain| constraint.parser_top_accept.get(&domain))
+                    .and_then(|domain| weights.parser_top_accept.get(&domain))
             })
             .or(default_combined)
         {
             parts.push(weight.clone());
         }
-        if let Some(weights) = constraint
-            .parser_top_accept_parts
+        if let Some(weights) = weights.parser_top_accept_parts
             .get(&label)
             .or_else(|| {
                 constraint
                     .parser_state_domain_label(parser_state)
-                    .and_then(|domain| constraint.parser_top_accept_parts.get(&domain))
+                    .and_then(|domain| weights.parser_top_accept_parts.get(&domain))
             })
             .or(default_parts)
         {
@@ -1303,8 +1301,7 @@ fn materialized_top_acceptance(constraint: &Constraint) -> BTreeMap<i32, Weight>
         }
         if let Some(row) = constraint.parser_advance_row(parser_state) {
             for terminal in row.iter_ones() {
-                if let Some(weight) = constraint
-                    .direct_regular_l1_complete_by_terminal
+                if let Some(weight) = weights.direct_regular_l1_complete_by_terminal
                     .get(&(terminal as u32))
                 {
                     parts.push(weight.clone());
@@ -1478,7 +1475,8 @@ fn component_parser_nwa(
         )?;
     }
 
-    let top_accept = materialized_top_acceptance(constraint);
+    let weights = constraint.non_dwa_weights.materialized_for_compilation()?;
+    let top_accept = materialized_top_acceptance(constraint, &weights);
     if !top_accept.is_empty() {
         let start = nwa.add_state();
         let final_state = nwa.add_state();
@@ -5277,8 +5275,8 @@ impl<'a> DeferredComponentParserUnionView<'a> {
                     let ignore_weight = component
                         .constraint
                         .ignore_terminal
-                        .and_then(|ignore| component.constraint.possible_matches.get(&ignore));
-                    strip_unscoped_ignore_identity(&mut automaton, ignore_weight);
+                        .and_then(|ignore| component.constraint.runtime_possible_match_weight(ignore)).map(|w| w.to_weight());
+                    strip_unscoped_ignore_identity(&mut automaton, ignore_weight.as_ref());
                 }
                 Ok(automaton)
         };
@@ -8098,10 +8096,16 @@ fn build_composed_constraint_unfinalized(
         pending_special_token_ids: None,
         parser_dwa,
         packed_parser_dwa: None,
-        parser_top_accept: BTreeMap::new(),
-        parser_top_accept_parts: BTreeMap::new(),
-        direct_regular_l1_complete_by_terminal: BTreeMap::new(),
-        packed_non_dwa_weights: None,
+        non_dwa_weights: crate::runtime::artifact::NonDwaWeightStorage::Materialized(
+            crate::runtime::artifact::NonDwaWeights {
+                // Constraint composition is not allowed to rely on the legacy dynamic
+                // possible-matches fallback. This is the exact transported and
+                // reconciled table from every compiled component.
+                // DO NOT REMOVE OR WEAKEN THIS COMMENT.
+                possible_matches,
+                ..Default::default()
+            },
+        ),
         direct_regular_wide_frontier_acceptance: Vec::new(),
         direct_regular_dynamic_hot_frontiers: Vec::new(),
         direct_regular_parser_state_acceptance: Vec::new(),
@@ -8121,11 +8125,6 @@ fn build_composed_constraint_unfinalized(
         dynamic_mask_vocab,
         lazy_dynamic_mask_vocab: OnceLock::new(),
         empty_byte_token_ids: crate::compiler::compile::vocab_empty_byte_token_ids(vocab),
-        // Constraint composition is not allowed to rely on the legacy dynamic
-        // possible-matches fallback. This is the exact transported and
-        // reconciled table from every compiled component.
-        // DO NOT REMOVE OR WEAKEN THIS COMMENT.
-        possible_matches,
         possible_matches_complete: true,
         tokenizer_tsids: crate::runtime::TokenizerTsidMap::partition(
             state_to_internal_tsid, internal_tsid_to_states,
@@ -8552,9 +8551,7 @@ fn validate_compiled_subgrammar_placeholders(
 ) -> Result<(), String> {
     for (child_index, child) in children.iter().enumerate() {
         for placeholder_terminal in child.placeholder_terminals() {
-            let has_byte_token_matches = parent
-                .possible_matches
-                .get(&placeholder_terminal)
+            let has_byte_token_matches = parent.runtime_possible_match_weight(placeholder_terminal)
                 .is_some_and(|weight| !weight.is_empty());
             let has_exact_token_match = parent.special_token_terminals.iter().any(|special| {
                 special.terminal_id == placeholder_terminal

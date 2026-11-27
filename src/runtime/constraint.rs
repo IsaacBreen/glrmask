@@ -40,7 +40,7 @@ use crate::ds::u8set::U8Set;
 use crate::ds::weight::{PackedRuntimePoolTokenSetRef, PackedRuntimePoolWeightRef, Weight};
 use crate::grammar::flat::TerminalID;
 
-use super::artifact::{
+use super::artifact::{NonDwaWeightStorage,
     dynamic_mask_vocab_layout_class, empty_dense_words, DenseAcceptanceRows,
     DirectRegularDynamicFrontierCacheEntry,
     DirectRegularDynamicHotFrontier, DirectRegularTerminalSupport,
@@ -317,6 +317,7 @@ impl<'a> RuntimeWeightRef<'a> {
 
     #[inline]
     pub(crate) fn to_weight(self) -> Weight {
+        if let Self::Materialized(weight) = self { return weight.clone(); }
         if self.is_full() {
             return Weight::all();
         }
@@ -2272,7 +2273,7 @@ impl Constraint {
 
     #[inline]
     fn runtime_pooled_weight(&self, id: u32) -> Option<RuntimeWeightRef<'_>> {
-        let packed = self.packed_non_dwa_weights.as_ref()?;
+        let packed = self.non_dwa_weights.pooled()?;
         if let Some(index) = packed.final_masks.indices.get(&id) {
             return Some(RuntimeWeightRef::IndexedPool(index));
         }
@@ -2284,43 +2285,25 @@ impl Constraint {
         &self,
         label: i32,
     ) -> Option<RuntimeWeightRef<'_>> {
-        if let Some(packed) = &self.packed_non_dwa_weights {
-            let id = packed
-                .parser_top_accept
-                .get(&label)
-                .or_else(|| packed.parser_top_accept.get(&DEFAULT_LABEL))?;
-            return self.runtime_pooled_weight(*id);
+        match &self.non_dwa_weights {
+            NonDwaWeightStorage::Materialized(weights) =>
+                weights.top_accept(label).map(RuntimeWeightRef::Materialized),
+            NonDwaWeightStorage::Pooled(packed) =>
+                self.runtime_pooled_weight(*packed.relations.top_accept(label)?),
         }
-        self.parser_top_accept
-            .get(&label)
-            .or_else(|| self.parser_top_accept.get(&DEFAULT_LABEL))
-            .map(RuntimeWeightRef::Materialized)
     }
 
     pub(crate) fn runtime_parser_top_accept_parts(
         &self,
         label: i32,
     ) -> SmallVec<[RuntimeWeightRef<'_>; 4]> {
-        if let Some(packed) = &self.packed_non_dwa_weights {
-            let Some(ids) = packed
-                .parser_top_accept_parts
-                .get(&label)
-                .or_else(|| packed.parser_top_accept_parts.get(&DEFAULT_LABEL))
-            else {
-                return SmallVec::new();
-            };
-            return ids
-                .iter()
-                .filter_map(|&id| self.runtime_pooled_weight(id))
-                .collect();
+        match &self.non_dwa_weights {
+            NonDwaWeightStorage::Materialized(weights) =>
+                weights.top_parts(label).iter().map(RuntimeWeightRef::Materialized).collect(),
+            NonDwaWeightStorage::Pooled(packed) =>
+                packed.relations.top_parts(label).iter()
+                    .filter_map(|&id| self.runtime_pooled_weight(id)).collect(),
         }
-        self.parser_top_accept_parts
-            .get(&label)
-            .or_else(|| self.parser_top_accept_parts.get(&DEFAULT_LABEL))
-            .into_iter()
-            .flatten()
-            .map(RuntimeWeightRef::Materialized)
-            .collect()
     }
 
     #[inline]
@@ -2328,15 +2311,13 @@ impl Constraint {
         &self,
         terminal: TerminalID,
     ) -> Option<RuntimeWeightRef<'_>> {
-        if let Some(packed) = &self.packed_non_dwa_weights {
-            return packed
-                .direct_regular_l1_complete_by_terminal
-                .get(&terminal)
-                .and_then(|&id| self.runtime_pooled_weight(id));
+        match &self.non_dwa_weights {
+            NonDwaWeightStorage::Materialized(weights) =>
+                weights.direct_regular_l1_complete_by_terminal.get(&terminal)
+                    .map(RuntimeWeightRef::Materialized),
+            NonDwaWeightStorage::Pooled(packed) =>
+                self.runtime_pooled_weight(*packed.relations.direct_regular_l1_complete_by_terminal.get(&terminal)?),
         }
-        self.direct_regular_l1_complete_by_terminal
-            .get(&terminal)
-            .map(RuntimeWeightRef::Materialized)
     }
 
     #[inline]
@@ -2344,47 +2325,41 @@ impl Constraint {
         &self,
         terminal: TerminalID,
     ) -> Option<RuntimeWeightRef<'_>> {
-        if let Some(packed) = &self.packed_non_dwa_weights {
-            return packed
-                .possible_matches
-                .get(&terminal)
-                .and_then(|&id| self.runtime_pooled_weight(id));
+        match &self.non_dwa_weights {
+            NonDwaWeightStorage::Materialized(weights) =>
+                weights.possible_matches.get(&terminal).map(RuntimeWeightRef::Materialized),
+            NonDwaWeightStorage::Pooled(packed) =>
+                self.runtime_pooled_weight(*packed.relations.possible_matches.get(&terminal)?),
         }
-        self.possible_matches
-            .get(&terminal)
-            .map(RuntimeWeightRef::Materialized)
     }
 
     pub(crate) fn runtime_possible_match_terminals(
         &self,
     ) -> Box<dyn Iterator<Item = TerminalID> + '_> {
-        if let Some(packed) = &self.packed_non_dwa_weights {
-            Box::new(packed.possible_matches.keys().copied())
-        } else {
-            Box::new(self.possible_matches.keys().copied())
+        match &self.non_dwa_weights {
+            NonDwaWeightStorage::Materialized(weights) =>
+                Box::new(weights.possible_matches.keys().copied()),
+            NonDwaWeightStorage::Pooled(packed) =>
+                Box::new(packed.relations.possible_matches.keys().copied()),
         }
     }
 
     #[inline]
     pub(crate) fn runtime_direct_regular_l1_is_empty(&self) -> bool {
-        self.packed_non_dwa_weights.as_ref().map_or_else(
-            || self.direct_regular_l1_complete_by_terminal.is_empty(),
-            |packed| packed.direct_regular_l1_complete_by_terminal.is_empty(),
-        )
+        match &self.non_dwa_weights {
+            NonDwaWeightStorage::Materialized(weights) => weights.direct_regular_l1_complete_by_terminal.is_empty(),
+            NonDwaWeightStorage::Pooled(packed) => packed.relations.direct_regular_l1_complete_by_terminal.is_empty(),
+        }
     }
 
     pub(crate) fn runtime_direct_regular_l1_terminals(
         &self,
     ) -> Box<dyn Iterator<Item = TerminalID> + '_> {
-        if let Some(packed) = &self.packed_non_dwa_weights {
-            Box::new(
-                packed
-                    .direct_regular_l1_complete_by_terminal
-                    .keys()
-                    .copied(),
-            )
-        } else {
-            Box::new(self.direct_regular_l1_complete_by_terminal.keys().copied())
+        match &self.non_dwa_weights {
+            NonDwaWeightStorage::Materialized(weights) =>
+                Box::new(weights.direct_regular_l1_complete_by_terminal.keys().copied()),
+            NonDwaWeightStorage::Pooled(packed) =>
+                Box::new(packed.relations.direct_regular_l1_complete_by_terminal.keys().copied()),
         }
     }
 
@@ -8667,9 +8642,9 @@ impl Constraint {
         // directly from packed Weight ids. These summaries are only an
         // optimization over materialized Weight objects; rebuilding them would
         // defeat the packed-load path.
-        if self.packed_non_dwa_weights.is_some() {
+        let Some(weights) = self.non_dwa_weights.materialized() else {
             return Vec::new();
-        }
+        };
         const MIN_FRONTIER_STATES: usize = 64;
         if self.uses_dynamic_runtime() || self.table.num_rules != 0 {
             return Vec::new();
@@ -8732,17 +8707,15 @@ impl Constraint {
             let mut weights = Vec::<Weight>::new();
             for &state in &states {
                 let label = encode_positive_label(state);
-                if let Some(weight) = self
-                    .parser_top_accept
+                if let Some(weight) = weights.parser_top_accept
                     .get(&label)
-                    .or_else(|| self.parser_top_accept.get(&DEFAULT_LABEL))
+                    .or_else(|| weights.parser_top_accept.get(&DEFAULT_LABEL))
                 {
                     weights.push(weight.clone());
                 }
-                if let Some(parts) = self
-                    .parser_top_accept_parts
+                if let Some(parts) = weights.parser_top_accept_parts
                     .get(&label)
-                    .or_else(|| self.parser_top_accept_parts.get(&DEFAULT_LABEL))
+                    .or_else(|| weights.parser_top_accept_parts.get(&DEFAULT_LABEL))
                 {
                     weights.extend(parts.iter().cloned());
                 }
@@ -8755,8 +8728,7 @@ impl Constraint {
                 }
             }
             for terminal in actionable_terminals.iter_ones() {
-                if let Some(weight) = self
-                    .direct_regular_l1_complete_by_terminal
+                if let Some(weight) = weights.direct_regular_l1_complete_by_terminal
                     .get(&(terminal as TerminalID))
                 {
                     weights.push(weight.clone());
@@ -8797,20 +8769,20 @@ impl Constraint {
         &self,
     ) -> Vec<DirectRegularParserStateAcceptance> {
         if self.has_template_parser() { return Vec::new(); }
-        if self.packed_non_dwa_weights.is_some() {
+        let Some(weights) = self.non_dwa_weights.materialized() else {
             return Vec::new();
-        }
+        };
         const MIN_L1_TERMINALS: usize = 64;
         if self.uses_dynamic_runtime()
             || self.table.num_rules != 0
-            || self.direct_regular_l1_complete_by_terminal.is_empty()
+            || weights.direct_regular_l1_complete_by_terminal.is_empty()
         {
             return Vec::new();
         }
 
         let mut l1_terminals =
             crate::ds::bitset::BitSet::new(self.parser_terminal_count() as usize + 1);
-        for &terminal in self.direct_regular_l1_complete_by_terminal.keys() {
+        for &terminal in weights.direct_regular_l1_complete_by_terminal.keys() {
             l1_terminals.set(terminal as usize);
         }
         let l1_count = |row: &crate::ds::bitset::BitSet| {
@@ -8840,23 +8812,20 @@ impl Constraint {
 
             let label = encode_positive_label(parser_state as u32);
             let mut weights = Vec::<Weight>::with_capacity(max_l1_terminals + 4);
-            if let Some(weight) = self
-                .parser_top_accept
+            if let Some(weight) = weights.parser_top_accept
                 .get(&label)
-                .or_else(|| self.parser_top_accept.get(&DEFAULT_LABEL))
+                .or_else(|| weights.parser_top_accept.get(&DEFAULT_LABEL))
             {
                 weights.push(weight.clone());
             }
-            if let Some(parts) = self
-                .parser_top_accept_parts
+            if let Some(parts) = weights.parser_top_accept_parts
                 .get(&label)
-                .or_else(|| self.parser_top_accept_parts.get(&DEFAULT_LABEL))
+                .or_else(|| weights.parser_top_accept_parts.get(&DEFAULT_LABEL))
             {
                 weights.extend(parts.iter().cloned());
             }
             for terminal in row.iter_ones() {
-                if let Some(weight) = self
-                    .direct_regular_l1_complete_by_terminal
+                if let Some(weight) = weights.direct_regular_l1_complete_by_terminal
                     .get(&(terminal as TerminalID))
                 {
                     weights.push(weight.clone());
@@ -9418,44 +9387,11 @@ impl Constraint {
     /// consumers, so one-time composition preparation reconstructs those maps
     /// rather than mixing packed and materialized sources of truth.
     pub(crate) fn materialize_non_dwa_weights_for_compilation(&mut self) -> Result<(), String> {
-        let Some(packed) = self.packed_non_dwa_weights.take() else {
-            return Ok(());
-        };
-        let weights = crate::ds::weight::unpack_pooled_weights(packed.pool.packed_bytes())?;
-        let weight = |id: u32| -> Result<Weight, String> {
-            weights
-                .get(id as usize)
-                .cloned()
-                .ok_or_else(|| format!("packed non-DWA Weight id {id} is out of range"))
-        };
-
-        self.parser_top_accept = packed
-            .parser_top_accept
-            .iter()
-            .map(|(&label, &id)| Ok((label, weight(id)?)))
-            .collect::<Result<_, String>>()?;
-        self.parser_top_accept_parts = packed
-            .parser_top_accept_parts
-            .iter()
-            .map(|(&label, ids)| {
-                let parts = ids
-                    .iter()
-                    .map(|&id| weight(id))
-                    .collect::<Result<Vec<_>, String>>()?;
-                Ok((label, parts))
-            })
-            .collect::<Result<_, String>>()?;
-        self.direct_regular_l1_complete_by_terminal = packed
-            .direct_regular_l1_complete_by_terminal
-            .iter()
-            .map(|(&terminal, &id)| Ok((terminal, weight(id)?)))
-            .collect::<Result<_, String>>()?;
-        self.possible_matches = packed
-            .possible_matches
-            .iter()
-            .map(|(&terminal, &id)| Ok((terminal, weight(id)?)))
-            .collect::<Result<_, String>>()?;
-        self.serialized_artifact_cache = None;
+        if self.non_dwa_weights.pooled().is_some() {
+            let weights = self.non_dwa_weights.materialized_for_compilation()?.into_owned();
+            self.non_dwa_weights = NonDwaWeightStorage::Materialized(weights);
+            self.serialized_artifact_cache = None;
+        }
         Ok(())
     }
 
@@ -10821,7 +10757,7 @@ impl Constraint {
         &self,
         packed: Option<crate::automata::weighted::dwa::PackedDwaTokenSetInventory>,
     ) -> WeightTokenSetInventory {
-        if self.packed_non_dwa_weights.is_some()
+        if self.non_dwa_weights.pooled().is_some()
             && self
                 .packed_parser_dwa
                 .as_ref()
@@ -10926,73 +10862,31 @@ impl Constraint {
             (batch, None)
         };
 
+        let non_dwa_started = profile.then(std::time::Instant::now);
         let mut seen_final_weights = FxHashSet::<usize>::default();
-        seen_final_weights.reserve(
-            self.parser_top_accept
-                .len()
-                .saturating_add(self.parser_top_accept_parts.len())
-                .saturating_add(self.direct_regular_l1_complete_by_terminal.len()),
-        );
-        let top_started = profile.then(std::time::Instant::now);
-        for final_weight in self.parser_top_accept.values() {
-            if final_weight.is_full() || final_weight.is_empty() {
-                continue;
-            }
-            if !seen_final_weights.insert(final_weight.ptr_key()) {
-                continue;
-            }
-            for (_tsid_range, token_set) in final_weight.raw_range_values() {
-                let key = Arc::as_ptr(token_set) as usize;
-                inventory
-                    .final_sets
-                    .entry(key)
-                    .or_insert_with(|| Arc::clone(token_set));
+        if let Some(weights) = self.non_dwa_weights.materialized() {
+            seen_final_weights.reserve(
+                weights.parser_top_accept.len()
+                    .saturating_add(weights.parser_top_accept_parts.len())
+                    .saturating_add(weights.direct_regular_l1_complete_by_terminal.len()),
+            );
+            for final_weight in weights.final_weights() {
+                if final_weight.is_full() || final_weight.is_empty()
+                    || !seen_final_weights.insert(final_weight.ptr_key())
+                {
+                    continue;
+                }
+                for (_tsid_range, token_set) in final_weight.raw_range_values() {
+                    let key = Arc::as_ptr(token_set) as usize;
+                    inventory.final_sets.entry(key).or_insert_with(|| Arc::clone(token_set));
+                }
             }
         }
-        let top_ms = top_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-
-        let parts_started = profile.then(std::time::Instant::now);
-        for final_weight in self.parser_top_accept_parts.values().flatten() {
-            if final_weight.is_full() || final_weight.is_empty() {
-                continue;
-            }
-            if !seen_final_weights.insert(final_weight.ptr_key()) {
-                continue;
-            }
-            for (_tsid_range, token_set) in final_weight.raw_range_values() {
-                let key = Arc::as_ptr(token_set) as usize;
-                inventory
-                    .final_sets
-                    .entry(key)
-                    .or_insert_with(|| Arc::clone(token_set));
-            }
-        }
-        let parts_ms = parts_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-
-        let direct_started = profile.then(std::time::Instant::now);
-        for final_weight in self.direct_regular_l1_complete_by_terminal.values() {
-            if final_weight.is_full() || final_weight.is_empty() {
-                continue;
-            }
-            if !seen_final_weights.insert(final_weight.ptr_key()) {
-                continue;
-            }
-            for (_tsid_range, token_set) in final_weight.raw_range_values() {
-                let key = Arc::as_ptr(token_set) as usize;
-                inventory
-                    .final_sets
-                    .entry(key)
-                    .or_insert_with(|| Arc::clone(token_set));
-            }
-        }
-        let direct_ms = direct_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-
+        let non_dwa_ms = non_dwa_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if let Some(started) = total_started {
             eprintln!(
-                "[glrmask/profile][weight_token_inventory] top_ms={top_ms:.3} parts_ms={parts_ms:.3} direct_ms={direct_ms:.3} top_weights={} part_weights={} direct_weights={} final_sets={} transition_sets={} total_ms={:.3}",
-                self.parser_top_accept.len(),
-                self.parser_top_accept_parts.values().map(Vec::len).sum::<usize>(),
-                self.direct_regular_l1_complete_by_terminal.len(),
+                "[glrmask/profile][weight_token_inventory] non_dwa_ms={non_dwa_ms:.3} final_weights={} final_sets={} transition_sets={} total_ms={:.3}",
+                seen_final_weights.len(),
                 inventory.final_sets.len(),
                 inventory.transition_sets.len(),
                 started.elapsed().as_secs_f64() * 1000.0,

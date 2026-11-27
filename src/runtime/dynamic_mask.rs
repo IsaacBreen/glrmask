@@ -12481,7 +12481,7 @@ nt start = A r0;
         let constraint = Constraint::from_glrm_grammar(&grammar, &vocab).unwrap();
         assert!(!constraint.uses_dynamic_runtime());
         assert!(constraint.possible_matches_complete);
-        assert!(!constraint.possible_matches.is_empty());
+        assert!(constraint.runtime_possible_match_terminals().next().is_some());
 
         let dynamic = DynamicConstraint::from_glrm_grammar(&grammar, &vocab).unwrap();
         assert!(dynamic.inner.uses_dynamic_runtime());
@@ -12563,7 +12563,7 @@ nt start = A;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         assert!(!constraint.uses_dynamic_runtime());
         assert!(constraint.possible_matches_complete);
-        assert_eq!(constraint.possible_matches.len(), 1);
+        assert_eq!(constraint.runtime_possible_match_terminals().count(), 1);
 
         // Committing one accepting prefix leaves the same terminal live, so
         // the next mask exercises the delayed-terminal exclusion table that is

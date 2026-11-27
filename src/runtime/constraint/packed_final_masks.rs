@@ -84,7 +84,7 @@ impl Constraint {
     /// detaches any shared pool metadata before publishing a mapping-specific
     /// cache; clones whose token mapping is unchanged may share it immutably.
     pub(crate) fn rebuild_packed_final_mask_cache(&mut self) {
-        let Some(packed) = &self.packed_non_dwa_weights else {
+        let Some(packed) = self.non_dwa_weights.pooled() else {
             return;
         };
         let mut cache = PackedFinalMaskCache::default();
@@ -94,16 +94,12 @@ impl Constraint {
             || buf_words > MAX_CACHE_BYTES / 4
             || self.internal_token_buf_mask_count() >= MAX_WORKSPACE_BYTES / 8
         {
-            Arc::make_mut(self.packed_non_dwa_weights.as_mut().unwrap()).final_masks =
+            Arc::make_mut(self.non_dwa_weights.pooled_mut().unwrap()).final_masks =
                 Arc::new(cache);
             return;
         }
         let mut weight_ids = BTreeSet::new();
-        for &id in packed
-            .parser_top_accept
-            .values()
-            .chain(packed.parser_top_accept_parts.values().flatten())
-            .chain(packed.direct_regular_l1_complete_by_terminal.values())
+        for &id in packed.relations.final_weights()
             .take(MAX_SCANNED_ENTRIES)
         {
             weight_ids.insert(id);
@@ -250,7 +246,7 @@ impl Constraint {
                 ranges_seen
             );
         }
-        Arc::make_mut(self.packed_non_dwa_weights.as_mut().unwrap()).final_masks = Arc::new(cache);
+        Arc::make_mut(self.non_dwa_weights.pooled_mut().unwrap()).final_masks = Arc::new(cache);
     }
 
     /// `tokens` comes from this constraint's packed non-DWA pool. Returning
@@ -263,7 +259,7 @@ impl Constraint {
         tokens: PackedRuntimePoolTokenSetRef<'_>,
         buf: &mut [u32],
     ) -> bool {
-        let Some(pool) = &self.packed_non_dwa_weights else {
+        let Some(pool) = self.non_dwa_weights.pooled() else {
             return false;
         };
         let Some(entry) = pool.final_masks.sets.get(&tokens.id()) else {
@@ -311,7 +307,7 @@ impl Constraint {
 impl Constraint {
     pub(crate) fn check_packed_final_cache_against_uncached(&self, rounds: usize) -> usize {
         let constraint = self;
-        let Some(pool) = &constraint.packed_non_dwa_weights else {
+        let Some(pool) = constraint.non_dwa_weights.pooled() else {
             return 0;
         };
         let mut checked = 0usize;

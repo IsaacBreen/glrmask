@@ -5866,10 +5866,14 @@ fn compile_prepared_with_profile_and_table_construction(
             pending_special_token_ids: None,
             parser_dwa,
             packed_parser_dwa: None,
-            parser_top_accept,
-            parser_top_accept_parts,
-            direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,
-            packed_non_dwa_weights: None,
+            non_dwa_weights: crate::runtime::artifact::NonDwaWeightStorage::Materialized(
+                crate::runtime::artifact::NonDwaWeights {
+                    parser_top_accept,
+                    parser_top_accept_parts,
+                    direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,
+                    possible_matches: possible_matches.into_artifact(),
+                },
+            ),
             direct_regular_wide_frontier_acceptance: Vec::new(),
             direct_regular_dynamic_hot_frontiers: Vec::new(),
             direct_regular_parser_state_acceptance: Vec::new(),
@@ -5884,7 +5888,6 @@ fn compile_prepared_with_profile_and_table_construction(
             dynamic_mask_vocab,
             lazy_dynamic_mask_vocab: std::sync::OnceLock::new(),
             empty_byte_token_ids: crate::compiler::compile::vocab_empty_byte_token_ids(vocab),
-            possible_matches: possible_matches.into_artifact(),
             possible_matches_complete,
             tokenizer_tsids: crate::runtime::TokenizerTsidMap::partition(
                 runtime_tokenizer_state_map.original_to_internal,

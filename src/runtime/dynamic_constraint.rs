@@ -867,7 +867,7 @@ impl DynamicConstraint {
             table, terminal_display_names, tokenizer, None, ignore_terminal,
             special_token_terminals, vocab, runtime_dynamic_vocab.vocab,
         )?;
-        result.inner.possible_matches = possible_matches;
+        result.inner.non_dwa_weights.materialized_mut().possible_matches = possible_matches;
         result.inner.possible_matches_complete = complete;
         result.inner.tokenizer_tsids = crate::runtime::TokenizerTsidMap::partition(
             id_map.tokenizer_states.original_to_internal, id_map.tokenizer_states.internal_to_originals,
@@ -1003,10 +1003,7 @@ impl DynamicConstraint {
             pending_special_token_ids: None,
             parser_dwa: DWA::new(payload.tokenizer.num_states(), max_token_id),
             packed_parser_dwa: None,
-            parser_top_accept: BTreeMap::new(),
-            parser_top_accept_parts: BTreeMap::new(),
-            direct_regular_l1_complete_by_terminal: BTreeMap::new(),
-            packed_non_dwa_weights: None,
+            non_dwa_weights: Default::default(),
             direct_regular_wide_frontier_acceptance: Vec::new(),
             direct_regular_dynamic_hot_frontiers: Vec::new(),
             direct_regular_parser_state_acceptance: Vec::new(),
@@ -1021,7 +1018,6 @@ impl DynamicConstraint {
             dynamic_mask_vocab,
             lazy_dynamic_mask_vocab: std::sync::OnceLock::new(),
             empty_byte_token_ids,
-            possible_matches: BTreeMap::new(),
             possible_matches_complete: false,
             tokenizer_tsids: Default::default(),
             composition_reset_tokens_by_terminal: Vec::new(),
@@ -7689,7 +7685,7 @@ nt start = A;
         assert!(!static_constraint.table.is_present());
         assert!(static_constraint.direct_regular_automaton.is_some());
         assert!(
-            !static_constraint.parser_top_accept_parts.is_empty(),
+            !static_constraint.non_dwa_weights.materialized_for_compilation().unwrap().parser_top_accept_parts.is_empty(),
             "regression must exercise the direct parser-acceptance summaries",
         );
 

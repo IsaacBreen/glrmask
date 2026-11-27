@@ -2215,7 +2215,7 @@ mod tests {
             .iter()
             .position(|name| name == "A")
             .expect("A terminal should have a display name") as u32;
-        constraint.possible_matches.clear();
+        constraint.non_dwa_weights.materialized_mut().possible_matches.clear();
         constraint.possible_matches_complete = false;
 
         let tokenizer_state = constraint.tokenizer.initial_state();
@@ -2233,7 +2233,7 @@ mod tests {
         assert_eq!(actual, expected);
 
         let loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).expect("empty-PM constraint should roundtrip");
-        assert!(loaded.possible_matches.is_empty());
+        assert!(loaded.runtime_possible_match_terminals().next().is_none());
         let mut loaded_state = loaded.start_dynamic();
         let loaded_tokenizer_state = loaded.tokenizer.initial_state();
         let loaded_disallowed =
@@ -6042,6 +6042,7 @@ impl ConstraintState {
         if (!force && !indexed_dag_mask_enabled()) || !self.has_parser_ambiguity() {
             return false;
         }
+        let Some(weights) = self.constraint.non_dwa_weights.materialized() else { return false; };
         let parser_dwa = self.constraint.parser_dwa();
         if self.state.is_empty() || parser_dwa.states().is_empty() {
             return false;
@@ -6135,11 +6136,7 @@ impl ConstraintState {
                     });
                 }
                 let positive_label = encode_positive_label(parser_state);
-                if let Some(top_weight) = self
-                    .constraint
-                    .parser_top_accept
-                    .get(&positive_label)
-                    .or_else(|| self.constraint.parser_top_accept.get(&DEFAULT_LABEL))
+                if let Some(top_weight) = weights.top_accept(positive_label)
                 {
                     dense.for_each_acc(|accumulator| {
                         merge_accepted(
@@ -6152,15 +6149,7 @@ impl ConstraintState {
                         );
                     });
                 }
-                if let Some(top_parts) = self
-                    .constraint
-                    .parser_top_accept_parts
-                    .get(&positive_label)
-                    .or_else(|| {
-                        self.constraint
-                            .parser_top_accept_parts
-                            .get(&DEFAULT_LABEL)
-                    })
+                if let Some(top_parts) = weights.parser_top_accept_parts.get(&positive_label).or_else(|| weights.parser_top_accept_parts.get(&DEFAULT_LABEL))
                 {
                     for top_weight in top_parts {
                         dense.for_each_acc(|accumulator| {
