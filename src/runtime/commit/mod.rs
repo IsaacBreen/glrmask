@@ -9987,9 +9987,7 @@ mod tests {
 
         fn dump(name: &str, constraint: &Constraint, tokenizer_state: u32, token: u32) {
             let internal_token = constraint
-                .original_token_to_internal
-                .get(token as usize)
-                .copied()
+                .original_token_internal_at(token)
                 .unwrap_or(u32::MAX);
             let tsids = constraint.internal_tsids_for_state(tokenizer_state).to_vec();
             eprintln!("WEIGHT_TRANSPORT {name} tokenizer_state={tokenizer_state} tsids={tsids:?} token={token} internal_token={internal_token}");
@@ -10055,7 +10053,7 @@ mod tests {
         }
 
         fn contains(constraint: &Constraint, tokenizer_state: u32, token: u32, weight: &Weight) -> bool {
-            let internal = constraint.original_token_to_internal[token as usize];
+            let internal = constraint.original_token_internal_at(token).unwrap();
             constraint.internal_tsids_for_state(tokenizer_state)
                 .iter()
                 .any(|&tsid| weight.tokens_for_tsid(tsid).contains(internal))

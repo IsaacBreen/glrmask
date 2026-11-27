@@ -5914,11 +5914,7 @@ fn compile_prepared_with_profile_and_table_construction(
             // The sentinel avoids constructing a redundant singleton CSR.
             state_internal_tsid_offsets: vec![u32::MAX],
             state_internal_tsids: Vec::new(),
-            original_token_to_internal: internal_ids.vocab_tokens.original_to_internal.clone(),
-            packed_original_token_to_internal: None,
-            deferred_original_token_to_internal: std::sync::OnceLock::new(),
-            internal_token_to_tokens: internal_ids.vocab_tokens.internal_to_originals_vecs(),
-            deferred_internal_token_to_tokens: std::sync::OnceLock::new(),
+            token_classes: crate::runtime::TokenClasses::mapped(internal_ids.vocab_tokens.original_to_internal.clone(), internal_ids.vocab_tokens.internal_to_originals_vecs()),
             template_dfas_by_terminal: prepared_parser.templates,
             fast_template_dfas_by_terminal: prepared_parser.runtime,
             template_parser: Some(Arc::new(prepared_parser.parser)),

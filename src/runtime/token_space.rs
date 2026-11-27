@@ -9,101 +9,367 @@ use crate::grammar::flat::TerminalID;
 
 use super::artifact::Constraint;
 
+\\?\C:\Users\isaacbreen\AppData\Local\Temp\glrmask-token-classes-47284.rs:
+
+/// The final token coordinate shared by parser weights and mask fragments.
+/// Identity has no quotient; empty explicit quotients remain distinct from it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TokenClasses(TokenClassStorage);
+
+#[derive(Debug, Clone, Default)]
+enum TokenClassStorage {
+    #[default]
+    Identity,
+    Owned {
+        forward: Vec<u32>,
+        inverse: Vec<Vec<u32>>,
+    },
+    Packed {
+        map: PackedTokenMap,
+        expanded: std::sync::OnceLock<Vec<u32>>,
+        inverse: std::sync::OnceLock<Vec<Vec<u32>>>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct PackedTokenMap {
+    backing: std::sync::Arc<Vec<u8>>,
+    start: usize,
+    count: usize,
+    class_count: usize,
+    width: usize,
+}
+
+const TOKEN_MAP_MAGIC: &[u8; 4] = b"OTM3";
+const TOKEN_MAP_HEADER: usize = 13;
+
+impl PackedTokenMap {
+    fn bytes(&self) -> &[u8] {
+        &self.backing[self.start..self.start + TOKEN_MAP_HEADER + self.count * self.width]
+    }
+
+    #[inline]
+    fn get(&self, index: usize) -> Option<u32> {
+        if index >= self.count {
+            return None;
+        }
+        let start = self.start + TOKEN_MAP_HEADER + index * self.width;
+        let bytes = &self.backing[start..start + self.width];
+        Some(match self.width {
+            1 => {
+                if bytes[0] == u8::MAX {
+                    u32::MAX
+                } else {
+                    u32::from(bytes[0])
+                }
+            }
+            2 => {
+                let id = u16::from_le_bytes([bytes[0], bytes[1]]);
+                if id == u16::MAX {
+                    u32::MAX
+                } else {
+                    u32::from(id)
+                }
+            }
+            4 => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            _ => unreachable!(),
+        })
+    }
+}
+
+impl TokenClasses {
+    pub(crate) fn mapped(forward: Vec<u32>, inverse: Vec<Vec<u32>>) -> Self {
+        debug_assert!(inverse.len() <= forward.len());
+        debug_assert!(
+            forward
+                .iter()
+                .all(|&id| id == u32::MAX || (id as usize) < inverse.len())
+        );
+        Self(TokenClassStorage::Owned { forward, inverse })
+    }
+
+    #[inline]
+    fn count(&self) -> Option<usize> {
+        match &self.0 {
+            TokenClassStorage::Identity => None,
+            TokenClassStorage::Owned { inverse, .. } => Some(inverse.len()),
+            TokenClassStorage::Packed { map, .. } => Some(map.class_count),
+        }
+    }
+
+    fn forward(&self) -> &[u32] {
+        match &self.0 {
+            TokenClassStorage::Identity => &[],
+            TokenClassStorage::Owned { forward, .. } => forward,
+            TokenClassStorage::Packed { map, expanded, .. } => expanded.get_or_init(|| {
+                (0..map.count)
+                    .map(|index| map.get(index).unwrap())
+                    .collect()
+            }),
+        }
+    }
+
+    #[inline]
+    fn get(&self, index: usize) -> Option<u32> {
+        match &self.0 {
+            TokenClassStorage::Identity => None,
+            TokenClassStorage::Owned { forward, .. } => forward.get(index).copied(),
+            TokenClassStorage::Packed { map, .. } => map.get(index),
+        }
+    }
+
+    pub(crate) fn cached_groups(&self) -> Option<&[Vec<u32>]> {
+        match &self.0 {
+            TokenClassStorage::Identity => None,
+            TokenClassStorage::Owned { inverse, .. } => Some(inverse),
+            TokenClassStorage::Packed { inverse, .. } => inverse.get().map(Vec::as_slice),
+        }
+    }
+
+    fn groups(&self) -> Option<&[Vec<u32>]> {
+        match &self.0 {
+            TokenClassStorage::Identity => None,
+            TokenClassStorage::Owned { inverse, .. } => Some(inverse),
+            TokenClassStorage::Packed { map, inverse, .. } => Some(inverse.get_or_init(|| {
+                let forward = self.forward();
+                let mut counts = vec![0usize; map.class_count];
+                for &id in forward {
+                    if id != u32::MAX {
+                        counts[id as usize] += 1;
+                    }
+                }
+                let mut groups = counts
+                    .into_iter()
+                    .map(Vec::<u32>::with_capacity)
+                    .collect::<Vec<_>>();
+                for (original, &id) in forward.iter().enumerate() {
+                    if id != u32::MAX {
+                        groups[id as usize].push(original as u32);
+                    }
+                }
+                groups
+            })),
+        }
+    }
+
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let (forward, class_count) = match &self.0 {
+            TokenClassStorage::Identity => return Vec::new(),
+            TokenClassStorage::Packed { map, .. } => return map.bytes().to_vec(),
+            TokenClassStorage::Owned { forward, inverse } => (forward, inverse.len()),
+        };
+        let max_id = forward
+            .iter()
+            .copied()
+            .filter(|&id| id != u32::MAX)
+            .max()
+            .unwrap_or(0);
+        let width = if max_id < u8::MAX as u32 {
+            1
+        } else if max_id < u16::MAX as u32 {
+            2
+        } else {
+            4
+        };
+        let mut bytes = Vec::with_capacity(TOKEN_MAP_HEADER + forward.len() * width);
+        bytes.extend_from_slice(TOKEN_MAP_MAGIC);
+        bytes.push(width as u8);
+        bytes.extend_from_slice(
+            &u32::try_from(forward.len())
+                .expect("token extent fits u32")
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(
+            &u32::try_from(class_count)
+                .expect("class count fits u32")
+                .to_le_bytes(),
+        );
+        for &id in forward {
+            match width {
+                1 => bytes.push(id as u8),
+                2 => bytes.extend_from_slice(&(id as u16).to_le_bytes()),
+                4 => bytes.extend_from_slice(&id.to_le_bytes()),
+                _ => unreachable!(),
+            }
+        }
+        bytes
+    }
+
+    pub(crate) fn decode_backed(
+        backing: std::sync::Arc<Vec<u8>>,
+        start: usize,
+        len: usize,
+    ) -> Result<Self, String> {
+        let end = start
+            .checked_add(len)
+            .ok_or("token class section range overflow")?;
+        let input = backing
+            .get(start..end)
+            .ok_or("token class section outside artifact")?;
+        if input.is_empty() {
+            return Ok(Self::default());
+        }
+        if input.len() < TOKEN_MAP_HEADER || !input.starts_with(TOKEN_MAP_MAGIC) {
+            return Err("invalid token class map header".into());
+        }
+        let width = input[4] as usize;
+        let count = u32::from_le_bytes(input[5..9].try_into().unwrap()) as usize;
+        let class_count = u32::from_le_bytes(input[9..13].try_into().unwrap()) as usize;
+        if !matches!(width, 1 | 2 | 4)
+            || count
+                .checked_mul(width)
+                .and_then(|n| n.checked_add(TOKEN_MAP_HEADER))
+                != Some(len)
+        {
+            return Err("invalid token class map length or width".into());
+        }
+        // A quotient can retain empty classes when sentinels are hidden.
+        // Their former original IDs still occupy the forward extent.
+        if class_count > count {
+            return Err("token class cardinality exceeds original extent".into());
+        }
+        let map = PackedTokenMap {
+            backing,
+            start,
+            count,
+            class_count,
+            width,
+        };
+        if (0..count).any(|index| {
+            let id = map.get(index).unwrap();
+            id != u32::MAX && id as usize >= class_count
+        }) {
+            return Err("token class ID outside class cardinality".into());
+        }
+        Ok(Self(TokenClassStorage::Packed {
+            map,
+            expanded: Default::default(),
+            inverse: Default::default(),
+        }))
+    }
+}
+
 impl Constraint {
-	#[inline]
-	pub(crate) fn has_original_token_map(&self) -> bool {
-		!self.original_token_to_internal.is_empty()
-			|| self
-				.packed_original_token_to_internal
-				.as_ref()
-				.is_some_and(|packed| !packed.is_empty())
-	}
+    /// Visit original-ID members of the final static class without expanding a
+    /// loaded vocabulary map or producing a complete mask. The already-stored
+    /// sparse output fragments are just another representation of the same class.
+    pub(crate) fn visit_internal_token_members(
+        &self,
+        class: usize,
+        visit: &mut impl FnMut(u32) -> crate::Result<bool>,
+    ) -> crate::Result<bool> {
+        if let Some(ids) = self
+            .token_classes
+            .cached_groups()
+            .and_then(|v| v.get(class))
+        {
+            for &id in ids {
+                if !visit(id)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        let mut word = |index: u16, mut bits: u32| -> crate::Result<bool> {
+            while bits != 0 {
+                let id = u32::from(index) * 32 + bits.trailing_zeros();
+                bits &= bits - 1;
+                if !visit(id)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        };
+        if let (Some(&lo), Some(&hi)) = (
+            self.internal_token_buf_offsets.get(class),
+            self.internal_token_buf_offsets.get(class + 1),
+        ) {
+            if let Some(entries) = self.internal_token_buf_flat.get(lo as usize..hi as usize) {
+                for entry in entries {
+                    if !word(entry.word_idx, entry.mask)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+            if let Some(backed) = &self.backed_internal_token_buf_flat {
+                if let Some(entries) = backed.slice(lo as usize, hi as usize) {
+                    for entry in entries {
+                        if !word(entry.word_idx, entry.mask)? {
+                            return Ok(false);
+                        }
+                    }
+                    return Ok(true);
+                }
+                // Unaligned artifact backing cannot yield a borrowed native slice.
+                // Read one existing sparse entry at a time, so cutoff still stops.
+                for index in lo as usize..hi as usize {
+                    let mut entry = None;
+                    backed.for_each_range(index, index + 1, |w, b| entry = Some((w, b)));
+                    let (w, b) = entry.ok_or_else(|| {
+                        crate::Error::Internal(
+                            "bounded token proof: missing class member entry".into(),
+                        )
+                    })?;
+                    if !word(w, b)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+        }
+        if let Some(entries) = self.internal_token_buf_masks.get(class) {
+            for &(index, bits) in entries {
+                if !word(index, bits)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        // An artifact may not have restored its mask caches yet. The packed map
+        // still defines the members exactly.
+        if let Some(ids) = self
+            .internal_token_groups()
+            .and_then(|groups| groups.get(class))
+        {
+            for &id in ids {
+                if !visit(id)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        Err(crate::Error::Internal(
+            "bounded token proof: final class has no original-ID members".into(),
+        ))
+    }
 
-	pub(crate) fn original_token_map(&self) -> &[u32] {
-		if !self.original_token_to_internal.is_empty() {
-			return &self.original_token_to_internal;
-		}
-		let Some(packed) = self.packed_original_token_to_internal.as_ref() else {
-			return &[];
-		};
-		self.deferred_original_token_to_internal
-			.get_or_init(|| packed.materialize())
-			.as_slice()
-	}
+    #[inline]
+    pub(crate) fn has_original_token_map(&self) -> bool {
+        self.token_classes.count().is_some()
+    }
 
-	#[inline]
-	pub(crate) fn original_token_internal_at(&self, token_id: u32) -> Option<u32> {
-		let index = token_id as usize;
-		if let Some(&internal) = self.original_token_to_internal.get(index) {
-			return Some(internal);
-		}
-		self.packed_original_token_to_internal
-			.as_ref()
-			.and_then(|packed| packed.get(index))
-	}
+    pub(crate) fn original_token_map(&self) -> &[u32] {
+        self.token_classes.forward()
+    }
 
-	#[inline]
-	pub(crate) fn internal_token_count(&self) -> usize {
-		if !self.internal_token_to_tokens.is_empty() {
-			return self.internal_token_to_tokens.len();
-		}
-		if let Some(groups) = self.deferred_internal_token_to_tokens.get() {
-			return groups.len();
-		}
-		if self.internal_token_buf_offsets.len() > 1
-			&& self.internal_token_buf_offsets.last().copied().map(|end| end as usize)
-				== Some(self.internal_token_buf_flat_len())
-		{
-			return self.internal_token_buf_offsets.len() - 1;
-		}
-		if !self.internal_token_buf_masks.is_empty() {
-			return self.internal_token_buf_masks.len();
-		}
-		self.original_token_map()
-			.iter()
-			.copied()
-			.filter(|&internal| internal != u32::MAX)
-			.max()
-			.map_or_else(
-				|| self.max_original_token_id().map_or(0, |id| id as usize + 1),
-				|internal| internal as usize + 1,
-			)
-	}
+    #[inline]
+    pub(crate) fn original_token_internal_at(&self, token_id: u32) -> Option<u32> {
+        self.token_classes.get(token_id as usize)
+    }
 
-	pub(crate) fn internal_token_groups(&self) -> Option<&[Vec<u32>]> {
-		if !self.internal_token_to_tokens.is_empty() {
-			return Some(&self.internal_token_to_tokens);
-		}
-		if !self.has_original_token_map() {
-			return None;
-		}
-		let group_count = self.internal_token_count();
-		let original_token_to_internal = self.original_token_map();
-		Some(
-			self.deferred_internal_token_to_tokens
-				.get_or_init(|| {
-					let mut counts = vec![0usize; group_count];
-					for &internal in original_token_to_internal {
-						if internal != u32::MAX {
-							counts[internal as usize] += 1;
-						}
-					}
-					let mut groups = counts
-						.into_iter()
-						.map(Vec::<u32>::with_capacity)
-						.collect::<Vec<_>>();
-					for (original, &internal) in original_token_to_internal.iter().enumerate() {
-						if internal != u32::MAX {
-							groups[internal as usize].push(original as u32);
-						}
-					}
-					groups
-				})
-				.as_slice(),
-		)
-	}
+    #[inline]
+    pub(crate) fn internal_token_count(&self) -> usize {
+        self.token_classes
+            .count()
+            .unwrap_or_else(|| self.max_original_token_id().map_or(0, |id| id as usize + 1))
+    }
 
-	pub(crate) fn runtime_commit_initial_state(&self) -> u32 {
+    pub(crate) fn internal_token_groups(&self) -> Option<&[Vec<u32>]> {
+        self.token_classes.groups()
+    }
+
+    pub(crate) fn runtime_commit_initial_state(&self) -> u32 {
 		self.tokenizer.initial_state()
 	}
 
@@ -273,6 +539,7 @@ impl Constraint {
 			return Some(true);
 		};
 		let internal_count = self.internal_token_count();
+        if internal_count == 0 { return Some(true); }
 		let flat_ready = self.internal_token_buf_offsets.len() == internal_count.saturating_add(1)
 			&& self
 				.internal_token_buf_offsets
@@ -397,17 +664,15 @@ impl Constraint {
 	}
 
 	pub(crate) fn internal_token_universe(&self) -> RangeSetBlaze<u32> {
-		if !self.has_original_token_map() && self.internal_token_to_tokens.is_empty() {
-			let Some(max_token_id) = self.max_original_token_id() else {
-				return RangeSetBlaze::new();
-			};
-			return RangeSetBlaze::from_iter(std::iter::once(0..=max_token_id));
-		}
+        let count = self.internal_token_count();
+        if count == 0 {
+            RangeSetBlaze::new()
+        } else {
+            RangeSetBlaze::from_iter(std::iter::once(0..=(count - 1) as u32))
+        }
+    }
 
-		RangeSetBlaze::from_iter(std::iter::once(0..=self.internal_token_count().saturating_sub(1) as u32))
-	}
-
-	pub(crate) fn expand_internal_token_set(
+    pub(crate) fn expand_internal_token_set(
 		&self,
 		internal_tokens: &RangeSetBlaze<u32>,
 	) -> RangeSetBlaze<u32> {
@@ -484,4 +749,56 @@ impl Constraint {
 		ranges.push(start..=end);
 		RangeSetBlaze::from_iter(ranges)
 	}
+}
+
+#[cfg(test)]
+mod token_class_tests {
+    use super::*;
+
+    fn load(bytes: Vec<u8>) -> Result<TokenClasses, String> {
+        let len = bytes.len();
+        TokenClasses::decode_backed(std::sync::Arc::new(bytes), 0, len)
+    }
+
+    #[test]
+    fn identity_and_empty_explicit_quotient_are_distinct() {
+        let identity = load(TokenClasses::default().encode()).unwrap();
+        let empty = load(TokenClasses::mapped(vec![], vec![]).encode()).unwrap();
+        assert_eq!(identity.count(), None);
+        assert_eq!(empty.count(), Some(0));
+        assert_eq!(identity.groups(), None);
+        assert_eq!(empty.groups(), Some(&[][..]));
+    }
+
+    #[test]
+    fn fixed_width_quotient_round_trips_with_sparse_and_empty_classes() {
+        for (id, width) in [(12, 1), (4096, 2), (65535, 4)] {
+            let count = id as usize + 2;
+            let mut forward = vec![u32::MAX; count];
+            forward[0] = id;
+            forward[1] = 0;
+            let mut inverse = vec![vec![]; count];
+            inverse[id as usize].push(0);
+            inverse[0].push(1);
+            let wire = TokenClasses::mapped(forward.clone(), inverse.clone()).encode();
+            assert_eq!(wire[4], width);
+            let packed = load(wire.clone()).unwrap();
+            assert_eq!(packed.count(), Some(count));
+            assert!(packed.cached_groups().is_none());
+            assert_eq!(packed.get(0), Some(id));
+            assert_eq!(packed.get(2), Some(u32::MAX));
+            assert_eq!(packed.get(count), None);
+            assert_eq!(packed.encode(), wire);
+            assert!(packed.cached_groups().is_none());
+            assert_eq!(packed.forward(), forward);
+            assert_eq!(packed.groups().unwrap(), inverse);
+        }
+    }
+
+    #[test]
+    fn malformed_packed_class_ids_are_rejected() {
+        let mut wire = TokenClasses::mapped(vec![0], vec![vec![0]]).encode();
+        wire[TOKEN_MAP_HEADER] = 1;
+        assert!(load(wire).is_err());
+    }
 }

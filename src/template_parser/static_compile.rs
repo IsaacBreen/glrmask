@@ -625,8 +625,7 @@ pub(super) fn compile(
     inner.state_to_internal_tsid = ids.tokenizer_states.original_to_internal.clone();
     inner.internal_tsid_to_states = ids.tokenizer_states.internal_to_originals_vecs();
     inner.state_internal_tsid_offsets = vec![u32::MAX];
-    inner.original_token_to_internal = ids.vocab_tokens.original_to_internal.clone();
-    inner.internal_token_to_tokens = ids.vocab_tokens.internal_to_originals_vecs();
+    inner.token_classes = crate::runtime::TokenClasses::mapped(ids.vocab_tokens.original_to_internal.clone(), ids.vocab_tokens.internal_to_originals_vecs());
     inner.internal_token_bytes =
         pm::build_internal_token_bytes_from_groups(vocab, &ids.vocab_tokens.internal_to_originals);
     inner.rebuild_runtime_caches();

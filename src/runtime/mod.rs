@@ -19,6 +19,7 @@ pub(crate) mod serde;
 pub(crate) use serde::compact_large_non_dwa_weight_runtime;
 mod state;
 mod token_space;
+pub(crate) use token_space::TokenClasses;
 pub(crate) mod static_observation;
 pub(crate) use glrmask_artifact::CommitTemplateDfas;
 #[allow(unused_imports)]

@@ -291,52 +291,6 @@ fn eligible_byte_id(view:View<'_>,id:u32)->bool {
         .is_some_and(|b|!b.is_empty()||!empty_bytes_are_events(view.constraint))
 }
 
-/// Visit original-ID members of the final static class without expanding a
-/// loaded vocabulary map or producing a complete mask. The already-stored
-/// sparse output fragments are just another representation of the same class.
-fn visit_static_class(c:&Constraint,class:usize,visit:&mut impl FnMut(u32)->crate::Result<bool>)->crate::Result<bool> {
-    if let Some(ids)=c.internal_token_to_tokens.get(class) {
-        for &id in ids {if !visit(id)?{return Ok(false);}}
-        return Ok(true);
-    }
-    if let Some(ids)=c.deferred_internal_token_to_tokens.get().and_then(|v|v.get(class)) {
-        for &id in ids {if !visit(id)?{return Ok(false);}}
-        return Ok(true);
-    }
-    let mut word=|index:u16,mut bits:u32|->crate::Result<bool>{
-        while bits!=0 {
-            let id=u32::from(index)*32+bits.trailing_zeros();bits&=bits-1;
-            if !visit(id)?{return Ok(false);}
-        }
-        Ok(true)
-    };
-    if let (Some(&lo),Some(&hi))=(c.internal_token_buf_offsets.get(class),c.internal_token_buf_offsets.get(class+1)) {
-        if let Some(entries)=c.internal_token_buf_flat.get(lo as usize..hi as usize) {
-            for entry in entries {if !word(entry.word_idx,entry.mask)?{return Ok(false);}}
-            return Ok(true);
-        }
-        if let Some(backed)=&c.backed_internal_token_buf_flat {
-            if let Some(entries)=backed.slice(lo as usize,hi as usize) {
-                for entry in entries {if !word(entry.word_idx,entry.mask)?{return Ok(false);}}
-                return Ok(true);
-            }
-            // Unaligned artifact backing cannot yield a borrowed native slice.
-            // Read one existing sparse entry at a time, so cutoff still stops.
-            for index in lo as usize..hi as usize {
-                let mut entry=None;backed.for_each_range(index,index+1,|w,b|entry=Some((w,b)));
-                let (w,b)=entry.ok_or_else(||state_error("missing class member entry".into()))?;
-                if !word(w,b)?{return Ok(false);}
-            }
-            return Ok(true);
-        }
-    }
-    if let Some(entries)=c.internal_token_buf_masks.get(class) {
-        for &(index,bits) in entries {if !word(index,bits)?{return Ok(false);}}
-        return Ok(true);
-    }
-    Err(state_error("final class has no original-ID members".into()))
-}
-
 /// Only a quotient belonging to THIS complete standalone grammar is used.
 /// These final classes are precisely what normal masking expands to original
 /// IDs. Exact-event/control/empty-byte exceptions remain individually filtered.
@@ -349,9 +303,7 @@ fn probe_grammar_classes(view:View<'_>,buffers:&mut CommitBuffers,w:&mut Witness
     let quotient=dynamic.is_initialized()&&dynamic.is_grammar_quotiented();
     let count=if quotient {dynamic.canonical_token_count()}
         else if !c.uses_dynamic_runtime() && c.has_original_token_map() {
-            if !c.internal_token_to_tokens.is_empty(){c.internal_token_to_tokens.len()}
-            else if c.internal_token_buf_offsets.len()>1 {c.internal_token_buf_offsets.len()-1}
-            else {c.internal_token_buf_masks.len()}
+            c.internal_token_count()
         } else {return Ok(None)};
     // A cost-based structural gate, independent of source grammar families.
     // Trie traversal is preferable to scanning hundreds of classes for K=1.
@@ -364,7 +316,7 @@ fn probe_grammar_classes(view:View<'_>,buffers:&mut CommitBuffers,w:&mut Witness
                 representative=ids.iter().copied().find(|&id|eligible_byte_id(view,id)&&!w.contains(id));
             }
         } else {
-            visit_static_class(c,class,&mut |id|{
+            c.visit_internal_token_members(class,&mut |id|{
                 if eligible_byte_id(view,id)&&!w.contains(id){representative=Some(id);Ok(false)}else{Ok(true)}
             })?;
         }
@@ -381,7 +333,7 @@ fn probe_grammar_classes(view:View<'_>,buffers:&mut CommitBuffers,w:&mut Witness
             for &id in dynamic.token_ids(class as u32).unwrap_or_default() {
                 if eligible_byte_id(view,id)&&!w.admit(id)?{return Ok(Some(false));}
             }
-        } else if !visit_static_class(c,class,&mut |id|{
+        } else if !c.visit_internal_token_members(class,&mut |id|{
             if eligible_byte_id(view,id){w.admit(id)}else{Ok(true)}
         })? {return Ok(Some(false));}
     }

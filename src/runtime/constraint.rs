@@ -613,7 +613,7 @@ impl InternalTokenMaskPrebuild {
     pub(crate) fn install(self, constraint: &mut Constraint) {
         debug_assert_eq!(
             self.internal_token_buf_masks.len(),
-            constraint.internal_token_to_tokens.len(),
+            constraint.internal_token_count(),
             "base token-mask prebuild must match final internal-token coordinate",
         );
         constraint.internal_token_buf_masks = self.internal_token_buf_masks;
@@ -13374,11 +13374,7 @@ impl Constraint {
             }
         }
 
-        self.original_token_to_internal = original_to_internal;
-        self.packed_original_token_to_internal = None;
-        self.deferred_original_token_to_internal = OnceLock::new();
-        self.internal_token_to_tokens = internal_to_tokens;
-        self.deferred_internal_token_to_tokens = OnceLock::new();
+        self.token_classes = crate::runtime::TokenClasses::mapped(original_to_internal, internal_to_tokens);
 
         // Portable per-token fragments and every aggregate derived from them
         // were built before the slot became linker-only. Force one rebuild in
@@ -14968,13 +14964,13 @@ mod dense_internal_token_mask_tests {
         )
         .unwrap();
         constraint.final_mask_mapping = Default::default();
-        let n_internal = constraint.internal_token_to_tokens.len();
+        let n_internal = constraint.internal_token_count();
         assert!(n_internal <= 16, "small exhaustive test requires a tiny internal vocab");
 
         for selected in 0u64..(1u64 << n_internal) {
             let mut dense = vec![0u64; n_internal.div_ceil(64)];
             let mut selected_image = 0u32;
-            for (internal, originals) in constraint.internal_token_to_tokens.iter().enumerate() {
+            for (internal, originals) in constraint.internal_token_groups().unwrap().iter().enumerate() {
                 if selected & (1u64 << internal) == 0 {
                     continue;
                 }
@@ -14995,7 +14991,7 @@ mod dense_internal_token_mask_tests {
                     profiled[0],
                     expected,
                     "profiled OR mismatch: selected={selected:#b} initial={initial:#06b} internal_to_original={:?}",
-                    constraint.internal_token_to_tokens,
+                    constraint.internal_token_groups().unwrap(),
                 );
 
                 let mut fast = vec![0u32; constraint.body_mask_len()];
@@ -15005,7 +15001,7 @@ mod dense_internal_token_mask_tests {
                     fast[0],
                     expected,
                     "fast OR mismatch: selected={selected:#b} initial={initial:#06b} internal_to_original={:?}",
-                    constraint.internal_token_to_tokens,
+                    constraint.internal_token_groups().unwrap(),
                 );
 
                 let mut scratch_fast = vec![0u32; constraint.body_mask_len()];
@@ -15021,7 +15017,7 @@ mod dense_internal_token_mask_tests {
                     scratch_fast[0],
                     expected,
                     "scratch fast OR mismatch: selected={selected:#b} initial={initial:#06b} internal_to_original={:?}",
-                    constraint.internal_token_to_tokens,
+                    constraint.internal_token_groups().unwrap(),
                 );
             }
         }
@@ -15057,7 +15053,7 @@ mod dense_internal_token_mask_tests {
         .unwrap();
         constraint.final_mask_mapping = Default::default();
 
-        let n_internal = constraint.internal_token_to_tokens.len();
+        let n_internal = constraint.internal_token_count();
         assert_eq!(n_internal, 64, "expected duplicate bytes to form 64 internal tokens");
 
         let mut dense = vec![0u64; n_internal.div_ceil(64)];
@@ -15065,7 +15061,7 @@ mod dense_internal_token_mask_tests {
             dense[internal / 64] |= 1u64 << (internal % 64);
         }
 
-        let dirty_token = constraint.internal_token_to_tokens[63][0];
+        let dirty_token = constraint.internal_token_groups().unwrap()[63][0];
         let dirty_word = dirty_token as usize / 32;
         let dirty_bit = dirty_token as usize % 32;
 

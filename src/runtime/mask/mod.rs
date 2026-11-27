@@ -3967,29 +3967,21 @@ impl ConstraintState {
                         {
                             continue;
                         }
-                        if source.internal_token_to_tokens.is_empty() {
-                            let original = internal_token;
-                            let outer_internal = outer
-                                .constraint
+                        let mut add_original = |original| -> crate::Result<bool> {
+                            let outer_internal = outer.constraint
                                 .original_token_internal_at(original)
                                 .unwrap_or(u32::MAX);
                             if outer_internal != u32::MAX && dense_contains(allowed, outer_internal) {
                                 set_original_mask_bit(buf, original);
                             }
-                        } else if let Some(originals) =
-                            source.internal_token_to_tokens.get(internal_token as usize)
+                            Ok(true)
+                        };
+                        if !source.has_original_token_map() {
+                            let _ = add_original(internal_token);
+                        } else if (internal_token as usize) < source.internal_token_count()
+                            && source.visit_internal_token_members(internal_token as usize, &mut add_original).is_err()
                         {
-                            for &original in originals {
-                                let outer_internal = outer
-                                    .constraint
-                                    .original_token_internal_at(original)
-                                    .unwrap_or(u32::MAX);
-                                if outer_internal != u32::MAX
-                                    && dense_contains(allowed, outer_internal)
-                                {
-                                    set_original_mask_bit(buf, original);
-                                }
-                            }
+                            return false;
                         }
                     }
                 }
@@ -8757,6 +8749,7 @@ mod boundary_dag_exact_tests {
                 *acc = acc.clone().with_insert(7, 9);
             }
         }
+        stacks.push((vec![2, 0], TerminalsDisallowed::new()));
         stacks.push((Vec::new(), TerminalsDisallowed::new()));
         let dwa = adversarial_dwa(2);
         for gss in [ParserGSS::from_stacks(&stacks), ParserGSS::empty()] {

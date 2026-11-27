@@ -451,13 +451,9 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
     constraint.deferred_internal_tsid_to_states = Default::default();
     constraint.state_internal_tsid_offsets = vec![u32::MAX];
     constraint.state_internal_tsids.clear();
-    constraint.packed_original_token_to_internal = None;
-    constraint.deferred_original_token_to_internal = Default::default();
-    constraint.internal_token_to_tokens = common.vocab_tokens.internal_to_originals_vecs();
-    constraint.deferred_internal_token_to_tokens = Default::default();
     constraint.internal_token_bytes = pm::build_internal_token_bytes_from_groups(vocab,
         &common.vocab_tokens.internal_to_originals);
-    constraint.original_token_to_internal = common.vocab_tokens.original_to_internal;
+    constraint.token_classes = crate::runtime::TokenClasses::mapped(common.vocab_tokens.original_to_internal, common.vocab_tokens.internal_to_originals);
     constraint.possible_matches = possible_matches;
     constraint.possible_matches_complete = true;
     constraint.seed_universe_dense = Arc::from([]);

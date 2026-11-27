@@ -55,7 +55,7 @@ const V30_SECTION_HEADER_LEN: usize = V30_SECTION_MAGIC.len() + 11 * 8;
 const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R35\0";
 const CURRENT_RUNTIME_HEADER_LEN: usize = CURRENT_RUNTIME_MAGIC.len() + 2 * 8;
 const STATIC_RESIDUAL_MASK_MAGIC: [u8; 4] = *b"SRM3";
-const CURRENT_CORE_MAGIC: [u8; 4] = *b"C23\0";
+const CURRENT_CORE_MAGIC: [u8; 4] = *b"C24\0";
 const CURRENT_CORE_HEADER_LEN: usize = CURRENT_CORE_MAGIC.len() + 4 + 2 * 8;
 const CURRENT_CORE_FLAG_OMIT_TSID_INVERSE: u32 = 1;
 
@@ -4656,9 +4656,7 @@ impl Constraint {
                     || {
                         let started = profile.then(std::time::Instant::now);
                         let bytes =
-                            crate::runtime::artifact::original_token_map_artifact_serde::to_fast_bytes(
-                                self.original_token_map(),
-                            );
+                            self.token_classes.encode();
                         if let Some(started) = started {
                             eprintln!(
                                 "[glrmask/profile][constraint_save_section] name=original_token_map ms={:.3} bytes={}",
@@ -4758,12 +4756,6 @@ impl Constraint {
                             crate::automata::lexer::tokenizer::set_compact_artifact_serde(true);
                         let previous_external_tokenizer =
                             crate::automata::lexer::tokenizer::set_external_artifact_serde(true);
-                        let previous_omit_inverse =
-                            crate::runtime::artifact::internal_token_inverse_artifact_serde::set_omit(true);
-                        let previous_packed_original_token_map =
-                            crate::runtime::artifact::original_token_map_artifact_serde::set_packed(true);
-                        let previous_external_original_token_map =
-                            crate::runtime::artifact::original_token_map_artifact_serde::set_external(true);
                         let previous_packed_token_bytes =
                             crate::runtime::artifact::token_bytes_artifact_serde::set_packed(true);
                         let previous_external_token_bytes =
@@ -4832,15 +4824,6 @@ impl Constraint {
                         );
                         crate::runtime::artifact::token_bytes_artifact_serde::set_external(
                             previous_external_token_bytes,
-                        );
-                        crate::runtime::artifact::internal_token_inverse_artifact_serde::set_omit(
-                            previous_omit_inverse,
-                        );
-                        crate::runtime::artifact::original_token_map_artifact_serde::set_packed(
-                            previous_packed_original_token_map,
-                        );
-                        crate::runtime::artifact::original_token_map_artifact_serde::set_external(
-                            previous_external_original_token_map,
                         );
                         crate::compiler::glr::table::artifact_serde::set_external_serde(
                             previous_external_table,
@@ -5891,10 +5874,8 @@ impl Constraint {
                         }
                         result
                         },
-                        || -> Result<Option<Arc<crate::runtime::artifact::original_token_map_artifact_serde::PackedOriginalTokenMap>>, String> {
-                        let Some(section) = original_token_map_section else {
-                            return Ok(None);
-                        };
+                        || -> Result<crate::runtime::TokenClasses, String> {
+                        let section = original_token_map_section.ok_or_else(|| "missing token class section".to_owned())?;
                         let started = profile.then(std::time::Instant::now);
                         let result = {
                             let backing = current_backing.as_ref().ok_or_else(|| {
@@ -5907,12 +5888,11 @@ impl Constraint {
                                     "original-token map section does not belong to artifact backing"
                                         .to_owned()
                                 })?;
-                            crate::runtime::artifact::original_token_map_artifact_serde::PackedOriginalTokenMap::parse_backed(
+                            crate::runtime::TokenClasses::decode_backed(
                                 std::sync::Arc::clone(backing),
                                 section_start,
                                 section.len(),
                             )
-                            .map(|packed| Some(Arc::new(packed)))
                         };
                         if let Some(started) = started {
                             eprintln!(
@@ -6016,18 +5996,6 @@ impl Constraint {
                         crate::automata::lexer::tokenizer::set_external_artifact_serde(
                             true,
                         );
-                    let previous_omit_inverse =
-                        crate::runtime::artifact::internal_token_inverse_artifact_serde::set_omit(
-                            true,
-                        );
-                    let previous_packed_original_token_map =
-                        crate::runtime::artifact::original_token_map_artifact_serde::set_packed(
-                            true,
-                        );
-                    let previous_external_original_token_map =
-                        crate::runtime::artifact::original_token_map_artifact_serde::set_external(
-                            true,
-                        );
                     let previous_packed_token_bytes =
                         crate::runtime::artifact::token_bytes_artifact_serde::set_packed(true);
                     let previous_external_token_bytes =
@@ -6085,15 +6053,6 @@ impl Constraint {
                     );
                     crate::runtime::artifact::token_bytes_artifact_serde::set_defer_unpack(
                         previous_defer_token_bytes,
-                    );
-                    crate::runtime::artifact::internal_token_inverse_artifact_serde::set_omit(
-                        previous_omit_inverse,
-                    );
-                    crate::runtime::artifact::original_token_map_artifact_serde::set_packed(
-                        previous_packed_original_token_map,
-                    );
-                    crate::runtime::artifact::original_token_map_artifact_serde::set_external(
-                        previous_external_original_token_map,
                     );
                     crate::compiler::glr::table::artifact_serde::set_external_serde(
                         previous_external_table,
@@ -6156,10 +6115,7 @@ impl Constraint {
         if let Some(tokenizer) = tokenizer {
             constraint.tokenizer = tokenizer.into();
         }
-        if let Some(map) = original_token_map {
-            constraint.original_token_to_internal = Vec::new();
-            constraint.packed_original_token_to_internal = Some(map);
-        }
+        constraint.token_classes = original_token_map;
         let attach_weights_started = profile.then(std::time::Instant::now);
         if let Some((pool, ids)) = packed_weights {
             attach_packed_non_dwa_weights(&mut constraint, pool, ids)

@@ -871,8 +871,7 @@ impl DynamicConstraint {
         result.inner.possible_matches_complete = complete;
         result.inner.state_to_internal_tsid = id_map.tokenizer_states.original_to_internal;
         result.inner.internal_tsid_to_states = id_map.tokenizer_states.internal_to_originals;
-        result.inner.original_token_to_internal = id_map.vocab_tokens.original_to_internal;
-        result.inner.internal_token_to_tokens = id_map.vocab_tokens.internal_to_originals;
+        result.inner.token_classes = crate::runtime::TokenClasses::mapped(id_map.vocab_tokens.original_to_internal, id_map.vocab_tokens.internal_to_originals);
         Ok(result)
     }
 
@@ -1039,11 +1038,7 @@ impl DynamicConstraint {
             template_dfas_by_terminal: Vec::new(),
             fast_template_dfas_by_terminal: Vec::new(),
             template_parser: None,
-            original_token_to_internal: Vec::new(),
-            packed_original_token_to_internal: None,
-            deferred_original_token_to_internal: std::sync::OnceLock::new(),
-            internal_token_to_tokens: Vec::new(),
-            deferred_internal_token_to_tokens: std::sync::OnceLock::new(),
+            token_classes: Default::default(),
             token_bytes: payload.token_bytes,
             packed_token_bytes: None,
             internal_token_bytes: BTreeMap::new(),
