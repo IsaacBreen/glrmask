@@ -3550,7 +3550,7 @@ fn build_residual_projection(input: BuildInput<'_>, publication: ResidualPublica
         }
         trie.token_node.iter().map(|&node| subset_at_node[node as usize]).collect::<Vec<_>>()
     } else {
-        tokens.iter().map(|token| token.iter().rev().fold(0, &mut prepend)).collect::<Vec<_>>()
+        tokens.iter().map(|token| token.iter().rev().copied().fold(0, &mut prepend)).collect::<Vec<_>>()
     };
     for (token, subset) in subset_ids.into_iter().enumerate() {
         token_class[token] = intern_dense_subset_class(
