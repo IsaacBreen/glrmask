@@ -48,13 +48,13 @@ fn old_envelope(dynamic: &DynamicConstraint, external: bool) -> Vec<u8> {
     bytes.extend_from_slice(if external {
         &DYNAMIC_TRANSFER_MAGIC
     } else {
-        &DYNAMIC_CONSTRAINT_MAGIC
+        b"GLRDYN\0\0"
     });
     bytes.extend_from_slice(
         &(if external {
-            TEMPLATE_DYNAMIC_TRANSFER_VERSION
+            16u16
         } else {
-            TEMPLATE_DYNAMIC_CONSTRAINT_VERSION
+            15u16
         })
         .to_le_bytes(),
     );

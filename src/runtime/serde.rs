@@ -39,10 +39,10 @@ const CONSTRAINT_ARTIFACT_MAGIC: &[u8; 8] = b"GLRCON02";
 const CONSTRAINT_ARTIFACT_HEADER_LEN: usize = CONSTRAINT_ARTIFACT_MAGIC.len() + 32;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
-const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 50;
+const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 52;
 /// External-vocabulary envelope that retains an executable LR table for
 /// ordinary Dynamic's retained LR backend.
-const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 51;
+const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 53;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -116,7 +116,7 @@ impl NativeSectionSource<'_> {
         }
     }
 }
-const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R38\0";
+const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R39\0";
 const CURRENT_RUNTIME_HEADER_LEN: usize = CURRENT_RUNTIME_MAGIC.len() + 2 * 8;
 const STATIC_RESIDUAL_MASK_MAGIC: [u8; 4] = *b"SRM3";
 const CURRENT_CORE_MAGIC: [u8; 4] = *b"C30\0";
@@ -2360,7 +2360,7 @@ fn decode_current_runtime_wire(
 
 #[derive(Serialize)]
 struct ConstraintArtifactCurrentRuntimeRef<'a> {
-    template_dynamic_proofs: Option<crate::dynamic_constraint::TemplateDynamicProofs>,
+    dynamic_execution_metadata: Option<crate::dynamic_constraint::DynamicExecutionMetadata>,
     terminal_live_states: &'a [Vec<u32>],
     segmented_runtime: Option<SegmentedRuntimeArtifactV27Ref<'a>>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
@@ -2372,7 +2372,7 @@ struct ConstraintArtifactCurrentRuntimeRef<'a> {
 
 #[derive(Deserialize)]
 struct ConstraintArtifactCurrentRuntime {
-    template_dynamic_proofs: Option<crate::dynamic_constraint::TemplateDynamicProofs>,
+    dynamic_execution_metadata: Option<crate::dynamic_constraint::DynamicExecutionMetadata>,
     terminal_live_states: Vec<Vec<u32>>,
     segmented_runtime: Option<SegmentedRuntimeArtifactV27>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
@@ -2383,7 +2383,7 @@ struct ConstraintArtifactCurrentRuntime {
 }
 
 struct DecodedConstraintRuntime {
-    template_dynamic_proofs: Option<crate::dynamic_constraint::TemplateDynamicProofs>,
+    dynamic_execution_metadata: Option<crate::dynamic_constraint::DynamicExecutionMetadata>,
     terminal_live_states: Vec<Vec<u32>>,
     segmented_runtime_v27: Option<SegmentedRuntimeArtifactV27>,
     dynamic_mask_vocab: Option<crate::runtime::artifact::DynamicMaskVocabArtifact>,
@@ -2409,7 +2409,7 @@ fn can_reuse_omitted_external_dynamic_vocab(
         && !constraint.tokenizer.has_any_virtual_runtime()
         && !constraint.dynamic_mask_vocab.is_initialized()
         && runtime.dynamic_mask_vocab.is_none()
-        && runtime.template_dynamic_proofs.is_some()
+        && runtime.dynamic_execution_metadata.is_some()
         && runtime.virtual_runtimes.is_empty()
         && runtime.static_virtual_residual_mask.is_none()
         && runtime.segmented_runtime_v27.is_none()
@@ -3491,18 +3491,34 @@ impl Constraint {
                             let started = profile.then(std::time::Instant::now);
                             let packed_dwa_dense_masks = &self.packed_dwa_token_dense_masks;
                             let static_virtual_residual_wire = {
-                                self.dynamic_mask_vocab
+                                let prepared;
+                                let projections = if let Some(parts) = self.dynamic_mask_vocab
                                     .virtual_residual_mask_projection_parts()
-                                    .map(|(mask_tokenizer, projections)| encode_static_virtual_residual_mask_wire_with_fallback(
+                                {
+                                    Some(parts)
+                                } else if self.uses_dynamic_runtime()
+                                    && self.tokenizer.has_any_virtual_runtime()
+                                    && crate::env::var("GLRMASK_DYNAMIC_TRANSFER_VIRTUAL_RESIDUAL_PROJECTIONS")
+                                        .ok().is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"))
+                                {
+                                    let mut local = self.dynamic_mask_vocab.clone();
+                                    self.prepare_dynamic_virtual_residual_mask_projection(&mut local);
+                                    prepared = local;
+                                    prepared.virtual_residual_mask_projection_parts()
+                                } else {
+                                    None
+                                };
+                                projections.map(|(mask_tokenizer, projections)| {
+                                    encode_static_virtual_residual_mask_wire_with_fallback(
                                         &self.tokenizer,
                                         self.retained_terminal_exprs(),
                                         mask_tokenizer,
                                         projections,
-                                    ))
-                                    .unwrap_or_default()
+                                    )
+                                }).unwrap_or_default()
                             };
                             let metadata = ConstraintArtifactCurrentRuntimeRef {
-                                template_dynamic_proofs: self.has_template_parser().then(|| crate::dynamic_constraint::TemplateDynamicProofs::from_constraint(self)),
+                                dynamic_execution_metadata: (self.uses_dynamic_runtime() || self.has_template_parser()).then(|| crate::dynamic_constraint::DynamicExecutionMetadata::from_constraint(self)),
                                 terminal_live_states: &self.terminal_live_states,
                                 segmented_runtime: segmented_runtime_artifact_ref(self),
                                 dynamic_mask_vocab: self.uses_dynamic_runtime().then(|| {
@@ -4165,7 +4181,7 @@ impl Constraint {
                                         ))
                                     };
                                     Ok(DecodedConstraintRuntime {
-                                        template_dynamic_proofs: runtime.template_dynamic_proofs,
+                                        dynamic_execution_metadata: runtime.dynamic_execution_metadata,
                                         terminal_live_states: runtime.terminal_live_states,
                                         segmented_runtime_v27: runtime.segmented_runtime,
                                         dynamic_mask_vocab: runtime.dynamic_mask_vocab,
@@ -4551,12 +4567,12 @@ impl Constraint {
                 }
             let mut virtual_runtimes = Vec::new();
             let mut static_virtual_residual_mask = None;
-            let mut template_dynamic_proofs = None;
+            let mut dynamic_execution_metadata = None;
             if let Some(runtime) = runtime {
                 let reuse_omitted_vocab = can_reuse_omitted_external_dynamic_vocab(
                     &constraint, &runtime, external_vocab,
                 );
-                template_dynamic_proofs = runtime.template_dynamic_proofs;
+                dynamic_execution_metadata = runtime.dynamic_execution_metadata;
                 virtual_runtimes = runtime.virtual_runtimes;
                 static_virtual_residual_mask = runtime.static_virtual_residual_mask;
                 constraint.terminal_live_states = runtime.terminal_live_states;
@@ -4592,7 +4608,9 @@ impl Constraint {
                         crate::dynamic_constraint::DynamicConstraint::dynamic_vocab_from_transfer_artifact(
                             None, external_vocab.expect("checked external Vocab"),
                         )?;
-                } else if version == EXTERNAL_LR_CONSTRAINT_VERSION && external_vocab.is_some()
+                } else if constraint.uses_dynamic_runtime() && external_vocab.is_some()
+                    && !constraint.dynamic_mask_vocab.is_initialized()
+                    && !constraint.uses_compact_segmented_parser_runtime()
                 {
                     // Explicit LR envelopes deliberately
                     // omit the mask vocabulary artifact and reconstruct the
@@ -4602,6 +4620,9 @@ impl Constraint {
                         crate::dynamic_constraint::DynamicConstraint::dynamic_vocab_from_transfer_artifact(
                             None, external_vocab.expect("external envelope requires its Vocab"),
                         )?;
+                }
+                if let Some(metadata) = dynamic_execution_metadata.as_mut() {
+                    metadata.restore_mask_quotient(&mut constraint)?;
                 }
                 if let Some(segmented_runtime) = runtime.segmented_runtime_v27
                     && !deferred {
@@ -4627,9 +4648,23 @@ impl Constraint {
                         constraint.retained_terminal_exprs().map(|exprs| exprs.to_vec())
                     });
                     if constraint.uses_dynamic_runtime() && static_virtual_residual_mask.is_none() {
-                        Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs_with_virtual_runtime_metadata(
-                            terminal_exprs, &virtual_runtimes, false,
-                        )
+                        let oracles = dynamic_execution_metadata.as_ref()
+                            .map_or(&[][..], |metadata| metadata.residual_oracles.as_slice());
+                        let slices = dynamic_execution_metadata.as_ref()
+                            .map_or(&[][..], |metadata| metadata.master_slices.as_slice());
+                        if virtual_runtimes.iter().all(|entry| entry.kind ==
+                            crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeKind::ResidualExpr)
+                        {
+                            let expressions = terminal_exprs.as_deref().ok_or_else(||
+                                crate::Error::Serialization("dynamic residual runtimes have no terminal expressions".into()))?;
+                            Arc::make_mut(&mut constraint.tokenizer).restore_compiled_dynamic_residual_runtimes(
+                                expressions, &virtual_runtimes, oracles, slices,
+                            )
+                        } else {
+                            Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs_with_virtual_runtime_metadata_and_oracles_preserving_coordinates(
+                                terminal_exprs, &virtual_runtimes, oracles, false, false,
+                            )
+                        }
                     } else if let Some(static_mask) = static_virtual_residual_mask
                         .as_ref()
                         .filter(|static_mask| {
@@ -4653,7 +4688,7 @@ impl Constraint {
             if let Some(static_mask) = static_virtual_residual_mask {
                 static_mask.restore_projections(&mut constraint)?;
             }
-            if let Some(proofs) = template_dynamic_proofs {
+            if let Some(proofs) = dynamic_execution_metadata {
                 proofs.restore(&mut constraint)?;
             }
             let restore_exprs_ms = restore_exprs_started
@@ -4781,7 +4816,7 @@ mod tests {
 
     fn omitted_dynamic_runtime(constraint: &Constraint) -> DecodedConstraintRuntime {
         DecodedConstraintRuntime {
-            template_dynamic_proofs: Some(crate::dynamic_constraint::TemplateDynamicProofs::from_constraint(constraint)),
+            dynamic_execution_metadata: Some(crate::dynamic_constraint::DynamicExecutionMetadata::from_constraint(constraint)),
             terminal_live_states: Vec::new(),
             segmented_runtime_v27: None, dynamic_mask_vocab: None,
             virtual_runtimes: Vec::new(), static_virtual_residual_mask: None,
@@ -4801,9 +4836,9 @@ mod tests {
         assert!(runtime.dynamic_mask_vocab.is_some());
         assert!(!can_reuse_omitted_external_dynamic_vocab(&decoded, &runtime, Some(&vocab)));
         runtime.dynamic_mask_vocab = None;
-        runtime.template_dynamic_proofs = None;
+        runtime.dynamic_execution_metadata = None;
         assert!(!can_reuse_omitted_external_dynamic_vocab(&decoded, &runtime, Some(&vocab)));
-        runtime.template_dynamic_proofs = Some(crate::dynamic_constraint::TemplateDynamicProofs::from_constraint(&original.inner));
+        runtime.dynamic_execution_metadata = Some(crate::dynamic_constraint::DynamicExecutionMetadata::from_constraint(&original.inner));
         decoded.runtime_backend = crate::runtime::artifact::ConstraintRuntimeBackend::Static;
         assert!(!can_reuse_omitted_external_dynamic_vocab(&decoded, &runtime, Some(&vocab)));
         decoded.runtime_backend = crate::runtime::artifact::ConstraintRuntimeBackend::Dynamic;
@@ -4827,7 +4862,7 @@ mod tests {
         reference.dynamic_mask_vocab = Default::default();
         reference.lazy_dynamic_mask_vocab = Default::default();
         assert!(reference.lazy_dynamic_mask_vocab.get().is_none());
-        crate::dynamic_constraint::TemplateDynamicProofs::from_constraint(&original.inner)
+        crate::dynamic_constraint::DynamicExecutionMetadata::from_constraint(&original.inner)
             .restore(&mut reference).unwrap();
         reference.rebuild_dynamic_runtime_caches();
         let mut expected = reference.start();

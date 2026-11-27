@@ -80,7 +80,7 @@ fn o2_template_artifacts_roundtrip_without_lr_storage() {
         let bytes=template.save();
         assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()), 16);
         let body=&bytes[30..]; // first native alternative after its length descriptor
-        assert_eq!(u16::from_le_bytes(body[40+8..40+10].try_into().unwrap()), 42);
+        assert_eq!(u16::from_le_bytes(body[40+8..40+10].try_into().unwrap()), 52);
         assert_eq!(&body[parser_range(body)][..4],b"TPR7");
         let loaded=DynamicConstraint::load(&bytes, &vocab()).unwrap();
         for report in dynamic_parser_backend_report(&loaded).as_array().unwrap() {
@@ -179,12 +179,12 @@ fn external_template_artifacts_omit_vocab_require_exact_binding_and_roundtrip() 
     let template = reference.clone();
     let external = template.save();
     assert_eq!(&external[..8], b"GLRDXF\0\0");
-    assert_eq!(u16::from_le_bytes(external[8..10].try_into().unwrap()), 16);
+    assert_eq!(u16::from_le_bytes(external[8..10].try_into().unwrap()), 18);
     let no_vocab = DynamicConstraint::load(&external, &vocab()).unwrap();
     compare_dynamic(&reference, &no_vocab);
-    // First dynamic alternative: outer18 + count4 + descriptor8.
-    let body = &external[30..];
-    assert_eq!(u16::from_le_bytes(body[40+8..40+10].try_into().unwrap()), 42);
+    // First dynamic alternative: outer18 + digest32 + count4 + length8.
+    let body = &external[62..];
+    assert_eq!(u16::from_le_bytes(body[40+8..40+10].try_into().unwrap()), 52);
     let token_section_len = u64::from_le_bytes(body[40+22 + 5*8..40+30 + 5*8].try_into().unwrap());
     assert_eq!(token_section_len,0,"model-token bytes must really be absent");
     let range = parser_range(body);
