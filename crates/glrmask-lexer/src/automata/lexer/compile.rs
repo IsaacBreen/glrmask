@@ -2762,7 +2762,8 @@ fn expand_direct_expression_graph_classes(dfa: &mut DFA, class_members: &[Vec<u8
 }
 /// Local DFA residual with the union of outer-control continuations to
 /// resume if this residual accepts. The continuation IDs refer to sets of
-/// nullable-control SCCs, never to a Cartesian edge/local-state coordinate.#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// nullable-control SCCs, never to a Cartesian edge/local-state coordinate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct DirectGroupedConfig {
     symbol: u32,
     local_state: u32,
@@ -3052,7 +3053,8 @@ fn compile_direct_expression_graph_grouped(
     let mut continuation_canonical = Vec::new();
     let mut edge_set_ids = Vec::<u32>::new();
     let initial_accepting = initial.accepting;
-    let initial_groups = initial.groups.clone();    let determinize_started = profile.then(Instant::now);
+    let initial_groups = initial.groups.clone();
+    let determinize_started = profile.then(Instant::now);
     let initial = Arc::new(DirectGroupedState::new(initial_accepting, initial_groups));
     let mut dfa = DFA::new(1);
     dfa.ensure_group_capacity(1);
