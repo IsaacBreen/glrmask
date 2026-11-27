@@ -107,8 +107,7 @@ fn kind_name(kind: glrmask::ErrorKind) -> &'static str {
 pub(crate) fn check_token_id(id: u32) -> PyResult<u32> {
     if id > glrmask::__private::MAX_TOKEN_ID {
         return Err(glrmask_error("invalid_input", format!(
-            "token ID {id} is larger than the maximum token ID, {}",
-            glrmask::__private::MAX_TOKEN_ID
+            "token ID {id} is outside the supported range"
         )));
     }
     Ok(id)

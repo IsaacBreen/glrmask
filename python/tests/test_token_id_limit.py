@@ -21,11 +21,11 @@ def test_vocab_rejects_a_huge_id(token_id):
 @pytest.mark.parametrize("token_id", HUGE_IDS)
 def test_binding_a_huge_id_is_an_error(token_id):
     grammar = token_extern()
-    with pytest.raises(glrmask.GLRMaskError, match="maximum token ID") as exc:
+    with pytest.raises(glrmask.GLRMaskError, match="supported range") as exc:
         grammar.bind("E", glrmask.TokenSet([token_id]))
     assert exc.value.kind == "invalid_input"
     module = glrmask.Module(token_extern())
-    with pytest.raises(glrmask.GLRMaskError, match="maximum token ID") as exc:
+    with pytest.raises(glrmask.GLRMaskError, match="supported range") as exc:
         module.bind("E", glrmask.TokenSet([token_id]))
     assert exc.value.kind == "invalid_input"
     assert "E" in module.externs.unbound
@@ -33,10 +33,10 @@ def test_binding_a_huge_id_is_an_error(token_id):
 
 @pytest.mark.parametrize("token_id", HUGE_IDS)
 def test_token_sets_reject_a_huge_id(token_id):
-    with pytest.raises(glrmask.GLRMaskError, match="maximum token ID") as exc:
+    with pytest.raises(glrmask.GLRMaskError, match="supported range") as exc:
         glrmask.TokenSet([1, token_id])
     assert exc.value.kind == "invalid_input"
-    with pytest.raises(glrmask.GLRMaskError, match="maximum token ID") as exc:
+    with pytest.raises(glrmask.GLRMaskError, match="supported range") as exc:
         glrmask.TokenSet([range(token_id, token_id + 1)])
     assert exc.value.kind == "invalid_input"
 

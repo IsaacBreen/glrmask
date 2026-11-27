@@ -163,7 +163,7 @@ def test_token_set_and_sparse_membership_validation():
         assert _bound_snapshot(m, "item", value).compile(v) is not None
     # The largest token ID is accepted; one above it is an error, not a huge mask.
     assert _bound_snapshot(g, "item", glrmask.TokenSet([2**24 - 1])) is not None
-    with pytest.raises(glrmask.GLRMaskError, match="maximum token ID"):
+    with pytest.raises(glrmask.GLRMaskError, match="supported range"):
         glrmask.TokenSet([2**24])
     for id in [7, 63]:
         c = _bound_snapshot(m, "item", glrmask.TokenSet([id])).compile(v)

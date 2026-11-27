@@ -178,8 +178,7 @@ pub fn compilation_error(message: String) -> Error {
 pub(crate) fn check_token_id(id: u32) -> Result<()> {
     if id > glrmask_vocab::__private::MAX_TOKEN_ID {
         return Err(Error::InvalidInput(format!(
-            "token ID {id} is larger than the maximum token ID, {}",
-            glrmask_vocab::__private::MAX_TOKEN_ID
+            "token ID {id} is outside the supported range"
         )));
     }
     Ok(())
