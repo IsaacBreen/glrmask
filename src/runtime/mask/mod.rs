@@ -42,7 +42,7 @@ use self::profile::{
 };
 use self::queue::{mask_queue_mode, MaskQueue};
 
-type DenseTokenMaskCache = FxHashMap<usize, Arc<[u64]>>;
+use super::artifact::{WeightTokenMaskCache, WeightTokenMaskEntry};
 type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 
 /// Mask-local exact byte-transition reuse for recursive composition. Full
@@ -702,10 +702,10 @@ impl DenseMaskAcc {
     fn intersect_dense_with_runtime_token_set(
         dense: &[u64],
         token_set: RuntimeTokenSetRef<'_>,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
     ) -> Option<Arc<[u64]>> {
         if let Some(key) = token_set.materialized_key()
-            && let Some(mask) = precomputed.get(&key) {
+            && let Some(mask) = precomputed.get(&key).and_then(WeightTokenMaskEntry::dense) {
                 let mut out = vec![0u64; dense.len()];
                 let mut any = false;
                 for i in 0..dense.len() {
@@ -730,11 +730,11 @@ impl DenseMaskAcc {
     fn or_dense_and_runtime_token_set_into(
         dense: &[u64],
         token_set: RuntimeTokenSetRef<'_>,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         merged: &mut [u64],
     ) {
         if let Some(key) = token_set.materialized_key()
-            && let Some(mask) = precomputed.get(&key) {
+            && let Some(mask) = precomputed.get(&key).and_then(WeightTokenMaskEntry::dense) {
                 let n = dense.len().min(mask.len()).min(merged.len());
                 for i in 0..n {
                     merged[i] |= dense[i] & mask[i];
@@ -750,7 +750,7 @@ impl DenseMaskAcc {
     fn intersect_with_runtime_weight_reuse(
         &self,
         weight: RuntimeWeightRef<'_>,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
     ) -> Option<Self> {
         if self.is_empty() {
             return None;
@@ -775,7 +775,7 @@ impl DenseMaskAcc {
     fn intersect_with_runtime_weight_small_cached(
         &self,
         weight: RuntimeWeightRef<'_>,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         cache: &mut DenseTokenSetIntersectionSmallCache,
     ) -> Option<Self> {
         if self.is_empty() {
@@ -842,11 +842,11 @@ impl DenseMaskAcc {
     fn intersect_dense_with_token_set(
         dense: &[u64],
         token_set: &Arc<RangeSetBlaze<u32>>,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
     ) -> Option<Arc<[u64]>> {
         let key = Arc::as_ptr(token_set) as usize;
 
-        if let Some(mask) = precomputed.get(&key) {
+        if let Some(mask) = precomputed.get(&key).and_then(WeightTokenMaskEntry::dense) {
             let mut out = vec![0u64; dense.len()];
             let mut any = false;
 
@@ -871,12 +871,12 @@ impl DenseMaskAcc {
     fn or_dense_and_token_set_into(
         dense: &[u64],
         token_set: &Arc<RangeSetBlaze<u32>>,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         merged: &mut [u64],
     ) {
         let key = Arc::as_ptr(token_set) as usize;
 
-        if let Some(mask) = precomputed.get(&key) {
+        if let Some(mask) = precomputed.get(&key).and_then(WeightTokenMaskEntry::dense) {
             let n = dense.len().min(mask.len()).min(merged.len());
             for i in 0..n {
                 merged[i] |= dense[i] & mask[i];
@@ -892,7 +892,7 @@ impl DenseMaskAcc {
     fn intersect_with_weight(
         &self,
         weight: &Weight,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
     ) -> Option<Self> {
         if self.is_empty() {
             return None;
@@ -926,7 +926,7 @@ impl DenseMaskAcc {
     fn intersect_with_weight_cached(
         &self,
         weight: &Weight,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         cache: &mut FxHashMap<DenseTokenSetIntersectionKey, Option<Arc<[u64]>>>,
     ) -> Option<Self> {
         if self.is_empty() {
@@ -964,7 +964,7 @@ impl DenseMaskAcc {
         tsid: u32,
         dense: &Arc<[u64]>,
         token_set: &Arc<RangeSetBlaze<u32>>,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         cache: &mut FxHashMap<DenseTokenSetIntersectionKey, Option<Arc<[u64]>>>,
     ) -> Option<Arc<[u64]>> {
         let key = DenseTokenSetIntersectionKey {
@@ -977,7 +977,7 @@ impl DenseMaskAcc {
             return cached.clone();
         }
         if let RuntimeTokenSetKey::Materialized(token_set_key) = key.token_set
-            && let Some(mask) = precomputed.get(&token_set_key) {
+            && let Some(mask) = precomputed.get(&token_set_key).and_then(WeightTokenMaskEntry::dense) {
             let mut any = false;
             let mut out: Option<Vec<u64>> = None;
             for i in 0..dense.len() {
@@ -1010,7 +1010,7 @@ impl DenseMaskAcc {
     fn intersect_with_weight_small_cached(
         &self,
         weight: &Weight,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         cache: &mut DenseTokenSetIntersectionSmallCache,
     ) -> Option<Self> {
         if self.is_empty() {
@@ -1041,7 +1041,7 @@ impl DenseMaskAcc {
     fn intersect_dense_with_token_set_small_cached(
         dense: &Arc<[u64]>,
         token_set: &Arc<RangeSetBlaze<u32>>,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         cache: &mut DenseTokenSetIntersectionSmallCache,
     ) -> Option<Arc<[u64]>> {
         let token_set_key = RuntimeTokenSetKey::Materialized(Arc::as_ptr(token_set) as usize);
@@ -1061,10 +1061,10 @@ impl DenseMaskAcc {
     fn intersect_dense_with_token_set_reuse(
         dense: &Arc<[u64]>,
         token_set: &Arc<RangeSetBlaze<u32>>,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
     ) -> Option<Arc<[u64]>> {
         let key = Arc::as_ptr(token_set) as usize;
-        if let Some(mask) = precomputed.get(&key) {
+        if let Some(mask) = precomputed.get(&key).and_then(WeightTokenMaskEntry::dense) {
             let mut any = false;
             let mut out: Option<Vec<u64>> = None;
             for index in 0..dense.len() {
@@ -1108,7 +1108,7 @@ impl DenseMaskAcc {
     fn intersect_with_weight_reuse(
         &self,
         weight: &Weight,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
     ) -> Option<Self> {
         if self.is_empty() {
             return None;
@@ -1133,7 +1133,7 @@ impl DenseMaskAcc {
     fn intersect_with_weight_in_place(
         &mut self,
         weight: &Weight,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
     ) -> bool {
         if self.is_empty() {
             return false;
@@ -1151,7 +1151,7 @@ impl DenseMaskAcc {
             };
 
             let key = Arc::as_ptr(token_set) as usize;
-            if let Some(mask) = precomputed.get(&key) {
+            if let Some(mask) = precomputed.get(&key).and_then(WeightTokenMaskEntry::dense) {
                 let dense_mut = Arc::make_mut(dense);
                 let mut any = false;
                 for i in 0..dense_mut.len() {
@@ -1239,7 +1239,7 @@ impl DenseMaskAcc {
     fn or_intersection_into_merged(
         &self,
         final_weight: &Weight,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         merged: &mut [u64],
     ) {
         if final_weight.is_full() {
@@ -1695,7 +1695,7 @@ mod tests {
         exact_component_trigger_accepted_weight, single_path_direct_plan_reuse_dominates,
         single_path_direct_stack_work,
         DenseMaskAcc,
-        DenseTokenMaskCache,
+        WeightTokenMaskCache,
         DenseTokenSetIntersectionSmallCache,
         MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY,
         MASK_SINGLE_PATH_DIRECT_MAX_PATHS_PER_GSS,
@@ -1706,15 +1706,21 @@ mod tests {
     use crate::compiler::glr::parser::ParserGSS;
     use crate::{runtime::Constraint as Constraint, Grammar, Vocab};
     use range_set_blaze::RangeSetBlaze;
-    use rustc_hash::FxHashMap;
     use std::sync::Arc;
 
     fn precomputed_for(
         token_set: &Arc<RangeSetBlaze<u32>>,
         mask: Arc<[u64]>,
-    ) -> DenseTokenMaskCache {
-        let mut precomputed: FxHashMap<usize, Arc<[u64]>> = FxHashMap::default();
-        precomputed.insert(Arc::as_ptr(token_set) as usize, mask);
+    ) -> WeightTokenMaskCache {
+        let mut precomputed = WeightTokenMaskCache::default();
+        precomputed.insert(
+            Arc::as_ptr(token_set) as usize,
+            super::WeightTokenMaskEntry::new(
+                token_set,
+                Some(mask),
+                crate::runtime::artifact::WeightTokenOutput::None,
+            ),
+        );
         precomputed
     }
 
@@ -2735,7 +2741,7 @@ impl IndexedDagMaskRuntime {
 struct IndexedDagMaskEvaluator<'a, 'r> {
     constraint: &'a Constraint,
     dag: &'a IndexedLeveledGss<u32, DenseMaskAcc>,
-    precomputed: &'a DenseTokenMaskCache,
+    precomputed: &'a WeightTokenMaskCache,
     runtime: &'r mut IndexedDagMaskRuntime,
     source_slots: Vec<u32>,
     upper_memo: FxHashMap<(u32, u32), Option<DenseMaskAcc>>,
@@ -2756,7 +2762,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
     fn new(
         constraint: &'a Constraint,
         dag: &'a IndexedLeveledGss<u32, DenseMaskAcc>,
-        precomputed: &'a DenseTokenMaskCache,
+        precomputed: &'a WeightTokenMaskCache,
         runtime: &'r mut IndexedDagMaskRuntime,
     ) -> Self {
         let source_slots = dag
@@ -2956,7 +2962,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
             return IndexedDagDenseMask::Empty;
         };
         let token_key = Arc::as_ptr(tokens) as usize;
-        if let Some(dense) = self.precomputed.get(&token_key) {
+        if let Some(dense) = self.precomputed.get(&token_key).and_then(WeightTokenMaskEntry::dense) {
             return Self::single_dense_transition_mask(Arc::clone(dense));
         }
         let mut dense = vec![0u64; self.constraint.internal_token_dense_words];
@@ -3450,7 +3456,7 @@ fn enqueue_weighted_transition(
     popped: &DenseMaskGSS,
     target: u32,
     weight: RuntimeWeightRef<'_>,
-    precomputed: &DenseTokenMaskCache,
+    precomputed: &WeightTokenMaskCache,
     transition_gss_cache: &mut FxHashMap<DenseGssTransitionKey, DenseMaskGSS>,
     transition_intersection_cache: &mut DenseTokenSetIntersectionSmallCache,
     profile: &mut Option<MaskInnerProfileStats>,
@@ -3514,7 +3520,7 @@ fn enqueue_parser_state_transition(
     dwa_state: u32,
     parser_state: u32,
     popped: &DenseMaskGSS,
-    precomputed: &DenseTokenMaskCache,
+    precomputed: &WeightTokenMaskCache,
     transition_gss_cache: &mut FxHashMap<DenseGssTransitionKey, DenseMaskGSS>,
     transition_intersection_cache: &mut DenseTokenSetIntersectionSmallCache,
     profile: &mut Option<MaskInnerProfileStats>,
@@ -3638,7 +3644,7 @@ fn boundary_weight_mask_via_shared_queue(
     let seed = DenseMaskAcc::from_dense_arc_for_tsids(tsids, Arc::from(full))?;
     let mut queue = MaskQueue::new();
     queue.enqueue(dwa.start_state(), boundary_queue_seed(stacks, &seed, top_live));
-    let precomputed = DenseTokenMaskCache::default();
+    let precomputed = WeightTokenMaskCache::default();
     let mut transition_cache = FxHashMap::default();
     let mut intersection_cache = DenseTokenSetIntersectionSmallCache::new();
     let mut output = None;
@@ -4508,7 +4514,7 @@ impl ConstraintState {
             // Boundary token IDs belong to this shard, not to the outer
             // constraint. Reuse the normal dense/range primitives but never
             // consult a cache keyed in the outer token coordinate.
-            let precomputed = DenseTokenMaskCache::default();
+            let precomputed = WeightTokenMaskCache::default();
             walk_single_stack::<false, _>(
                 dwa.start_state(), top_first,
                 |state| dwa.states().get(state as usize)?.final_weight.as_ref(),
@@ -5230,7 +5236,7 @@ impl ConstraintState {
         let use_stack_plans = plans_complete && should_build_stack_plans;
         buf.fill(0);
 
-        let precomputed = &self.constraint.weight_token_dense_masks;
+        let precomputed = &self.constraint.weight_token_masks;
         let dense_words = self.constraint.internal_token_dense_words;
         let (mut merged, mut output_scratch, mut single_path_aux, mut single_path_acc) = {
             let mut scratch = self.mask_scratch.lock().unwrap();
@@ -5591,7 +5597,7 @@ impl ConstraintState {
         final_weight: RuntimeWeightRef<'_>,
         internal_tsid: u32,
         dense: &[u64],
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         merged: &mut [u64],
         mut direct_buf: Option<&mut [u32]>,
         direct_buf_dirty: &mut bool,
@@ -5610,23 +5616,7 @@ impl ConstraintState {
         if let (Some(buf), RuntimeTokenSetRef::Materialized(token_set)) =
             (direct_buf.as_deref_mut(), token_set)
         {
-            let token_set_key = Arc::as_ptr(token_set) as usize;
-            if self
-                .constraint
-                .direct_sparse_weight_token_sets
-                .contains(&token_set_key)
-                && self
-                    .constraint
-                    .or_dense_token_set_to_buf_sparse(dense, token_set, 2048, buf)
-                    .is_some()
-            {
-                *direct_buf_dirty = true;
-                return true;
-            }
-            if self
-                .constraint
-                .or_weight_token_set_to_buf_if_contained(dense, token_set, buf)
-            {
+            if self.constraint.try_or_materialized_final_token_set_to_buf(dense, token_set, buf) {
                 *direct_buf_dirty = true;
                 return true;
             }
@@ -5685,7 +5675,7 @@ impl ConstraintState {
         &self,
         final_weight: RuntimeWeightRef<'_>,
         acc: &DenseMaskAcc,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         merged: &mut [u64],
         mut direct_buf: Option<&mut [u32]>,
         direct_buf_dirty: &mut bool,
@@ -5708,24 +5698,10 @@ impl ConstraintState {
                 let handled_directly = if let (Some(buf), RuntimeTokenSetRef::Materialized(token_set)) =
                     (direct_buf.as_deref_mut(), token_set)
                 {
-                    let token_set_key = Arc::as_ptr(token_set) as usize;
-                    if (self
-                        .constraint
-                        .direct_sparse_weight_token_sets
-                        .contains(&token_set_key)
-                        && self
-                            .constraint
-                            .or_dense_token_set_to_buf_sparse(dense, token_set, 2048, buf)
-                            .is_some())
-                        || self
-                            .constraint
-                            .or_weight_token_set_to_buf_if_contained(dense, token_set, buf)
-                    {
-                        *direct_buf_dirty = true;
-                        true
-                    } else {
-                        false
-                    }
+                    let handled = self.constraint
+                        .try_or_materialized_final_token_set_to_buf(dense, token_set, buf);
+                    *direct_buf_dirty |= handled;
+                    handled
                 } else {
                     false
                 };
@@ -5744,7 +5720,7 @@ impl ConstraintState {
         &self,
         final_weight: RuntimeWeightRef<'_>,
         accs: &[DenseMaskAcc],
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         merged: &mut [u64],
         direct_buf: &mut Option<&mut [u32]>,
         direct_buf_dirty: &mut bool,
@@ -5767,7 +5743,7 @@ impl ConstraintState {
         &self,
         final_weight: RuntimeWeightRef<'_>,
         gss: &DenseMaskGSS,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         merged: &mut [u64],
         direct_buf: &mut Option<&mut [u32]>,
         direct_buf_dirty: &mut bool,
@@ -5792,7 +5768,7 @@ impl ConstraintState {
         original_tokenizer_state: u32,
         start_final_weight: Option<RuntimeWeightRef<'_>>,
         start_dwa_state: u32,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         merged: &mut [u64],
         direct_buf: &mut Option<&mut [u32]>,
         direct_buf_possible: &mut bool,
@@ -5847,7 +5823,7 @@ impl ConstraintState {
         &self,
         start_final_weight: Option<RuntimeWeightRef<'_>>,
         start_dwa_state: u32,
-        precomputed: &DenseTokenMaskCache,
+        precomputed: &WeightTokenMaskCache,
         transition_gss_cache: &mut FxHashMap<DenseGssTransitionKey, DenseMaskGSS>,
         transition_intersection_cache: &mut DenseTokenSetIntersectionSmallCache,
         queue: &mut MaskQueue,
@@ -6055,7 +6031,7 @@ impl ConstraintState {
 
         let profile = indexed_dag_mask_profile_enabled();
         let total_started = profile.then(Instant::now);
-        let precomputed = &self.constraint.weight_token_dense_masks;
+        let precomputed = &self.constraint.weight_token_masks;
         let dense_words = self.constraint.internal_token_dense_words;
         let (mut merged, mut indexed_runtime) = {
             let mut scratch = self.mask_scratch.lock().unwrap();
@@ -6391,7 +6367,7 @@ impl ConstraintState {
             });
         }
 
-        let precomputed = &self.constraint.weight_token_dense_masks;
+        let precomputed = &self.constraint.weight_token_masks;
         let dense_words = self.constraint.internal_token_dense_words;
         let mut transition_gss_cache: FxHashMap<DenseGssTransitionKey, DenseMaskGSS> =
             FxHashMap::default();

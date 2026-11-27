@@ -46,14 +46,12 @@ use super::artifact::{
     DirectRegularDynamicFrontierCacheEntry,
     DirectRegularDynamicHotFrontier, DirectRegularTerminalSupport,
     DirectRegularParserStateAcceptance, DirectRegularWideFrontierAcceptance,
-    DenseBufMaskRows, DenseWeightBufMaskCache,
-    DenseWeightMaskCache,
+    DenseBufMaskRows, WeightTokenMaskCache, WeightTokenMaskEntry, WeightTokenOutput,
     DenseWords,
     DynamicFirstMatchPostRow,
     DynamicFirstMatchSecondRow,
     DynamicBoundedObservationSets, DynamicConfigSubtreeCertificate,
     DynamicSelfLoopProjection,
-    DirectSparseWeightTokenSetCache,
     PackedDynamicMaskTokenAliases,
     RecursiveParserLayout, RecursiveParserLeafLayout,
     DynamicMaskTrie,
@@ -65,7 +63,6 @@ use super::artifact::{
     IndexedDagDenseTransitionRow, IndexedDagDenseTransitions,
     InternalTokenBufMasks, PackedDwaDenseWeightMaskCache, PackedInternalTokenBufMask,
     SeedTerminalDenseMasks,
-    SparseWeightBufMaskCache,
 };
 pub(crate) use super::artifact::Constraint;
 use super::state::ConstraintState;
@@ -173,9 +170,9 @@ impl crate::compiler::glr::parser::ParserActionProvider for RecursiveTemplateRef
 }
 
 #[derive(Default)]
-struct DirectSparseWeightBufCaches {
-    eligible: DirectSparseWeightTokenSetCache,
-    fallback: Vec<(usize, Arc<RangeSetBlaze<u32>>)>,
+struct FinalWeightCachePlan {
+    eligible: FxHashSet<usize>,
+    fallback: Vec<usize>,
 }
 
 /// Finalization-local view of the parser-DWA token sets.  The final and
@@ -8851,7 +8848,7 @@ impl Constraint {
         dense_word_count: usize,
         tsid_count: usize,
         full_dense: &DenseWords,
-        dense_cache: &DenseWeightMaskCache,
+        dense_cache: &WeightTokenMaskCache,
     ) -> Arc<DenseAcceptanceRows> {
         let dense_cells = tsid_count
             .checked_mul(dense_word_count)
@@ -8873,7 +8870,7 @@ impl Constraint {
             }
             for (tsid_range, token_set) in weight.raw_range_values() {
                 let key = Arc::as_ptr(token_set) as usize;
-                let dense = dense_cache.get(&key).cloned().unwrap_or_else(|| {
+                let dense = dense_cache.get(&key).and_then(WeightTokenMaskEntry::dense).cloned().unwrap_or_else(|| {
                     Self::dense_words_from_internal_set_with_words(
                         token_set.as_ref(),
                         dense_word_count,
@@ -8910,7 +8907,7 @@ impl Constraint {
         dense_word_count: usize,
         tsid_count: usize,
         full_dense: &DenseWords,
-        dense_cache: &DenseWeightMaskCache,
+        dense_cache: &WeightTokenMaskCache,
     ) -> Vec<Arc<DenseAcceptanceRows>> {
         if dense_word_count == 0 {
             return (0..acceptance_parts.len())
@@ -9417,7 +9414,7 @@ impl Constraint {
             self.token_mask_caches_ready(),
             "parser runtime cache prebuild requires internal-token output masks",
         );
-        let (fast_transitions, (prebuilt_sparse, dense_words, dense_masks, identities)) = rayon::join(
+        let (fast_transitions, (prebuilt_sparse, dense_words, dense_masks)) = rayon::join(
             || self.compute_fast_transitions(),
             || {
                 let inventory = self.weight_token_set_inventory();
@@ -9425,24 +9422,19 @@ impl Constraint {
                     &inventory.final_sets,
                     &self.internal_token_buf_masks,
                 );
-                let (dense_words, dense_masks, identities) =
+                let (dense_words, dense_masks) =
                     self.compute_dense_token_masks_excluding_direct_final(
                         &prebuilt_sparse.eligible,
                         inventory,
                     );
-                (prebuilt_sparse, dense_words, dense_masks, identities)
+                (prebuilt_sparse, dense_words, dense_masks)
             },
         );
         self.internal_token_dense_words = dense_words;
-        self.weight_token_dense_masks = dense_masks;
-        self.weight_token_cache_identities = identities;
+        self.weight_token_masks = dense_masks;
         self.packed_dwa_token_dense_masks = self.compute_packed_dwa_dense_token_masks();
         self.dwa_fast_transitions = fast_transitions;
-        let (weight_token_buf_masks, weight_token_sparse_buf_masks, direct_sparse_weight_token_sets) =
-            self.compute_weight_token_buf_mask_caches_with_prebuilt_sparse(prebuilt_sparse);
-        self.weight_token_buf_masks = weight_token_buf_masks;
-        self.weight_token_sparse_buf_masks = weight_token_sparse_buf_masks;
-        self.direct_sparse_weight_token_sets = direct_sparse_weight_token_sets;
+        self.build_weight_token_outputs(prebuilt_sparse);
         self.parser_runtime_caches_prebuilt = true;
     }
 
@@ -9613,19 +9605,11 @@ impl Constraint {
         let mut prebuilt_parser_dense_masks = parser_runtime_caches_prebuilt.then(|| {
             (
                 self.internal_token_dense_words,
-                std::mem::take(&mut self.weight_token_dense_masks),
-                std::mem::take(&mut self.weight_token_cache_identities),
+                std::mem::take(&mut self.weight_token_masks),
             )
         });
         let mut prebuilt_parser_fast_transitions = parser_runtime_caches_prebuilt
             .then(|| std::mem::take(&mut self.dwa_fast_transitions));
-        let mut prebuilt_parser_weight_buf_caches = parser_runtime_caches_prebuilt.then(|| {
-            (
-                std::mem::take(&mut self.weight_token_buf_masks),
-                std::mem::take(&mut self.weight_token_sparse_buf_masks),
-                std::mem::take(&mut self.direct_sparse_weight_token_sets),
-            )
-        });
         let primary_started_at = profile.then(std::time::Instant::now);
         let mut prebuilt_tokenizer_fast_transitions =
             (self.tokenizer_fast_transitions.len() == self.tokenizer.num_states() as usize)
@@ -9635,7 +9619,7 @@ impl Constraint {
             internal_token_buf_masks_ms,
             tokenizer_fast_transitions,
             tokenizer_fast_transitions_ms,
-            (dense_mask_words, dense_masks, identities),
+            (dense_mask_words, dense_masks),
             dense_token_masks_ms,
             fast_transitions,
             dwa_fast_transitions_ms,
@@ -9661,7 +9645,7 @@ impl Constraint {
             let parser_dense_prebuilt = prebuilt_parser_dense_masks.take();
             let (dense_masks, prebuilt_weight_caches, prebuilt_weight_sparse_ms, dense_token_masks_ms) =
                 if let Some(dense_masks) = parser_dense_prebuilt {
-                    (dense_masks, DirectSparseWeightBufCaches::default(), 0.0, 0.0)
+                    (dense_masks, FinalWeightCachePlan::default(), 0.0, 0.0)
                 } else {
                     let weight_token_sets = self
                         .weight_token_set_inventory();
@@ -9720,7 +9704,7 @@ impl Constraint {
         } else {
             let (
                 ((tokenizer_fast_transitions, tokenizer_fast_transitions_ms), (fast_transitions, dwa_fast_transitions_ms)),
-                (((internal_token_buf_masks, internal_token_buf_masks_ms), ((dense_mask_words, dense_masks, identities), dense_token_masks_ms)), (prebuilt_weight_caches, prebuilt_weight_sparse_ms)),
+                (((internal_token_buf_masks, internal_token_buf_masks_ms), ((dense_mask_words, dense_masks), dense_token_masks_ms)), (prebuilt_weight_caches, prebuilt_weight_sparse_ms)),
             ) = rayon::join(
                 || {
                     let build_tokenizer_fast_transitions = || {
@@ -9769,7 +9753,7 @@ impl Constraint {
                     let started = profile.then(std::time::Instant::now);
                     let (dense_masks, prebuilt_weight_caches, prebuilt_weight_sparse_ms, dense_token_masks_ms) =
                         if let Some(dense_masks) = prebuilt_parser_dense_masks.take() {
-                            (dense_masks, DirectSparseWeightBufCaches::default(), 0.0, 0.0)
+                            (dense_masks, FinalWeightCachePlan::default(), 0.0, 0.0)
                         } else {
                             let weight_token_sets = self
                                 .weight_token_set_inventory();
@@ -9804,7 +9788,7 @@ impl Constraint {
                 internal_token_buf_masks_ms,
                 tokenizer_fast_transitions,
                 tokenizer_fast_transitions_ms,
-                (dense_mask_words, dense_masks, identities),
+                (dense_mask_words, dense_masks),
                 dense_token_masks_ms,
                 fast_transitions,
                 dwa_fast_transitions_ms,
@@ -9838,8 +9822,7 @@ impl Constraint {
         } = token_mask_profile;
 
         self.internal_token_dense_words = dense_mask_words;
-        self.weight_token_dense_masks = dense_masks;
-        self.weight_token_cache_identities = identities;
+        self.weight_token_masks = dense_masks;
         if !preserve_packed_dwa_dense_masks {
             self.packed_dwa_token_dense_masks = self.compute_packed_dwa_dense_token_masks();
         }
@@ -9858,7 +9841,7 @@ impl Constraint {
             .iter()
             .map(|summary| Arc::clone(&summary.acceptance_parts))
             .collect::<Vec<_>>();
-        let dense_cache = &self.weight_token_dense_masks;
+        let dense_cache = &self.weight_token_masks;
         let direct_wide_dense_started_at = profile.then(std::time::Instant::now);
         let direct_parser_dense_started_at = profile.then(std::time::Instant::now);
         let build_wide = || {
@@ -9905,26 +9888,15 @@ impl Constraint {
             summary.dense_by_tsid = dense;
         }
         let derived_piece_started_at = profile.then(std::time::Instant::now);
-        let (
-            weight_token_buf_masks,
-            weight_token_sparse_buf_masks,
-            direct_sparse_weight_token_sets,
-        ) = prebuilt_parser_weight_buf_caches
-            .take()
-            .unwrap_or_else(|| {
-                self.compute_weight_token_buf_mask_caches_with_prebuilt_sparse(
-                    prebuilt_weight_caches,
-                )
-            });
-        self.weight_token_buf_masks = weight_token_buf_masks;
+        if !parser_runtime_caches_prebuilt {
+            self.build_weight_token_outputs(prebuilt_weight_caches);
+        }
         let weight_buf_ms = if parser_runtime_caches_prebuilt {
             0.0
         } else {
             derived_piece_started_at
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0)
         };
-        self.weight_token_sparse_buf_masks = weight_token_sparse_buf_masks;
-        self.direct_sparse_weight_token_sets = direct_sparse_weight_token_sets;
         let weight_sparse_ms = 0.0;
         self.rebuild_packed_final_mask_cache();
         self.dwa_fast_transitions = fast_transitions;
@@ -9980,6 +9952,15 @@ impl Constraint {
         let initial_commit_prime_ms = initial_commit_prime_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         if let Some(total_started_at) = total_started_at {
+            let mut output_counts = [0usize; 3];
+            for entry in self.weight_token_masks.values() {
+                match &entry.output {
+                    WeightTokenOutput::DenseBuf(_) => output_counts[0] += 1,
+                    WeightTokenOutput::SparseBuf(_) => output_counts[1] += 1,
+                    WeightTokenOutput::DirectSparse => output_counts[2] += 1,
+                    WeightTokenOutput::None => {}
+                }
+            }
             eprintln!(
                 "[glrmask/profile][runtime_finalize_derived] pair_ms={:.3} quad_ms={:.3} super_ms={:.3} mega_ms={:.3} giga_ms={:.3} all_tokens_ms={:.3} heavy_ms={:.3} flat_ms={:.3} costs_ms={:.3} direct_wide_dense_ms={:.3} direct_parser_dense_ms={:.3} prebuilt_weight_sparse_ms={:.3} weight_buf_ms={:.3} weight_sparse_ms={:.3} final_weight_sets={} final_weight_sparse_sets={} direct_sparse_weight_sets={}",
                 pair_ms,
@@ -9996,9 +9977,9 @@ impl Constraint {
                 prebuilt_weight_sparse_ms,
                 weight_buf_ms,
                 weight_sparse_ms,
-                self.weight_token_buf_masks.len(),
-                self.weight_token_sparse_buf_masks.len(),
-                self.direct_sparse_weight_token_sets.len(),
+                output_counts[0],
+                output_counts[1],
+                output_counts[2],
             );
             eprintln!(
                 "[glrmask/profile][runtime_finalize] terminal_live_ms={:.3} guarded_shift_ms={:.3} dynamic_mask_vocab_ms={:.3} dynamic_mask_vocab_reused={} internal_token_buf_masks_ms={:.3} tokenizer_fast_transitions_ms={:.3} dense_token_masks_ms={:.3} dwa_fast_transitions_ms={:.3} primary_ms={:.3} word_block_masks_ms={:.3} quad_word_block_masks_ms={:.3} byte_block_masks_ms={:.3} block_masks_ms={:.3} derived_masks_ms={:.3} seed_dense_ms={:.3} tokenizer_closures_ms={:.3} initial_commit_prime_ms={:.3} total_ms={:.3}",
@@ -10584,57 +10565,48 @@ impl Constraint {
         Some(work)
     }
 
+    /// Return true when the final token set was handled completely, even if
+    /// the exact intersection was empty. A false result requires the ordinary
+    /// internal-dense fallback.
     #[inline(always)]
-    pub(crate) fn or_weight_token_set_to_buf_if_contained(
+    pub(crate) fn try_or_materialized_final_token_set_to_buf(
         &self,
         dense: &[u64],
         token_set: &Arc<RangeSetBlaze<u32>>,
         buf: &mut [u32],
     ) -> bool {
         let key = Arc::as_ptr(token_set) as usize;
-        if self.direct_sparse_weight_token_sets.contains(&key) {
-            return self
-                .or_dense_token_set_to_buf_sparse(dense, token_set, 2048, buf)
-                .unwrap_or(false);
-        }
-        let sparse_mask = self.weight_token_sparse_buf_masks.get(&key);
-        let dense_mask = self.weight_token_buf_masks.get(&key);
-        if sparse_mask.is_none() && dense_mask.is_none() {
-            return false;
-        }
-        let Some(token_dense) = self.weight_token_dense_masks.get(&key) else {
+        let Some(entry) = self.weight_token_masks.get(&key) else {
             return false;
         };
-
-        for (i, &token_word) in token_dense.iter().enumerate() {
-            let dense_word = dense.get(i).copied().unwrap_or(0);
-            if token_word & !dense_word != 0 {
-                return false;
+        match &entry.output {
+            WeightTokenOutput::None => return false,
+            WeightTokenOutput::DirectSparse => {
+                return self
+                    .or_runtime_token_set_to_buf_sparse(
+                        dense,
+                        RuntimeTokenSetRef::Materialized(token_set),
+                        2048,
+                        buf,
+                    )
+                    .is_some();
             }
+            _ => {}
         }
-
-        if let Some(sparse_mask) = sparse_mask {
-            or_sparse_buf_entries(buf, sparse_mask);
-        } else {
-            or_dense_buf(buf, dense_mask.expect("cache presence checked"));
+        let Some(token_dense) = entry.dense() else {
+            return false;
+        };
+        if token_dense.iter().enumerate().any(|(i, &token_word)| {
+            token_word & !dense.get(i).copied().unwrap_or(0) != 0
+        }) {
+            return false;
+        }
+        match &entry.output {
+            WeightTokenOutput::SparseBuf(mask) => or_sparse_buf_entries(buf, mask),
+            WeightTokenOutput::DenseBuf(mask) => or_dense_buf(buf, mask),
+            _ => unreachable!("buffer strategy checked above"),
         }
         true
-    }
-
-    #[inline(always)]
-    pub(crate) fn or_dense_token_set_to_buf_sparse(
-        &self,
-        dense: &[u64],
-        token_set: &Arc<RangeSetBlaze<u32>>,
-        max_tokens: u64,
-        buf: &mut [u32],
-    ) -> Option<bool> {
-        self.or_runtime_token_set_to_buf_sparse(
-            dense,
-            RuntimeTokenSetRef::Materialized(token_set),
-            max_tokens,
-            buf,
-        )
     }
 
     #[inline(always)]
@@ -10701,49 +10673,6 @@ impl Constraint {
         Some(any)
     }
 
-
-    #[inline(always)]
-    pub(crate) fn has_weight_token_set_buf_if_contained(
-        &self,
-        dense: &[u64],
-        token_set: &Arc<RangeSetBlaze<u32>>,
-    ) -> bool {
-        let key = Arc::as_ptr(token_set) as usize;
-        if self.direct_sparse_weight_token_sets.contains(&key) {
-            for range in token_set.ranges() {
-                let start = *range.start() as usize;
-                let end = *range.end() as usize;
-                for internal_token in start..=end {
-                    let word = internal_token / 64;
-                    let bit = internal_token % 64;
-                    if dense
-                        .get(word)
-                        .is_none_or(|dense_word| (dense_word & (1u64 << bit)) == 0)
-                    {
-                        return false;
-                    }
-                }
-            }
-            return true;
-        }
-        if !self.weight_token_buf_masks.contains_key(&key)
-            && !self.weight_token_sparse_buf_masks.contains_key(&key)
-        {
-            return false;
-        }
-        let Some(token_dense) = self.weight_token_dense_masks.get(&key) else {
-            return false;
-        };
-
-        for (i, &token_word) in token_dense.iter().enumerate() {
-            let dense_word = dense.get(i).copied().unwrap_or(0);
-            if token_word & !dense_word != 0 {
-                return false;
-            }
-        }
-
-        true
-    }
 
     fn weight_token_set_inventory(&self) -> WeightTokenSetInventory {
         if self.non_dwa_weights.pooled().is_some()
@@ -10888,9 +10817,9 @@ impl Constraint {
         &self,
         final_token_sets: &[(usize, Arc<RangeSetBlaze<u32>>) ],
         prepared_internal_token_buf_masks: &[InternalTokenBufMasks],
-    ) -> DirectSparseWeightBufCaches {
+    ) -> FinalWeightCachePlan {
         if final_token_sets.is_empty() {
-            return DirectSparseWeightBufCaches::default();
+            return FinalWeightCachePlan::default();
         }
         let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
         let total_started = profile.then(std::time::Instant::now);
@@ -10920,7 +10849,7 @@ impl Constraint {
         #[derive(Default)]
         struct SparseBatch {
             eligible: Vec<usize>,
-            fallback: Vec<(usize, Arc<RangeSetBlaze<u32>>)>,
+            fallback: Vec<usize>,
             small_cardinality: usize,
             expanded_work_max: u64,
         }
@@ -10954,10 +10883,10 @@ impl Constraint {
                     batch.expanded_work_max = batch
                         .expanded_work_max
                         .max(direct_work_limit.saturating_add(1));
-                    batch.fallback.push((*key, Arc::clone(token_set)));
+                    batch.fallback.push(*key);
                 }
             } else {
-                batch.fallback.push((*key, Arc::clone(token_set)));
+                batch.fallback.push(*key);
             }
         };
 
@@ -11011,7 +10940,7 @@ impl Constraint {
                 total_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0),
             );
         }
-        DirectSparseWeightBufCaches {
+        FinalWeightCachePlan {
             eligible: batch.eligible.into_iter().collect(),
             fallback: batch.fallback,
         }
@@ -11020,48 +10949,19 @@ impl Constraint {
     /// Build the small residual set of final-weight output buffers. All direct
     /// sparse sets have already been classified, so this path visits only the
     /// token sets that genuinely require a materialized dense or sparse output.
-    fn compute_weight_token_buf_mask_caches_with_prebuilt_sparse(
-        &self,
-        mut prebuilt: DirectSparseWeightBufCaches,
-    ) -> (
-        DenseWeightBufMaskCache,
-        SparseWeightBufMaskCache,
-        DirectSparseWeightTokenSetCache,
-    ) {
-        #[derive(Default)]
-        struct CacheBatch {
-            dense: Vec<(usize, Box<[u32]>)>,
-            sparse: Vec<(usize, Box<[(u16, u32)]>)>,
-        }
-
-        impl CacheBatch {
-            fn merge_from(&mut self, mut other: Self) {
-                self.dense.append(&mut other.dense);
-                self.sparse.append(&mut other.sparse);
-            }
-        }
-
+    fn build_weight_token_outputs(&mut self, plan: FinalWeightCachePlan) {
         let buf_words = self.body_mask_len();
         if buf_words == 0 {
-            return (
-                FxHashMap::default(),
-                FxHashMap::default(),
-                prebuilt.eligible,
-            );
+            return;
         }
 
         let can_store_sparse = buf_words <= u16::MAX as usize;
         let sparse_cost_limit = (buf_words / 2) as u64;
-        let dense_masks = &self.weight_token_dense_masks;
-
-        let build_one = |batch: &mut CacheBatch,
-                         (key, _token_set): (usize, Arc<RangeSetBlaze<u32>>)| {
-            let Some(dense) = dense_masks.get(&key) else {
-                return;
-            };
+        let build = |key: usize| {
+            let dense = self.weight_token_masks.get(&key)?.dense()?;
             let estimated_cost = self.estimate_internal_dense_to_buf_cost(dense);
             if estimated_cost == 0 {
-                return;
+                return None;
             }
 
             let try_sparse = can_store_sparse && estimated_cost < sparse_cost_limit;
@@ -11071,39 +10971,25 @@ impl Constraint {
             if try_sparse {
                 let sparse = Self::dense_buf_to_sparse_entries(&buf);
                 if sparse.len() < buf_words / 2 {
-                    batch.sparse.push((key, sparse));
-                    return;
+                    return Some((key, WeightTokenOutput::SparseBuf(sparse)));
                 }
             }
 
-            batch.dense.push((key, buf.into_boxed_slice()));
+            Some((key, WeightTokenOutput::DenseBuf(buf.into_boxed_slice())))
         };
-
-        let fallback = std::mem::take(&mut prebuilt.fallback);
-        let batch = if rayon::current_num_threads() == 1 {
-            let mut batch = CacheBatch::default();
-            for entry in fallback {
-                build_one(&mut batch, entry);
-            }
-            batch
+        let outputs: Vec<_> = if rayon::current_num_threads() == 1 {
+            plan.fallback.into_iter().filter_map(build).collect()
         } else {
-            fallback
-                .into_par_iter()
-                .fold(CacheBatch::default, |mut batch, entry| {
-                    build_one(&mut batch, entry);
-                    batch
-                })
-                .reduce(CacheBatch::default, |mut left, right| {
-                    left.merge_from(right);
-                    left
-                })
+            plan.fallback.into_par_iter().filter_map(build).collect()
         };
-
-        (
-            batch.dense.into_iter().collect(),
-            batch.sparse.into_iter().collect(),
-            prebuilt.eligible,
-        )
+        for (key, output) in outputs {
+            let entry = self
+                .weight_token_masks
+                .get_mut(&key)
+                .expect("final output requires a token cache entry");
+            debug_assert!(matches!(entry.output, WeightTokenOutput::None));
+            entry.output = output;
+        }
     }
 
     fn dense_buf_to_sparse_entries(buf: &[u32]) -> Box<[(u16, u32)]> {
@@ -11381,7 +11267,7 @@ impl Constraint {
         tokens: &Arc<RangeSetBlaze<u32>>,
     ) -> IndexedDagDenseMask {
         let token_key = Arc::as_ptr(tokens) as usize;
-        let words = if let Some(dense) = self.weight_token_dense_masks.get(&token_key) {
+        let words = if let Some(dense) = self.weight_token_masks.get(&token_key).and_then(WeightTokenMaskEntry::dense) {
             Arc::clone(dense)
         } else {
             let mut dense = vec![0u64; self.internal_token_dense_words];
@@ -11556,17 +11442,14 @@ impl Constraint {
 
     fn compute_dense_token_masks_excluding_direct_final(
         &self,
-        direct_final_sets: &DirectSparseWeightTokenSetCache,
+        direct_final_sets: &FxHashSet<usize>,
         inventory: WeightTokenSetInventory,
-    ) -> (usize, DenseWeightMaskCache, Vec<std::sync::Weak<RangeSetBlaze<u32>>>) {
+    ) -> (usize, WeightTokenMaskCache) {
         let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
         let total_started = profile.then(std::time::Instant::now);
         let internal_token_dense_words = self.internal_token_count().div_ceil(64);
-        if internal_token_dense_words == 0 {
-            return (0, DenseWeightMaskCache::default(), Vec::new());
-        }
         if inventory.final_sets.is_empty() && inventory.transition_sets.is_empty() {
-            return (internal_token_dense_words, DenseWeightMaskCache::default(), Vec::new());
+            return (internal_token_dense_words, WeightTokenMaskCache::default());
         }
 
         let classify_started = profile.then(std::time::Instant::now);
@@ -11575,11 +11458,14 @@ impl Constraint {
             transition_sets: mut unique_sets,
             transition_word_spans,
         } = inventory;
-        let mut residual_final_sets: DirectSparseWeightTokenSetCache = Default::default();
-        let mut identities = Vec::with_capacity(direct_final_sets.len());
+        let mut residual_final_sets: FxHashSet<usize> = Default::default();
+        let mut direct_entries = Vec::with_capacity(direct_final_sets.len());
         for (key, token_set) in final_sets {
             if direct_final_sets.contains(&key) {
-                identities.push(Arc::downgrade(&token_set));
+                direct_entries.push((
+                    key,
+                    WeightTokenMaskEntry::new(&token_set, None, WeightTokenOutput::DirectSparse),
+                ));
             } else {
                 // These sets may need the contained-output cache, which
                 // requires their dense form regardless of range width.
@@ -11588,6 +11474,9 @@ impl Constraint {
             }
         }
 
+        if internal_token_dense_words == 0 {
+            return (0, direct_entries.into_iter().collect());
+        }
         unique_sets.retain(|key, token_set| {
             residual_final_sets.contains(key)
                 || transition_word_spans
@@ -11610,23 +11499,26 @@ impl Constraint {
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let build_started = profile.then(std::time::Instant::now);
         let dense_set_count = unique_sets.len();
-        identities.extend(unique_sets.iter().filter_map(|(key, tokens)| {
-            (!direct_final_sets.contains(key)).then(|| Arc::downgrade(tokens))
-        }));
         let build = |(key, token_set): (usize, Arc<RangeSetBlaze<u32>>)| {
-            (
-                key,
-                Self::dense_words_from_internal_set_with_words(
-                    token_set.as_ref(),
-                    internal_token_dense_words,
-                ),
-            )
+            let dense = Self::dense_words_from_internal_set_with_words(
+                token_set.as_ref(),
+                internal_token_dense_words,
+            );
+            let output = if direct_final_sets.contains(&key) {
+                WeightTokenOutput::DirectSparse
+            } else {
+                WeightTokenOutput::None
+            };
+            (key, WeightTokenMaskEntry::new(&token_set, Some(dense), output))
         };
-        let dense_masks: DenseWeightMaskCache = if rayon::current_num_threads() == 1 {
+        let mut dense_masks: WeightTokenMaskCache = if rayon::current_num_threads() == 1 {
             unique_sets.into_iter().map(build).collect()
         } else {
             unique_sets.into_par_iter().map(build).collect()
         };
+        for (key, entry) in direct_entries {
+            dense_masks.entry(key).or_insert(entry);
+        }
         if let Some(total_started) = total_started {
             eprintln!(
                 "[glrmask/profile][dense_weight_masks] sets={} words_per_set={} classify_ms={:.3} build_ms={:.3} total_ms={:.3}",
@@ -11638,7 +11530,7 @@ impl Constraint {
             );
         }
 
-        (internal_token_dense_words, dense_masks, identities)
+        (internal_token_dense_words, dense_masks)
     }
 
     fn compute_packed_dwa_dense_token_masks(&self) -> PackedDwaDenseWeightMaskCache {
@@ -11893,7 +11785,11 @@ impl Constraint {
         token_set: RuntimeTokenSetRef<'_>,
     ) -> Option<&[u64]> {
         if let Some(key) = token_set.materialized_key() {
-            return self.weight_token_dense_masks.get(&key).map(AsRef::as_ref);
+            return self
+                .weight_token_masks
+                .get(&key)
+                .and_then(WeightTokenMaskEntry::dense)
+                .map(AsRef::as_ref);
         }
         token_set
             .packed_id()
@@ -13946,7 +13842,7 @@ mod dense_internal_token_mask_tests {
                 ))).collect::<Vec<_>>();
                 let expected = sets.iter().filter_map(|(key, set)|
                     (Constraint::direct_sparse_expanded_work(set, &prefix) <= limit).then_some(*key)
-                ).collect::<DirectSparseWeightTokenSetCache>();
+                ).collect::<FxHashSet<usize>>();
                 assert!(!expected.is_empty(), "fixture must admit a cheap class");
                 assert!(expected.len() < sets.len(), "fixture must reject an over-budget class");
                 // Real packed/backed resident rows must also provide a valid fallback.
@@ -13991,8 +13887,15 @@ mod dense_internal_token_mask_tests {
                 eprintln!("prepared-fragment rebuild: threads={threads} classes={} final_sets={} over_budget={over_budget}",
                     rows.len(), inventory.final_sets.len());
                 for (key, set) in &inventory.final_sets {
-                    if rebuilt.direct_sparse_weight_token_sets.contains(key) {
+                    if rebuilt.weight_token_masks.get(key).is_some_and(|entry| {
+                        matches!(entry.output, WeightTokenOutput::DirectSparse)
+                    }) {
                         assert!(Constraint::direct_sparse_expanded_work(set, &prefix) <= limit);
+                        let mut empty_intersection = vec![0u32; rebuilt.body_mask_len()];
+                        assert!(rebuilt.try_or_materialized_final_token_set_to_buf(
+                            &[], set, &mut empty_intersection,
+                        ));
+                        assert!(empty_intersection.iter().all(|&word| word == 0));
                     }
                 }
                 // Include duplicate aliases, a successful sequence, and failures

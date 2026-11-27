@@ -873,7 +873,44 @@ impl<'a> IntoIterator for &'a DenseBufMaskRows {
     }
 }
 
-pub(crate) type DenseWeightMaskCache = FxHashMap<usize, DenseWords>;
+/// Materialized token identities have one cache entry, with independent
+/// transition bitmap and final-output strategy. The weak allocation guard
+/// makes pointer keys stable without retaining the token ranges.
+#[derive(Debug, Clone)]
+pub(crate) struct WeightTokenMaskEntry {
+    _identity: std::sync::Weak<RangeSetBlaze<u32>>,
+    dense: Option<DenseWords>,
+    pub(crate) output: WeightTokenOutput,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum WeightTokenOutput {
+    None,
+    DirectSparse,
+    SparseBuf(Box<[(u16, u32)]>),
+    DenseBuf(Box<[u32]>),
+}
+
+impl WeightTokenMaskEntry {
+    pub(crate) fn new(
+        tokens: &Arc<RangeSetBlaze<u32>>,
+        dense: Option<DenseWords>,
+        output: WeightTokenOutput,
+    ) -> Self {
+        Self {
+            _identity: Arc::downgrade(tokens),
+            dense,
+            output,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn dense(&self) -> Option<&DenseWords> {
+        self.dense.as_ref()
+    }
+}
+
+pub(crate) type WeightTokenMaskCache = FxHashMap<usize, WeightTokenMaskEntry>;
 
 /// Dense masks for selected packed-DWA token sets.
 ///
@@ -1003,9 +1040,6 @@ impl PackedDwaDenseWeightMaskCache {
         self.rows.as_ref()
     }
 }
-pub(crate) type DenseWeightBufMaskCache = FxHashMap<usize, Box<[u32]>>;
-pub(crate) type SparseWeightBufMaskCache = FxHashMap<usize, Box<[(u16, u32)]>>;
-pub(crate) type DirectSparseWeightTokenSetCache = FxHashSet<usize>;
 pub(crate) type SeedTerminalDenseMasks = FxHashMap<(u32, TerminalID), DenseWords>;
 const INLINE_DWA_TRANSITION_LIMIT: usize = 8;
 
@@ -9831,26 +9865,13 @@ constraint_data_schema! {
     @serde(skip)
     pub(crate) internal_token_dense_words: usize,
     @serde(skip)
-    pub(crate) weight_token_dense_masks: DenseWeightMaskCache,
-    /// Weak allocation guards for all address-keyed token-set caches.
-    /// They prevent address reuse without retaining the actual token ranges.
-    @serde(skip)
-    pub(crate) weight_token_cache_identities: Vec<std::sync::Weak<RangeSetBlaze<u32>>>,
+    pub(crate) weight_token_masks: WeightTokenMaskCache,
     /// Dense masks for wide token sets retained in a current-format packed
-    /// parser DWA. Unlike `weight_token_dense_masks`, these are keyed by the
+    /// parser DWA. Unlike `weight_token_masks`, these are keyed by the
     /// packed token-set id and can therefore be rebuilt directly from the
     /// artifact without materializing RangeSet/Weight objects.
     @serde(skip, default)
     pub(crate) packed_dwa_token_dense_masks: PackedDwaDenseWeightMaskCache,
-    @serde(skip)
-    pub(crate) weight_token_buf_masks: DenseWeightBufMaskCache,
-    @serde(skip)
-    pub(crate) weight_token_sparse_buf_masks: SparseWeightBufMaskCache,
-    /// Final-weight token sets eligible for the direct sparse-intersection
-    /// path. Their full output masks are intentionally not materialized: the
-    /// runtime intersects them with the current dense state on every use.
-    @serde(skip)
-    pub(crate) direct_sparse_weight_token_sets: DirectSparseWeightTokenSetCache,
     /// Precomputed dense bitmask for the seed phase: for each (tokenizer_state, terminal_id),
     /// the dense bitmap of internal tokens that terminal covers in that state.
     @serde(skip)
