@@ -72,8 +72,10 @@ fn collect_plain_integer_range_cuts(
             && let Some(number) = &assertions.number
             && integer_multiple_is_vacuous(number.multiple_of)
         {
-            let lower = integer_lower_bound(number);
-            let upper = integer_upper_bound(number);
+            let (Ok(lower), Ok(upper)) = (integer_lower_bound(number), integer_upper_bound(number)) else {
+                *representable = false;
+                continue;
+            };
             if lower == Some(i64::MIN) || upper == Some(i64::MAX) {
                 *representable = false;
             } else {
@@ -124,14 +126,7 @@ impl<'a> Lowerer<'a> {
             r(JSON_NUMBER_RULE)
         };
 
-        if let Some(range_expr) = range_expr {
-            return Ok(GrammarExpr::Intersect {
-                expr: Box::new(base_expr),
-                intersect: Box::new(range_expr),
-            });
-        }
-
-        Ok(base_expr)
+        Ok(intersect_numeric_range(base_expr, range_expr))
     }
 
     fn ensure_shared_integer_atom_rules(&mut self) -> ImportResult<()> {
@@ -174,8 +169,8 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_integer(&mut self, schema: &NumberSchema) -> ImportResult<GrammarExpr> {
-        let mut lower = integer_lower_bound(schema);
-        let upper = integer_upper_bound(schema);
+        let mut lower = integer_lower_bound(schema)?;
+        let upper = integer_upper_bound(schema)?;
         if self.llguidance_compat_enabled()
             && schema.multiple_of.is_some()
             && lower.is_some_and(|value| value < 0)
@@ -183,93 +178,73 @@ impl<'a> Lowerer<'a> {
         {
             lower = Some(0);
         }
-        if let (Some(lower), Some(upper)) = (lower, upper)
-            && lower > upper
-        {
+        if let (Some(lower), Some(upper)) = (lower, upper) && lower > upper {
             return Ok(never());
         }
-        // `multipleOf: 1` is vacuous for an integer schema. Normalize it to
-        // the ordinary integer-range representation after applying the optional
-        // llguidance compatibility bound adjustment above. This avoids expanding
-        // a finite [L,U] interval into one parser terminal per integer solely
-        // because the schema redundantly states `multipleOf: 1`.
-        if integer_multiple_is_vacuous(schema.multiple_of) {
+        let divisor = IntegerDivisor::from_multiple(schema.multiple_of)
+            .ok_or_else(|| SchemaImportError::new("integer multipleOf is not a representable positive decimal"))?;
+        if divisor == IntegerDivisor::Exact(1) {
             if let Some(expr) = self.shared_integer_range_expr(lower, upper)? {
                 return Ok(expr);
             }
-            if lower.is_some() || upper.is_some() {
-                let regex = rx_int_range(lower, upper).map_err(SchemaImportError::new)?;
-                return Ok(GrammarExpr::RawRegex(regex));
-            }
-            return Ok(r(JSON_INTEGER_RULE));
+            return Ok(integer_range_expr(lower, upper)?.unwrap_or_else(|| r(JSON_INTEGER_RULE)));
         }
 
         if let (Some(lower), Some(upper)) = (lower, upper) {
             if upper.saturating_sub(lower) <= MAX_EXPLICIT_INTEGER_RANGE {
-                let alternatives = (lower..=upper)
-                    .filter(|value| integer_satisfies_multiple(*value, schema.multiple_of))
-                    .map(|value| lit_bytes(value.to_string().into_bytes()))
-                    .collect::<Vec<_>>();
-                return Ok(choice(alternatives));
+                return Ok(choice((lower..=upper).filter(|&value| divisor.accepts(value))
+                    .map(|value| lit_bytes(value.to_string().into_bytes())).collect()));
             }
-            if let Some(expr) = bounded_integer_multiple_choice(lower, upper, schema.multiple_of) {
+            if let Some(expr) = divisor.bounded_choice(lower, upper) {
                 return Ok(expr);
             }
         }
 
-        if let Some(multiple) = schema.multiple_of {
-            if let Some(expr) = integer_multiple_expr(multiple) {
-                if lower.is_some() || upper.is_some() {
-                    let range_regex = rx_int_range(lower, upper).map_err(SchemaImportError::new)?;
-                    return Ok(GrammarExpr::Intersect {
-                        expr: Box::new(expr),
-                        intersect: Box::new(GrammarExpr::RawRegex(range_regex)),
-                    });
-                }
-                return Ok(expr);
-            }
-            if let Some(divisor) = positive_integer_multiple_value(multiple) {
-                let expr = integer_modulo_expr(divisor)?;
-                if lower.is_some() || upper.is_some() {
-                    let regex = rx_int_range(lower, upper).map_err(SchemaImportError::new)?;
-                    return Ok(GrammarExpr::Intersect {
-                        expr: Box::new(expr),
-                        intersect: Box::new(GrammarExpr::RawRegex(regex)),
-                    });
-                }
-                return Ok(expr);
-            }
-            return Err(SchemaImportError::new(format!("integer multipleOf={multiple} is unsupported")));
-        }
-
-        Ok(r(JSON_INTEGER_RULE))
+        let IntegerDivisor::Exact(divisor) = divisor else {
+            return Err(SchemaImportError::new("integer multipleOf exceeds the representable divisor range"));
+        };
+        let base = if let Some(regex) = power_of_ten_divisor_regex(divisor, true) {
+            GrammarExpr::RawRegex(regex)
+        } else {
+            integer_modulo_expr(divisor)?
+        };
+        Ok(intersect_numeric_range(base, integer_range_expr(lower, upper)?))
     }
 }
 
-fn integer_lower_bound(schema: &NumberSchema) -> Option<i64> {
-    let value = schema.minimum?;
-    if !value.is_finite() {
-        return None;
-    }
-    let mut lower = value.ceil() as i64;
-    if schema.exclusive_minimum && (lower as f64) <= value {
-        lower += 1;
-    }
-    Some(lower)
+fn integer_range_expr(lower: Option<i64>, upper: Option<i64>) -> ImportResult<Option<GrammarExpr>> {
+    if lower.is_none() && upper.is_none() { return Ok(None); }
+    Ok(Some(GrammarExpr::RawRegex(rx_int_range(lower, upper).map_err(SchemaImportError::new)?)))
 }
 
-fn integer_upper_bound(schema: &NumberSchema) -> Option<i64> {
-    let value = schema.maximum?;
-    if !value.is_finite() {
-        return None;
+fn intersect_numeric_range(base: GrammarExpr, range: Option<GrammarExpr>) -> GrammarExpr {
+    match range {
+        None => base,
+        Some(range) => GrammarExpr::Intersect { expr: Box::new(base), intersect: Box::new(range) },
     }
-    let mut upper = value.floor() as i64;
-    if schema.exclusive_maximum && (upper as f64) >= value {
-        upper -= 1;
-    }
-    Some(upper)
 }
 
+fn integer_bound(bound: Option<f64>, exclusive: bool, lower: bool) -> ImportResult<Option<i64>> {
+    let Some(value) = bound else { return Ok(None); };
+    let rounded = if lower { value.ceil() } else { value.floor() };
+    if !rounded.is_finite() || rounded < i64::MIN as f64 || rounded >= i64::MAX as f64 {
+        return Err(SchemaImportError::new("integer bound is outside the supported signed 64-bit range"));
+    }
+    let integer = rounded as i64;
+    let integer = if exclusive && rounded == value {
+        (if lower { integer.checked_add(1) } else { integer.checked_sub(1) })
+            .ok_or_else(|| SchemaImportError::new("exclusive integer bound is outside the supported signed 64-bit range"))?
+    } else { integer };
+    Ok(Some(integer))
+}
+
+fn integer_lower_bound(schema: &NumberSchema) -> ImportResult<Option<i64>> {
+    integer_bound(schema.minimum, schema.exclusive_minimum, true)
+}
+
+fn integer_upper_bound(schema: &NumberSchema) -> ImportResult<Option<i64>> {
+    integer_bound(schema.maximum, schema.exclusive_maximum, false)
+}
 /// A finite decimal magnitude n * 10^e. Factors of ten are removed so
 /// equality and divisibility do not depend on redundant decimal zeroes.
 #[derive(Clone, Copy)]
@@ -425,16 +400,14 @@ fn integer_multiple_is_vacuous(multiple: Option<f64>) -> bool {
     IntegerDivisor::from_multiple(multiple) == Some(IntegerDivisor::Exact(1))
 }
 
+#[cfg(test)]
 fn integer_satisfies_multiple(value: i64, multiple: Option<f64>) -> bool {
     IntegerDivisor::from_multiple(multiple).is_some_and(|divisor| divisor.accepts(value))
 }
 
+#[cfg(test)]
 fn bounded_integer_multiple_choice(lower: i64, upper: i64, multiple: Option<f64>) -> Option<GrammarExpr> {
     IntegerDivisor::from_multiple(multiple)?.bounded_choice(lower, upper)
-}
-
-fn integer_multiple_expr(multiple: f64) -> Option<GrammarExpr> {
-    power_of_ten_multiple_regex(multiple, true).map(GrammarExpr::RawRegex)
 }
 
 /// Exact signed canonical-decimal integers divisible by `divisor`.
@@ -504,33 +477,21 @@ fn positive_integer_multiple_value(multiple: f64) -> Option<u64> {
     if (value as f64) == multiple { Some(value) } else { None }
 }
 
-fn positive_integer_multiple_i64(multiple: f64) -> Option<i64> {
-    let value = positive_integer_multiple_value(multiple)?;
-    i64::try_from(value).ok()
+fn power_of_ten_multiple_regex(multiple: f64, allow_sign: bool) -> Option<String> {
+    power_of_ten_divisor_regex(positive_integer_multiple_value(multiple)?, allow_sign)
 }
 
-fn power_of_ten_multiple_regex(multiple: f64, allow_sign: bool) -> Option<String> {
-    if !multiple.is_finite() || multiple < 1.0 || multiple.fract() != 0.0 {
-        return None;
-    }
-    let mut value = multiple as u64;
+fn power_of_ten_divisor_regex(mut value: u64, allow_sign: bool) -> Option<String> {
+    if value == 0 { return None; }
     let sign = if allow_sign { "-?" } else { "" };
-    if value == 1 {
-        return Some(format!(r#"{sign}(0|[1-9][0-9]*)"#));
-    }
-
     let mut zeros = 0usize;
     while value > 1 && value.is_multiple_of(10) {
         zeros += 1;
         value /= 10;
     }
-    if value != 1 {
-        return None;
-    }
-
+    if value != 1 { return None; }
     Some(format!(r#"{sign}(0|[1-9][0-9]*{})"#, "0".repeat(zeros)))
 }
-
 fn decimal_multiple_regex(multiple: f64) -> Option<String> {
     let step = parse_decimal_step(multiple)?;
     let fraction = decimal_fraction_regex(&step)?;

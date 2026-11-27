@@ -23,10 +23,6 @@ fn push_optional_part(parts: &mut Vec<String>, part: Option<String>) {
     }
 }
 
-fn negative_regex(pattern: String) -> String {
-    format!("-{pattern}")
-}
-
 /// A lexicographic interval of equal-width digit strings. Once both bounds
 /// agree on a prefix, it is emitted once; divergent endpoints and the
 /// unrestricted middle are disjoint. No numeric increment or power-of-ten
@@ -481,7 +477,7 @@ fn float_range(
     }
     match right {
         Some(value) if value < 0.0 => {}
-        Some(0.0) if left.is_none() => {
+        Some(value) if value == 0.0 && left.is_none() => {
             if right_inclusive { parts.push(mode.zero_boundary().to_owned()); }
         }
         _ => {
