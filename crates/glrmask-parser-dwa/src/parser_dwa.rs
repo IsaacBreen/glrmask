@@ -98,7 +98,7 @@ fn flat_final_weight_signatures_match_nested_grouping() {
     assert_ne!(final_weight_signature([(1, 2)]), final_weight_signature([(1, 3)]));
 }
 
-struct ParallelSupportScanScratch {
+struct SupportScanScratch {
     weight_ops: ScopedWeightOpCache,
     sparse_only: bool,
     flat_scan: bool,
@@ -111,10 +111,16 @@ struct ParallelSupportScanScratch {
     closure_key: SmallVec<[(u32, usize); 8]>,
 }
 
-impl ParallelSupportScanScratch {
+impl SupportScanScratch {
     fn new(dense_label_limit: usize) -> Self {
-        let sparse_only = std::env::var_os("GLRMASK_EXPERIMENT_PARSER_SUPPORT_SPARSE_SCAN").is_some();
-        let flat_scan = std::env::var_os("GLRMASK_EXPERIMENT_PARSER_SUPPORT_PARALLEL_FLAT_SCAN").is_some();
+        Self::with_policy(
+            dense_label_limit,
+            std::env::var_os("GLRMASK_EXPERIMENT_PARSER_SUPPORT_SPARSE_SCAN").is_some(),
+            std::env::var_os("GLRMASK_EXPERIMENT_PARSER_SUPPORT_PARALLEL_FLAT_SCAN").is_some(),
+        )
+    }
+
+    fn with_policy(dense_label_limit: usize, sparse_only: bool, flat_scan: bool) -> Self {
         Self {
             weight_ops: ScopedWeightOpCache::default(),
             sparse_only,
@@ -148,20 +154,32 @@ impl ParallelSupportScanScratch {
 
     #[inline]
     fn push(&mut self, label: i32, target: u32, weight: Weight) {
+        self.push_profiled(label, target, weight, None);
+    }
+
+    #[inline]
+    fn push_profiled(
+        &mut self, label: i32, target: u32, weight: Weight,
+        detail: Option<&mut ParserDwaDeterminizeDetail>,
+    ) {
         if self.flat_scan {
+            debug_assert!(detail.is_none());
             self.flat.push((label, target, weight));
-        } else if !self.sparse_only && label >= 0 && (label as usize) < self.dense.len() {
+            return;
+        }
+        let targets = if !self.sparse_only && label >= 0 && (label as usize) < self.dense.len() {
             let index = label as usize;
             if !self.dense_touched[index] {
                 self.dense_touched[index] = true;
                 self.touched_dense.push(index);
             }
-            self.dense[index].push((target, weight));
+            &mut self.dense[index]
         } else if label == DEFAULT_LABEL {
-            self.default.push((target, weight));
+            &mut self.default
         } else {
-            self.sparse.entry(label).or_default().push((target, weight));
-        }
+            self.sparse.entry(label).or_default()
+        };
+        push_target_contribution_profiled(targets, target, weight, detail);
     }
 
     fn take_labels(&mut self) -> Vec<(i32, TargetContribs)> {
@@ -202,7 +220,7 @@ const PROFILE_PARSER_DWA_DETERMINIZE_DETAIL_ENV: &str =
 #[cfg(test)]
 #[test]
 fn parallel_support_borrowed_keys_match_owned_keys_after_spill_and_reuse() {
-    let mut scratch = ParallelSupportScanScratch::new(4);
+    let mut scratch = SupportScanScratch::new(4);
     let mut cache = FxHashMap::<Vec<(u32, usize)>, usize>::default();
     for (iteration, len) in [0usize, 1, 4, 8, 9, 32, 2, 0, 7].into_iter().enumerate() {
         for reversed in [false, true] {
@@ -2082,13 +2100,7 @@ fn determinize_with_supports_mode(
     worklist.push_back((dwa.start_state(), canon_buf.clone()));
 
     let dense_label_limit = dense_positive_label_limit.map(|n| n as usize).unwrap_or(0);
-    let mut dense_raw_targets: Vec<TargetContribs> =
-        (0..dense_label_limit).map(|_| TargetContribs::new()).collect();
-    let mut default_raw_targets: TargetContribs = TargetContribs::new();
-    let mut sparse_raw_targets: FxHashMap<i32, TargetContribs> = FxHashMap::default();
-    let mut touched_dense_labels: Vec<usize> = Vec::new();
-    let mut dense_label_touched: Vec<bool> = vec![false; dense_label_limit];
-    let mut default_touched = false;
+    let mut serial_scan = SupportScanScratch::with_policy(dense_label_limit, false, false);
     let mut intersection_cache = ScopedWeightOpCache::default();
     let use_epsilon_closure_weight_cache =
         std::env::var_os("GLRMASK_DISABLE_PARSER_EPSILON_CLOSURE_WEIGHT_CACHE").is_none();
@@ -2298,7 +2310,7 @@ fn determinize_with_supports_mode(
             let scanned = wave
                 .into_par_iter()
                 .map_init(
-                    || ParallelSupportScanScratch::new(dense_label_limit),
+                    || SupportScanScratch::new(dense_label_limit),
                     |scratch, (from_state, subset_entries)| {
                     for (nwa_state_id, path_weight) in &subset_entries {
                         if component_row_cache_enabled {
@@ -2483,20 +2495,7 @@ fn determinize_with_supports_mode(
 
                 if let Some(row) = cached_row {
                     for (label, target, next_weight) in row.iter() {
-                        let target_weights = if *label >= 0 && (*label as usize) < dense_label_limit {
-                            let label_idx = *label as usize;
-                            if !dense_label_touched[label_idx] {
-                                dense_label_touched[label_idx] = true;
-                                touched_dense_labels.push(label_idx);
-                            }
-                            &mut dense_raw_targets[label_idx]
-                        } else if *label == DEFAULT_LABEL {
-                            default_touched = true;
-                            &mut default_raw_targets
-                        } else {
-                            sparse_raw_targets.entry(*label).or_default()
-                        };
-                        target_weights.push((*target, next_weight.clone()));
+                        serial_scan.push(*label, *target, next_weight.clone());
                     }
                     continue;
                 }
@@ -2516,25 +2515,7 @@ fn determinize_with_supports_mode(
                             detail.nonempty_intersections += 1;
                         }
 
-                        let target_weights = if label >= 0 && (label as usize) < dense_label_limit {
-                            let label_idx = label as usize;
-                            if !dense_label_touched[label_idx] {
-                                dense_label_touched[label_idx] = true;
-                                touched_dense_labels.push(label_idx);
-                            }
-                            &mut dense_raw_targets[label_idx]
-                        } else if label == DEFAULT_LABEL {
-                            default_touched = true;
-                            &mut default_raw_targets
-                        } else {
-                            sparse_raw_targets.entry(label).or_default()
-                        };
-                        push_target_contribution_profiled(
-                            target_weights,
-                            *target,
-                            next_weight,
-                            detail.as_mut(),
-                        );
+                        serial_scan.push_profiled(label, *target, next_weight, detail.as_mut());
                     }
                 }
             }
@@ -2885,24 +2866,8 @@ fn determinize_with_supports_mode(
             }
         };
 
-        if let Some(labels) = prescanned_labels {
-            for (label, contribs) in labels {
-                process_label(label, contribs);
-            }
-        } else {
-            for label_idx in touched_dense_labels.drain(..) {
-                dense_label_touched[label_idx] = false;
-                process_label(label_idx as i32, std::mem::take(&mut dense_raw_targets[label_idx]));
-            }
-
-            if default_touched {
-                default_touched = false;
-                process_label(DEFAULT_LABEL, std::mem::take(&mut default_raw_targets));
-            }
-
-            for (label, contribs) in sparse_raw_targets.drain() {
-                process_label(label, contribs);
-            }
+        for (label, contribs) in prescanned_labels.unwrap_or_else(|| serial_scan.take_labels()) {
+            process_label(label, contribs);
         }
         if let Some(started_at) = label_started {
             let ms = elapsed_ms(started_at);
