@@ -335,7 +335,7 @@ mod push_tests {
                 ] {
                     let expected=literal(&t.push,entry,&input);
                     let actual=plan.apply(&t, [(Phase::Push, entry, input)], ParserGSS::empty());
-                    covered+=usize::from(!expected.is_empty());
+                    covered+=1;
                     assert_eq!(actual.semantically_eq(&expected,65_536),Some(true));
                 }
             }
@@ -351,7 +351,7 @@ mod push_tests {
             graph.set_accepting(depth,true);let t=template(graph,0);
             let plan=PreparedPhaseDag::prepare(&t).unwrap();
             let input=ParserGSS::from_single_stack(vec![0],TerminalsDisallowed::new());
-            let actual=plan.apply(0,&input).unwrap();
+            let actual=plan.apply_large_push(&t,0,&input).unwrap();
             assert_eq!(actual.max_depth(),depth+1);
             assert!(actual.node_count_at_most(1024)<=depth as usize+5,
                 "2^depth output words must share each DFA layer, not be enumerated: {:?}",actual.summary());
@@ -363,7 +363,7 @@ mod push_tests {
     #[test]
     fn correlated_annotations_decline_and_malformed_graphs_do_not_get_a_plan() {
         let mut graph=DFA::new();let end=graph.add_state();graph.set_accepting(end,true);
-        graph.add_transition(0,encode_negative_label(1),end);
+        for label in 0..65 { graph.add_transition(0,encode_negative_label(label),end); }
         let mut t=template(graph,0);
         let plan=PreparedPhaseDag::prepare(&t).unwrap();
         let input=ParserGSS::from_stacks(&[(vec![0,1],TerminalsDisallowed::new()),

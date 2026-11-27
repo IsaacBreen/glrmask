@@ -682,7 +682,29 @@ fn advance_with_template(template: &CommitTemplateDfas, stack: ParserGSS) -> Par
 
 pub(crate) fn advance_with_prepared_template(template: &CommitTemplateDfas, stack: ParserGSS,
     prepared: Option<&FastCommitTemplateDfas>) -> ParserGSS {
-    let sparse_input = stack.single_interface_lower_id().is_some();
+    advance_relation(template, stack, prepared, None)
+}
+
+/// A scope changes only the concrete stack alphabet. Stored stack frames
+/// outside the local alphabet remain untouched; DEFAULT never crosses it.
+pub(crate) fn advance_with_template_coordinate(
+    template: &CommitTemplateDfas, stack: ParserGSS, scope: Option<(u32, u32)>,
+) -> ParserGSS {
+    advance_relation(template, stack, None, scope)
+}
+
+fn advance_relation(
+    template: &CommitTemplateDfas, stack: ParserGSS,
+    prepared: Option<&FastCommitTemplateDfas>, scope: Option<(u32, u32)>,
+) -> ParserGSS {
+    let global = |local: u32| scope.map_or(local, |(offset, _)| offset + local);
+    let local = |top: u32| match scope {
+        Some((offset, count)) => top.checked_sub(offset).filter(|&symbol| symbol < count),
+        None => Some(top),
+    };
+    // Preserve the established scoped/correlated traversal order. The
+    // prepared cursor and bulk accelerators here still use local symbols.
+    let sparse_input = scope.is_none() && stack.single_interface_lower_id().is_some();
     let seeded = prepared.and_then(|index| index.input_cursor.as_ref())
         .and_then(|cursor| cursor.apply(template, &stack));
     let (mut output, mut worklist) = match seeded {
@@ -771,7 +793,8 @@ pub(crate) fn advance_with_prepared_template(template: &CommitTemplateDfas, stac
                     let mut explicit_tops = tops.clone();
                     explicit_tops.sort_unstable();
                     for &top in &explicit_tops {
-                        let label = top as i32;
+                        let Some(symbol) = local(top) else { continue; };
+                        let label = symbol as i32;
                         if label == DEFAULT_LABEL || is_negative_label(label) { continue; }
                         if let Some(&target) = dfa_state.transitions.get(&label) {
                             let isolated = gss.isolate(Some(top));
@@ -784,7 +807,8 @@ pub(crate) fn advance_with_prepared_template(template: &CommitTemplateDfas, stac
                         // The old fallback visits remaining GSS top values in
                         // their native order, separately from explicit edges.
                         for top in tops {
-                            if dfa_state.transitions.contains_key(&(top as i32)) { continue; }
+                            let Some(symbol) = local(top) else { continue; };
+                            if dfa_state.transitions.contains_key(&(symbol as i32)) { continue; }
                             let branch = gss.isolate(Some(top)).popn(1);
                             if !branch.is_empty() {
                                 worklist.push((Phase::Pop, target, branch));
@@ -827,7 +851,8 @@ pub(crate) fn advance_with_prepared_template(template: &CommitTemplateDfas, stac
                     let mut tops = gss.peek_values();
                     tops.sort_unstable();
                     for top in tops {
-                        let label = top as i32;
+                        let Some(symbol) = local(top) else { continue; };
+                        let label = symbol as i32;
                         if is_negative_label(label) { continue; }
                         if let Some(&target) = dfa_state.transitions.get(&label) {
                             let isolated = gss.isolate(Some(top));
@@ -874,7 +899,7 @@ pub(crate) fn advance_with_prepared_template(template: &CommitTemplateDfas, stac
                     worklist.push((
                         Phase::Push,
                         target,
-                        gss.push(negative_to_positive_label(label) as u32),
+                        gss.push(global(negative_to_positive_label(label) as u32)),
                     ));
                 }
             }
@@ -886,13 +911,14 @@ pub(crate) fn advance_with_prepared_template(template: &CommitTemplateDfas, stac
 
 #[cfg(test)]
 fn advance_with_template_reference(template: &CommitTemplateDfas, stack: ParserGSS) -> ParserGSS {
-    advance_with_template_coordinate(template, stack, None)
+    advance_with_template_coordinate_reference(template, stack, None)
 }
 
 /// The exact phase interpreter over a borrowed immutable program. A scoped
 /// coordinate translates only inspected/written symbols; caller frames retain
 /// their original values and annotations. DEFAULT is local at every POP.
-pub(crate) fn advance_with_template_coordinate(
+#[cfg(test)]
+fn advance_with_template_coordinate_reference(
     template: &CommitTemplateDfas, stack: ParserGSS, scope: Option<(u32, u32)>,
 ) -> ParserGSS {
     let global = |local: u32| scope.map_or(local, |(offset, _)| offset + local);
