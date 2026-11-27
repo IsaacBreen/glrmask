@@ -2524,15 +2524,28 @@ fn normalize_suffixes(suffixes: &mut Vec<Vec<u32>>) {
 }
 
 fn normalize_guarded_effects_for_suffix_quotient(effects: &mut Vec<GuardedStackShift>) {
-    for effect in effects.iter_mut() {
-        for guard in &mut effect.guards {
+    effects.retain_mut(|effect| {
+        let mut guards = std::mem::take(&mut effect.guards);
+        guards.sort_unstable_by_key(|guard| guard.pop);
+        for mut guard in guards {
             guard.states.sort_unstable();
             guard.states.dedup();
+            if let Some(last) = effect.guards.last_mut()
+                && last.pop == guard.pop
+            {
+                last.states.retain(|state| guard.states.binary_search(state).is_ok());
+                if last.states.is_empty() {
+                    return false;
+                }
+            } else {
+                if guard.states.is_empty() {
+                    return false;
+                }
+                effect.guards.push(guard);
+            }
         }
-        effect.guards.retain(|guard| !guard.states.is_empty());
-        effect.guards.sort_by_key(|guard| guard.pop);
-        effect.guards.dedup();
-    }
+        true
+    });
     effects.sort();
     effects.dedup();
 }
@@ -2554,13 +2567,19 @@ fn apply_goto_to_suffix(suffix: &[u32], target: u32, replace: bool) -> Vec<u32> 
 /// Interpret one consuming alternative as a partial relation on a stack
 /// suffix. The unknown prefix is represented by the original-pop coordinate;
 /// known pushed states discharge guards without consulting predecessors.
+#[derive(Clone, Copy)]
+enum RewriteError {
+    GuardRange,
+    Overflow,
+}
+
 fn compose_stack_rewrite(
     mut frame: StackEffectFrame,
     guards: &[StackShiftGuard],
     pop: u32,
     pushes: &[u32],
-) -> Result<Option<StackEffectFrame>, ()> {
-    let pushed_len = u32::try_from(frame.pushes.len()).map_err(|_| ())?;
+) -> Result<Option<StackEffectFrame>, RewriteError> {
+    let pushed_len = u32::try_from(frame.pushes.len()).map_err(|_| RewriteError::Overflow)?;
     for guard in guards {
         if guard.states.is_empty() {
             return Ok(None);
@@ -2571,16 +2590,16 @@ fn compose_stack_rewrite(
                 return Ok(None);
             }
         } else {
-            let depth = frame.pop.checked_add(guard.pop - pushed_len).ok_or(())?;
+            let depth = frame.pop.checked_add(guard.pop - pushed_len).ok_or(RewriteError::Overflow)?;
             if !add_guard_to_frame(&mut frame, depth, guard.states.iter().copied()) {
                 return Ok(None);
             }
         }
     }
     if guards.iter().any(|guard| guard.pop > pop) {
-        return Err(());
+        return Err(RewriteError::GuardRange);
     }
-    pop_frame(&mut frame, pop)?;
+    pop_frame(&mut frame, pop).map_err(|()| RewriteError::Overflow)?;
     frame.pushes.extend_from_slice(pushes);
     Ok(Some(frame))
 }
@@ -2606,8 +2625,8 @@ fn compose_action_rewrites(
         match compose_stack_rewrite(frame.clone(), guards, if forwarded { 0 } else { pop }, pushes) {
             Ok(Some(next)) => out.push(next),
             Ok(None) => {}
-            Err(()) if skip_invalid_guards => {}
-            Err(()) => invalid = true,
+            Err(RewriteError::GuardRange) if skip_invalid_guards => {}
+            Err(_) => invalid = true,
         }
     });
     if invalid { Err(()) } else { Ok(out) }
@@ -4198,17 +4217,7 @@ fn control_stack_effect_action(
     table: &GLRTable,
     mut effects: Vec<GuardedStackShift>,
 ) -> Option<Action> {
-    for effect in &mut effects {
-        for guard in &mut effect.guards {
-            guard.states.sort_unstable();
-            guard.states.dedup();
-        }
-        effect.guards.retain(|guard| !guard.states.is_empty());
-        effect.guards.sort_by_key(|guard| guard.pop);
-        effect.guards.dedup();
-    }
-    effects.sort();
-    effects.dedup();
+    normalize_guarded_effects_for_suffix_quotient(&mut effects);
     if effects.is_empty() {
         return None;
     }
@@ -5021,7 +5030,14 @@ struct StackWalk<'a> {
     origin_dependent: bool,
 }
 
-impl StackWalk<'_> {
+enum StackWalkTask<'a> {
+    Enter { state: u32, action: &'a Action, frame: StackEffectFrame, dependency: bool },
+    Exit(StackEffectVisitKey),
+    Continue(StackEffectFrame),
+    Reduce { nt: NonterminalID, len: u32, frame: StackEffectFrame, charge: bool },
+}
+
+impl<'a> StackWalk<'a> {
     fn charge(&self) -> Result<(), ()> {
         match &self.domain {
             StackWalkDomain::Origin { budget, .. } if !budget.record_stack_effect_visit() => Err(()),
@@ -5053,7 +5069,9 @@ impl StackWalk<'_> {
         }
     }
 
-    fn continue_frame(&mut self, frame: StackEffectFrame) -> Result<(), ()> {
+    fn schedule_continuation<'w>(
+        &mut self, frame: StackEffectFrame, agenda: &mut Vec<StackWalkTask<'w>>,
+    ) -> Result<(), ()> where 'a: 'w {
         let table = self.table;
         let terminal = self.terminal;
         if self.endpoint == StackEndpoint::Eof {
@@ -5062,48 +5080,92 @@ impl StackWalk<'_> {
             let tops = frame_top_branches(
                 predecessors, *state, &frame, states_at_depth_cache, budget,
             ).map_err(|_| ())?;
-            for (state, frame) in tops {
+            for (state, frame) in tops.into_iter().rev() {
                 if let Some(action) = table.action.get(state as usize).ok_or(())?.get(&terminal) {
-                    self.walk(state, action, frame)?;
+                    agenda.push(StackWalkTask::Enter { state, action, frame, dependency: false });
                 }
             }
         } else if let Some(&state) = frame.pushes.last()
             && let Some(action) = table.action.get(state as usize).ok_or(())?.get(&terminal)
         {
-            if let StackWalkDomain::Origin { state: origin, dependencies, .. } = &mut self.domain {
-                dependencies.push(((*origin, terminal), (state, terminal)));
-            }
-            self.walk(state, action, frame)?;
+            agenda.push(StackWalkTask::Enter { state, action, frame, dependency: true });
         }
         Ok(())
     }
 
-    fn walk(
-        &mut self,
-        state: u32,
-        action: &Action,
-        frame: StackEffectFrame,
-    ) -> Result<(), ()> {
-        self.charge()?;
-        let key = StackEffectVisitKey {
-            state,
-            tid: self.terminal,
-            action_tag: stack_effect_action_tag(action),
-            frame: frame.clone(),
-        };
-        if !self.visiting.insert(key.clone()) {
-            return if self.endpoint == StackEndpoint::Eof { Ok(()) } else { Err(()) };
+    /// Explicit DFS continuations retain path-local cycle detection and
+    /// the old depth-first branch order without borrowing the native call
+    /// stack. Speculative suffix expansion may decline on resource limits;
+    /// it never publishes a partially interpreted relation.
+    fn walk<'w>(
+        &mut self, state: u32, action: &'w Action, frame: StackEffectFrame,
+    ) -> Result<(), ()> where 'a: 'w {
+        let mut agenda = vec![StackWalkTask::Enter { state, action, frame, dependency: false }];
+        let mut suffix_visits = 0usize;
+        let result = (|| {
+            while let Some(task) = agenda.pop() {
+                match task {
+                    StackWalkTask::Exit(key) => {
+                        self.visiting.remove(&key);
+                    }
+                    StackWalkTask::Continue(frame) => self.schedule_continuation(frame, &mut agenda)?,
+                    StackWalkTask::Reduce { nt, len, frame, charge } => {
+                        if charge {
+                            self.charge()?;
+                        }
+                        for frame in self.reduce(frame, nt, len)?.into_iter().rev() {
+                            agenda.push(StackWalkTask::Continue(frame));
+                        }
+                    }
+                    StackWalkTask::Enter { state, action, frame, dependency } => {
+                        if dependency
+                            && let StackWalkDomain::Origin { state: origin, dependencies, .. } = &mut self.domain
+                        {
+                            dependencies.push(((*origin, self.terminal), (state, self.terminal)));
+                        }
+                        self.charge()?;
+                        if self.endpoint == StackEndpoint::Suffix {
+                            suffix_visits += 1;
+                            if suffix_visits > EXACT_CONTROL_ELIMINATION_MAX_STACK_EFFECT_VISITS {
+                                return Err(());
+                            }
+                        }
+                        let key = StackEffectVisitKey {
+                            state, tid: self.terminal,
+                            action_tag: stack_effect_action_tag(action),
+                            frame: frame.clone(),
+                        };
+                        if !self.visiting.insert(key.clone()) {
+                            if self.endpoint == StackEndpoint::Eof {
+                                continue;
+                            }
+                            return Err(());
+                        }
+                        agenda.push(StackWalkTask::Exit(key));
+                        self.schedule_cell(state, action, frame, &mut agenda)?;
+                    }
+                }
+                if self.endpoint == StackEndpoint::Suffix
+                    && agenda.len() > EXACT_CONTROL_ELIMINATION_MAX_STACK_EFFECT_VISITS
+                {
+                    return Err(());
+                }
+            }
+            Ok(())
+        })();
+        // An early decline must unwind the same path-local keys a recursive
+        // interpreter would remove while returning through its callers.
+        for task in agenda {
+            if let StackWalkTask::Exit(key) = task {
+                self.visiting.remove(&key);
+            }
         }
-        let result = self.walk_cell(state, action, frame);
-        self.visiting.remove(&key);
         result
     }
 
-    fn walk_cell(
-        &mut self,
-        state: u32,
-        action: &Action,
-        frame: StackEffectFrame,
+    fn schedule_cell<'w>(
+        &mut self, state: u32, action: &Action, frame: StackEffectFrame,
+        agenda: &mut Vec<StackWalkTask<'w>>,
     ) -> Result<(), ()> {
         if matches!(action, Action::Accept | Action::Split { accept: true, .. }) {
             match self.endpoint {
@@ -5112,7 +5174,6 @@ impl StackWalk<'_> {
                 StackEndpoint::Eof => self.effects.push(frame_to_guarded_shift(frame.clone())),
             }
         }
-        // Preserve the historical branch visit charge for split cells.
         let split = matches!(action, Action::Split { .. });
         if split && self.endpoint != StackEndpoint::Eof
             && matches!(action, Action::Split { shift: Some(_), .. })
@@ -5123,30 +5184,21 @@ impl StackWalk<'_> {
             self.table, state, self.terminal, action, &frame,
             self.endpoint == StackEndpoint::Eof,
         )?;
-        for next in rewritten {
-            if self.endpoint == StackEndpoint::Eof {
-                self.continue_frame(next)?;
-            } else {
-                self.effects.push(frame_to_guarded_shift(next));
-            }
+        let mut reductions = SmallVec::<[(NonterminalID, u32); 2]>::new();
+        action.for_each_reduce(|nt, len| reductions.push((nt, len)));
+        // The agenda is LIFO: consuming/completion alternatives precede
+        // reduction alternatives in their original row order.
+        for (nt, len) in reductions.into_iter().rev() {
+            agenda.push(StackWalkTask::Reduce { nt, len, frame: frame.clone(), charge: split });
         }
-
-        let mut result = Ok(());
-        action.for_each_reduce(|nt, len| {
-            if result.is_err() {
-                return;
+        if self.endpoint == StackEndpoint::Eof {
+            for next in rewritten.into_iter().rev() {
+                agenda.push(StackWalkTask::Continue(next));
             }
-            result = (|| {
-                if split {
-                    self.charge()?;
-                }
-                for next in self.reduce(frame.clone(), nt, len)? {
-                    self.continue_frame(next)?;
-                }
-                Ok(())
-            })();
-        });
-        result
+        } else {
+            self.effects.extend(rewritten.into_iter().map(frame_to_guarded_shift));
+        }
+        Ok(())
     }
 }
 
