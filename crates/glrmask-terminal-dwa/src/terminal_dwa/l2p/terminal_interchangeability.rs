@@ -7117,67 +7117,14 @@ impl InterchangeabilityDfa {
                 && cone_classes.contains(&(source as usize))
                 && cone_classes.contains(&(target as usize))
         }));
-        let root_class = quotient.class_for_state[self.topology.initial_state] as usize;
-        if Self::mapped_support_class(&deviations, root_class) != root_class as u32 {
+        if !self.support_deviations_are_valid(
+            quotient,
+            left,
+            right,
+            &cone_classes,
+            &deviations,
+        ) {
             return None;
-        }
-        let mut outputs = SparseSwappedOutputIds::new(
-            &self.output_pairs,
-            &self.output_pair_lookup,
-            left as usize,
-            right as usize,
-        );
-        for &class in &cone_classes {
-            let target = Self::mapped_support_class(&deviations, class);
-            let source_state = quotient.representative_by_class[class] as usize;
-            let target_state = quotient.representative_by_class[target as usize] as usize;
-            let source_edges = self.topology.edges_from(source_state);
-            let target_edges = self.topology.edges_from(target_state);
-            let mut source_index = 0usize;
-            let mut target_index = 0usize;
-            while source_index < source_edges.len() || target_index < target_edges.len() {
-                let (_byte, source_destination, target_destination) = match (
-                    source_edges.get(source_index),
-                    target_edges.get(target_index),
-                ) {
-                    (Some(&(source_byte, source_destination)), Some(&(target_byte, target_destination)))
-                        if source_byte == target_byte =>
-                    {
-                        source_index += 1;
-                        target_index += 1;
-                        (source_byte, source_destination as usize, target_destination as usize)
-                    }
-                    (Some(&(source_byte, source_destination)), Some(&(target_byte, _)))
-                        if source_byte < target_byte =>
-                    {
-                        source_index += 1;
-                        (source_byte, source_destination as usize, self.dead_state())
-                    }
-                    (Some(_), Some(&(target_byte, target_destination))) => {
-                        target_index += 1;
-                        (target_byte, self.dead_state(), target_destination as usize)
-                    }
-                    (Some(&(source_byte, source_destination)), None) => {
-                        source_index += 1;
-                        (source_byte, source_destination as usize, self.dead_state())
-                    }
-                    (None, Some(&(target_byte, target_destination))) => {
-                        target_index += 1;
-                        (target_byte, self.dead_state(), target_destination as usize)
-                    }
-                    (None, None) => unreachable!("sparse edge union loop is nonempty"),
-                };
-                let expected_destination = Self::mapped_support_class(
-                    &deviations,
-                    quotient.class_for_state[source_destination] as usize,
-                );
-                if quotient.class_for_state[target_destination] != expected_destination
-                    || outputs.id(self.output_pair_by_state[source_destination])
-                        != self.output_pair_by_state[target_destination]
-                {
-                    return None;
-                }
-            }
         }
         Some(InterchangeMap {
             scanner_state_map: TransportScannerStateMap::Quotient {
