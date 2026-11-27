@@ -3329,7 +3329,7 @@ impl Constraint {
     pub(crate) fn dynamic_mask_vocab_for_runtime(&self) -> &DynamicMaskVocab {
         let needs_runtime_projection = self.tokenizer.has_any_virtual_runtime()
             && self.dynamic_mask_vocab.mask_projection_tokenizer().is_none();
-        if self.dynamic_mask_vocab.is_initialized() && !needs_runtime_projection {
+        if self.dynamic_mask_vocab.has_runtime_indexes() && !needs_runtime_projection {
             return &self.dynamic_mask_vocab;
         }
         self.lazy_dynamic_mask_vocab.get_or_init(|| {
@@ -3338,7 +3338,7 @@ impl Constraint {
             let mut vocab = self.dynamic_mask_vocab.clone();
             let materialize_started = profile_runtime_mask.then(std::time::Instant::now);
             let _ = vocab.materialize_pending_source();
-            if !vocab.is_initialized() {
+            if !vocab.has_runtime_indexes() {
                 vocab = self.build_dynamic_mask_vocab();
             }
             if let Some(started) = materialize_started {
@@ -3392,7 +3392,7 @@ impl Constraint {
         if let Some(vocab) = self.lazy_dynamic_mask_vocab.get() {
             return Some(vocab);
         }
-        self.dynamic_mask_vocab.is_initialized().then_some(&self.dynamic_mask_vocab)
+        self.dynamic_mask_vocab.has_runtime_indexes().then_some(&self.dynamic_mask_vocab)
     }
 
     fn build_dynamic_mask_vocab(&self) -> DynamicMaskVocab {
@@ -7166,16 +7166,16 @@ impl Constraint {
         let guarded_shift_ms = started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let mut dynamic_mask_vocab = std::mem::take(&mut self.dynamic_mask_vocab);
-        let small_ready_runtime = dynamic_mask_vocab.is_initialized()
+        let small_ready_runtime = dynamic_mask_vocab.has_runtime_indexes()
             && self.tokenizer.num_states() <= 64
             && self.parser_symbol_count() <= 32
             && !self.uses_sparse_direct_regular_runtime();
         let build_vocab = || {
             let started_at = profile.then(std::time::Instant::now);
-            if !dynamic_mask_vocab.is_initialized() {
+            if !dynamic_mask_vocab.has_runtime_indexes() {
                 let _ = dynamic_mask_vocab.materialize_pending_source();
             }
-            if !dynamic_mask_vocab.is_initialized() {
+            if !dynamic_mask_vocab.has_runtime_indexes() {
                 let mut materialized = self.build_dynamic_mask_vocab();
                 materialized.inherit_dynamic_lexer_metadata_from(&dynamic_mask_vocab);
                 dynamic_mask_vocab = materialized;
