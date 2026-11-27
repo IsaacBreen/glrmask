@@ -7392,9 +7392,6 @@ mod tests {
                         b.recursive_parser_dwa.as_ref().or(Some(&b.parser_dwa)),
                         Some(b.internal_token_to_originals.as_slice()),
                     ),
-                    crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(_) => {
-                        ("DynamicTerminalTrie", None, None)
-                    }
                     crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect => {
                         ("DynamicDirect", None, None)
                     }

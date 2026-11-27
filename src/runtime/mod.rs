@@ -24,8 +24,7 @@ pub(crate) use glrmask_artifact::CommitTemplateDfas;
 #[allow(unused_imports)]
 pub(crate) use artifact::{
     ConstraintData,
-    dynamic_mask_vocab_layout_class, BoundaryTerminalNwa, BoundaryTerminalNwaNode,
-    BoundaryTerminalNwaTransition, BoundaryTerminalTrieNode, BoundaryTrigger,
+    dynamic_mask_vocab_layout_class, BoundaryTrigger,
     BoundaryCandidateFingerprint, BoundaryCandidateSummary, OriginalTokenSet,
     SummaryPrecision, SummaryUnavailable,
     CompositionGrammarSummary, ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab,
@@ -33,7 +32,7 @@ pub(crate) use artifact::{
     FastTokenizerTransitions, LateGrammarSlot,
     PreparedMasterProofArtifact,
     BoundaryTsidCoordinate, SegmentedBoundaryParser, SegmentedBoundaryShard, SegmentedBoundaryShardBackend,
-    SegmentedBoundaryTerminalTrie, SegmentedParserComponent, SegmentedParserComponentTables,
+    SegmentedParserComponent, SegmentedParserComponentTables,
     SegmentedParserLink, SpecialTokenTerminal, StaticDynamicOverlayMetadata,
     dynamic_mask_llg_master_is_whitespace,
     dynamic_mask_llg_master_layout_class,

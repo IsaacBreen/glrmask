@@ -2444,11 +2444,6 @@ fn segmented_runtime_artifact_ref(
                 crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect => {
                     RecursiveSegmentedBoundaryShardBackendV27Ref::DynamicDirect
                 }
-                crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(_) => {
-                    unreachable!(
-                        "recursive provider-native runtime cannot carry a terminal-trie boundary"
-                    )
-                }
             };
             RecursiveSegmentedBoundaryShardV27Ref {
                 start_component: shard.start_component,
@@ -2713,8 +2708,6 @@ fn restore_recursive_segmented_runtime_v27(
         overlay.segmented_mask_authoritative = true;
         overlay.segmented_static_baseline = false;
         overlay.segmented_component_union_root_dispatch.clear();
-        overlay.segmented_boundary_parser = None;
-        overlay.segmented_boundary_terminal_trie = None;
         if !template_backend {
             overlay.recursive_compiler_table
                 .set(Arc::from(recursive_compiler_table.into_boxed_slice()))

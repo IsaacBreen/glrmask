@@ -311,9 +311,6 @@ fn mb_scoped_ignore_mapping_trace(
                     crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_) => {
                         "StaticParser"
                     }
-                    crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(_) => {
-                        "DynamicTerminalTrie"
-                    }
                     crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect => {
                         "DynamicDirect"
                     }

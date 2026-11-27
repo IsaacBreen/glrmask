@@ -3930,8 +3930,6 @@ mod tests {
             .static_dynamic_overlay
             .as_ref()
             .expect("bound constraint must use the explicit segmented runtime");
-        assert!(overlay.segmented_boundary_parser.is_none());
-        assert!(overlay.segmented_boundary_terminal_trie.is_none());
         assert!(
             overlay.boundary_shards().next().is_some(),
             "static boundary policy must publish component-owned shards",
@@ -3947,8 +3945,6 @@ mod tests {
             .static_dynamic_overlay
             .as_ref()
             .expect("bound constraint must use the explicit segmented runtime");
-        assert!(overlay.segmented_boundary_parser.is_none());
-        assert!(overlay.segmented_boundary_terminal_trie.is_none());
         assert!(overlay.boundary_shards().all(|shard| matches!(
             shard.backend,
             crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
@@ -4030,8 +4026,6 @@ mod tests {
         for alternative in dynamic_with_static.clone_constraints() {
             assert_eq!(component_backend_flags(&alternative), vec![true, false]);
             let overlay = alternative.static_dynamic_overlay.as_ref().unwrap();
-            assert!(overlay.segmented_boundary_parser.is_none());
-            assert!(overlay.segmented_boundary_terminal_trie.is_none());
             assert!(overlay.boundary_shards().all(|shard| matches!(
                 shard.backend,
                 crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
@@ -5873,16 +5867,9 @@ mod tests {
             overlay.boundary_shards().next().is_some(),
             "static composition must publish component-scoped B shards",
         );
-        assert!(
-            overlay.segmented_boundary_parser.is_none(),
-            "partitioned static B must not retain a redundant global boundary parser",
-        );
-        assert!(overlay.segmented_boundary_terminal_trie.is_none());
 
         let loaded = RuntimeConstraint::load(bound.save(), &vocab).unwrap();
         let loaded_overlay = loaded.static_dynamic_overlay.as_ref().unwrap();
-        assert!(loaded_overlay.segmented_boundary_parser.is_none());
-        assert!(loaded_overlay.segmented_boundary_terminal_trie.is_none());
         assert!(loaded_overlay.boundary_shards().next().is_some());
         let reference = RuntimeConstraint::compile(
             Grammar::ebnf(r#"start ::= "x" "y" "z""#),

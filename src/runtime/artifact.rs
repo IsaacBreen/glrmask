@@ -9593,11 +9593,6 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// body. No runtime parser-NWA branching is involved.
     #[serde(skip, default)]
     pub(crate) segmented_component_union_root_dispatch: Vec<u32>,
-    /// Legacy global boundary accelerators.
-    #[serde(skip, default)]
-    pub(crate) segmented_boundary_parser: Option<Arc<SegmentedBoundaryParser>>,
-    #[serde(skip, default)]
-    pub(crate) segmented_boundary_terminal_trie: Option<Arc<SegmentedBoundaryTerminalTrie>>,
 }
 
 impl StaticDynamicOverlayMetadata {
@@ -9635,7 +9630,6 @@ pub(crate) enum SegmentedBoundaryShardBackend {
     /// Preserved terminal-language/NWA crossing accelerator used by historical
     /// artifacts and the explicit experimental runtime path. Normal current
     /// dynamic composition publishes `DynamicDirect` instead.
-    DynamicTerminalTrie(Arc<SegmentedBoundaryTerminalTrie>),
     /// Exact dynamic crossing with no required composition-specific B artifact.
     /// Materialized runtimes use the strict dynamic full-vocabulary walker;
     /// recursive runtimes use the scoped shared-prefix vocabulary walker.
@@ -9701,50 +9695,6 @@ impl ParserComponentTableSource for SegmentedParserComponentTables<'_> {
         let ignore = component.constraint.ignore_terminal?;
         (!component.constraint.table.skip_terminals.contains(&ignore)).then_some(ignore)
     }
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct BoundaryTerminalTrieNode {
-    pub(crate) children: Vec<(u32, u32)>,
-    /// Legacy v21 representation: private boundary token classes accepted at
-    /// this node after expanding the TSID dimension during construction.
-    pub(crate) outputs: Vec<u32>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct BoundaryTerminalNwaTransition {
-    pub(crate) terminal: u32,
-    pub(crate) target: u32,
-    pub(crate) weight: Weight,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct BoundaryTerminalNwaNode {
-    pub(crate) final_weight: Option<Weight>,
-    pub(crate) transitions: Vec<BoundaryTerminalNwaTransition>,
-    pub(crate) epsilons: Vec<(u32, Weight)>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct BoundaryTerminalNwa {
-    pub(crate) nodes: Vec<BoundaryTerminalNwaNode>,
-    pub(crate) start_states: Vec<u32>,
-    /// A topological order of `nodes`, validated when the artifact is loaded.
-    /// Runtime evaluation uses it to coalesce equal token domains at converged
-    /// NWA states without materializing the exponentially large prefix trie.
-    pub(crate) topological_order: Vec<u32>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct SegmentedBoundaryTerminalTrie {
-    pub(crate) nodes: Vec<BoundaryTerminalTrieNode>,
-    pub(crate) root_by_tsid: Vec<u32>,
-    pub(crate) tokenizer_state_to_tsid: Vec<u32>,
-    pub(crate) internal_token_to_originals: Vec<Vec<u32>>,
-    /// Current representation. The legacy v21 serde shape above is retained so
-    /// old artifacts still decode; v22 persists this DAG explicitly.
-    #[serde(skip, default)]
-    pub(crate) symbolic_nwa: Option<BoundaryTerminalNwa>,
 }
 
 /// Scanner coordinate used by a boundary parser's weights.

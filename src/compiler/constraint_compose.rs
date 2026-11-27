@@ -2063,21 +2063,9 @@ enum PositiveBoundaryParser {
 }
 
 
-struct BoundaryTerminalTrieWork {
-    nodes: Vec<crate::runtime::BoundaryTerminalTrieNode>,
-    root_by_tsid: Vec<u32>,
-    symbolic_nwa: Option<crate::runtime::BoundaryTerminalNwa>,
-}
-
 enum BoundaryRuntimeCandidate {
     Parser {
         positive: PositiveBoundaryParser,
-        id_map: InternalIdMap,
-        template_cache: Option<Vec<Option<UnweightedDfa>>>,
-        build_ms: f64,
-    },
-    TerminalTrie {
-        trie: BoundaryTerminalTrieWork,
         id_map: InternalIdMap,
         template_cache: Option<Vec<Option<UnweightedDfa>>>,
         build_ms: f64,
@@ -2670,143 +2658,6 @@ impl PositiveBoundaryParser {
 }
 
 
-fn build_boundary_terminal_trie_work(
-    terminal_automaton: &TerminalAutomaton,
-    id_map: &InternalIdMap,
-) -> Result<BoundaryTerminalTrieWork, String> {
-    // Keep the acyclic weighted terminal machine compact. Expanding it into a
-    // terminal-prefix trie is not viable in general: a small converging DAG can
-    // encode exponentially many terminal sequences. Runtime evaluation takes
-    // the product with the *current* parser frontier instead, where grammar
-    // state prunes almost all of those paths; exceptional wide products fall
-    // back to the unified dynamic evaluator.
-    let owned_nwa;
-    let nwa = match terminal_automaton {
-        TerminalAutomaton::Dwa(dwa) => {
-            owned_nwa = dwa.to_nwa();
-            &owned_nwa
-        }
-        TerminalAutomaton::TokenDeterministicNwa(nwa)
-        | TerminalAutomaton::EpsilonNwa(nwa) => nwa,
-    };
-    if id_map.num_internal_tokens() == 0 {
-        return Err("runtime boundary terminal NWA requires a private token class".into());
-    }
-    if !nwa.is_acyclic() {
-        return Err("runtime boundary terminal NWA requires an acyclic source automaton".into());
-    }
-
-    let state_count = nwa.states().len();
-    let mut indegree = vec![0usize; state_count];
-    for state in nwa.states() {
-        for (&label, branches) in &state.transitions {
-            if label < 0 {
-                return Err(format!(
-                    "boundary terminal NWA encountered non-terminal label {label}"
-                ));
-            }
-            for (target, _) in branches {
-                let Some(slot) = indegree.get_mut(*target as usize) else {
-                    return Err(format!(
-                        "boundary terminal NWA source references invalid state {target}"
-                    ));
-                };
-                *slot += 1;
-            }
-        }
-        for (target, _) in &state.epsilons {
-            let Some(slot) = indegree.get_mut(*target as usize) else {
-                return Err(format!(
-                    "boundary terminal NWA source references invalid state {target}"
-                ));
-            };
-            *slot += 1;
-        }
-    }
-    for &start in nwa.start_states() {
-        if start as usize >= state_count {
-            return Err(format!(
-                "boundary terminal NWA source references invalid start state {start}"
-            ));
-        }
-    }
-    let mut queue = VecDeque::new();
-    for (state, &degree) in indegree.iter().enumerate() {
-        if degree == 0 {
-            queue.push_back(state as u32);
-        }
-    }
-    let mut topological_order = Vec::with_capacity(state_count);
-    while let Some(state_id) = queue.pop_front() {
-        topological_order.push(state_id);
-        let state = &nwa.states()[state_id as usize];
-        for branches in state.transitions.values() {
-            for (target, _) in branches {
-                indegree[*target as usize] -= 1;
-                if indegree[*target as usize] == 0 {
-                    queue.push_back(*target);
-                }
-            }
-        }
-        for (target, _) in &state.epsilons {
-            indegree[*target as usize] -= 1;
-            if indegree[*target as usize] == 0 {
-                queue.push_back(*target);
-            }
-        }
-    }
-    if topological_order.len() != state_count {
-        return Err("runtime boundary terminal NWA requires an acyclic source automaton".into());
-    }
-
-    let nodes = nwa
-        .states()
-        .iter()
-        .map(|state| {
-            let mut transitions = Vec::new();
-            for (&label, branches) in &state.transitions {
-                for (target, weight) in branches {
-                    transitions.push(crate::runtime::BoundaryTerminalNwaTransition {
-                        terminal: label as u32,
-                        target: *target,
-                        weight: weight.clone(),
-                    });
-                }
-            }
-            crate::runtime::BoundaryTerminalNwaNode {
-                final_weight: state.final_weight.clone(),
-                transitions,
-                epsilons: state.epsilons.clone(),
-            }
-        })
-        .collect::<Vec<_>>();
-    if compose_profile_enabled() {
-        let labeled_edges = nodes.iter().map(|node| node.transitions.len()).sum::<usize>();
-        let epsilon_edges = nodes.iter().map(|node| node.epsilons.len()).sum::<usize>();
-        eprintln!(
-            "[glrmask/profile][boundary_terminal_nwa] states={} starts={} labeled_edges={} epsilon_edges={} tsids={} token_classes={}",
-            nodes.len(),
-            nwa.start_states().len(),
-            labeled_edges,
-            epsilon_edges,
-            id_map.num_tsids(),
-            id_map.num_internal_tokens(),
-        );
-    }
-    Ok(BoundaryTerminalTrieWork {
-        // v21 artifacts used an expanded trie. New in-memory builds carry only
-        // the compact weighted DAG; the legacy fields remain for compatibility.
-        nodes: Vec::new(),
-        root_by_tsid: vec![u32::MAX; id_map.num_tsids() as usize],
-        symbolic_nwa: Some(crate::runtime::BoundaryTerminalNwa {
-            nodes,
-            start_states: nwa.start_states().to_vec(),
-            topological_order,
-        }),
-    })
-}
-
-
 impl BoundaryParserWork {
     fn set_parser_table_override(
         &mut self,
@@ -2864,35 +2715,6 @@ impl BoundaryParserWork {
                 ..
             } => parser_table_override.as_ref(),
             _ => None,
-        }
-    }
-
-    fn materialize_terminal_trie(
-        self,
-    ) -> Result<(
-        BoundaryTerminalTrieWork,
-        InternalIdMap,
-        Option<Vec<Option<UnweightedDfa>>>,
-    ), String> {
-        match self {
-            Self::DeferredTerminalCount {
-                terminal_automaton,
-                id_map,
-                num_terminals,
-                templates,
-                prebuilt_bundle_cache: _,
-                parser_table_override: _,
-            } => {
-                let trie = build_boundary_terminal_trie_work(&terminal_automaton, &id_map)?;
-                let mut template_cache = vec![None; num_terminals as usize];
-                for (terminal, dfa) in templates.by_terminal {
-                    if let Some(slot) = template_cache.get_mut(terminal as usize) {
-                        *slot = Some(dfa);
-                    }
-                }
-                Ok((trie, id_map, Some(template_cache)))
-            }
-            _ => Err("runtime boundary terminal trie requires deferred count-only boundary work".into()),
         }
     }
 
@@ -9110,8 +8932,6 @@ fn compose_dynamic_recursive_shared_fast(
     overlay.segmented_mask_authoritative = true;
     overlay.segmented_static_baseline = false;
     overlay.segmented_component_union_root_dispatch.clear();
-    overlay.segmented_boundary_parser = None;
-    overlay.segmented_boundary_terminal_trie = None;
     install_dynamic_direct_boundary_shards(overlay, None);
     for (component, ids) in overlay.segmented_parser_components.iter_mut().zip(dynamic_candidate_ids) {
         if let Some(shard) = component.boundary.as_mut() {
@@ -13474,8 +13294,6 @@ table: &child_table,
 
             let assert_policy = |constraint: &Constraint| {
                 let overlay = constraint.static_dynamic_overlay.as_ref().unwrap();
-                assert!(overlay.segmented_boundary_parser.is_none());
-                assert!(overlay.segmented_boundary_terminal_trie.is_none());
                 assert_eq!(overlay.segmented_parser_components.len(), 2);
                 for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
                     let shard = component
@@ -15054,10 +14872,6 @@ table: &child_table,
             overlay.boundary_shards().next().is_some(),
             "extended composition must publish static shards",
         );
-        assert!(
-            overlay.segmented_boundary_parser.is_none(),
-            "extended composition must not retain a redundant global boundary parser",
-        );
         let reference = compose_constraints_owned_parent_segmented(
             composed_parent,
             &second_inputs,
@@ -15366,10 +15180,6 @@ table: &child_table,
                     "installed component {index} must be a StaticParser shard",
                 );
             }
-            assert!(
-                overlay.segmented_boundary_parser.is_none(),
-                "extended composition must not retain a redundant global boundary parser",
-            );
             let inner = overlay.segmented_parser_components[0]
                 .constraint
                 .static_dynamic_overlay
@@ -15775,10 +15585,6 @@ table: &child_table,
                     "installed component {index} must be a StaticParser shard",
                 );
             }
-            assert!(
-                overlay.segmented_boundary_parser.is_none(),
-                "extended composition must not retain a redundant global boundary parser",
-            );
             let inner = overlay.segmented_parser_components[0]
                 .constraint
                 .static_dynamic_overlay
@@ -16103,10 +15909,6 @@ table: &child_table,
                     "installed component {index} must be a StaticParser shard",
                 );
             }
-            assert!(
-                overlay.segmented_boundary_parser.is_none(),
-                "extended composition must not retain a redundant global boundary parser",
-            );
         }
         // Byte-prefix differential: crossings into/out of the shared child
         // from BOTH parents.
@@ -16486,10 +16288,6 @@ table: &child_table,
                     "installed component {index} must be a StaticParser shard",
                 );
             }
-            assert!(
-                overlay.segmented_boundary_parser.is_none(),
-                "extended composition must not retain a redundant global boundary parser",
-            );
         }
         // Byte-prefix differential across the C-to-D call site.
         let prefixes: Vec<Vec<u8>> = vec![
@@ -16894,10 +16692,6 @@ table: &child_table,
                     "installed component {index} must be a StaticParser shard",
                 );
             }
-            assert!(
-                overlay.segmented_boundary_parser.is_none(),
-                "extended composition must not retain a redundant global boundary parser",
-            );
         }
         // Byte-prefix differential with whitespace flowing across boundaries.
         let prefixes: Vec<Vec<u8>> = vec![
@@ -17286,10 +17080,6 @@ table: &child_table,
                     "installed component {index} must be a StaticParser shard",
                 );
             }
-            assert!(
-                overlay.segmented_boundary_parser.is_none(),
-                "extended composition must not retain a redundant global boundary parser",
-            );
             let inner = overlay.segmented_parser_components[0]
                 .constraint
                 .static_dynamic_overlay
