@@ -307,31 +307,7 @@ fn build_boundary_terminal_dwa_synthesized(
         follow_transparent_ignores: inputs.follow_transparent_ignores, scope: &scope,
         retain_non_crossing_paths: false, flat_trans: None,
     }, None, None, true)?;
-    // Only token-entry states are lifted. RESET/factor coordinates are private
-    // continuation states and must not be confused with raw runtime states.
-    let current = &output.id_map.tokenizer_states;
-    let mut original = vec![u32::MAX; prepared.original_to_synth.len()];
-    for (q, &keep) in inputs.scope.initial_states().keep_raw().iter().enumerate() {
-        if !keep { continue; }
-        let synthetic = *prepared.original_to_synth.get(q)?;
-        if synthetic == u32::MAX { return None; }
-        original[q] = *current.original_to_internal.get(synthetic as usize)?;
-    }
-    output.id_map.tokenizer_states = crate::compiler::stages::equiv_types::ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-        original, current.num_internal_ids(),
-    );
-    // The published shard is addressed by every raw runtime lexer ID, not
-    // just the certified token-entry set. As in the ordinary induced view,
-    // give omitted IDs one fresh zero-language class. A symbolic full weight
-    // or support reaching that new coordinate cannot certify this operation.
-    let dead_class = output.id_map.tokenizer_states.num_internal_ids();
-    if !proves_fresh_dead_class(&output.dwa, dead_class,
-        crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_ROOT_SUPPORT_BOUND")) {
-        return None;
-    }
-    output.id_map.tokenizer_states = output.id_map.tokenizer_states.fill_unmapped_with_new_class();
-    output.profile.tokenizer_classes = output.id_map.tokenizer_states.num_internal_ids() as usize;
-    output.profile.initial_states = inputs.scope.initial_states().len();
+    lift_initial_states(inputs, &mut output, &prepared.original_to_synth)?;
     output.profile.setup_ms += preparation_ms;
     output.profile.walk_ms = started.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
@@ -443,31 +419,10 @@ fn build_boundary_terminal_dwa_query_reference(
             follow_transparent_ignores:inputs.follow_transparent_ignores,scope:&prepared.scope,
             retain_non_crossing_paths:inputs.retain_non_crossing_paths,flat_trans:None,
         },None,tile_size,terminal_support,identity)?;
-        let current=&output.id_map.tokenizer_states;
-        let mut originals=vec![u32::MAX;view.original_to_view.len()];
-        let mut groups=vec![Vec::new();current.num_internal_ids() as usize];
-        for (raw,&keep) in inputs.scope.initial_states().keep_raw().iter().enumerate(){if keep{
-            let compact=view.original_to_view[raw];assert_ne!(compact,u32::MAX);
-            let class=current.original_to_internal[compact as usize];originals[raw]=class;
-            if class!=u32::MAX{groups[class as usize].push(raw as u32);}
-        }}
-        let representatives=groups.iter().map(|g|g.first().copied().unwrap_or(u32::MAX)).collect();
-        output.id_map.tokenizer_states=crate::compiler::stages::equiv_types::ManyToOneIdMap{
-            original_to_internal:originals,internal_to_originals:groups,representative_original_ids:representatives,
-        };
-        // Runtime publication requires a total raw-state map even though this
-        // shard can be queried only from its certified initial domain. Add one
-        // fresh zero-language class, never reuse a productive continuation ID.
-        // Prove that no accepted lexical point mentions the new ID before
-        // assigning all omitted states to it; symbolic ALL is not a finite row.
-        let dead_class=output.id_map.tokenizer_states.num_internal_ids();
-        if !proves_fresh_dead_class(&output.dwa,dead_class,
-            crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_ROOT_SUPPORT_BOUND")){
-            return build_boundary_terminal_dwa_on_view(inputs,shared);
+        if lift_initial_states(inputs, &mut output, &view.original_to_view).is_none() {
+            return build_boundary_terminal_dwa_on_view(inputs, shared);
         }
-        output.id_map.tokenizer_states=output.id_map.tokenizer_states.fill_unmapped_with_new_class();
         output.profile.setup_ms+=prepared.footprint_ms+prepared.materialize_ms;
-        output.profile.initial_states=inputs.scope.initial_states().len();
         if compose_profile_enabled(){eprintln!("[glrmask/profile][boundary_query_view] component={} raw_states={} view_states={} first_states={} reset_states={} steps={} footprint_ms={:.3} materialize_ms={:.3} compile_ms={:.3}",
             inputs.scope.start_component().0,inputs.merged_tokenizer.num_states(),view.tokenizer.num_states(),
             prepared.first_states,prepared.reset_states,prepared.state_steps,prepared.footprint_ms,
@@ -714,6 +669,50 @@ fn finalize_boundary_terminal_dwa(
 /// enumeration: every accepted path either stops at the root or traverses a
 /// root edge. Its coefficient is a subset of that final/edge coefficient.
 /// Unknown or overly broad root weights use the original complete proof.
+/// Publish only the certified token-entry domain of an induced lexer view.
+/// Continuation-only and omitted raw states must not alias productive classes.
+fn lift_initial_states(
+    inputs: &BoundaryWalkInputs,
+    output: &mut BoundaryWalkOutput,
+    raw_to_view: &[u32],
+) -> Option<()> {
+    let current = &output.id_map.tokenizer_states;
+    let keep_raw = inputs.scope.initial_states().keep_raw();
+    if keep_raw.len() != raw_to_view.len() {
+        return None;
+    }
+    let mut originals = vec![u32::MAX; raw_to_view.len()];
+    for (raw, &keep) in keep_raw.iter().enumerate() {
+        if !keep {
+            continue;
+        }
+        let view = raw_to_view[raw];
+        if view == u32::MAX {
+            return None;
+        }
+        let class = *current.original_to_internal.get(view as usize)?;
+        if class != u32::MAX && class >= current.num_internal_ids() {
+            return None;
+        }
+        originals[raw] = class;
+    }
+    let map = crate::compiler::stages::equiv_types::ManyToOneIdMap::
+        from_original_to_internal_allowing_unmapped(originals, current.num_internal_ids());
+    // Symbolic ALL is not a finite row. Prove that no accepted lexical
+    // point mentions the fresh coordinate before completing the runtime map.
+    if !proves_fresh_dead_class(
+        &output.dwa,
+        map.num_internal_ids(),
+        crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_ROOT_SUPPORT_BOUND"),
+    ) {
+        return None;
+    }
+    output.id_map.tokenizer_states = map.fill_unmapped_with_new_class();
+    output.profile.tokenizer_classes = output.id_map.tokenizer_states.num_internal_ids() as usize;
+    output.profile.initial_states = inputs.scope.initial_states().len();
+    Some(())
+}
+
 fn proves_fresh_dead_class(dwa: &DWA, dead_class: u32, use_root_bound: bool) -> bool {
     let below = |weight: &crate::ds::weight::Weight| {
         !weight.is_full() && weight.range_entries().all(|(_, hi, _)| hi < dead_class)
@@ -7108,31 +7107,8 @@ fn build_boundary_terminal_dwa_borrowed_query(inputs:&BoundaryWalkInputs)->Optio
         follow_transparent_ignores:inputs.follow_transparent_ignores,scope:&prepared.scope,
         retain_non_crossing_paths:inputs.retain_non_crossing_paths,flat_trans:Some(flat)};
     let mut output=finalize_scoped_terminal_output(&local,mapped,profile,certificate,0.,began)?;
-        let current=&output.id_map.tokenizer_states;
-        let mut originals=vec![u32::MAX;prepared.original_to_view.len()];
-        let mut groups=vec![Vec::new();current.num_internal_ids() as usize];
-        for (raw,&keep) in inputs.scope.initial_states().keep_raw().iter().enumerate(){if keep{
-            let compact=prepared.original_to_view[raw];assert_ne!(compact,u32::MAX);
-            let class=current.original_to_internal[compact as usize];originals[raw]=class;
-            if class!=u32::MAX{groups[class as usize].push(raw as u32);}
-        }}
-        let representatives=groups.iter().map(|g|g.first().copied().unwrap_or(u32::MAX)).collect();
-        output.id_map.tokenizer_states=crate::compiler::stages::equiv_types::ManyToOneIdMap{
-            original_to_internal:originals,internal_to_originals:groups,representative_original_ids:representatives,
-        };
-        // Runtime publication requires a total raw-state map even though this
-        // shard can be queried only from its certified initial domain. Add one
-        // fresh zero-language class, never reuse a productive continuation ID.
-        // Prove that no accepted lexical point mentions the new ID before
-        // assigning all omitted states to it; symbolic ALL is not a finite row.
-        let dead_class=output.id_map.tokenizer_states.num_internal_ids();
-        if !proves_fresh_dead_class(&output.dwa,dead_class,
-            crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_ROOT_SUPPORT_BOUND")){
-            return None;
-        }
-        output.id_map.tokenizer_states=output.id_map.tokenizer_states.fill_unmapped_with_new_class();
+    lift_initial_states(inputs, &mut output, &prepared.original_to_view)?;
         output.profile.setup_ms+=prepared.footprint_ms+prepared.materialize_ms;
-        output.profile.initial_states=inputs.scope.initial_states().len();
         if compose_profile_enabled(){eprintln!("[glrmask/profile][boundary_query_view] component={} raw_states={} view_states={} first_states={} reset_states={} steps={} footprint_ms={:.3} materialize_ms={:.3} compile_ms={:.3}",
             inputs.scope.start_component().0,inputs.merged_tokenizer.num_states(),prepared.view_to_original.len(),
             prepared.first_states,prepared.reset_states,prepared.state_steps,prepared.footprint_ms,
