@@ -52,21 +52,21 @@ pub(super) trait TopDomain {
 }
 
 pub(super) fn restrict<D: TopDomain>(
-    states: &mut [FastBoundaryNwaState],
+    mut states: Vec<FastBoundaryNwaState>,
     starts: &[u32],
     alphabet: u32,
     domain: &mut D,
-) -> Option<TopSupportProfile> {
+) -> Option<(Vec<FastBoundaryNwaState>, TopSupportProfile)> {
     let n = states.len();
     if n == 0 || n > 200_000 || alphabet == 0 || alphabet > 50_000
         || starts.iter().any(|&state| state as usize >= n)
     {
         return None;
     }
-    let order = fast_boundary_topological_order(states)?;
-    let mut inputs = vec![0u32; n];
+    let order = fast_boundary_topological_order(&states)?;
+    let mut inputs = vec![D::BOTTOM; n];
     for &state in starts {
-        inputs[state as usize] = 1;
+        inputs[state as usize] = D::INITIAL;
     }
     let mut profile = TopSupportProfile { states: n, ..Default::default() };
     for state in order {
@@ -111,5 +111,5 @@ pub(super) fn restrict<D: TopDomain>(
         }
     }
     domain.finish_profile(&mut profile);
-    Some(profile)
+    Some((states, profile))
 }

@@ -86,8 +86,8 @@ impl TopDomain for Tops {
 }
 
 pub(super) fn restrict(
-    states: &mut [FastBoundaryNwaState], starts: &[u32], alphabet: u32,
-) -> Option<TopSupportProfile> {
+    states: Vec<FastBoundaryNwaState>, starts: &[u32], alphabet: u32,
+) -> Option<(Vec<FastBoundaryNwaState>, TopSupportProfile)> {
     super::signed_top_support::restrict(states, starts, alphabet, &mut Tops::new(alphabet as usize)?)
 }
 
@@ -129,7 +129,7 @@ mod tests{
                 }}
                 states.push(FastBoundaryNwaState{transitions:transitions.into_iter().collect(),epsilons,final_weight:weights[next()%weights.len()]});
             }
-            let mut reduced=states.clone();let profile=restrict(&mut reduced,&[0],3).unwrap();blocked+=profile.blocked_labels;
+            let (reduced,profile)=restrict(states.clone(),&[0],3).unwrap();blocked+=profile.blocked_labels;
             for stack in &inputs{assert_eq!(execute(&states,stack,&mut interner),execute(&reduced,stack,&mut interner),"case={case} stack={stack:?}");}
             for (original,after) in states.iter().zip(&reduced){assert_eq!(original.transitions.iter().map(|(l,_)|*l).collect::<Vec<_>>(),after.transitions.iter().map(|(l,_)|*l).collect::<Vec<_>>());}
         }

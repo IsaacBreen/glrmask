@@ -165,12 +165,12 @@ impl TopDomain for WeightedTop<'_> {
     }
 }
 
-/// Mutates only a private candidate; exhaustion never publishes a partial
+/// Consumes an unpublished candidate; exhaustion never publishes a partial
 /// signed graph. The literal stack-effect oracle remains independent.
 pub(super) fn restrict(
-    states: &mut [FastBoundaryNwaState], starts: &[u32], alphabet: u32,
+    states: Vec<FastBoundaryNwaState>, starts: &[u32], alphabet: u32,
     masks: &mut FastBoundaryWeightInterner,
-) -> Option<TopSupportProfile> {
+) -> Option<(Vec<FastBoundaryNwaState>, TopSupportProfile)> {
     super::signed_top_support::restrict(
         states, starts, alphabet, &mut WeightedTop { domains: Domains::new(), masks },
     )
@@ -223,7 +223,7 @@ mod tests {
                 if next()%3==0 {transitions.entry(2).or_default();}
                 states.push(FastBoundaryNwaState{transitions:transitions.into_iter().collect(),epsilons,final_weight:ws[next()%ws.len()]});
             }
-            let mut candidate=states.clone();let profile=restrict(&mut candidate,&[0],3,&mut masks).unwrap();changed+=profile.changed_edges;
+            let (candidate,profile)=restrict(states.clone(),&[0],3,&mut masks).unwrap();changed+=profile.changed_edges;
             for input in &inputs {assert_eq!(execute(&states,input,&mut masks),execute(&candidate,input,&mut masks),"case{case} stack{input:?}");}
             for (a,b) in states.iter().zip(&candidate) {assert_eq!(a.transitions.iter().map(|r|r.0).collect::<Vec<_>>(),b.transitions.iter().map(|r|r.0).collect::<Vec<_>>());}
         }
@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(domains.read(joined,2,&mut masks),a);
         let mut bounded=Domains::new();bounded.max_rows=2;
         assert!(bounded.singleton(0,a,&mut masks).is_none());assert_eq!(bounded.rows.len(),2);
-        let mut cyclic=vec![FastBoundaryNwaState{epsilons:vec![(0,1)],transitions:vec![],final_weight:1}];
-        assert!(restrict(&mut cyclic,&[0],3,&mut masks).is_none());
+        let cyclic=vec![FastBoundaryNwaState{epsilons:vec![(0,1)],transitions:vec![],final_weight:1}];
+        assert!(restrict(cyclic,&[0],3,&mut masks).is_none());
     }
 }

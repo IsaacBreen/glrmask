@@ -341,17 +341,17 @@ fn normalize_finite_template_program_impl(
     }
     if weighted_top || boolean_top {
         let phase = Instant::now();
-        let statistics = if weighted_top {
-            let result = finite_weighted_top::restrict(&mut states, &active_starts, parser_states, &mut interner);
+        let (restricted, statistics) = if weighted_top {
+            let state_count = states.len(); &active_starts, parser_states, &mut interner);
             if result.is_none() && compile_profile_enabled() {
                 eprintln!("[glrmask/profile][boundary_weighted_top_declined] states={} alphabet={} native_failed={} native_weights={} native_work={} ms={:.3}",
-                    states.len(), parser_states, interner.failed, interner.values.len(), interner.work, elapsed_ms(phase));
+                    state_count, parser_states, interner.failed, interner.values.len(), interner.work, elapsed_ms(phase));
             }
             result?
         } else {
-            finite_top_support::restrict(&mut states, &active_starts, parser_states)?
+            finite_top_support::restrict(states, &active_starts, parser_states)?
         };
-        profile.early_top_ms = elapsed_ms(phase);
+        states = restricted;
         if compile_profile_enabled() {
             eprintln!("[glrmask/profile][boundary_early_top_support] weighted={weighted_top} ms={:.3} stats={statistics:?}", profile.early_top_ms);
         }
