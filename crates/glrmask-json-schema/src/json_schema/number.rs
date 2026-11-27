@@ -66,9 +66,10 @@ fn collect_plain_integer_range_cuts(
     cuts: &mut BTreeSet<i64>,
     representable: &mut bool,
 ) {
-    let SchemaKind::Assertions(assertions) = &schema.kind else { return; };
-    if plain_integer_assertions(assertions)
-        && let Some(number) = &assertions.number
+    for node in schema.descendants() {
+        let SchemaKind::Assertions(assertions) = &node.kind else { continue; };
+        if plain_integer_assertions(assertions)
+            && let Some(number) = &assertions.number
             && integer_multiple_is_vacuous(number.multiple_of)
         {
             let lower = integer_lower_bound(number);
@@ -80,34 +81,8 @@ fn collect_plain_integer_range_cuts(
                 if let Some(upper) = upper { cuts.insert(upper + 1); }
             }
         }
-    if let Some(object) = &assertions.object {
-        for property in &object.properties {
-            collect_plain_integer_range_cuts(&property.schema, cuts, representable);
-        }
-        for property in &object.pattern_properties {
-            collect_plain_integer_range_cuts(&property.schema, cuts, representable);
-        }
-        if let super::ast::AdditionalProperties::Schema(additional) = &object.additional_properties {
-            collect_plain_integer_range_cuts(additional, cuts, representable);
-        }
-        if let Some(property_names) = &object.property_names {
-            collect_plain_integer_range_cuts(property_names, cuts, representable);
-        }
-    }
-    if let Some(array) = &assertions.array {
-        collect_plain_integer_range_cuts(&array.items, cuts, representable);
-        for item in &array.prefix_items {
-            collect_plain_integer_range_cuts(item, cuts, representable);
-        }
-    }
-    for branch in assertions.any_of.iter().chain(&assertions.one_of).chain(&assertions.all_of) {
-        collect_plain_integer_range_cuts(branch, cuts, representable);
-    }
-    if let Some(not) = &assertions.not {
-        collect_plain_integer_range_cuts(not, cuts, representable);
     }
 }
-
 fn plain_integer_assertions(assertions: &SchemaAssertions) -> bool {
     let Some(types) = &assertions.types else { return false; };
     types.contains(&SchemaType::Integer) && !types.contains(&SchemaType::Number)

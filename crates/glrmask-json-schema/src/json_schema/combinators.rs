@@ -450,6 +450,9 @@ impl<'a> Lowerer<'a> {
         if let Some(merged) = merge_all_of_finite_string_literals(&branches)? {
             return self.lower_schema(&merged);
         }
+        if let Some(expr) = self.try_lower_finite_conjunction(&branches)? {
+            return Ok(expr);
+        }
         if let Some(merged) = merge_all_of_scalar_or_array_schema(&branches) {
             return self.lower_schema(&merged);
         }

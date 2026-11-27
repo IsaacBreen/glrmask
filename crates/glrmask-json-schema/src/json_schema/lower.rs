@@ -973,6 +973,37 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Exact finite conjunction: choose the smallest literal universe and
+    /// test candidates against the original complete assertions. Do not
+    /// intersect byte grammars for objects or arrays with finite values.
+    pub(super) fn try_lower_finite_conjunction(
+        &mut self,
+        branches: &[Schema],
+    ) -> ImportResult<Option<GrammarExpr>> {
+        let anchor = branches.iter().filter_map(|schema| {
+            let SchemaKind::Assertions(assertions) = &schema.kind else { return None; };
+            assertions.const_value.as_ref().map(std::slice::from_ref)
+                .or(assertions.enum_values.as_deref())
+        }).min_by_key(|values| values.len());
+        let Some(anchor) = anchor else { return Ok(None); };
+        let mut survivors = Vec::new();
+        'candidate: for value in anchor {
+            for branch in branches {
+                if !self.json_literal_satisfies_schema(value, branch)? {
+                    continue 'candidate;
+                }
+            }
+            survivors.push(value.clone());
+        }
+        // Retain the ordinary literal lowering policies, including enum
+        // terminalization, canonical spelling, and small-string factoring.
+        let schema = Schema::assertions("<finite-conjunction>", SchemaAssertions {
+            enum_values: Some(survivors),
+            ..SchemaAssertions::default()
+        });
+        self.lower_schema(&schema).map(Some)
+    }
+
     fn json_literal_satisfies_schema(&self, value: &Value, schema: &Schema) -> ImportResult<bool> {
         let mut ref_stack = BTreeSet::new();
         self.json_literal_satisfies_schema_inner(value, schema, &mut ref_stack)
