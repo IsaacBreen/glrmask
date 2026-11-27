@@ -12588,7 +12588,7 @@ impl Constraint {
             terminated: false,
             markers: None,
             constraint: self.clone(),
-            state: state.into(),
+            state,
             generation: 0,
             mask_cache: Mutex::new(None),
         };
@@ -12604,7 +12604,7 @@ impl Constraint {
             terminated: false,
             markers: None,
             constraint: self.clone(),
-            state: self.initial_state_map().into(),
+            state: self.initial_state_map(),
             generation: 0,
             mask_cache: Mutex::new(None),
         };

@@ -290,37 +290,73 @@ impl Constraint {
     }
 }
 
-/// Reused per-state storage. Absent entirely for unannotated constraints.
+/// Per-sequence observations. The offset is copied by value; both collections
+/// are immutable while shared. Starting a commit never copies prior events,
+/// and positions detach only when a genuinely new marker is observed.
 #[derive(Debug, Clone)]
 pub(crate) struct MarkerState {
     pub(crate) byte_offset: u64,
-    pub(crate) events: Vec<MarkerEvent>,
-    last_positions: Vec<Option<u64>>,
+    events: Option<Arc<Vec<MarkerEvent>>>,
+    last_positions: Arc<Vec<Option<u64>>>,
 }
 
 impl MarkerState {
     fn new(queries: &MarkerQueries) -> Self {
-        Self { byte_offset: 0, events: Vec::with_capacity(queries.ids.len().min(16)),
-            last_positions: vec![None; queries.ids.len()] }
+        Self { byte_offset: 0, events: Some(Arc::new(Vec::with_capacity(queries.ids.len().min(16)))),
+            last_positions: Arc::new(vec![None; queries.ids.len()]) }
     }
 
-    pub(crate) fn begin(&mut self) { self.events.clear(); }
+    pub(crate) fn begin(&mut self) {
+        if let Some(events) = self.events.as_mut() {
+            if let Some(unique) = Arc::get_mut(events) {
+                unique.clear();
+            } else {
+                // A sibling still observes the old events. They are irrelevant
+                // to this commit; do not copy them merely to clear them.
+                self.events = None;
+            }
+        }
+    }
+
+    pub(crate) fn observe<R>(&mut self, queries: &MarkerQueries, base: u64,
+        f: impl FnOnce(&mut LiveMarkers<'_>) -> R) -> R {
+        let mut fresh = Vec::new();
+        let events = match self.events.as_mut() {
+            Some(events) => Arc::get_mut(events).expect("begin marker observation before writing"),
+            None => &mut fresh,
+        };
+        let result = f(&mut LiveMarkers { queries, events, base });
+        // On a fork with no new events, no event allocation is needed.
+        if !fresh.is_empty() {
+            self.events = Some(Arc::new(fresh));
+        }
+        result
+    }
+
+    fn events(&self) -> &[MarkerEvent] {
+        self.events.as_deref().map_or(&[], Vec::as_slice)
+    }
 
     pub(crate) fn finish(&mut self, queries: &MarkerQueries, next_offset: u64, success: bool) {
-        if !success { self.events.clear(); return; }
-        if self.events.windows(2).any(|p| (p[0].byte_offset, p[0].id) > (p[1].byte_offset, p[1].id)) {
-            self.events.sort_unstable_by_key(|e| (e.byte_offset, e.id));
+        if !success { self.begin(); return; }
+        if let Some(events) = self.events.as_mut() {
+            let events = Arc::get_mut(events).expect("live marker events are unique");
+            if events.windows(2).any(|p| (p[0].byte_offset, p[0].id) > (p[1].byte_offset, p[1].id)) {
+                events.sort_unstable_by_key(|e| (e.byte_offset, e.id));
+            }
+            events.dedup();
+            let last_positions = &mut self.last_positions;
+            events.retain(|event| {
+                let slot = queries.ids.binary_search(&event.id).expect("compiled marker ID");
+                if last_positions[slot] == Some(event.byte_offset) { return false; }
+                Arc::make_mut(last_positions)[slot] = Some(event.byte_offset);
+                true
+            });
         }
-        self.events.dedup();
-        self.events.retain(|event| {
-            let slot = queries.ids.binary_search(&event.id).expect("compiled marker ID");
-            if self.last_positions[slot] == Some(event.byte_offset) { return false; }
-            self.last_positions[slot] = Some(event.byte_offset);
-            true
-        });
         self.byte_offset = next_offset;
     }
 }
+
 
 /// Explicit compile-time effect parameter: ordinary commits and all internal
 /// mask probes instantiate NoMarkers, so their inner loops contain no callback,
@@ -359,19 +395,19 @@ impl CommitObserver for NoMarkers { const ENABLED: bool = false; }
 
 pub(crate) struct LiveMarkers<'a> {
     pub(crate) queries: &'a MarkerQueries,
-    pub(crate) state: &'a mut MarkerState,
+    pub(crate) events: &'a mut Vec<MarkerEvent>,
     pub(crate) base: u64,
 }
 
 impl CommitObserver for LiveMarkers<'_> {
     const ENABLED: bool = true;
-    #[inline] fn checkpoint(&self) -> usize { self.state.events.len() }
-    #[inline] fn rewind(&mut self, checkpoint: usize) { self.state.events.truncate(checkpoint); }
+    #[inline] fn checkpoint(&self) -> usize { self.events.len() }
+    #[inline] fn rewind(&mut self, checkpoint: usize) { self.events.truncate(checkpoint); }
     #[inline] fn stack(&mut self, constraint: &Constraint, stack: &ParserGSS, offset: usize) {
-        self.queries.observe_gss(constraint, stack, self.base + offset as u64, &mut self.state.events);
+        self.queries.observe_gss(constraint, stack, self.base + offset as u64, self.events);
     }
     #[inline] fn flat(&mut self, constraint: &Constraint, stack: &[u32], offset: usize) {
-        self.queries.observe_flat(constraint, stack, self.base + offset as u64, &mut self.state.events);
+        self.queries.observe_flat(constraint, stack, self.base + offset as u64, self.events);
     }
     #[inline] fn carried(&mut self, constraint: &Constraint,
         stack: &VirtualStack<u32, TerminalsDisallowed>, offset: usize) {
@@ -379,7 +415,7 @@ impl CommitObserver for LiveMarkers<'_> {
             // A drained virtual prefix can expose an empty word or a shared
             // nonempty floor. Query its exact existing language, never advance.
             self.queries.observe_gss(constraint, &stack.clone().into_gss(),
-                self.base + offset as u64, &mut self.state.events);
+                self.base + offset as u64, self.events);
             return;
         };
         let mut fallback = None;
@@ -388,7 +424,7 @@ impl CommitObserver for LiveMarkers<'_> {
                 let gss = fallback.get_or_insert_with(|| stack.clone().into_gss());
                 self.queries.admits_gss(constraint, gss, candidate.terminal.terminal_id)
             } {
-                self.state.events.push(MarkerEvent { id: candidate.terminal.marker_id,
+                self.events.push(MarkerEvent { id: candidate.terminal.marker_id,
                     byte_offset: self.base + offset as u64 });
             }
         }
@@ -397,7 +433,7 @@ impl CommitObserver for LiveMarkers<'_> {
         runtime: &mut TemplateAdvanceRuntime, language: u32,
         accumulator: &TerminalsDisallowed, offset: usize) {
         if !self.queries.empty.is_empty() && runtime.language_contains_empty_stack(language) {
-            self.state.events.extend(self.queries.empty.iter().map(|&id| MarkerEvent {
+            self.events.extend(self.queries.empty.iter().map(|&id| MarkerEvent {
                 id, byte_offset: self.base + offset as u64,
             }));
         }
@@ -408,7 +444,7 @@ impl CommitObserver for LiveMarkers<'_> {
                     let gss = fallback.get_or_insert_with(|| runtime.gss_from_language(language, accumulator.clone()));
                     self.queries.admits_gss(constraint, gss, candidate.terminal.terminal_id)
                 } {
-                    self.state.events.push(MarkerEvent { id: candidate.terminal.marker_id,
+                    self.events.push(MarkerEvent { id: candidate.terminal.marker_id,
                         byte_offset: self.base + offset as u64 });
                 }
             }
@@ -426,9 +462,9 @@ impl super::ConstraintState {
     pub(crate) fn initialize_markers(&mut self) {
         let Some(queries) = self.constraint.marker_queries.as_deref() else { return; };
         let mut markers = MarkerState::new(queries);
-        LiveMarkers { queries, state: &mut markers, base: 0 }.frontier(&self.constraint, &self.state, 0);
+        markers.observe(queries, 0, |observer| observer.frontier(&self.constraint, &self.state, 0));
         markers.finish(queries, 0, true);
-        self.markers = Some(Arc::new(markers));
+        self.markers = Some(markers);
     }
 
     /// The markers passed by the most recent commit, or by
@@ -439,7 +475,7 @@ impl super::ConstraintState {
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
     pub fn marker_events(&self) -> &[MarkerEvent] {
-        self.markers.as_deref().map_or(&[], |markers| markers.events.as_slice())
+        self.markers.as_ref().map_or(&[], MarkerState::events)
     }
 }
 
@@ -476,7 +512,7 @@ mod tests {
             assert_eq!(state.mask(), reference.mask(), "initial mask {mode:?}");
             for (token, marker) in [(0, 7), (1, 42)] {
                 assert!(state.commit_token(token)); assert!(reference.commit_token(token));
-                let before = state.state.snapshot();
+                let before = state.state.clone();
                 assert_eq!(observations(&state), [marker], "{mode:?} token {token}");
                 assert_eq!(state.state, before, "marker query mutated the parser");
                 assert_eq!(state.mask(), reference.mask(), "mask {mode:?} token {token}");
@@ -565,6 +601,43 @@ mod tests {
         assert!(!one.merge(&empty).contains_empty_stack());
     }
     #[test]
+    fn marker_clone_drops_old_events_without_copying_positions_until_observed() {
+        let queries = MarkerQueries { terminals: Box::new([]), ids: vec![7].into(),
+            offsets: vec![0].into(), candidates: Box::new([]), empty: vec![7].into(),
+            lr_domains: Box::new([]) };
+        let mut original = MarkerState::new(&queries);
+        original.observe(&queries, 0, |observer| {
+            observer.events.push(MarkerEvent { id: 7, byte_offset: 0 });
+        });
+        original.finish(&queries, 0, true);
+        let mut branch = original.clone();
+        assert!(Arc::ptr_eq(&original.last_positions, &branch.last_positions));
+        assert!(Arc::ptr_eq(original.events.as_ref().unwrap(), branch.events.as_ref().unwrap()));
+        branch.begin();
+        assert!(branch.events.is_none());
+        branch.observe(&queries, 0, |_| ());
+        branch.finish(&queries, 1, true);
+        assert!(branch.events.is_none());
+        assert!(Arc::ptr_eq(&original.last_positions, &branch.last_positions));
+        // A later real observation detaches only the position table.
+        branch.observe(&queries, 1, |observer| {
+            observer.events.push(MarkerEvent { id: 7, byte_offset: 1 });
+        });
+        branch.finish(&queries, 1, true);
+        assert_eq!(branch.events(), [MarkerEvent { id: 7, byte_offset: 1 }]);
+        assert_eq!(original.events(), [MarkerEvent { id: 7, byte_offset: 0 }]);
+        assert!(!Arc::ptr_eq(&original.last_positions, &branch.last_positions));
+        // A duplicate at the same offset is suppressed and leaves siblings alone.
+        branch.begin();
+        branch.observe(&queries, 1, |observer| {
+            observer.events.push(MarkerEvent { id: 7, byte_offset: 1 });
+        });
+        branch.finish(&queries, 1, true);
+        assert!(branch.events().is_empty());
+        assert_eq!(original.last_positions[0], Some(0));
+    }
+
+    #[test]
     fn observer_adapters_preserve_empty_and_mixed_stack_languages() {
         let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let constraint = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile_inner(&vocab).unwrap();
@@ -581,28 +654,25 @@ mod tests {
             let mut runtime = TemplateAdvanceRuntime::default();
             let (language, accumulator) = runtime.language_from_uniform_gss(stack).unwrap();
             let mut marker_state = MarkerState::new(&queries);
-            LiveMarkers { queries: &queries, state: &mut marker_state, base: 10 }
-                .language(&constraint, &mut runtime, language, &accumulator, 2);
+            marker_state.observe(&queries, 10, |observer| observer.language(&constraint, &mut runtime, language, &accumulator, 2));
             marker_state.finish(&queries,12,true);
             let expected = if stack.contains_empty_stack() {
                 vec![MarkerEvent { id:7,byte_offset:12 }]
             } else { vec![] };
-            assert_eq!(marker_state.events,expected);
+            assert_eq!(marker_state.events(),expected);
         }
         let mut runtime = TemplateAdvanceRuntime::default();
         let mut rejected = MarkerState::new(&queries);
-        LiveMarkers { queries:&queries,state:&mut rejected,base:0 }
-            .language(&constraint,&mut runtime,0,&acc,0);
-        assert!(rejected.events.is_empty());
+        rejected.observe(&queries, 0, |observer| observer.language(&constraint,&mut runtime,0,&acc,0));
+        assert!(rejected.events().is_empty());
         let mut carried = nonempty.try_virtual_stack().unwrap();
         assert_eq!(carried.pop(1),0);
         assert!(carried.top().is_none());
         assert!(carried.clone().into_gss().contains_empty_stack());
         let mut result = MarkerState::new(&queries);
-        LiveMarkers { queries:&queries,state:&mut result,base:10 }
-            .carried(&constraint,&carried,2);
+        result.observe(&queries, 10, |observer| observer.carried(&constraint,&carried,2));
         result.finish(&queries,12,true);
-        assert_eq!(result.events,[MarkerEvent {id:7,byte_offset:12}]);
+        assert_eq!(result.events(),[MarkerEvent {id:7,byte_offset:12}]);
     }
 
 }

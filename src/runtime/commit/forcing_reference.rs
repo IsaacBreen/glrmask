@@ -145,7 +145,7 @@ fn byte_prefix_with_bounds(
     states: &[ConstraintState], max_bytes: usize, budget: &mut Budget, physical_bounds: bool,
 ) -> Vec<u8> {
     let constraints = states.iter().map(|state| &state.constraint).collect::<Vec<_>>();
-    let mut frontier = states.iter().map(|state| state.state.snapshot()).collect::<Vec<_>>();
+    let mut frontier = states.iter().map(|state| state.state.clone()).collect::<Vec<_>>();
     let mut scratch = constraints.iter().map(|c| CommitBuffers::for_constraint(c)).collect::<Vec<_>>();
     let mut prefix = Vec::new();
     while prefix.len() < max_bytes {
@@ -285,7 +285,7 @@ fn force_inner(states: &mut Vec<ConstraintState>, dynamic: Option<bool>) -> Vec<
             continue;
         }
         let constraints = states.iter().map(|s| &s.constraint).collect::<Vec<_>>();
-        let mut frontiers = states.iter().map(|s| s.state.snapshot()).collect::<Vec<_>>();
+        let mut frontiers = states.iter().map(|s| s.state.clone()).collect::<Vec<_>>();
         for (&c, s) in constraints.iter().zip(&mut frontiers) { expand_runtime_product_states(c, s); }
         let event = match event_possible(&constraints, &frontiers, &mut budget) {
             Ok(event) => event,
@@ -312,7 +312,7 @@ fn force_inner(states: &mut Vec<ConstraintState>, dynamic: Option<bool>) -> Vec<
                 if output.len() >= MAX_FORCED_TOKENS { return output; }
                 // The full ID successor, not a byte-shadow cursor, owns the next proof.
                 let constraints = states.iter().map(|s| &s.constraint).collect::<Vec<_>>();
-                let mut next = states.iter().map(|s| s.state.snapshot()).collect::<Vec<_>>();
+                let mut next = states.iter().map(|s| s.state.clone()).collect::<Vec<_>>();
                 for (&c, s) in constraints.iter().zip(&mut next) { expand_runtime_product_states(c, s); }
                 if !matches!(event_possible(&constraints, &next, &mut budget), Ok(false)) { return output; }
                 (current_masks, current_mask) = masks(states, dynamic);

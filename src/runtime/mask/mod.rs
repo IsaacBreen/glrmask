@@ -2130,7 +2130,7 @@ mod tests {
                 let mut cached = vec![0; mask.len()];
                 assert!(state.try_fill_mask_from_cache(&mut cached));
                 assert_eq!(cached, mask);
-                let before = state.state.snapshot();
+                let before = state.state.clone();
                 assert!(state.commit_token(token));
                 if before == state.state {
                     assert!(state.try_fill_mask_from_cache(&mut cached));
@@ -2286,7 +2286,7 @@ mod tests {
         let mut buffers = super::CommitBuffers::default();
         let mut output = vec![0u32; state.constraint.mask_bit_len().div_ceil(32)];
         let mut stack = vec![None; usize::from(trie.full_walk_max_parent_depth()) + 2];
-        stack[0] = Some(state.state.snapshot());
+        stack[0] = Some(state.state.clone());
         let mark = |node, output: &mut [u32]| {
             if let Some(canonical) = trie.node(node).token_id {
                 for &id in vocab.token_ids(canonical).unwrap() {
@@ -2567,7 +2567,7 @@ mod tests {
         state.state = crate::runtime::state::ParserStateMap::singleton(
             tokenizer_state,
             ParserGSS::from_stacks(&[(vec![0u32], disallowed)]),
-        ).into();
+        );
 
         let mut expected = vec![0u32; constraint.body_mask_len()];
         state.fill_mask_dynamic(&mut expected);
@@ -2584,7 +2584,7 @@ mod tests {
         loaded_state.state = crate::runtime::state::ParserStateMap::singleton(
             loaded_tokenizer_state,
             ParserGSS::from_stacks(&[(vec![0u32], loaded_disallowed)]),
-        ).into();
+        );
         let mut loaded_expected = vec![0u32; loaded.body_mask_len()];
         loaded_state.fill_mask_dynamic(&mut loaded_expected);
         let mut loaded_actual = vec![0u32; loaded.body_mask_len()];
@@ -4670,7 +4670,7 @@ impl ConstraintState {
             terminated: false,
             markers: None,
                 constraint: component.constraint.as_ref().clone(),
-                state: state.into(),
+                state,
                 generation: self.generation,
                 mask_cache: Mutex::new(None),
             };
@@ -4872,7 +4872,7 @@ impl ConstraintState {
             terminated: false,
             markers: None,
                 constraint: component.constraint.as_ref().clone(),
-                state: state.into(),
+                state,
                 generation: self.generation,
                 mask_cache: Mutex::new(None),
             };
@@ -5082,7 +5082,7 @@ impl ConstraintState {
                                     terminated: self.terminated,
             markers: None,
                                     constraint: self.constraint.clone(),
-                                    state: frontier.into(),
+                                    state: frontier,
                                     generation: self.generation,
                                     mask_cache: Mutex::new(None),
                                 };
@@ -5176,7 +5176,7 @@ impl ConstraintState {
         let mut transitions = RecursiveMaskTransitions::new(state_budget, alphabet);
         state_stack[0] = Some(match transitions.intern(&self.state) {
             Some(id) => RecursiveMaskFrontier::Cached(id),
-            None => RecursiveMaskFrontier::Uncached(self.state.snapshot()),
+            None => RecursiveMaskFrontier::Uncached(self.state.clone()),
         });
 
         let mark_node = |node: u32, live: bool, buf: &mut [u32]| {
@@ -8709,7 +8709,7 @@ impl ConstraintState {
             return None;
         }
 
-        // A mask-only speculative view shares the immutable frontier until written.
+        // A mask-only speculative view clones only the live Arc-backed parser paths.
         let mut shadow = Box::new(ConstraintState {
             terminated: false,
             markers: None,

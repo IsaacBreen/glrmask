@@ -1,4 +1,4 @@
-use crate::runtime::markers::{CommitObserver, NoMarkers, LiveMarkers};
+use crate::runtime::markers::{CommitObserver, NoMarkers};
 use crate::automata::lexer::Lexer;
 pub(crate) mod profile;
 pub(crate) mod bounded;
@@ -1820,9 +1820,9 @@ fn assert_commit_fast_path_equivalence(
         // state equality as the strongest oracle, but fall back to the public
         // semantic observations when the reference has merged correlations.
         let mut actual_semantic = constraint.start();
-        actual_semantic.state = actual_state.clone().into();
+        actual_semantic.state = actual_state.clone();
         let mut reference_semantic = constraint.start();
-        reference_semantic.state = reference_state.into();
+        reference_semantic.state = reference_state;
         assert_eq!(
             actual_semantic.is_accepting(),
             reference_semantic.is_accepting(),
@@ -8572,7 +8572,7 @@ impl ConstraintState {
     pub(crate) fn reject_after_failed_commit(&mut self) {
         self.state.clear();
         self.terminated = false;
-        if let Some(markers) = self.markers.as_mut().map(std::sync::Arc::make_mut) { markers.begin(); }
+        if let Some(markers) = self.markers.as_mut() { markers.begin(); }
         self.generation = self.generation.wrapping_add(1);
         *self.mask_cache.get_mut().unwrap_or_else(|error| error.into_inner()) = None;
     }
@@ -8584,7 +8584,7 @@ impl ConstraintState {
 
     fn commit_token_actual_inner(&mut self, token_id: u32, buffers: &mut CommitBuffers) -> Result<(), String> {
         let constraint = &self.constraint;
-        let Some(markers) = self.markers.as_mut().map(std::sync::Arc::make_mut) else {
+        let Some(markers) = self.markers.as_mut() else {
             return commit_token_impl(constraint, &mut self.state, buffers, token_id);
         };
         markers.begin();
@@ -8592,8 +8592,8 @@ impl ConstraintState {
         let base = markers.byte_offset;
         let width = token_bytes_for_id(constraint, token_id).map_or(0, |bytes| bytes.len());
         let next = base.checked_add(width as u64).expect("marker byte position overflow");
-        let result = commit_token_impl_observed(constraint, &mut self.state, buffers, token_id,
-            &mut LiveMarkers { queries, state: markers, base });
+        let result = markers.observe(queries, base, |observer|
+            commit_token_impl_observed(constraint, &mut self.state, buffers, token_id, observer));
         markers.finish(queries, next, result.is_ok());
         result
     }
@@ -8605,15 +8605,15 @@ impl ConstraintState {
 
     fn commit_bytes_actual_inner(&mut self, bytes: &[u8], buffers: &mut CommitBuffers) -> Result<(), String> {
         let constraint = &self.constraint;
-        let Some(markers) = self.markers.as_mut().map(std::sync::Arc::make_mut) else {
+        let Some(markers) = self.markers.as_mut() else {
             return commit_bytes_impl(constraint, &mut self.state, bytes, buffers);
         };
         markers.begin();
         let queries = constraint.marker_queries.as_deref().expect("marker-enabled state has immutable queries");
         let base = markers.byte_offset;
         let next = base.checked_add(bytes.len() as u64).expect("marker byte position overflow");
-        let result = commit_bytes_impl_observed(constraint, &mut self.state, bytes, buffers,
-            &mut LiveMarkers { queries, state: markers, base });
+        let result = markers.observe(queries, base, |observer|
+            commit_bytes_impl_observed(constraint, &mut self.state, bytes, buffers, observer));
         markers.finish(queries, next, result.is_ok());
         result
     }
@@ -8632,7 +8632,7 @@ impl ConstraintState {
         cache
             .as_ref()
             .is_some_and(|cache_data| cache_data.generation == self.generation)
-            .then(|| self.state.snapshot())
+            .then(|| self.state.clone())
     }
 
     /// Advance the commit generation while retaining a cached mask when commit
@@ -9166,7 +9166,7 @@ impl ConstraintState {
                 "commit_token: end token {token_id} is not allowed for this prefix"
             )));
         }
-        if let Some(markers) = self.markers.as_mut().map(std::sync::Arc::make_mut) { markers.begin(); }
+        if let Some(markers) = self.markers.as_mut() { markers.begin(); }
         self.terminated = true;
         self.generation = self.generation.wrapping_add(1);
         *self.mask_cache.get_mut().unwrap_or_else(|error| error.into_inner()) = None;
@@ -9205,7 +9205,7 @@ impl ConstraintState {
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
-            .then(|| self.state.snapshot());
+            .then(|| self.state.clone());
         let mask_state_before_commit = self.snapshot_current_mask_state();
         let result = self.commit_token_actual(token_id);
         self.finish_commit_generation(mask_state_before_commit, result.is_ok());
@@ -9268,7 +9268,7 @@ impl ConstraintState {
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
-            .then(|| self.state.snapshot());
+            .then(|| self.state.clone());
         let mask_state_before_commit = self.snapshot_current_mask_state();
         let start = Instant::now();
         let result = self.commit_token_actual(token_id);
@@ -9305,7 +9305,7 @@ impl ConstraintState {
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
-            .then(|| self.state.snapshot());
+            .then(|| self.state.clone());
         let mask_state_before_commit = self.snapshot_current_mask_state();
         let total_started_at = std::time::Instant::now();
         let result = self.commit_transaction(|this, buffers| {
@@ -9376,7 +9376,7 @@ impl ConstraintState {
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
-            .then(|| self.state.snapshot());
+            .then(|| self.state.clone());
         let mask_state_before_commit = self.snapshot_current_mask_state();
         let total_started_at = std::time::Instant::now();
         let mut advances = Vec::new();
@@ -9461,7 +9461,7 @@ impl ConstraintState {
             self.reject_after_failed_commit();
             return Err("sequence has already terminated".to_owned());
         }
-        if let Some(markers) = self.markers.as_mut().map(std::sync::Arc::make_mut) { markers.begin(); }
+        if let Some(markers) = self.markers.as_mut() { markers.begin(); }
         let mask_state_before_commit = self.snapshot_current_mask_state();
         let result = self.commit_bytes_actual(bytes);
         self.finish_commit_generation(mask_state_before_commit, result.is_ok());
@@ -9605,13 +9605,13 @@ mod tests {
         for constraint in [&compiled, &Constraint::load(compiled.save(), &vocab).unwrap()] {
             let mut state = constraint.start();
             assert!(state.commit_bytes(b"ab"));
-            let mut reference = state.state.snapshot();
+            let mut reference = state.state.clone();
             assert!(commit_token_no_fast_path_reference(constraint, &mut reference, 1).is_ok());
-            let mut actual = state.state.snapshot();
+            let mut actual = state.state.clone();
             let mut scratch = CommitBuffers::default();
             assert!(commit_token_impl(constraint, &mut actual, &mut scratch, 1).is_ok(),
                 "lexer lanes sharing parser stacks must not share actionable-match answers");
-            assert_commit_fast_path_equivalence(constraint, state.state.snapshot(), 1, &actual, true);
+            assert_commit_fast_path_equivalence(constraint, state.state.clone(), 1, &actual, true);
         }
     }
 
@@ -9648,7 +9648,7 @@ mod tests {
                     let mut actual = constraint.start();
                     let mut bytewise = constraint.start();
                     for token in ids {
-                        let before = actual.state.snapshot();
+                        let before = actual.state.clone();
                         assert!(token_in_mask(&actual.mask(), token),
                             "ignore prefix absent from mask partitions={partitions} token={token}");
                         let mut reference = before.clone();
@@ -9738,7 +9738,7 @@ mod tests {
         // consumed and the complete runtime state remains identical.
         let cached_mask = state.mask();
         let before_generation = state.generation;
-        let before_state = state.state.snapshot();
+        let before_state = state.state.clone();
         {
             let cache = state.mask_cache.lock().unwrap();
             assert_eq!(cache.as_ref().unwrap().generation, before_generation);
@@ -9787,7 +9787,7 @@ mod tests {
         assert!(state.commit_token(1)); // first interior 'a'
         let cached_mask = state.mask();
         let before_generation = state.generation;
-        let before_state = state.state.snapshot();
+        let before_state = state.state.clone();
 
         assert!(state.commit_token(1)); // second interior 'a'
         assert_ne!(before_state, state.state, "test must exercise a changed exact lexer state");
@@ -11169,7 +11169,7 @@ nt start = item item? item?;
         assert_eq!(state.len(), INLINE_PARSER_STATE_CAPACITY + 1);
 
         let mut actual = start.clone();
-        actual.state = state.into();
+        actual.state = state;
         assert!(actual.commit_bytes(b"a"));
         let mut expected = start;
         assert!(expected.commit_bytes(b"a"));

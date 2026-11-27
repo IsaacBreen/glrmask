@@ -263,56 +263,6 @@ impl<'a> IntoIterator for &'a ParserStateMap {
 }
 
 
-/// Only live sequence frontiers use shared storage. Temporary algorithmic
-/// maps keep their inline representation and allocation-free fast paths.
-/// Cloning a sequence is constant-time; a write to a shared frontier detaches
-/// once, preserving the original parser paths and their immutable GSS nodes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SharedFrontier(Arc<ParserStateMap>);
-
-impl From<ParserStateMap> for SharedFrontier {
-    fn from(state: ParserStateMap) -> Self { Self(Arc::new(state)) }
-}
-
-impl SharedFrontier {
-    #[inline]
-    pub(crate) fn snapshot(&self) -> ParserStateMap { self.0.as_ref().clone() }
-
-    // Rejection need not duplicate a shared frontier merely to empty it.
-    pub(crate) fn clear(&mut self) {
-        if let Some(state) = Arc::get_mut(&mut self.0) {
-            state.clear();
-        } else {
-            self.0 = Arc::new(ParserStateMap::default());
-        }
-    }
-}
-
-impl Deref for SharedFrontier {
-    type Target = ParserStateMap;
-    #[inline]
-    fn deref(&self) -> &ParserStateMap { &self.0 }
-}
-
-impl DerefMut for SharedFrontier {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut ParserStateMap { Arc::make_mut(&mut self.0) }
-}
-
-impl PartialEq<ParserStateMap> for SharedFrontier {
-    fn eq(&self, other: &ParserStateMap) -> bool { self.0.as_ref() == other }
-}
-
-impl PartialEq<SharedFrontier> for ParserStateMap {
-    fn eq(&self, other: &SharedFrontier) -> bool { self == other.0.as_ref() }
-}
-
-impl<'a> IntoIterator for &'a SharedFrontier {
-    type Item = <&'a ParserStateMap as IntoIterator>::Item;
-    type IntoIter = <&'a ParserStateMap as IntoIterator>::IntoIter;
-    fn into_iter(self) -> Self::IntoIter { self.0.as_ref().into_iter() }
-}
-
 // A bounded, per-thread cache of idle scratch leases, scoped to the exact
 // immutable compiled constraint. Weak identity prevents pointer ABA without
 // retaining a compiled grammar. A checkout removes the slot before invoking
@@ -644,9 +594,11 @@ impl CommitBuffers {
 
 pub struct ConstraintState {
     pub(crate) terminated: bool,
-    pub(crate) markers: Option<Arc<crate::runtime::markers::MarkerState>>,
+    pub(crate) markers: Option<crate::runtime::markers::MarkerState>,
     pub(crate) constraint: Constraint,
-    pub(crate) state: SharedFrontier,
+    // Keep the tuned 64-slot inline frontier: cloning copies only live GSS handles, and
+    // the following commit does not allocate/detach a separate frontier container.
+    pub(crate) state: ParserStateMap,
     /// Monotonically increasing counter, bumped on every commit.
     /// Used for cheap cache invalidation in fill_mask.
     pub(crate) generation: u64,
@@ -856,6 +808,15 @@ mod clone_and_scratch_tests {
     }
 
     #[test]
+    fn sequence_state_layout() {
+        eprintln!("state={} frontier={} entry={} constraint={} markers={} cache={}",
+            std::mem::size_of::<ConstraintState>(), std::mem::size_of::<ParserStateMap>(),
+            std::mem::size_of::<(u32, ParserGSS)>(), std::mem::size_of::<Constraint>(),
+            std::mem::size_of::<Option<crate::runtime::markers::MarkerState>>(),
+            std::mem::size_of::<Mutex<Option<MaskCacheData>>>());
+    }
+
+    #[test]
     fn scratch_checkout_is_reentrant_constraint_scoped_and_reusable() {
         let c = constraint("start root; nt root = 'a'+;");
         let other = constraint("start root; nt root = 'b'+;");
@@ -892,18 +853,19 @@ mod clone_and_scratch_tests {
     }
 
     #[test]
-    fn sequence_clone_shares_frontier_but_detaches_on_mutation() {
+    fn sequence_clone_shares_gss_nodes_but_not_frontier_storage() {
         let c = constraint("start root; nt root = 'a' ('b' | 'c');");
         let mut original = c.start();
         assert!(original.commit_token(0));
         let expected = original.mask();
         let mut accepted = original.clone();
         let mut rejected = original.clone();
-        assert!(Arc::ptr_eq(&original.state.0, &accepted.state.0));
-        assert!(Arc::ptr_eq(&original.state.0, &rejected.state.0));
+        for ((a, b), d) in original.state.values().zip(accepted.state.values()).zip(rejected.state.values()) {
+            assert!(a.ptr_eq(b) && a.ptr_eq(d));
+        }
+        assert!(!std::ptr::eq(&original.state, &accepted.state));
         assert!(accepted.commit_token(1));
         assert!(accepted.is_accepting());
-        assert!(!Arc::ptr_eq(&original.state.0, &accepted.state.0));
         assert!(!rejected.commit_token(0));
         assert!(!rejected.is_accepting());
         assert!(rejected.is_terminated());

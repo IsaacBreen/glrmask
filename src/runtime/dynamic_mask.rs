@@ -11494,7 +11494,7 @@ mod tests {
         let mut state = dynamic.inner.start();
         assert!(state.commit_token(0));
         assert!(state.commit_token(1));
-        let exact_before = state.state.snapshot();
+        let exact_before = state.state.clone();
         let key_before = dynamic_mask_state_key(&state).expect("cache key before commit");
         let mask_before = direct_mask(&state);
 
