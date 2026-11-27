@@ -3723,6 +3723,65 @@ impl Default for ProjectedTerminalInventory {
     }
 }
 
+/// Exact mapping into a finite mask language. The variants are mutually
+/// exclusive; in particular virtual coordinates are not dense source IDs.
+#[derive(Debug, Clone)]
+enum MaskCoordinateMap {
+    Dense(Arc<[u32]>),
+    UnitRepeat(VirtualZeroMinUnitRepeatMaskProjection),
+    RepeatIntersections(Arc<[VirtualBinaryRepeatIntersectionMaskProjection]>),
+    Residuals(Arc<[VirtualResidualMaskProjection]>),
+}
+
+impl MaskCoordinateMap {
+    fn project(&self, full_state: u32) -> u32 {
+        match self {
+            Self::Dense(states) => states.get(full_state as usize).copied().unwrap_or(full_state),
+            Self::UnitRepeat(projection) => projection.project(full_state)
+                .expect("arithmetic lexer state has no owning finite-mask projection"),
+            Self::RepeatIntersections(projections) => projections.iter()
+                .find_map(|projection| projection.project(full_state))
+                .expect("repeat intersection lexer state has no owning finite-mask projection"),
+            Self::Residuals(projections) => projections.iter()
+                .find_map(|projection| projection.project(full_state))
+                .unwrap_or_else(|| {
+                    // Ordinary physical states retain their IDs.
+                    assert!(projections.iter().all(|projection| full_state < projection.physical_state_count()),
+                        "residual lexer state {full_state} has no owning finite-mask projection");
+                    full_state
+                }),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MaskExecutionDerivative {
+    tokenizer: Arc<Tokenizer>,
+    from_projection: Arc<[u32]>,
+}
+
+#[derive(Debug)]
+struct MaskSubsetProvenance {
+    by_state: Vec<Arc<[u32]>>,
+    by_subset: FxHashMap<Arc<[u32]>, u32>,
+}
+
+#[derive(Debug, Clone)]
+struct MaskProjection {
+    tokenizer: Arc<Tokenizer>,
+    map: MaskCoordinateMap,
+    derivative: Option<MaskExecutionDerivative>,
+    /// Subsets in exact-source coordinates for direct determinization, or
+    /// in base-projection coordinates when a derivative is present.
+    provenance: Option<Arc<MaskSubsetProvenance>>,
+}
+
+impl MaskProjection {
+    fn runtime_owner(&self) -> &Arc<Tokenizer> {
+        self.derivative.as_ref().map_or(&self.tokenizer, |derived| &derived.tokenizer)
+    }
+}
+
 /// Runtime-only vocabulary data for direct dynamic mask generation.
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskVocab {
@@ -3831,32 +3890,9 @@ pub(crate) struct DynamicMaskVocab {
     /// immutable lexer/vocabulary coordinate, so sequences may safely share it.
     pending_guard_blocked_mask_cache:
         Arc<Mutex<FxHashMap<Vec<(u32, TerminalID)>, Arc<Vec<u32>>>>>,
-    /// Optional mask-only finite-token quotient. Commit continues to use the
-    /// exact tokenizer stored on `Constraint`; dynamic mask projections may be
-    /// built in this smaller coordinate and indexed from exact runtime states
-    /// through `full_to_mask_state`.
-    mask_tokenizer: Option<Arc<Tokenizer>>,
-    /// Optional deterministic derivative of `mask_tokenizer` used only by
-    /// mask generation. This is particularly useful for finite one-token
-    /// projections of lazy/virtual lexers whose compact serialized projection
-    /// still contains epsilon fan-in. Commit never uses this coordinate.
-    mask_determinized_tokenizer: Option<Arc<Tokenizer>>,
-    /// Dense map from the serialized/base mask-tokenizer state coordinate to
-    /// `mask_determinized_tokenizer`. Empty when no second-stage
-    /// determinization is active.
-    mask_projection_to_determinized: Arc<[u32]>,
+    /// Mask-only finite language and its exact coordinate mapping.
+    mask_projection: Option<MaskProjection>,
     mask_tokenizer_fast_transitions: Option<FastTokenizerTransitions>,
-    full_to_mask_state: Arc<[u32]>,
-    /// Derived exact subset provenance for the dense mask tokenizer. Keys are
-    /// epsilon-closed source-tokenizer state sets and values are the already
-    /// materialized deterministic mask states representing those sets.
-    /// Runtime mask roots may use this only when every source state in the set
-    /// carries the same parser object by identity.
-    mask_state_source_subsets: Arc<[Arc<[u32]>]>,
-    mask_source_subset_to_state: Arc<FxHashMap<Arc<[u32]>, u32>>,
-    virtual_unit_repeat_projection: Option<VirtualZeroMinUnitRepeatMaskProjection>,
-    virtual_repeat_intersection_projections: Vec<VirtualBinaryRepeatIntersectionMaskProjection>,
-    virtual_residual_projections: Vec<VirtualResidualMaskProjection>,
 }
 
 impl DynamicMaskVocab {
@@ -3902,11 +3938,7 @@ impl DynamicMaskVocab {
         if self.mask_tokenizer_fast_transitions.is_some() {
             return;
         }
-        let tokenizer = self
-            .mask_determinized_tokenizer
-            .as_deref()
-            .or(self.mask_tokenizer.as_deref())
-            .unwrap_or(source);
+        let tokenizer = self.mask_runtime_tokenizer().unwrap_or(source);
         self.mask_tokenizer_fast_transitions = Self::build_full_walk_fast_transitions(tokenizer);
     }
 
@@ -3926,14 +3958,18 @@ impl DynamicMaskVocab {
         const ALPHABET: usize = 256;
         let state_limit = Self::FULL_WALK_DENSE_TRANSITION_BYTES / (CELL_BYTES * ALPHABET);
         let transition_limit = state_limit.saturating_mul(ALPHABET);
-        let source = self.mask_tokenizer.as_deref().unwrap_or(source_tokenizer);
+        let source = self.mask_projection_tokenizer().unwrap_or(source_tokenizer);
         if source.has_any_virtual_runtime() {
             return false;
         }
         if !source.has_epsilon_transitions() {
-            self.mask_determinized_tokenizer = None;
-            self.mask_projection_to_determinized = Arc::from(Vec::<u32>::new());
-            self.mask_tokenizer_fast_transitions = Self::build_full_walk_fast_transitions(source);
+            let fast = Self::build_full_walk_fast_transitions(source);
+            if let Some(projection) = self.mask_projection.as_mut() {
+                if projection.derivative.take().is_some() {
+                    projection.provenance = None;
+                }
+            }
+            self.mask_tokenizer_fast_transitions = fast;
             return self.mask_tokenizer_fast_transitions.is_some();
         }
         let Some((built, source_to_determinized)) = source
@@ -3947,13 +3983,8 @@ impl DynamicMaskVocab {
         let Some(fast) = Self::build_full_walk_fast_transitions(&deterministic) else {
             return false;
         };
-        if self.mask_tokenizer.is_none() {
-            // Directly-derived source execution coordinate. Represent it as
-            // the ordinary source->mask quotient so all existing runtime
-            // metadata sees the same coordinate, and retain exact subset
-            // provenance for root/branch unions.
-            self.set_mask_tokenizer_quotient(deterministic, source_to_determinized);
-            self.set_mask_tokenizer_source_subsets(source_subsets);
++
++        true        self.set_mask_tokenizer_source_subsets(source_subsets);
             return true;
         }
         self.mask_determinized_tokenizer = Some(Arc::new(deterministic));
@@ -4154,16 +4185,8 @@ impl DynamicMaskVocab {
             projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
             raw_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
             pending_guard_blocked_mask_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            mask_tokenizer: None,
-            mask_determinized_tokenizer: None,
-            mask_projection_to_determinized: Arc::from(Vec::<u32>::new()),
+            mask_projection: None,
             mask_tokenizer_fast_transitions: None,
-            full_to_mask_state: Arc::from(Vec::<u32>::new()),
-            mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
-            mask_source_subset_to_state: Arc::new(FxHashMap::default()),
-            virtual_unit_repeat_projection: None,
-            virtual_repeat_intersection_projections: Vec::new(),
-            virtual_residual_projections: Vec::new(),
         }
     }
 
@@ -4249,16 +4272,8 @@ impl DynamicMaskVocab {
             projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
             raw_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
             pending_guard_blocked_mask_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            mask_tokenizer: None,
-            mask_determinized_tokenizer: None,
-            mask_projection_to_determinized: Arc::from(Vec::<u32>::new()),
+            mask_projection: None,
             mask_tokenizer_fast_transitions: None,
-            full_to_mask_state: Arc::from(Vec::<u32>::new()),
-            mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
-            mask_source_subset_to_state: Arc::new(FxHashMap::default()),
-            virtual_unit_repeat_projection: None,
-            virtual_repeat_intersection_projections: Vec::new(),
-            virtual_residual_projections: Vec::new(),
         }
     }
 
@@ -4381,16 +4396,8 @@ impl DynamicMaskVocab {
             projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
             raw_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
             pending_guard_blocked_mask_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            mask_tokenizer: None,
-            mask_determinized_tokenizer: None,
-            mask_projection_to_determinized: Arc::from(Vec::<u32>::new()),
+            mask_projection: None,
             mask_tokenizer_fast_transitions: None,
-            full_to_mask_state: Arc::from(Vec::<u32>::new()),
-            mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
-            mask_source_subset_to_state: Arc::new(FxHashMap::default()),
-            virtual_unit_repeat_projection: None,
-            virtual_repeat_intersection_projections: Vec::new(),
-            virtual_residual_projections: Vec::new(),
         }
     }
 
@@ -6538,7 +6545,7 @@ impl DynamicMaskVocab {
         &mut self,
         projections: Vec<DynamicSelfLoopProjection>,
     ) {
-        let state_count = self.mask_tokenizer.as_ref().map_or_else(
+        let state_count = self.mask_projection_tokenizer().map_or_else(
             || {
                 projections
                     .iter()
@@ -6566,143 +6573,100 @@ impl DynamicMaskVocab {
         self.projection_alias_h64 = Arc::from(aliases);
     }
 
+    fn publish_mask_projection(
+        &mut self,
+        tokenizer: Tokenizer,
+        map: MaskCoordinateMap,
+        fast: Option<FastTokenizerTransitions>,
+    ) {
+        self.mask_projection = Some(MaskProjection {
+            tokenizer: Arc::new(tokenizer),
+            map,
+            derivative: None,
+            provenance: None,
+        });
+        self.mask_tokenizer_fast_transitions = fast;
+    }
+
+    fn set_mask_projection(&mut self, tokenizer: Tokenizer, map: MaskCoordinateMap) {
+        let fast = Self::build_full_walk_fast_transitions(&tokenizer);
+        self.publish_mask_projection(tokenizer, map, fast);
+    }
+
     pub(crate) fn set_mask_tokenizer_quotient(
         &mut self,
         tokenizer: Tokenizer,
         full_to_mask_state: Vec<u32>,
     ) {
         debug_assert!(!full_to_mask_state.is_empty());
-        debug_assert!(full_to_mask_state
-            .iter()
-            .all(|&state| state < tokenizer.num_states()));
-        self.mask_tokenizer_fast_transitions = Self::build_full_walk_fast_transitions(&tokenizer);
-        self.mask_tokenizer = Some(Arc::new(tokenizer));
-        self.mask_determinized_tokenizer = None;
-        self.mask_projection_to_determinized = Arc::from(Vec::<u32>::new());
-        self.full_to_mask_state = Arc::from(full_to_mask_state);
-        self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
-        self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
-        self.virtual_unit_repeat_projection = None;
-        self.virtual_repeat_intersection_projections.clear();
-        self.virtual_residual_projections.clear();
+        debug_assert!(full_to_mask_state.iter().all(|&state| state < tokenizer.num_states()));
+        self.set_mask_projection(tokenizer, MaskCoordinateMap::Dense(Arc::from(full_to_mask_state)));
     }
 
-    pub(crate) fn set_mask_tokenizer_source_subsets(
-        &mut self,
-        source_subsets: Vec<Box<[u32]>>,
-    ) {
-        let Some(tokenizer) = self.mask_runtime_tokenizer() else {
-            self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
-            self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
+    fn set_mask_tokenizer_source_subsets(&mut self, source_subsets: Vec<Box<[u32]>>) {
+        let Some(projection) = self.mask_projection.as_mut() else {
             return;
         };
-        if source_subsets.len() != tokenizer.num_states() as usize {
-            self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
-            self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
+        if source_subsets.len() != projection.runtime_owner().num_states() as usize
+            || source_subsets.is_empty()
+        {
+            projection.provenance = None;
             return;
         }
-        let by_state = source_subsets
-            .into_iter()
-            .map(Arc::<[u32]>::from)
-            .collect::<Vec<_>>();
+        let by_state: Vec<Arc<[u32]>> = source_subsets.into_iter().map(Arc::from).collect();
         let mut by_subset = FxHashMap::default();
         by_subset.reserve(by_state.len());
         for (state, subset) in by_state.iter().enumerate() {
+            // Multiple preserved raw IDs may represent the same closure.
+            // Any such complete deterministic coordinate is exact.
             by_subset.insert(Arc::clone(subset), state as u32);
         }
-        self.mask_state_source_subsets = Arc::from(by_state);
-        self.mask_source_subset_to_state = Arc::new(by_subset);
-    }
-
-    #[inline]
-    pub(crate) fn has_mask_tokenizer_source_subsets(&self) -> bool {
-        !self.mask_source_subset_to_state.is_empty()
-            // A derivative of an intermediate mask projection records subsets
-            // in projection-state coordinates, not exact source-tokenizer
-            // coordinates. It remains useful for unioning execution states in
-            // the strict walker, but must not be queried with ConstraintState
-            // source lexer states.
-            && (self.mask_tokenizer.is_none() || self.mask_determinized_tokenizer.is_none())
+        projection.provenance = Some(Arc::new(MaskSubsetProvenance { by_state, by_subset }));
     }
 
     #[inline]
     pub(crate) fn has_mask_subset_provenance(&self) -> bool {
-        !self.mask_source_subset_to_state.is_empty()
+        self.mask_projection.as_ref().is_some_and(|projection| projection.provenance.is_some())
     }
 
-    /// Return an already-materialized mask execution state for the union of
-    /// exact constraint lexer states. For a direct determinization the retained
-    /// subsets are in exact-source coordinates. For a second-stage derivative
-    /// of a finite virtual projection, first map each exact state into that
-    /// projection and close it there; the inverse subset table is keyed in that
-    /// intermediate coordinate.
+    /// Inverse lookup of the exact source-state union in the active execution
+    /// coordinate, closing in the intermediate projection when appropriate.
     pub(crate) fn mask_runtime_state_for_source_states(
         &self,
         source_tokenizer: &Tokenizer,
         source_states: &[u32],
     ) -> Option<u32> {
-        if source_states.is_empty() || self.mask_source_subset_to_state.is_empty() {
-            return None;
-        }
-        if self.mask_tokenizer.is_some() && self.mask_determinized_tokenizer.is_some() {
-            let projection = self.mask_tokenizer.as_deref()?;
-            let mut subset = SmallVec::<[u32; 32]>::new();
-            for &state in source_states {
-                let projected = self.mask_projection_state(state);
-                subset.extend_from_slice(&projection.singleton_epsilon_closure(projected));
-            }
-            subset.sort_unstable();
-            subset.dedup();
-            return self.mask_source_subset_to_state.get(subset.as_slice()).copied();
-        }
-        self.mask_projection_state_for_source_states(source_tokenizer, source_states)
-    }
-
-    pub(crate) fn mask_projection_state_for_source_states(
-        &self,
-        source_tokenizer: &Tokenizer,
-        source_states: &[u32],
-    ) -> Option<u32> {
-        if source_states.is_empty() || self.mask_source_subset_to_state.is_empty() {
-            return None;
-        }
-        let mut subset = SmallVec::<[u32; 16]>::new();
+        let projection = self.mask_projection.as_ref()?;
+        let provenance = projection.provenance.as_ref()?;
+        if source_states.is_empty() { return None; }
+        let mut subset = SmallVec::<[u32; 32]>::new();
         for &state in source_states {
-            let closure = source_tokenizer.singleton_epsilon_closure(state);
+            let closure = if projection.derivative.is_some() {
+                projection.tokenizer.singleton_epsilon_closure(projection.map.project(state))
+            } else {
+                source_tokenizer.singleton_epsilon_closure(state)
+            };
             subset.extend_from_slice(&closure);
         }
         subset.sort_unstable();
         subset.dedup();
-        self.mask_source_subset_to_state
-            .get(subset.as_slice())
-            .copied()
+        provenance.by_subset.get(subset.as_slice()).copied()
     }
 
-    /// Return an already-materialized deterministic mask state whose exact
-    /// source-state subset is the union of `projection_states`.
-    ///
-    /// This never creates a DFA state at runtime. It is only an inverse lookup
-    /// into source-subset provenance retained from compile-time determinization.
+    /// Inverse lookup of an already materialized union of execution states.
     pub(crate) fn mask_projection_state_for_projection_states(
         &self,
         projection_states: &[u32],
     ) -> Option<u32> {
-        if projection_states.is_empty()
-            || self.mask_state_source_subsets.is_empty()
-            || self.mask_source_subset_to_state.is_empty()
-        {
-            return None;
-        }
+        let provenance = self.mask_projection.as_ref()?.provenance.as_ref()?;
+        if projection_states.is_empty() { return None; }
         let mut subset = SmallVec::<[u32; 32]>::new();
         for &state in projection_states {
-            let source = self.mask_state_source_subsets.get(state as usize)?;
-            subset.extend_from_slice(source);
+            subset.extend_from_slice(provenance.by_state.get(state as usize)?);
         }
         subset.sort_unstable();
         subset.dedup();
-        self.mask_source_subset_to_state
-            .get(subset.as_slice())
-            .copied()
+        provenance.by_subset.get(subset.as_slice()).copied()
     }
 
     pub(crate) fn set_virtual_unit_repeat_mask_projection(
@@ -6710,20 +6674,8 @@ impl DynamicMaskVocab {
         tokenizer: Tokenizer,
         projection: VirtualZeroMinUnitRepeatMaskProjection,
     ) {
-        debug_assert_eq!(
-            tokenizer.num_states(),
-            projection.mask_state_count(),
-        );
-        self.mask_tokenizer_fast_transitions = Self::build_full_walk_fast_transitions(&tokenizer);
-        self.mask_tokenizer = Some(Arc::new(tokenizer));
-        self.mask_determinized_tokenizer = None;
-        self.mask_projection_to_determinized = Arc::from(Vec::<u32>::new());
-        self.full_to_mask_state = Arc::from(Vec::<u32>::new());
-        self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
-        self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
-        self.virtual_unit_repeat_projection = Some(projection);
-        self.virtual_repeat_intersection_projections.clear();
-        self.virtual_residual_projections.clear();
+        debug_assert_eq!(tokenizer.num_states(), projection.mask_state_count());
+        self.set_mask_projection(tokenizer, MaskCoordinateMap::UnitRepeat(projection));
     }
 
     pub(crate) fn set_virtual_repeat_intersection_mask_projection(
@@ -6740,16 +6692,7 @@ impl DynamicMaskVocab {
         projections: Vec<VirtualBinaryRepeatIntersectionMaskProjection>,
     ) {
         debug_assert!(!projections.is_empty());
-        self.mask_tokenizer_fast_transitions = Self::build_full_walk_fast_transitions(&tokenizer);
-        self.mask_tokenizer = Some(Arc::new(tokenizer));
-        self.mask_determinized_tokenizer = None;
-        self.mask_projection_to_determinized = Arc::from(Vec::<u32>::new());
-        self.full_to_mask_state = Arc::from(Vec::<u32>::new());
-        self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
-        self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
-        self.virtual_unit_repeat_projection = None;
-        self.virtual_repeat_intersection_projections = projections;
-        self.virtual_residual_projections.clear();
+        self.set_mask_projection(tokenizer, MaskCoordinateMap::RepeatIntersections(Arc::from(projections)));
     }
 
     pub(crate) fn set_virtual_residuals_mask_projection(
@@ -6758,28 +6701,15 @@ impl DynamicMaskVocab {
         projections: Vec<VirtualResidualMaskProjection>,
     ) {
         debug_assert!(!projections.is_empty());
-        self.mask_tokenizer_fast_transitions = Self::build_full_walk_fast_transitions(&tokenizer);
-        self.mask_tokenizer = Some(Arc::new(tokenizer));
-        self.mask_determinized_tokenizer = None;
-        self.mask_projection_to_determinized = Arc::from(Vec::<u32>::new());
-        self.full_to_mask_state = Arc::from(Vec::<u32>::new());
-        self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
-        self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
-        self.virtual_unit_repeat_projection = None;
-        self.virtual_repeat_intersection_projections.clear();
-        self.virtual_residual_projections = projections;
+        self.set_mask_projection(tokenizer, MaskCoordinateMap::Residuals(Arc::from(projections)));
     }
 
     pub(crate) fn virtual_residual_mask_projection_parts(
         &self,
     ) -> Option<(&Tokenizer, &[VirtualResidualMaskProjection])> {
-        if self.virtual_residual_projections.is_empty() {
-            return None;
-        }
-        Some((
-            self.mask_tokenizer.as_deref()?,
-            self.virtual_residual_projections.as_slice(),
-        ))
+        let projection = self.mask_projection.as_ref()?;
+        let MaskCoordinateMap::Residuals(residuals) = &projection.map else { return None; };
+        Some((projection.tokenizer.as_ref(), residuals.as_ref()))
     }
 
     /// Preserve lexer-derived dynamic-mask metadata when a deferred vocabulary
@@ -6790,14 +6720,8 @@ impl DynamicMaskVocab {
     /// them at different times. Sharing the immutable Arc-backed metadata
     /// avoids cloning it during that handoff.
     pub(crate) fn inherit_dynamic_lexer_metadata_from(&mut self, source: &Self) {
-        self.mask_tokenizer = source.mask_tokenizer.clone();
-        self.mask_determinized_tokenizer = source.mask_determinized_tokenizer.clone();
-        self.mask_projection_to_determinized =
-            Arc::clone(&source.mask_projection_to_determinized);
+        self.mask_projection = source.mask_projection.clone();
         self.mask_tokenizer_fast_transitions = source.mask_tokenizer_fast_transitions.clone();
-        self.full_to_mask_state = Arc::clone(&source.full_to_mask_state);
-        self.mask_state_source_subsets = Arc::clone(&source.mask_state_source_subsets);
-        self.mask_source_subset_to_state = Arc::clone(&source.mask_source_subset_to_state);
         self.terminal_observation_classes = Arc::clone(&source.terminal_observation_classes);
         self.terminal_quotients = source.terminal_quotients.clone();
         self.prepared_master_prover_row_ids =
@@ -6820,28 +6744,10 @@ impl DynamicMaskVocab {
             Arc::clone(&source.prepared_safe_radius_offsets);
         self.prepared_safe_radius_entries =
             Arc::clone(&source.prepared_safe_radius_entries);
-        self.virtual_unit_repeat_projection = source.virtual_unit_repeat_projection;
-        self.virtual_repeat_intersection_projections =
-            source.virtual_repeat_intersection_projections.clone();
-        self.virtual_residual_projections = source.virtual_residual_projections.clone();
     }
 
-    pub(crate) fn mask_tokenizer_quotient_for_transfer(&self) -> Option<(Tokenizer, Vec<u32>)> {
-        if self.virtual_unit_repeat_projection.is_some()
-            || !self.virtual_repeat_intersection_projections.is_empty()
-            || !self.virtual_residual_projections.is_empty()
-        {
-            // This compact structural projection is rebuilt from the exact
-            // virtual tokenizer and bound vocabulary after load. The legacy
-            // transfer tuple can only express a dense full-state vector.
-            return None;
-        }
-        self.mask_tokenizer.as_ref().map(|tokenizer| {
-            ((**tokenizer).clone(), self.full_to_mask_state.as_ref().to_vec())
-        })
-    }
-
-    #[inline]
++
++    pub(crate) fn mask_projection_fast_transitions(    #[inline]
     pub(crate) fn mask_projection_tokenizer(&self) -> Option<&Tokenizer> {
         self.mask_tokenizer.as_deref()
     }
@@ -6876,119 +6782,65 @@ impl DynamicMaskVocab {
 
     #[cfg(test)]
     pub(crate) fn disable_prepared_mask_execution_for_test(&mut self) {
-        self.mask_tokenizer = None;
-        self.mask_determinized_tokenizer = None;
-        self.mask_projection_to_determinized = Arc::from(Vec::<u32>::new());
+        self.mask_projection = None;
         self.mask_tokenizer_fast_transitions = None;
-        self.full_to_mask_state = Arc::from(Vec::<u32>::new());
-        self.mask_state_source_subsets = Arc::from(Vec::<Arc<[u32]>>::new());
-        self.mask_source_subset_to_state = Arc::new(FxHashMap::default());
     }
 
     #[inline]
     pub(crate) fn mask_projection_state(&self, full_state: u32) -> u32 {
-        if !self.virtual_residual_projections.is_empty() {
-            for projection in &self.virtual_residual_projections {
-                if let Some(projected) = projection.project(full_state) {
-                    return projected;
-                }
-            }
-            // Ordinary physical states retain their IDs in the residual mask
-            // tokenizer; only exact virtual states require an owning projection.
-            if self
-                .virtual_residual_projections
-                .iter()
-                .all(|projection| full_state < projection.physical_state_count())
-            {
-                return full_state;
-            }
-            panic!(
-                "exact residual tokenizer state {full_state} has no owning finite-mask projection"
-            );
-        }
-        if !self.virtual_repeat_intersection_projections.is_empty() {
-            for projection in &self.virtual_repeat_intersection_projections {
-                if let Some(projected) = projection.project(full_state) {
-                    return projected;
-                }
-            }
-            panic!(
-                "exact virtual tokenizer state {full_state} has no owning finite-mask projection"
-            );
-        }
-        if let Some(projection) = self.virtual_unit_repeat_projection {
-            return projection.project(full_state).unwrap_or_else(|| {
-                panic!(
-                    "exact arithmetic tokenizer state {full_state} has no owning finite-mask projection"
-                )
-            });
-        }
-        self.full_to_mask_state
-            .get(full_state as usize)
-            .copied()
-            .unwrap_or(full_state)
+        self.mask_projection.as_ref().map_or(full_state, |projection| projection.map.project(full_state))
     }
 
     #[inline]
     pub(crate) fn mask_runtime_state(&self, full_state: u32) -> u32 {
-        let projected = self.mask_projection_state(full_state);
-        self.mask_projection_to_determinized
-            .get(projected as usize)
-            .copied()
-            .unwrap_or(projected)
+        let Some(projection) = self.mask_projection.as_ref() else { return full_state; };
+        let projected = projection.map.project(full_state);
+        projection.derivative.as_ref().and_then(|derived| {
+            derived.from_projection.get(projected as usize).copied()
+        }).unwrap_or(projected)
     }
 
     pub(crate) fn mask_projection_state_multiplicities(&self) -> Option<Vec<usize>> {
-        let tokenizer = self.mask_tokenizer.as_ref()?;
-        if !self.virtual_residual_projections.is_empty()
-            || !self.virtual_repeat_intersection_projections.is_empty() {
-            // The exact virtual state domain is populated lazily, so no finite
-            // global full-state multiplicity table exists. Optimizations that
-            // require such a table must simply decline.
-            return None;
-        }
-        if let Some(projection) = self.virtual_unit_repeat_projection {
-            let counts = projection.multiplicities();
-            debug_assert_eq!(counts.len(), tokenizer.num_states() as usize);
-            return Some(counts);
-        }
-        let mut counts = vec![0usize; tokenizer.num_states() as usize];
-        for &state in self.full_to_mask_state.iter() {
-            if let Some(count) = counts.get_mut(state as usize) {
-                *count += 1;
+        let projection = self.mask_projection.as_ref()?;
+        match &projection.map {
+            MaskCoordinateMap::Dense(states) => {
+                let mut counts = vec![0usize; projection.tokenizer.num_states() as usize];
+                for &state in states.iter() {
+                    if let Some(count) = counts.get_mut(state as usize) { *count += 1; }
+                }
+                Some(counts)
             }
+            MaskCoordinateMap::UnitRepeat(unit) => Some(unit.multiplicities()),
+            // Lazily populated exact state domains have no global finite
+            // preimage enumeration.
+            _ => None,
         }
-        Some(counts)
     }
 
-    /// Exact full-tokenizer preimage for quotient states that have exactly one
-    /// runtime source.  Non-unique and unreachable quotient states are
-    /// represented by `u32::MAX`.
+    /// Exact unique full-tokenizer preimages, with MAX denoting non-unique
+    /// or unreachable mask states.
     pub(crate) fn mask_projection_unique_full_states(&self) -> Option<Vec<u32>> {
-        let tokenizer = self.mask_tokenizer.as_ref()?;
-        if !self.virtual_repeat_intersection_projections.is_empty() {
-            return None;
-        }
-        if let Some(projection) = self.virtual_unit_repeat_projection {
-            let unique = projection.unique_full_states();
-            debug_assert_eq!(unique.len(), tokenizer.num_states() as usize);
-            return Some(unique);
-        }
-        let mut unique = vec![u32::MAX; tokenizer.num_states() as usize];
-        let mut duplicate = vec![false; tokenizer.num_states() as usize];
-        for (full_state, &mask_state) in self.full_to_mask_state.iter().enumerate() {
-            let index = mask_state as usize;
-            if index >= unique.len() {
-                continue;
+        let projection = self.mask_projection.as_ref()?;
+        match &projection.map {
+            MaskCoordinateMap::Dense(states) => {
+                let count = projection.tokenizer.num_states() as usize;
+                let mut unique = vec![u32::MAX; count];
+                let mut duplicate = vec![false; count];
+                for (full, &state) in states.iter().enumerate() {
+                    let index = state as usize;
+                    if index >= count { continue; }
+                    if unique[index] == u32::MAX && !duplicate[index] {
+                        unique[index] = full as u32;
+                    } else {
+                        duplicate[index] = true;
+                        unique[index] = u32::MAX;
+                    }
+                }
+                Some(unique)
             }
-            if unique[index] == u32::MAX && !duplicate[index] {
-                unique[index] = full_state as u32;
-            } else {
-                duplicate[index] = true;
-                unique[index] = u32::MAX;
-            }
+            MaskCoordinateMap::UnitRepeat(unit) => Some(unit.unique_full_states()),
+            _ => None,
         }
-        Some(unique)
     }
 
     /// Lookup by a state in the active mask-tokenizer coordinate. Callers that
@@ -8586,16 +8438,8 @@ impl Default for DynamicMaskVocab {
             projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
             raw_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
             pending_guard_blocked_mask_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            mask_tokenizer: None,
-            mask_determinized_tokenizer: None,
-            mask_projection_to_determinized: Arc::from(Vec::<u32>::new()),
+            mask_projection: None,
             mask_tokenizer_fast_transitions: None,
-            full_to_mask_state: Arc::from(Vec::<u32>::new()),
-            mask_state_source_subsets: Arc::from(Vec::<Arc<[u32]>>::new()),
-            mask_source_subset_to_state: Arc::new(FxHashMap::default()),
-            virtual_unit_repeat_projection: None,
-            virtual_repeat_intersection_projections: Vec::new(),
-            virtual_residual_projections: Vec::new(),
         }
     }
 }
@@ -9609,7 +9453,7 @@ mod dynamic_mask_vocab_cache_boundary_tests {
         );
 
         let loaded = DynamicMaskVocab::from_artifact(artifact).unwrap();
-        assert_eq!(loaded.full_to_mask_state.as_ref(), full_to_mask_state.as_slice());
+        assert_eq!(loaded.mask_tokenizer_quotient_for_transfer().unwrap().1, full_to_mask_state);
         assert_eq!(
             loaded.mask_projection_tokenizer().map(Tokenizer::num_states),
             Some(expected_states),
