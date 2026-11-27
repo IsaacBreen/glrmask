@@ -4881,6 +4881,74 @@ struct ProviderAdvanceResult {
     accepted: bool,
 }
 
+/// Result of interpreting one deterministic borrowed parser action against
+/// the visible linear prefix of a virtual stack. Unsupported never mutates
+/// the cursor; a caller can decline or resume ordinary GSS traversal there.
+pub enum CursorActionStep {
+    Dead,
+    Unsupported,
+    Consumed { changed: bool },
+    Reduced,
+}
+
+#[inline]
+pub fn step_provider_cursor<P: ParserActionProvider, A: Merge + Eq + std::hash::Hash>(
+    provider: &P,
+    stack: &mut VirtualStack<u32, A>,
+    provided: &ProvidedAction<'_>,
+) -> CursorActionStep {
+    use CursorActionStep::*;
+    if !provided.extra_stack_shifts.is_empty() || stack.top().is_none() {
+        return Unsupported;
+    }
+    match &provided.action {
+        ProvidedActionRef::Identity => Consumed { changed: false },
+        ProvidedActionRef::Call { parent_target, child_start, replace } => {
+            if *replace {
+                stack.pop(1);
+            }
+            stack.push(*parent_target);
+            stack.push(*child_start);
+            Consumed { changed: true }
+        }
+        ProvidedActionRef::Return { pop } => {
+            if *pop as usize > stack.len() { return Unsupported; }
+            stack.pop(*pop as usize);
+            Consumed { changed: *pop != 0 }
+        }
+        ProvidedActionRef::Local { scope, action } => match action {
+            Action::Skip => Consumed { changed: false },
+            Action::Shift(target, replace) => {
+                let Some(target) = provider.scope_state(*scope, *target) else { return Dead; };
+                if *replace {
+                    stack.replace_top(target);
+                } else {
+                    stack.push(target);
+                }
+                Consumed { changed: true }
+            }
+            Action::Reduce(nonterminal, count) => {
+                // Read the predecessor before mutating the cursor. A hidden
+                // or ambiguous lower floor requires the ordinary traversal.
+                let Some(&predecessor) = stack.top_after_popping(*count as usize) else {
+                    return Unsupported;
+                };
+                let Some((target, replace)) = provider.goto_target(
+                    provided.reduction_scope, predecessor, *nonterminal,
+                ) else { return Dead; };
+                stack.pop(*count as usize);
+                if replace {
+                    stack.replace_top(target);
+                } else {
+                    stack.push(target);
+                }
+                Reduced
+            }
+            _ => Unsupported,
+        },
+    }
+}
+
 /// Bounded deterministic reductions on the existing virtual stack.
 /// Only an unambiguous initial reduction enters this lane. After a proved
 /// prefix, branching, guards, acceptance, extra effects or a hidden lower floor
@@ -4933,53 +5001,17 @@ fn try_provider_reduction_prefix_impl<P: ParserActionProvider, const RESUME: boo
                 None => return Some(ProviderReductionPrefix::Shifted(ParserGSS::empty())),
             }
         };
-        if !provided.extra_stack_shifts.is_empty() {
-            return suspend_provider_reductions::<RESUME>(stack, completed_reductions);
-        }
-        match &provided.action {
-            ProvidedActionRef::Identity => return Some(ProviderReductionPrefix::Shifted(stack.into_gss())),
-            ProvidedActionRef::Call { parent_target, child_start, replace } => {
-                if *replace && stack.pop(1) != 0 { return None; }
-                stack.push(*parent_target);
-                stack.push(*child_start);
+        match step_provider_cursor(provider, &mut stack, provided) {
+            CursorActionStep::Dead => {
+                return Some(ProviderReductionPrefix::Shifted(ParserGSS::empty()));
+            }
+            CursorActionStep::Unsupported => {
+                return suspend_provider_reductions::<RESUME>(stack, completed_reductions);
+            }
+            CursorActionStep::Consumed { .. } => {
                 return Some(ProviderReductionPrefix::Shifted(stack.into_gss()));
             }
-            ProvidedActionRef::Return { pop } => {
-                if *pop as usize > stack.len() {
-                    return suspend_provider_reductions::<RESUME>(stack, completed_reductions);
-                }
-                stack.pop(*pop as usize);
-                return Some(ProviderReductionPrefix::Shifted(stack.into_gss()));
-            }
-            ProvidedActionRef::Local { scope, action } => match action {
-                Action::Skip => return Some(ProviderReductionPrefix::Shifted(stack.into_gss())),
-                Action::Shift(target, replace) => {
-                    let Some(target) = provider.scope_state(*scope, *target) else {
-                        return Some(ProviderReductionPrefix::Shifted(ParserGSS::empty()));
-                    };
-                    if *replace {
-                        if !stack.replace_top(target) { return None; }
-                    } else { stack.push(target); }
-                    return Some(ProviderReductionPrefix::Shifted(stack.into_gss()));
-                }
-                Action::Reduce(nonterminal, count) => {
-                    // A reduction needs the concrete predecessor for its goto.
-                    // Do not speculate across a hidden or ambiguous GSS floor.
-                    if *count as usize >= stack.len() {
-                        return suspend_provider_reductions::<RESUME>(stack, completed_reductions);
-                    }
-                    stack.pop(*count as usize);
-                    let predecessor = *stack.top()?;
-                    let Some((target, replace)) = provider.goto_target(
-                        provided.reduction_scope, predecessor, *nonterminal,
-                    ) else { return Some(ProviderReductionPrefix::Shifted(ParserGSS::empty())); };
-                    if replace {
-                        if !stack.replace_top(target) { return None; }
-                    } else { stack.push(target); }
-                    completed_reductions += 1;
-                }
-                _ => return suspend_provider_reductions::<RESUME>(stack, completed_reductions),
-            },
+            CursorActionStep::Reduced => completed_reductions += 1,
         }
     }
     suspend_provider_reductions::<RESUME>(stack, completed_reductions)

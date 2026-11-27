@@ -5,7 +5,7 @@
 //! actions, hidden-floor reads, cycles, or resource exhaustion. This module
 //! does not execute vocabulary bytes and does not cache parser answers.
 use super::*;
-use crate::compiler::glr::parser::{ParserActionProvider, ProvidedActionRef};
+use crate::compiler::glr::parser::{ParserActionProvider, CursorActionStep, step_provider_cursor};
 use crate::ds::leveled_gss::VirtualStack;
 
 type ControlCursor = VirtualStack<u32, ()>;
@@ -16,18 +16,9 @@ enum ControlAdvance {
     Advanced(ControlCursor),
 }
 
-fn no_controls<P: ParserActionProvider>(provider: &P, cursor: &ControlCursor) -> bool {
-    let Some(&top) = cursor.top() else { return false; };
-    let mut controls = SmallVec::<[P::Symbol; 4]>::new();
-    provider.control_symbols(top, &mut controls);
-    controls.is_empty()
-}
-
-fn execute_impl<P: ParserActionProvider, const REQUIRE_CLOSED_OUTPUT: bool>(
+fn execute<P: ParserActionProvider>(
     provider: &P, input: &ControlCursor, symbol: P::Symbol,
 ) -> ControlAdvance {
-    // Most wide lexical-future candidates have NO action. Do not clone even
-    // the small cursor for those negative lookups, and reuse the first lookup.
     let Some(&top) = input.top() else { return ControlAdvance::Unknown; };
     let Some(provided) = provider.action(top, symbol) else { return ControlAdvance::Dead; };
     if !provided.extra_stack_shifts.is_empty() { return ControlAdvance::Unknown; }
@@ -36,52 +27,23 @@ fn execute_impl<P: ParserActionProvider, const REQUIRE_CLOSED_OUTPUT: bool>(
     let mut changed = false;
     for _ in 0..64 {
         let Some(&top) = cursor.top() else { return ControlAdvance::Unknown; };
-        let Some(provided) = first.take().or_else(|| provider.action(top, symbol)) else { return ControlAdvance::Dead; };
-        if !provided.extra_stack_shifts.is_empty() { return ControlAdvance::Unknown; }
-        match provided.action {
-            ProvidedActionRef::Identity => {},
-            ProvidedActionRef::Call { parent_target, child_start, replace } => {
-                if replace && cursor.pop(1) != 0 { return ControlAdvance::Unknown; }
-                cursor.push(parent_target); cursor.push(child_start); changed = true;
+        let Some(provided) = first.take().or_else(|| provider.action(top, symbol))
+            else { return ControlAdvance::Dead; };
+        match step_provider_cursor(provider, &mut cursor, &provided) {
+            CursorActionStep::Dead => return ControlAdvance::Dead,
+            CursorActionStep::Unsupported => return ControlAdvance::Unknown,
+            CursorActionStep::Consumed { changed: effect } => {
+                return if changed || effect {
+                    ControlAdvance::Advanced(cursor)
+                } else {
+                    ControlAdvance::Unchanged
+                };
             }
-            ProvidedActionRef::Return { pop } => {
-                if pop as usize > cursor.len() { return ControlAdvance::Unknown; }
-                if cursor.pop(pop as usize) != 0 { return ControlAdvance::Unknown; }
-                changed |= pop != 0;
-            }
-            ProvidedActionRef::Local { scope, action } => match action {
-                Action::Skip => {},
-                Action::Shift(target, replace) => {
-                    let Some(target) = provider.scope_state(scope, *target) else { return ControlAdvance::Dead; };
-                    if *replace {
-                        if !cursor.replace_top(target) { return ControlAdvance::Unknown; }
-                    } else { cursor.push(target); }
-                    changed = true;
-                }
-                Action::Reduce(nonterminal, count) => {
-                    if *count as usize >= cursor.len() { return ControlAdvance::Unknown; }
-                    if cursor.pop(*count as usize) != 0 { return ControlAdvance::Unknown; }
-                    let Some(&predecessor) = cursor.top() else { return ControlAdvance::Unknown; };
-                    let Some((target, replace)) = provider.goto_target(provided.reduction_scope, predecessor, *nonterminal)
-                        else { return ControlAdvance::Dead; };
-                    if replace {
-                        if !cursor.replace_top(target) { return ControlAdvance::Unknown; }
-                    } else { cursor.push(target); }
-                    changed = true;
-                    continue; // reduction has NOT consumed the lookahead
-                }
-                _ => return ControlAdvance::Unknown,
-            },
+            CursorActionStep::Reduced => changed = true,
         }
-        // The reference unions all zero-width control successors after the
-        // consuming action. A lone cursor may stand for the result only if
-        // that closure adds nothing, without assuming bounded C is idempotent.
-        if REQUIRE_CLOSED_OUTPUT && !no_controls(provider, &cursor) { return ControlAdvance::Unknown; }
-        return if changed { ControlAdvance::Advanced(cursor) } else { ControlAdvance::Unchanged };
     }
     ControlAdvance::Unknown
 }
-
 
 /// A rejection-only proof must never use a partial control search. Budget
 /// exhaustion is recorded separately from the interpreter's dead result.
@@ -142,7 +104,7 @@ fn bounded_control_top_states<P: ParserActionProvider>(
         for symbol in symbols {
             if seen.contains(&symbol){continue;}
             seen.push(symbol);
-            let result=execute_impl::<_,false>(&provider,&cursor,symbol);
+            let result=execute(&provider,&cursor,symbol);
             if provider.exhausted.get(){return None;}
             match result {
                 ControlAdvance::Unknown=>return None,
