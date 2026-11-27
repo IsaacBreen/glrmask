@@ -6,7 +6,6 @@
 //! do not manufacture a grammar reachability certificate.
 use super::CheckedNativeTopology;
 use super::{FastBoundaryNwaState, DEFAULT_LABEL};
-use std::collections::VecDeque;
 
 #[derive(Debug)]
 pub struct FiniteParserReadSupport {
@@ -99,16 +98,18 @@ fn insert(bits:&mut[u64],id:usize,root:usize){
 /// Sparse storage for the same transfer. An offset exists iff a successful
 /// incoming transfer supplied a nonempty context. Original graph IDs remain
 /// unchanged; only the storage of context bitsets is allocated on demand.
-pub(super) struct SparseReadContextTransfer<'a> {
+pub(super) struct ReadContextTransfer<'a> {
     domain: &'a FiniteParserReadSupport,
     offsets: Vec<u32>,
     contexts: Vec<u64>,
     source: Vec<u64>,
     source_nonempty: bool,
     word_limit: usize,
+    dense: bool,
+    propagation_words: usize,
 }
 
-impl<'a> SparseReadContextTransfer<'a> {
+impl<'a> ReadContextTransfer<'a> {
     pub fn new(domain: &'a FiniteParserReadSupport, nodes: usize, starts: &[u32]) -> Option<Self> {
         Self::with_word_limit(domain, nodes, starts, 8_000_000)
     }
@@ -116,9 +117,32 @@ impl<'a> SparseReadContextTransfer<'a> {
     fn with_word_limit(domain: &'a FiniteParserReadSupport, nodes: usize, starts: &[u32], limit: usize) -> Option<Self> {
         if nodes == 0 || nodes > 200_000 || starts.iter().any(|&q| q as usize >= nodes) { return None; }
         let mut result = Self { domain, offsets: vec![u32::MAX; nodes], contexts: Vec::new(),
-            source: vec![0; domain.words], source_nonempty: false, word_limit: limit.min(8_000_000) };
+            source: vec![0; domain.words], source_nonempty: false, word_limit: limit.min(8_000_000), dense: false, propagation_words: 0 };
         for &q in starts {
             let begin = result.destination(q as usize)?;
+            insert(&mut result.contexts[begin..begin + domain.words], domain.root, domain.root);
+        }
+        Some(result)
+    }
+
+    /// Dense preallocation for callers that already materialize every row.
+    /// The same offset sentinel records nonempty support in either layout.
+    fn new_dense(domain: &'a FiniteParserReadSupport, nodes: usize, starts: &[u32]) -> Option<Self> {
+        if nodes == 0 || nodes > 200_000 || nodes.checked_mul(domain.words)? > 8_000_000 {
+            return None;
+        }
+        let mut result = Self {
+            domain,
+            offsets: vec![u32::MAX; nodes],
+            contexts: vec![0; nodes * domain.words],
+            source: vec![0; domain.words],
+            source_nonempty: false,
+            word_limit: 8_000_000,
+            dense: true,
+            propagation_words: 0,
+        };
+        for &state in starts {
+            let begin = result.destination(state as usize)?;
             insert(&mut result.contexts[begin..begin + domain.words], domain.root, domain.root);
         }
         Some(result)
@@ -127,6 +151,11 @@ impl<'a> SparseReadContextTransfer<'a> {
     fn destination(&mut self, target: usize) -> Option<usize> {
         let offset = *self.offsets.get(target)?;
         if offset != u32::MAX { return Some(offset as usize); }
+        if self.dense {
+            let begin = target * self.domain.words;
+            self.offsets[target] = begin as u32;
+            return Some(begin);
+        }
         let begin = self.contexts.len();
         let end = begin.checked_add(self.domain.words)?;
         if end > self.word_limit { return None; }
@@ -171,6 +200,7 @@ impl<'a> SparseReadContextTransfer<'a> {
         if source_root { insert(dest, root, root); }
         else if !has(dest, root) {
             for (a, b) in dest.iter_mut().zip(&self.source) { *a |= *b; }
+            self.propagation_words += self.domain.words;
         }
         Some(())
     }
@@ -199,95 +229,93 @@ pub(super) fn restrict_with_topology(
     nwa:&mut [FastBoundaryNwaState], starts:&[u32], domain:&FiniteParserReadSupport,
     topology:Option<&CheckedNativeTopology>,
 ) -> Option<ReadSupportProfile> {
-    let (n,words,root)=(nwa.len(),domain.words,domain.root);
-    if n==0 || n>200_000 || n.checked_mul(words)?>8_000_000
-        || starts.iter().any(|&q|q as usize>=n) {return None;}
-    if topology.is_some_and(|order| order.order.len() != n) { return None; }
-    let mut indegree=if topology.is_none(){vec![0usize;n]}else{Vec::new()};
-    let mut edges=0usize;
-    for (q,state) in nwa.iter().enumerate() {
-        for (label,branches) in &state.transitions {
-            if *label!=DEFAULT_LABEL && (*label<0 || *label as usize>=domain.target.len()) {return None;}
-            for &(next,weight) in branches {
-                if next as usize>=n {return None;}
-                if weight!=0 {
-                    if let Some(order)=topology {if !order.permits(q,next){return None;}}
-                    else{indegree[next as usize]+=1;}
-                    edges+=1;
+    let n = nwa.len();
+    let mut transfer = ReadContextTransfer::new_dense(domain, n, starts)?;
+    if topology.is_some_and(|order| order.order.len() != n) {
+        return None;
+    }
+    let mut edges = 0usize;
+    // Validate the complete graph, including labels/targets of dead guards,
+    // before changing any coefficients.
+    for (state_id, state) in nwa.iter().enumerate() {
+        for (label, branches) in &state.transitions {
+            if *label != DEFAULT_LABEL && (*label < 0 || *label as usize >= domain.target.len()) {
+                return None;
+            }
+            for &(target, weight) in branches {
+                if target as usize >= n {
+                    return None;
+                }
+                if weight != 0 {
+                    if topology.is_some_and(|order| !order.permits(state_id, target)) {
+                        return None;
+                    }
+                    edges += 1;
                 }
             }
         }
-        for &(next,weight) in &state.epsilons {
-            if next as usize>=n{return None;}
-            if weight!=0 {
-                    if let Some(order)=topology {if !order.permits(q,next){return None;}}
-                    else{indegree[next as usize]+=1;}
-                    edges+=1;
+        for &(target, weight) in &state.epsilons {
+            if target as usize >= n {
+                return None;
+            }
+            if weight != 0 {
+                if topology.is_some_and(|order| !order.permits(state_id, target)) {
+                    return None;
                 }
+                edges += 1;
+            }
         }
     }
-    if edges>4_000_000{return None;}
-    let mut topo=Vec::with_capacity(n);
-    if let Some(order)=topology {
-        topo.extend(order.order.iter().map(|&q|q as usize));
+    if edges > 4_000_000 {
+        return None;
+    }
+    let owned_order;
+    let order = if let Some(topology) = topology {
+        topology.order.as_slice()
     } else {
-    let mut queue=(0..n).filter(|&q|indegree[q]==0).collect::<VecDeque<_>>();
-    while let Some(q)=queue.pop_front(){
-        topo.push(q);
-        for &(next,weight) in nwa[q].epsilons.iter()
-            .chain(nwa[q].transitions.iter().flat_map(|(_,branches)|branches.iter())) {
-            if weight==0{continue;}
-            indegree[next as usize]-=1;
-            if indegree[next as usize]==0{queue.push_back(next as usize);}
-        }
-    }
-    }
-    if topo.len()!=n{return None;}
-    let mut contexts=vec![0u64;n*words];
-    for &q in starts {insert(&mut contexts[q as usize*words..(q as usize+1)*words],root,root);}
-    let mut source=vec![0;words];
-    let mut profile=ReadSupportProfile{states:n,domain_states:domain.states,live_edges_before:edges,..Default::default()};
-    for q in topo {
-        source.copy_from_slice(&contexts[q*words..(q+1)*words]);
-        let state=&mut nwa[q];
-        if source.iter().all(|&word|word==0){
-            state.final_weight=0;
-            for (_,weight) in state.epsilons.iter_mut()
-                .chain(state.transitions.iter_mut().flat_map(|(_,branches)|branches.iter_mut())) {
-                *weight=0;
+        owned_order = super::finite_signed_graph::topological_order(nwa as &[FastBoundaryNwaState])?;
+        owned_order.as_slice()
+    };
+    let mut profile = ReadSupportProfile {
+        states: n, domain_states: domain.states, live_edges_before: edges,
+        ..Default::default()
+    };
+    for &state_id in order {
+        let state = &mut nwa[state_id as usize];
+        if !transfer.load_source(state_id as usize)? {
+            state.final_weight = 0;
+            for (_, weight) in state.epsilons.iter_mut()
+                .chain(state.transitions.iter_mut().flat_map(|(_, branches)| branches.iter_mut()))
+            {
+                *weight = 0;
             }
             continue;
         }
-        profile.live_states+=1;
-        for &(next,weight) in &state.epsilons {
-            if weight==0{continue;}
-            let dest=&mut contexts[next as usize*words..(next as usize+1)*words];
-            if has(&source,root){insert(dest,root,root);}
-            else if !has(dest,root){
-                for (x,y) in dest.iter_mut().zip(&source){*x|=*y;}
-                profile.propagation_words+=words;
+        profile.live_states += 1;
+        for &(target, weight) in &state.epsilons {
+            if weight != 0 {
+                transfer.transfer_epsilon(target as usize)?;
+                profile.live_edges_after += 1;
             }
-            profile.live_edges_after+=1;
         }
-        for (label,branches) in &mut state.transitions {
-            let possible=*label==DEFAULT_LABEL || source.iter()
-                .zip(&domain.allowed[*label as usize*words..(*label as usize+1)*words])
-                .any(|(x,y)|x&y!=0);
-            if !possible {
-                profile.blocked_labels+=1;
-                for (_,weight) in branches.iter_mut(){*weight=0;}
-                // Even an entirely empty row remains present as a guard.
+        for (label, branches) in &mut state.transitions {
+            if !transfer.read_allowed(*label)? {
+                profile.blocked_labels += 1;
+                for (_, weight) in branches {
+                    *weight = 0;
+                }
                 continue;
             }
-            let context=if *label==DEFAULT_LABEL{root}else{domain.target[*label as usize] as usize};
-            for &(next,weight) in branches.iter(){
-                if weight==0{continue;}
-                insert(&mut contexts[next as usize*words..(next as usize+1)*words],context,root);
-                profile.live_edges_after+=1;
-                profile.forgotten_defaults+=usize::from(*label==DEFAULT_LABEL);
+            for &(target, weight) in branches.iter() {
+                if weight != 0 {
+                    transfer.transfer_read(*label, target as usize)?;
+                    profile.live_edges_after += 1;
+                    profile.forgotten_defaults += usize::from(*label == DEFAULT_LABEL);
+                }
             }
         }
     }
+    profile.propagation_words = transfer.propagation_words;
     Some(profile)
 }
 
@@ -326,7 +354,7 @@ mod tests {
     fn sparse_context_allocates_only_nonempty_blocks_and_declines_before_publication(){
         let domain=FiniteParserReadSupport::new_checked(3,0,
             &[vec![(0,1),(1,1),(2,2)],vec![(0,1)],vec![(2,2)]],&[true,true,true],true).unwrap();
-        let mut c=SparseReadContextTransfer::with_word_limit(&domain,100,&[0],3).unwrap();
+        let mut c=ReadContextTransfer::with_word_limit(&domain,100,&[0],3).unwrap();
         assert_eq!(c.allocated_nodes(),1);
         assert!(!c.load_source(90).unwrap());
         assert!(!c.read_allowed(DEFAULT_LABEL).unwrap());

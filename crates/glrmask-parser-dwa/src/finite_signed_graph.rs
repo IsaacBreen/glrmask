@@ -526,14 +526,14 @@ impl VirtualSignedGraph {
 /// exactly the same guard-preserving publication.
 enum PositiveSupport<'a> {
     Reachable(Vec<bool>),
-    Context(super::finite_read_support::SparseReadContextTransfer<'a>),
+    Context(super::finite_read_support::ReadContextTransfer<'a>),
 }
 
 impl<'a> PositiveSupport<'a> {
     fn new(nodes: usize, starts: &[u32], domain: Option<&'a FiniteParserReadSupport>) -> Option<Self> {
         if let Some(domain) = domain {
             return Some(Self::Context(
-                super::finite_read_support::SparseReadContextTransfer::new(domain, nodes, starts)?,
+                super::finite_read_support::ReadContextTransfer::new(domain, nodes, starts)?,
             ));
         }
         let mut live = vec![false; nodes];
