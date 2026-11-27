@@ -3699,6 +3699,30 @@ impl DynamicMaskSliceTrie {
     }
 }
 
+type TerminalQuotient = Arc<TerminalProjectedQuotient>;
+
+/// A prepared inventory is authoritative for availability, including an
+/// intentionally empty sidecar. Otherwise all successful and declined
+/// runtime preparations share one terminal-keyed inventory.
+#[derive(Debug, Clone)]
+enum ProjectedTerminalInventory {
+    Prepared(Arc<[(TerminalID, TerminalQuotient)]>),
+    Runtime(Arc<RuntimeTerminalInventory>),
+}
+
+#[derive(Debug, Default)]
+struct RuntimeTerminalInventory {
+    by_terminal: Mutex<FxHashMap<TerminalID, Option<TerminalQuotient>>>,
+    /// One eager batch attempt, not a second quotient store.
+    batch_complete: OnceLock<()>,
+}
+
+impl Default for ProjectedTerminalInventory {
+    fn default() -> Self {
+        Self::Runtime(Arc::new(RuntimeTerminalInventory::default()))
+    }
+}
+
 /// Runtime-only vocabulary data for direct dynamic mask generation.
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskVocab {
@@ -3780,24 +3804,7 @@ pub(crate) struct DynamicMaskVocab {
     projection_alias_h64: Arc<[u32]>,
     bounded_observation_sets: Arc<DynamicBoundedObservationSets>,
     terminal_observation_classes: Arc<[(TerminalID, Arc<[u32]>)]>,
-    projected_terminal_quotients: Arc<[(TerminalID, Arc<TerminalProjectedQuotient>)]>,
-    /// Runtime-only lazy quotient analysis. Dynamic compilation keeps quotient
-    /// construction off the build/first-mask path until a master-slice proof
-    /// actually needs it. The persisted/prepared sidecar above still takes
-    /// precedence when present.
-    runtime_projected_terminal_quotients:
-        Arc<OnceLock<Arc<[(TerminalID, Arc<TerminalProjectedQuotient>)]>>>,
-    /// Incremental runtime-only quotient cache used by hot-path containment
-    /// proofs. Unlike `runtime_projected_terminal_quotients`, this can prepare
-    /// only the terminal actually requested by the current proof instead of
-    /// materializing every safe-alphabet candidate at once. `None` is a cached
-    /// exact "no quotient available" result for that terminal.
-    runtime_projected_terminal_quotient_cache:
-        Arc<Mutex<FxHashMap<TerminalID, Option<Arc<TerminalProjectedQuotient>>>>>,
-    /// True once the exact projected-terminal analysis has run, including
-    /// when it proved that no quotient is worth retaining.  This distinguishes
-    /// a legitimate empty result from an unprepared legacy/runtime value.
-    projected_terminal_quotients_prepared: bool,
+    terminal_quotients: ProjectedTerminalInventory,
     /// Parser-independent exact projected-text proof results.  The key is the
     /// terminal residual coordinate plus the vocabulary alphabet being proved.
     /// Sharing this across sequences is safe because parser admission only
@@ -4141,10 +4148,7 @@ impl DynamicMaskVocab {
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
-            projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
-            runtime_projected_terminal_quotients: Arc::new(OnceLock::new()),
-            runtime_projected_terminal_quotient_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            projected_terminal_quotients_prepared: false,
+            terminal_quotients: ProjectedTerminalInventory::default(),
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
@@ -4239,10 +4243,7 @@ impl DynamicMaskVocab {
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
-            projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
-            runtime_projected_terminal_quotients: Arc::new(OnceLock::new()),
-            runtime_projected_terminal_quotient_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            projected_terminal_quotients_prepared: false,
+            terminal_quotients: ProjectedTerminalInventory::default(),
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
@@ -4374,10 +4375,7 @@ impl DynamicMaskVocab {
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
-            projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
-            runtime_projected_terminal_quotients: Arc::new(OnceLock::new()),
-            runtime_projected_terminal_quotient_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            projected_terminal_quotients_prepared: false,
+            terminal_quotients: ProjectedTerminalInventory::default(),
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
@@ -6324,17 +6322,17 @@ impl DynamicMaskVocab {
         (transparent, pair_count)
     }
 
-    #[inline]
-    fn active_projected_terminal_quotients(
-        &self,
-    ) -> &[(TerminalID, Arc<TerminalProjectedQuotient>)] {
-        if self.projected_terminal_quotients_prepared {
-            self.projected_terminal_quotients.as_ref()
-        } else {
-            self.runtime_projected_terminal_quotients
-                .get()
-                .map(Arc::as_ref)
-                .unwrap_or(&[])
+    fn active_projected_terminal_quotients(&self) -> Vec<(TerminalID, TerminalQuotient)> {
+        match &self.terminal_quotients {
+            ProjectedTerminalInventory::Prepared(quotients) => quotients.to_vec(),
+            ProjectedTerminalInventory::Runtime(runtime) => {
+                let inventory = runtime.by_terminal.lock().unwrap_or_else(|p| p.into_inner());
+                let mut quotients: Vec<_> = inventory.iter().filter_map(|(&terminal, quotient)| {
+                    Some((terminal, Arc::clone(quotient.as_ref()?)))
+                }).collect();
+                quotients.sort_unstable_by_key(|(terminal, _)| *terminal);
+                quotients
+            }
         }
     }
 
@@ -6801,13 +6799,7 @@ impl DynamicMaskVocab {
         self.mask_state_source_subsets = Arc::clone(&source.mask_state_source_subsets);
         self.mask_source_subset_to_state = Arc::clone(&source.mask_source_subset_to_state);
         self.terminal_observation_classes = Arc::clone(&source.terminal_observation_classes);
-        self.projected_terminal_quotients = Arc::clone(&source.projected_terminal_quotients);
-        self.runtime_projected_terminal_quotients =
-            Arc::clone(&source.runtime_projected_terminal_quotients);
-        self.runtime_projected_terminal_quotient_cache =
-            Arc::clone(&source.runtime_projected_terminal_quotient_cache);
-        self.projected_terminal_quotients_prepared =
-            source.projected_terminal_quotients_prepared;
+        self.terminal_quotients = source.terminal_quotients.clone();
         self.prepared_master_prover_row_ids =
             Arc::clone(&source.prepared_master_prover_row_ids);
         self.prepared_master_prover_offsets =
@@ -7202,16 +7194,12 @@ impl DynamicMaskVocab {
     ) {
         quotients.sort_unstable_by_key(|(terminal, _)| *terminal);
         quotients.dedup_by_key(|(terminal, _)| *terminal);
-        self.projected_terminal_quotients = Arc::from(
+        self.terminal_quotients = ProjectedTerminalInventory::Prepared(Arc::from(
             quotients
                 .into_iter()
                 .map(|(terminal, quotient)| (terminal, Arc::new(quotient)))
                 .collect::<Vec<_>>(),
-        );
-        self.runtime_projected_terminal_quotients = Arc::new(OnceLock::new());
-        self.runtime_projected_terminal_quotient_cache =
-            Arc::new(Mutex::new(FxHashMap::default()));
-        self.projected_terminal_quotients_prepared = true;
+        ));
         self.projected_terminal_text_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -7229,10 +7217,12 @@ impl DynamicMaskVocab {
     pub(crate) fn projected_terminal_quotients_for_artifact(
         &self,
     ) -> Vec<(TerminalID, TerminalProjectedQuotient)> {
-        self.projected_terminal_quotients
-            .iter()
-            .map(|(terminal, quotient)| (*terminal, quotient.as_ref().clone()))
-            .collect()
+        match &self.terminal_quotients {
+            ProjectedTerminalInventory::Prepared(quotients) => quotients.iter()
+                .map(|(terminal, quotient)| (*terminal, quotient.as_ref().clone()))
+                .collect(),
+            ProjectedTerminalInventory::Runtime(_) => Vec::new(),
+        }
     }
 
     #[inline]
@@ -7241,25 +7231,15 @@ impl DynamicMaskVocab {
         terminal: TerminalID,
         source: u32,
     ) -> Option<Arc<TerminalProjectedQuotient>> {
-        let quotients = self.active_projected_terminal_quotients();
-        if let Ok(index) = quotients
-            .binary_search_by_key(&terminal, |(candidate, _)| *candidate)
-        {
-            let quotient = Arc::clone(&quotients[index].1);
-            return quotient.contains_source(source).then_some(quotient);
-        }
-        if self.projected_terminal_quotients_prepared
-            || self.runtime_projected_terminal_quotients.get().is_some()
-        {
-            return None;
-        }
-        let quotient = self
-            .runtime_projected_terminal_quotient_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&terminal)
-            .cloned()
-            .flatten()?;
+        let quotient = match &self.terminal_quotients {
+            ProjectedTerminalInventory::Prepared(quotients) => {
+                let index = quotients.binary_search_by_key(&terminal, |(id, _)| *id).ok()?;
+                Arc::clone(&quotients[index].1)
+            }
+            ProjectedTerminalInventory::Runtime(runtime) => runtime.by_terminal
+                .lock().unwrap_or_else(|p| p.into_inner())
+                .get(&terminal).cloned().flatten()?,
+        };
         quotient.contains_source(source).then_some(quotient)
     }
 
@@ -7273,19 +7253,13 @@ impl DynamicMaskVocab {
         source: &Tokenizer,
         terminal: TerminalID,
     ) {
-        if self.projected_terminal_quotients_prepared
-            || self.runtime_projected_terminal_quotients.get().is_some()
+        let ProjectedTerminalInventory::Runtime(runtime) = &self.terminal_quotients else {
+            return;
+        };
+        if runtime.batch_complete.get().is_some()
+            || runtime.by_terminal.lock().unwrap_or_else(|p| p.into_inner()).contains_key(&terminal)
         {
             return;
-        }
-        {
-            let cache = self
-                .runtime_projected_terminal_quotient_cache
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if cache.contains_key(&terminal) {
-                return;
-            }
         }
 
         let state_cap = crate::env::var("GLRMASK_EXPERIMENT_DEMAND_PROOF_STATE_CAP")
@@ -7309,11 +7283,8 @@ impl DynamicMaskVocab {
                     (candidate == terminal).then(|| Arc::new(quotient))
                 })
         };
-        self.runtime_projected_terminal_quotient_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entry(terminal)
-            .or_insert(built);
+        runtime.by_terminal.lock().unwrap_or_else(|p| p.into_inner())
+            .entry(terminal).or_insert(built);
     }
 
     pub(crate) fn prepare_runtime_projected_terminal_quotients(
@@ -7322,12 +7293,10 @@ impl DynamicMaskVocab {
         safe_slice_bytes: &U8Set,
         component_state_cap: Option<usize>,
     ) {
-        if self.projected_terminal_quotients_prepared
-            || self.runtime_projected_terminal_quotients.get().is_some()
-        {
+        let ProjectedTerminalInventory::Runtime(runtime) = &self.terminal_quotients else {
             return;
-        }
-        let _ = self.runtime_projected_terminal_quotients.get_or_init(|| {
+        };
+        runtime.batch_complete.get_or_init(|| {
             let candidates = (0..source.num_terminals())
                 .filter(|&terminal| {
                     source
@@ -7335,43 +7304,37 @@ impl DynamicMaskVocab {
                         .is_some_and(|support| safe_slice_bytes.is_subset(&support))
                 })
                 .collect::<Vec<_>>();
-            let mut quotients = match component_state_cap {
+            let quotients = match component_state_cap {
                 Some(cap) => source.build_terminal_projected_quotients_for_containment_candidates_bounded(
                     &candidates, cap, cap.saturating_mul(256),
                 ),
                 None => source.build_terminal_projected_quotients_for_containment_candidates(&candidates),
             };
-            quotients.sort_unstable_by_key(|(terminal, _)| *terminal);
-            quotients.dedup_by_key(|(terminal, _)| *terminal);
-            Arc::from(
-                quotients
-                    .into_iter()
-                    .map(|(terminal, quotient)| (terminal, Arc::new(quotient)))
-                    .collect::<Vec<_>>(),
-            )
+            let mut inventory = runtime.by_terminal.lock().unwrap_or_else(|p| p.into_inner());
+            for (terminal, quotient) in quotients {
+                // A bounded decline is not an exact negative. A successful
+                // batch proof may fill a previously declined entry, but
+                // never discard an already usable exact quotient.
+                let entry = inventory.entry(terminal).or_default();
+                if entry.is_none() {
+                    *entry = Some(Arc::new(quotient));
+                }
+            }
         });
     }
 
     #[inline]
     pub(crate) fn has_projected_terminal_quotients(&self) -> bool {
-        if self.projected_terminal_quotients_prepared {
-            !self.projected_terminal_quotients.is_empty()
-        } else {
-            self.runtime_projected_terminal_quotients
-                .get()
-                .is_some_and(|quotients| !quotients.is_empty())
-                || self
-                    .runtime_projected_terminal_quotient_cache
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .values()
-                    .any(Option::is_some)
+        match &self.terminal_quotients {
+            ProjectedTerminalInventory::Prepared(quotients) => !quotients.is_empty(),
+            ProjectedTerminalInventory::Runtime(runtime) => runtime.by_terminal
+                .lock().unwrap_or_else(|p| p.into_inner()).values().any(Option::is_some),
         }
     }
 
     #[inline]
     pub(crate) fn projected_terminal_quotients_prepared(&self) -> bool {
-        self.projected_terminal_quotients_prepared
+        matches!(self.terminal_quotients, ProjectedTerminalInventory::Prepared(_))
     }
 
     pub(crate) fn projected_terminal_text_liveness(
@@ -8617,10 +8580,7 @@ impl Default for DynamicMaskVocab {
             projection_alias_h64: Arc::from(Vec::<u32>::new()),
             bounded_observation_sets: Arc::new(DynamicBoundedObservationSets::default()),
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
-            projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
-            runtime_projected_terminal_quotients: Arc::new(OnceLock::new()),
-            runtime_projected_terminal_quotient_cache: Arc::new(Mutex::new(FxHashMap::default())),
-            projected_terminal_quotients_prepared: false,
+            terminal_quotients: ProjectedTerminalInventory::default(),
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
