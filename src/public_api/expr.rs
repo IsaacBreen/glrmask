@@ -1,6 +1,6 @@
 //! Expression operators have no source, lexical scope or path segment of their own.
 use super::*;
-use super::module::sealed::Binding;
+use super::module::{CompiledPart, sealed::Binding};
 
 /// A grammar expression. Compiled constraints can be used in module-bound expressions with the same vocabulary.
 #[derive(Debug, Clone)]
@@ -10,7 +10,7 @@ pub struct Expr(pub(crate) Arc<ExprNode>);
 pub(crate) enum ExprLeaf {
     Grammar(Grammar),
     Module(Module),
-    Constraint(Constraint),
+    Constraint(CompiledPart),
     TokenSet(TokenSet),
 }
 
@@ -36,7 +36,7 @@ impl From<&Module> for Expr {
     }
 }
 impl From<Constraint> for Expr {
-    fn from(c: Constraint) -> Self { Self(Arc::new(ExprNode::Leaf(ExprLeaf::Constraint(c)))) }
+    fn from(c: Constraint) -> Self { Self(Arc::new(ExprNode::Leaf(ExprLeaf::Constraint(c.into())))) }
 }
 impl From<&Constraint> for Expr {
     fn from(c: &Constraint) -> Self { Self::from(c.clone()) }

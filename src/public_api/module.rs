@@ -105,11 +105,11 @@ impl InternalMaskStrategy {
 pub trait IntoBinding: sealed::ModuleValue {}
 
 pub(super) mod sealed {
-    use super::{Constraint, Expr, Grammar, Module, TokenSet};
+    use super::{CompiledPart, Expr, Grammar, Module, TokenSet};
 
     pub enum Binding {
         Module(Module),
-        Constraint(Constraint),
+        Constraint(CompiledPart),
         Grammar(Grammar),
         Expr(Expr),
         TokenSet(TokenSet),
@@ -155,26 +155,37 @@ pub(crate) enum BoundValue {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum CompiledPart {
-    Ready(Constraint),
+pub enum CompiledPart {
+    Ready(Arc<dyn RetainedConstraint>),
     Deferred { bytes: Arc<[u8]>, fingerprint: [u8; 32] },
+}
+// Hide recursive GSS internals from downstream auto-trait resolution, just
+// as RetainedPreparation does. The compiler checks Send + Sync here once.
+pub trait RetainedConstraint: Send + Sync + std::fmt::Debug {
+    fn constraint(&self) -> &Constraint;
+}
+impl RetainedConstraint for Constraint {
+    fn constraint(&self) -> &Constraint { self }
+}
+impl From<Constraint> for CompiledPart {
+    fn from(value: Constraint) -> Self { Self::Ready(Arc::new(value)) }
 }
 impl CompiledPart {
     fn fingerprint(&self) -> [u8; 32] {
         match self {
-            Self::Ready(c) => c.runtime().vocab_fingerprint(),
+            Self::Ready(c) => c.constraint().runtime().vocab_fingerprint(),
             Self::Deferred { fingerprint, .. } => *fingerprint,
         }
     }
     fn save(&self) -> Vec<u8> {
         match self {
-            Self::Ready(c) => c.save(),
+            Self::Ready(c) => c.constraint().save(),
             Self::Deferred { bytes, .. } => bytes.to_vec(),
         }
     }
     fn materialize(&self, vocab: &Vocab, boundary_strategy: InternalBoundaryMaskStrategy) -> Result<RuntimeConstraint> {
         let mut child = match self {
-            Self::Ready(c) => c.runtime().clone(),
+            Self::Ready(c) => c.constraint().runtime().clone(),
             Self::Deferred { bytes, .. } => Constraint::load(bytes, vocab)?.runtime().clone(),
         };
         child.materialize_composition_link_metadata_for_compilation().map_err(Error::Compilation)?;
@@ -188,7 +199,7 @@ impl CompiledPart {
         child = child.with_end_tokens(&[])?;
         let grammar = Grammar::from_glrm("extern grammar BODY extern token END start root nt root = BODY END")?;
         let wrapper = Module::new(&grammar)
-            .bound("BODY", Binding::Constraint(Constraint::from_runtime(child)))?
+            .bound("BODY", Binding::Constraint(Constraint::from_runtime(child).into()))?
             .bound("END", Binding::TokenSet(TokenSet::new(ids)))?;
         let options = CompileOptions::default().mask_strategy(MaskStrategy::FAST_COMPILE);
         let mut wrapper = wrapper;
@@ -520,7 +531,7 @@ impl Module {
             Binding::Module(child) => Self::bound_module(name, kind, declared, child)?,
             Binding::Constraint(c) => {
                 check_binding_kind(name, kind, true).map_err(|e| e.with_source_span(declared.spans.get(name).copied()))?;
-                BoundValue::Compiled(CompiledPart::Ready(c))
+                BoundValue::Compiled(c)
             }
             Binding::Expr(expr) => {
                 check_binding_kind(name, kind, true)
