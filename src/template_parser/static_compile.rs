@@ -575,7 +575,7 @@ pub(super) fn compile(
     specials: &[crate::runtime::SpecialTokenTerminal],
 ) -> Result<crate::runtime::Constraint> {
     let context = lexical_context(program.parser.terminal_count);
-    let templates = prepare_static_templates(&program.templates, program.parser.state_count)?;
+    let templates = prepare_static_templates(&program.parser.terminal_sources(), program.parser.state_count)?;
     let (terminal, _, _) = tdwa::build_id_map_and_terminal_dwa(
         &tokenizer,
         vocab,
@@ -612,7 +612,6 @@ pub(super) fn compile(
             tokenizer,
             context.terminal_display_names,
             ignore_terminal,
-            program.templates.iter().cloned().collect(),
             Arc::clone(&program.parser),
             vocab,
             possible.runtime_dynamic_vocab.vocab,

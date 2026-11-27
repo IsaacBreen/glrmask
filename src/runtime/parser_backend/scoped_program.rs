@@ -31,9 +31,9 @@ impl ScopedProgram {
 
     pub(crate) fn terminal(component: &Constraint, terminal: usize) -> Self {
         let parser = component.template_parser.as_ref().expect("native component");
-        Self { source: Arc::clone(component.template_dfas_by_terminal[terminal].as_ref().unwrap()),
+        Self { source: Arc::clone(parser.terminal_source(terminal).unwrap()),
             domain: Arc::clone(parser.local_domain(terminal).expect("local domain")),
-            fast: component.fast_template_dfas_by_terminal.get(terminal).cloned().flatten(),
+            fast: parser.local_fast(terminal).cloned(),
             offset: 0, symbols: parser.state_count, guard_owner: true, append_push: None }
     }
 

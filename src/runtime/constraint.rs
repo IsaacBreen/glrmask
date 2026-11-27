@@ -9433,7 +9433,6 @@ impl Constraint {
     pub(crate) fn rebuild_runtime_caches_impl(
         &mut self,
         preserve_packed_dwa_dense_masks: bool,
-        prepared_template_indices: Option<FastTemplateDfasByTerminal>,
     ) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         if !self.has_template_parser() { self.table.rebuild_unconditional_advance_rows(); }
@@ -9556,12 +9555,9 @@ impl Constraint {
         let state_relation_ms = state_relation_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let fast_template_started_at = profile.then(std::time::Instant::now);
-        // The template loader may hand back the exact indices it just built
-        // from this constraint's validated immutable program. Keep those
-        // objects instead of constructing and discarding a second copy.
-        // Ordinary compile/mutation rebuilds supply None and remain unchanged.
-        let fast_template_dfas_by_terminal = prepared_template_indices
-            .unwrap_or_else(|| self.compute_fast_template_dfas());
+        // Native relations own their immutable prepared views. Only LR acceleration
+        // needs to be rebuilt from the core inventory.
+        let lr_fast_terminal_templates = self.compute_lr_fast_terminal_templates();
         let fast_template_ms = fast_template_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let guarded_shift_ms = guarded_shift_started_at
@@ -9908,7 +9904,7 @@ impl Constraint {
                 self.internal_tsid_count(),
             );
         }
-        self.fast_template_dfas_by_terminal = fast_template_dfas_by_terminal;
+        self.lr_fast_terminal_templates = lr_fast_terminal_templates;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         let seed_started_at = profile.then(std::time::Instant::now);
         let seed_dense_prebuilt = self.seed_universe_dense.len() == self.internal_token_dense_words
@@ -11168,12 +11164,27 @@ impl Constraint {
             .collect()
     }
 
-    pub(crate) fn compute_fast_template_dfas(&self) -> FastTemplateDfasByTerminal {
+    pub(crate) fn terminal_template(&self, terminal: usize) -> Option<&Arc<crate::runtime::CommitTemplateDfas>> {
+        match &self.template_parser {
+            Some(parser) => parser.terminal_source(terminal),
+            None => self.lr_terminal_templates.get(terminal)?.as_ref(),
+        }
+    }
+
+    pub(crate) fn fast_terminal_template(&self, terminal: usize) -> Option<&Arc<FastCommitTemplateDfas>> {
+        match &self.template_parser {
+            Some(parser) => parser.local_fast(terminal),
+            None => self.lr_fast_terminal_templates.get(terminal)?.as_ref(),
+        }
+    }
+
+
+    fn compute_lr_fast_terminal_templates(&self) -> FastTemplateDfasByTerminal {
         let mut shared = rustc_hash::FxHashMap::<
             usize, Arc<FastCommitTemplateDfas>,
         >::default();
-        for (source, view) in self.template_dfas_by_terminal.iter()
-            .zip(&self.fast_template_dfas_by_terminal)
+        for (source, view) in self.lr_terminal_templates.iter()
+            .zip(&self.lr_fast_terminal_templates)
         {
             if let (Some(source), Some(view)) = (source, view)
                 && view.is_for_source(source)
@@ -11182,7 +11193,7 @@ impl Constraint {
                     .or_insert_with(|| Arc::clone(view));
             }
         }
-        self.template_dfas_by_terminal
+        self.lr_terminal_templates
             .iter()
             .map(|template| {
                 template.as_ref().map(|source| {
@@ -13866,7 +13877,7 @@ mod dense_internal_token_mask_tests {
                 rebuilt.materialize_parser_dwa_for_compilation().unwrap();
                 rebuilt.parser_runtime_caches_prebuilt = false;
                 clear_resident_fragments(&mut rebuilt);
-                rebuilt.rebuild_runtime_caches_impl(false, None);
+                rebuilt.rebuild_runtime_caches_impl(false);
                 let rows = rebuilt.compute_buf_masks();
                 let prefix = Constraint::direct_sparse_work_prefix(&rows, rebuilt.body_mask_len());
                 let limit = (rebuilt.body_mask_len() / 2).min(2048) as u64;

@@ -224,7 +224,6 @@ impl TemplateBuildOptions {
 #[derive(Debug, Clone)]
 pub struct ParserProgram {
     parser: Arc<TemplateParser>,
-    templates: Arc<[Option<Arc<CommitTemplateDfas>>]>,
     identity_terminals: BTreeSet<u32>,
 }
 
@@ -301,7 +300,7 @@ impl ParserProgram {
         // TemplateDomain validates every epsilon link and phase shape while
         // deriving the exact input projection; no provider certificate is trusted.
         let parser = TemplateParser::compile(symbols, terminals, BTreeSet::new(), &templates, completion)?;
-        Ok(Self { parser: Arc::new(parser), templates: templates.into(), identity_terminals })
+        Ok(Self { parser: Arc::new(parser), identity_terminals })
     }
 
     pub fn stack_symbol_count(&self) -> u32 { self.parser.state_count }
@@ -313,7 +312,7 @@ impl ParserProgram {
 
     pub fn compile_with(&self, lexer: &LexerDefinition, vocab: &Vocab,
         options: TemplateBuildOptions) -> Result<Constraint> {
-        if lexer.terminals.len() != self.templates.len() { return Err(fail("lexer and parser terminal counts must agree exactly")); }
+        if lexer.terminals.len() != self.parser.terminal_count as usize { return Err(fail("lexer and parser terminal counts must agree exactly")); }
         if let Some(ignore) = lexer.ignore_terminal
             && !self.identity_terminals.contains(&ignore) { return Err(fail("ignored terminal must exist and use StackTemplate::identity()")); }
         let mut expressions = Vec::with_capacity(lexer.terminals.len());
@@ -340,7 +339,7 @@ impl ParserProgram {
             crate::InternalMaskStrategy::Auto | crate::InternalMaskStrategy::TokenTrie(_) => {
                 let dynamic_vocab = crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab);
                 let mut inner = crate::dynamic_constraint::DynamicConstraint::from_template_runtime_parts_unfinalized(
-                    tokenizer, names.clone(), ignore, self.templates.to_vec(), self.parser.clone(), vocab, dynamic_vocab,
+                    tokenizer, names.clone(), ignore, self.parser.clone(), vocab, dynamic_vocab,
                 );
                 inner.special_token_terminals = specials.clone();
                 inner.rebuild_dynamic_runtime_caches();

@@ -126,21 +126,19 @@ fn ready_adapter_preserves_template_and_runtime_arc_identity() {
         )
         .unwrap();
 
-    let templates = prepared.templates.clone();
-    let runtime = prepared.runtime.clone();
+    let templates = prepared.parser.terminal_sources();
+    let runtime = (0..templates.len()).map(|terminal| prepared.parser.local_fast(terminal).cloned()).collect::<Vec<_>>();
     let completion = Arc::clone(prepared.parser.completion_template());
     drop(table);
     drop(analyzed);
 
-    let result = DynamicConstraint::from_template_runtime_parts_unfinalized_with_views(
+    let result = DynamicConstraint::from_template_runtime_parts_unfinalized(
         compiled.inner.tokenizer.as_ref().clone(),
         compiled.inner.terminal_display_names.clone(),
         compiled.inner.ignore_terminal,
-        prepared.templates,
         Arc::new(prepared.parser),
         &vocab,
         compiled.inner.dynamic_mask_vocab.clone(),
-        Some(prepared.runtime),
     );
 
     assert!(!result.table.is_present());
@@ -148,14 +146,16 @@ fn ready_adapter_preserves_template_and_runtime_arc_identity() {
         &completion,
         result.template_parser.as_ref().unwrap().completion_template(),
     ));
-    for (before, after) in templates.iter().zip(&result.template_dfas_by_terminal) {
+    for (terminal, before) in templates.iter().enumerate() {
+        let after = result.terminal_template(terminal);
         match (before, after) {
             (Some(before), Some(after)) => assert!(Arc::ptr_eq(before, after)),
             (None, None) => {}
             _ => panic!("template presence changed during installation"),
         }
     }
-    for (before, after) in runtime.iter().zip(&result.fast_template_dfas_by_terminal) {
+    for (terminal, before) in runtime.iter().enumerate() {
+        let after = result.fast_terminal_template(terminal);
         match (before, after) {
             (Some(before), Some(after)) => assert!(Arc::ptr_eq(before, after)),
             (None, None) => {}

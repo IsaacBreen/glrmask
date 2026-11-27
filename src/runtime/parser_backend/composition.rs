@@ -255,8 +255,8 @@ impl Constraint {
         // The packed flattened LR copy was only used for the old relinker. A
         // template artifact must not retain executable LR data in a side field.
         overlay.recursive_compiler_table = Default::default();
-        self.template_dfas_by_terminal = programs;
-        self.fast_template_dfas_by_terminal = self.compute_fast_template_dfas();
+        self.lr_terminal_templates.clear();
+        self.lr_fast_terminal_templates.clear();
         self.template_parser = Some(Arc::new(parser));
         self.table = ParserTableStorage::absent();
         self.deferred_table_rules_blob = None;

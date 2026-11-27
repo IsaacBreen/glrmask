@@ -36,8 +36,8 @@ fn native(vocab: &crate::Vocab, source: &str) -> crate::runtime::Constraint {
 fn assert_no_template_artifacts(constraint: &crate::runtime::Constraint) {
     assert!(!constraint.has_template_parser(), "LR must not install a template parser");
     assert!(constraint.template_parser.is_none());
-    assert!(constraint.template_dfas_by_terminal.is_empty(), "no template DFA inventory may be built");
-    assert!(constraint.fast_template_dfas_by_terminal.is_empty());
+    assert!(constraint.lr_terminal_templates.is_empty(), "no template DFA inventory may be built");
+    assert!(constraint.lr_fast_terminal_templates.is_empty());
     assert!(constraint.direct_regular_automaton.is_none(), "no direct-regular runtime bypass");
     assert_eq!(constraint.parser_backend(), ParserBackend::LrTable);
 }

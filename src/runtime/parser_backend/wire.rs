@@ -21,7 +21,7 @@ pub(crate) struct ParserSeed {
     terminal_count: u32,
     skip_terminals: BTreeSet<u32>,
     completion: CommitTemplateDfas,
-    programs: Option<TemplateDfasByTerminal>,
+    programs: TemplateDfasByTerminal,
     composition: Option<CompositionSeed>,
     embedding: Option<super::embedding::TemplateEmbedding>,
     link_grammar: Option<Arc<super::link_grammar::LinkGrammar>>,
@@ -34,15 +34,16 @@ pub(super) struct CompositionSeed {
     completion: super::scoped_program::ScopedProgram,
 }
 
-pub(crate) fn encode(parser: &TemplateParser, templates: &TemplateDfasByTerminal) -> Vec<u8> {
-    let bytes = compact::encode(parser, templates);
+pub(crate) fn encode(parser: &TemplateParser) -> Vec<u8> {
+    let bytes = compact::encode(parser);
     if crate::env::var_os("GLRMASK_VALIDATE_TEMPLATE_WIRE").is_some() {
+        let templates = parser.terminal_sources();
         let decoded = compact::decode(&bytes).expect("newly encoded template programs must decode");
         assert_eq!(decoded.state_count, parser.state_count);
         assert_eq!(decoded.terminal_count, parser.terminal_count);
         assert_eq!(decoded.skip_terminals, parser.skip_terminals);
         assert_eq!(decoded.link_grammar, parser.link_grammar);
-        assert!(bincode::serialize(decoded.programs.as_ref().unwrap()).unwrap() == bincode::serialize(templates).unwrap(),
+        assert!(bincode::serialize(&decoded.programs).unwrap() == bincode::serialize(&templates).unwrap(),
             "compact template wire changed raw graph numbering, edges, or links");
         assert!(bincode::serialize(&decoded.completion).unwrap() == bincode::serialize(parser.completion_template().as_ref()).unwrap(),
             "compact template wire changed raw EOF completion program");
@@ -54,8 +55,8 @@ pub(crate) fn encode(parser: &TemplateParser, templates: &TemplateDfasByTerminal
 /// The vocabulary digest authenticates the binding coordinate, not the
 /// authorship of this artifact. The parser program still comes only from the
 /// saved acyclic templates, never from an LR reconstruction.
-pub(crate) fn encode_external(parser: &TemplateParser, templates: &TemplateDfasByTerminal, digest: [u8; 32]) -> Vec<u8> {
-    let body = encode(parser, templates);
+pub(crate) fn encode_external(parser: &TemplateParser, digest: [u8; 32]) -> Vec<u8> {
+    let body = encode(parser);
     let mut bytes = Vec::with_capacity(36 + body.len());
     bytes.extend_from_slice(b"TPX1");
     bytes.extend_from_slice(&digest);
@@ -124,19 +125,17 @@ fn validate_alphabet(template: &CommitTemplateDfas, state_count: u32) -> Result<
 }
 
 impl ParserSeed {
-    pub(crate) fn install(mut self, constraint: &mut Constraint) -> Result<(), String> {
-        if let Some(programs) = self.programs.take() {
-            if !constraint.template_dfas_by_terminal.is_empty() {
-                return Err("compact template artifact has duplicate core parser programs".into());
-            }
-            constraint.template_dfas_by_terminal = programs;
+    pub(crate) fn install(self, constraint: &mut Constraint) -> Result<(), String> {
+        if !constraint.lr_terminal_templates.is_empty() {
+            return Err("compact template artifact has duplicate core parser programs".into());
         }
+        let programs = self.programs;
         if !constraint.terminal_display_names.is_empty()
             && constraint.terminal_display_names.len() != self.terminal_count as usize
         {
             return Err("template parser terminal coordinate disagrees with lexical metadata".into());
         }
-        if constraint.template_dfas_by_terminal.len() != self.terminal_count as usize {
+        if programs.len() != self.terminal_count as usize {
             return Err("template parser terminal count does not match its relation inventory".into());
         }
         // Component bodies are restored from the runtime section after this
@@ -144,20 +143,18 @@ impl ParserSeed {
         // before any derived caches or public runtime state can be published.
         // Core graph/alphabet validation and runtime-view preparation share the
         // standalone backend's complete validated preparation path.
-        let (mut parser, runtime) = if let Some(composition) = self.composition {
+        let mut parser = if let Some(composition) = self.composition {
             // Descriptors are authoritative aliases into the source dictionary.
             // Drop redundant raw outer records after validation rather than
             // retaining a second graph allocation for a reused component.
-            constraint.template_dfas_by_terminal = composition.outer.iter()
-                .map(|view| Some(Arc::clone(&view.source))).collect();
             let composition = super::composition::TemplateComposition::from_views(
                 self.state_count, composition.control_start, composition.outer,
                 composition.scoped, composition.completion).map_err(|error| error.to_string())?;
-            (TemplateParser::from_composition(self.state_count, self.terminal_count, composition)
-                .map_err(|error| error.to_string())?, Vec::new())
-        } else { TemplateParser::compile_with_runtime(
+            TemplateParser::from_composition(self.state_count, self.terminal_count, composition)
+                .map_err(|error| error.to_string())?
+        } else { TemplateParser::compile(
             self.state_count, self.terminal_count, self.skip_terminals,
-            &constraint.template_dfas_by_terminal, self.completion,
+            &programs, self.completion,
         ).map_err(|error| error.to_string())? };
         if let Some(embedding) = self.embedding {
             validate_alphabet(&embedding.finish, self.state_count)?;
@@ -175,32 +172,8 @@ impl ParserSeed {
         constraint.table = ParserTableStorage::absent();
         constraint.deferred_table_rules_blob = None;
         constraint.deferred_table_rules = Default::default();
-        constraint.fast_template_dfas_by_terminal = runtime;
+        constraint.lr_fast_terminal_templates.clear();
         Ok(())
-    }
-}
-
-/// The shared core keeps its established field shape. New parser sections own
-/// the programs once; legacy/ordinary encoders continue writing the old vector.
-/// A scoped guard restores the thread-local policy even if serialization fails.
-pub(crate) mod core_programs {
-    use std::cell::Cell;
-    use serde::{Serialize, Deserialize, Serializer, Deserializer};
-    use super::TemplateDfasByTerminal;
-    thread_local! { static EXTERNAL: Cell<bool> = const { Cell::new(false) }; }
-    pub(crate) struct Guard(bool);
-    pub(crate) fn externalize(enabled: bool) -> Guard {
-        Guard(EXTERNAL.with(|value| value.replace(enabled)))
-    }
-    impl Drop for Guard {
-        fn drop(&mut self) { EXTERNAL.with(|value| value.set(self.0)); }
-    }
-    pub(crate) fn serialize<S: Serializer>(templates: &TemplateDfasByTerminal, serializer: S) -> Result<S::Ok, S::Error> {
-        if EXTERNAL.with(Cell::get) { TemplateDfasByTerminal::new().serialize(serializer) }
-        else { templates.serialize(serializer) }
-    }
-    pub(crate) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<TemplateDfasByTerminal, D::Error> {
-        TemplateDfasByTerminal::deserialize(deserializer)
     }
 }
 
@@ -212,14 +185,15 @@ mod tests {
     fn current_parser_section_rejects_duplicate_core_program_inventory() {
         let vocab = crate::Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
         let original = Constraint::from_glrm_grammar("start root; nt root = \"a\";", &vocab).unwrap();
-        let wire = encode(original.template_parser.as_ref().unwrap(), &original.template_dfas_by_terminal);
+        let wire = encode(original.template_parser.as_ref().unwrap());
         let mut duplicate = original.clone();
+        duplicate.lr_terminal_templates = original.template_parser.as_ref().unwrap().terminal_sources();
         let error = decode(&wire).unwrap().install(&mut duplicate).unwrap_err();
         assert!(error.contains("duplicate core parser programs"), "{error}");
         assert!(!duplicate.table.is_present());
 
         let mut section_owned = original.clone();
-        section_owned.template_dfas_by_terminal.clear();
+        section_owned.template_parser = None;
         decode(&wire).unwrap().install(&mut section_owned).unwrap();
         assert_eq!(section_owned.start().mask(), original.start().mask());
         let mut state = section_owned.start();

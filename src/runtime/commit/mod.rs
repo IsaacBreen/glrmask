@@ -6498,7 +6498,7 @@ fn apply_terminal_to_flat_stacks(
     scratch: &mut FlatActionScratch,
 ) -> Option<bool> {
     if let Some(parser) = constraint.template_parser.as_ref() {
-        let fast = constraint.fast_template_dfas_by_terminal.get(terminal as usize)?.as_ref()?;
+        let fast = parser.local_fast(terminal as usize)?;
         let result = flat_template::apply(fast, source, scratch);
         if result.is_some() { parser.record_advance(); }
         return result;

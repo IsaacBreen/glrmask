@@ -98,7 +98,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     // Components retain their bounded local certificates. Scoped composition
     // does not construct dense certificates for the global Cartesian product;
     // its control inventory enforces its own resource budget in from_views.
-    let mut outer = Vec::new(); let mut outer_views = Vec::new();
+    let mut outer_views = Vec::new();
     let mut exact_views = Vec::new(); let mut control_views = Vec::new();
     for (index, component) in components.iter().enumerate() {
         let parser = component.template_parser.as_ref().unwrap(); let offset = state_offsets[index];
@@ -106,14 +106,13 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
             && (component.ignore_terminal.is_some() || !parser.skip_terminals.is_empty()) {
             Some(ScopedProgram::prepare(Arc::new(identity()), parser.state_count)?)
         } else { None };
-        for terminal in 0..component.template_dfas_by_terminal.len() {
+        for terminal in 0..parser.terminal_count as usize {
             let view = if let Some(composition) = parser.composition() {
                 composition.outer_views[terminal].relocated(offset)?
             } else if component.ignore_terminal == Some(terminal as u32)
                 || parser.skip_terminals.contains(&(terminal as u32)) {
                 ignore_view.as_ref().unwrap().relocated(offset)?
             } else { ScopedProgram::terminal(component, terminal).relocated(offset)? };
-            outer.push(Some(Arc::clone(&view.source)));
             if parser.composition().is_none() { exact_views.push(view.clone()); }
             outer_views.push(view);
         }
@@ -193,7 +192,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     }
     let dynamic_vocab = crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_recursive_provider(vocab);
     let mut constraint = crate::dynamic_constraint::DynamicConstraint::from_template_runtime_parts_unfinalized(
-        (*components[0].tokenizer).clone(), names, None, outer, Arc::new(parser), vocab, dynamic_vocab);
+        (*components[0].tokenizer).clone(), names, None, Arc::new(parser), vocab, dynamic_vocab);
     constraint.late_grammar_slots = remaining_slots;
     constraint.end_tokens = Arc::clone(&components[0].end_tokens);
     // DynamicDirect never consumes a coordinator TSID quotient. Preserve the

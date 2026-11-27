@@ -33,12 +33,8 @@ pub(crate) fn advance_stacks_template_dfa(
         return Some(crate::compiler::glr::parser::advance_provider_control_closed_stacks(
             &provider, stack, terminal));
     }
-    let dfa = constraint
-        .template_dfas_by_terminal
-        .get(terminal as usize)?
-        .as_ref()?;
-    let fast = constraint.fast_template_dfas_by_terminal
-        .get(terminal as usize).and_then(|t| t.as_deref());
+    let dfa = constraint.terminal_template(terminal as usize)?;
+    let fast = constraint.fast_terminal_template(terminal as usize).map(|view| view.as_ref());
     let output = advance_prepared_relation(dfa, stack, fast);
     debug_validate_template_output(dfa, stack, &output, terminal);
     Some(output)
@@ -78,13 +74,9 @@ pub(super) fn advance_stacks_template_dfa_owned(
         return Some(crate::compiler::glr::parser::advance_provider_control_closed_stacks(
             &provider, &stack, terminal));
     }
-    let dfa = constraint
-        .template_dfas_by_terminal
-        .get(terminal as usize)?
-        .as_ref()?;
+    let dfa = constraint.terminal_template(terminal as usize)?;
     let input = debug_template_literal_enabled().then(|| stack.clone());
-    let fast = constraint.fast_template_dfas_by_terminal
-        .get(terminal as usize).and_then(|t| t.as_deref());
+    let fast = constraint.fast_terminal_template(terminal as usize).map(|view| view.as_ref());
     let output = match fast.and_then(|fast| super::simple_read_shift::apply(dfa, fast, &stack)) {
         Some(output) => output,
         None => advance_with_prepared_template(dfa, stack, fast),
@@ -460,15 +452,9 @@ impl TemplateAdvanceRuntime {
         if self.is_exhausted() {
             return None;
         }
-        let serialized_template = constraint
-            .template_dfas_by_terminal
-            .get(terminal as usize)?
-            .as_ref()?;
+        let serialized_template = constraint.terminal_template(terminal as usize)?;
         let fallback_template;
-        let template = if let Some(template) = constraint
-            .fast_template_dfas_by_terminal
-            .get(terminal as usize)
-            .and_then(Option::as_deref)
+        let template = if let Some(template) = constraint.fast_terminal_template(terminal as usize).map(|view| view.as_ref())
         {
             template
         } else {

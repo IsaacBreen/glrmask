@@ -149,7 +149,7 @@ enum TemplateAdmission {
 
 #[derive(Debug, Clone)]
 struct LocalAdmission {
-    domains: Vec<Arc<TemplateDomain>>,
+    programs: Vec<Arc<prepare::Program>>,
     completion_template: Arc<CommitTemplateDfas>,
     completion: Arc<TemplateDomain>,
     possible: Vec<BitSet>,
@@ -173,8 +173,7 @@ pub(crate) struct TemplateParser {
 pub(crate) struct PreparedTemplateParser {
     source_state_count: u32,
     source_terminal_count: u32,
-    pub(crate) templates: Vec<Option<Arc<CommitTemplateDfas>>>,
-    pub(crate) runtime: crate::runtime::artifact::FastTemplateDfasByTerminal,
+
     pub(crate) parser: TemplateParser,
 }
 
@@ -236,19 +235,6 @@ impl TemplateParser {
     ) -> crate::Result<Self> {
         prepare::compile_parser(
             state_count, terminal_count, skip_terminals,
-            templates, completion_template, false,
-        ).map(|(parser, _)| parser)
-    }
-
-    pub(crate) fn compile_with_runtime(
-        state_count: u32,
-        terminal_count: u32,
-        skip_terminals: BTreeSet<TerminalID>,
-        templates: &[Option<Arc<CommitTemplateDfas>>],
-        completion_template: CommitTemplateDfas,
-    ) -> crate::Result<(Self, crate::runtime::artifact::FastTemplateDfasByTerminal)> {
-        prepare::compile_parser(
-            state_count, terminal_count, skip_terminals,
             templates, completion_template, true,
         )
     }
@@ -307,8 +293,28 @@ impl TemplateParser {
     }
 
     pub(crate) fn local_domain(&self, terminal: usize) -> Option<&Arc<TemplateDomain>> {
-        self.local_admission()?.domains.get(terminal)
+        self.local_admission()?.programs.get(terminal).map(|p| &p.domain)
     }
+
+    pub(crate) fn terminal_source(&self, terminal: usize) -> Option<&Arc<CommitTemplateDfas>> {
+        match &self.admission {
+            TemplateAdmission::Local(local) => local.programs.get(terminal).map(|p| &p.source),
+            TemplateAdmission::Linked(linked) => linked.outer_views.get(terminal).map(|p| &p.source),
+        }
+    }
+
+    pub(crate) fn local_fast(&self, terminal: usize) -> Option<&Arc<crate::runtime::FastCommitTemplateDfas>> {
+        self.local_admission()?.programs.get(terminal)?.fast.as_ref()
+    }
+
+    /// Cold projection for compiler inputs and diagnostics; the executable
+    /// relation inventory itself owns the programs and their derived views.
+    pub(crate) fn terminal_sources(&self) -> crate::runtime::artifact::TemplateDfasByTerminal {
+        (0..self.terminal_count as usize)
+            .map(|terminal| self.terminal_source(terminal).cloned())
+            .collect()
+    }
+
 
     #[inline]
     fn possible_row(&self, top: u32) -> Option<&BitSet> {
@@ -352,7 +358,7 @@ impl TemplateParser {
         let (bit, domain) = if terminal == EOF {
             (self.terminal_count as usize, &local.completion)
         } else {
-            let Some(domain) = local.domains.get(terminal as usize) else { return false; };
+            let Some(domain) = local.programs.get(terminal as usize).map(|p| &p.domain) else { return false; };
             (terminal as usize, domain)
         };
         if let Some(top) = stack.single_exclusive_top_value() {
@@ -396,7 +402,7 @@ impl TemplateParser {
                 let domain = if bit == self.terminal_count as usize {
                     Some(&local.completion)
                 } else {
-                    local.domains.get(bit)
+                    local.programs.get(bit).map(|p| &p.domain)
                 };
                 domain.is_some_and(|domain| matches_gss(domain, stack))
             });
@@ -461,7 +467,7 @@ impl TemplateParser {
                 let domain = if bit == self.terminal_count as usize {
                     Some(&local.completion)
                 } else {
-                    local.domains.get(bit)
+                    local.programs.get(bit).map(|p| &p.domain)
                 };
                 if domain.is_some_and(|domain| matches_gss(domain, stack)) {
                     result.set(bit);
@@ -516,7 +522,7 @@ impl TemplateParser {
                 let domain = if bit == self.terminal_count as usize {
                     Some(&local.completion)
                 } else {
-                    local.domains.get(bit)
+                    local.programs.get(bit).map(|p| &p.domain)
                 };
                 domain.is_some_and(|domain| {
                     domain.matches_top_first(stack.iter().rev().copied())
@@ -532,7 +538,7 @@ impl TemplateParser {
             let domain = if bit == self.terminal_count as usize {
                 Some(&local.completion)
             } else {
-                local.domains.get(bit)
+                local.programs.get(bit).map(|p| &p.domain)
             };
             if domain.is_some_and(|domain| {
                 domain.matches_top_first(stack.iter().rev().copied())
@@ -559,7 +565,7 @@ impl TemplateParser {
                 local.completion = domain;
                 local.completion_template = source;
                 (local.possible, local.unconditional) =
-                    top_certificate_rows(self.state_count, &local.domains, &local.completion);
+                    top_certificate_rows(self.state_count, &local.programs.iter().map(|p| Arc::clone(&p.domain)).collect::<Vec<_>>(), &local.completion);
             }
             TemplateAdmission::Linked(linked) => {
                 // The root completion is the authoritative linked relation.
@@ -581,7 +587,7 @@ impl TemplateParser {
         let mut unique = rustc_hash::FxHashSet::default();
         let mut unique_heap = 0usize;
         let domains: Box<dyn Iterator<Item = &Arc<TemplateDomain>> + '_> = match &self.admission {
-            TemplateAdmission::Local(local) => Box::new(local.domains.iter()),
+            TemplateAdmission::Local(local) => Box::new(local.programs.iter().map(|p| &p.domain)),
             TemplateAdmission::Linked(linked) => Box::new(linked.outer_views.iter().map(|view| &view.domain)),
         };
         let mut domain_states = 0usize;
@@ -894,8 +900,8 @@ impl Constraint {
                 "prepared template parser no longer matches its source constraint".into()
             ));
         }
-        self.template_dfas_by_terminal = prepared.templates;
-        self.fast_template_dfas_by_terminal = prepared.runtime;
+        self.lr_terminal_templates.clear();
+        self.lr_fast_terminal_templates.clear();
         self.serialized_artifact_cache = None;
         self.deferred_table_rules_blob = None;
         self.deferred_table_rules = Default::default();
@@ -1039,8 +1045,7 @@ impl Constraint {
                                     checked += 1;
                                     sources += usize::from(Arc::ptr_eq(
                                         &view.source,
-                                        component.constraint.template_dfas_by_terminal[terminal]
-                                            .as_ref().unwrap(),
+                                        local.terminal_source(terminal).unwrap(),
                                     ));
                                     domains += usize::from(Arc::ptr_eq(
                                         &view.domain, local.local_domain(terminal).expect("local domain"),

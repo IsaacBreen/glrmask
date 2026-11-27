@@ -806,10 +806,9 @@ impl DynamicConstraint {
                     &table, direct_regular_automaton.as_ref(), &[], ignore_terminal, true, false,
                 )?;
                 drop(table);
-                let mut inner = Self::from_template_runtime_parts_unfinalized_with_views(
-                    tokenizer, terminal_display_names, ignore_terminal, prepared.templates,
+                let mut inner = Self::from_template_runtime_parts_unfinalized(
+                    tokenizer, terminal_display_names, ignore_terminal,
                     Arc::new(prepared.parser), vocab, dynamic_mask_vocab,
-                    Some(prepared.runtime),
                 );
                 inner.special_token_terminals = special_token_terminals;
                 inner.direct_regular_automaton = direct_regular_automaton;
@@ -1024,8 +1023,8 @@ impl DynamicConstraint {
             composition_parser_characterizations_by_terminal: Vec::new(),
             composition_grammar_summary: None,
             terminal_live_states: Vec::new(),
-            template_dfas_by_terminal: Vec::new(),
-            fast_template_dfas_by_terminal: Vec::new(),
+            lr_terminal_templates: Vec::new(),
+            lr_fast_terminal_templates: Vec::new(),
             template_parser: None,
             token_classes: Default::default(),
             token_bytes: crate::runtime::TokenByteDomain::from_entries(payload.token_bytes),
@@ -1078,13 +1077,12 @@ impl DynamicConstraint {
         tokenizer: Tokenizer,
         terminal_display_names: Vec<String>,
         ignore_terminal: Option<TerminalID>,
-        templates: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
         parser: Arc<crate::runtime::parser_backend::TemplateParser>,
         vocab: &Vocab,
     ) -> Constraint {
         let dynamic_vocab = crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab);
         let mut inner = Self::from_template_runtime_parts_unfinalized(
-            tokenizer, terminal_display_names, ignore_terminal, templates, parser, vocab, dynamic_vocab,
+            tokenizer, terminal_display_names, ignore_terminal, parser, vocab, dynamic_vocab,
         );
         inner.rebuild_dynamic_runtime_caches();
         inner
@@ -1094,26 +1092,9 @@ impl DynamicConstraint {
         tokenizer: Tokenizer,
         terminal_display_names: Vec<String>,
         ignore_terminal: Option<TerminalID>,
-        templates: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
         parser: Arc<crate::runtime::parser_backend::TemplateParser>,
         vocab: &Vocab,
         dynamic_vocab: DynamicMaskVocab,
-    ) -> Constraint {
-        Self::from_template_runtime_parts_unfinalized_with_views(
-            tokenizer, terminal_display_names, ignore_terminal,
-            templates, parser, vocab, dynamic_vocab, None,
-        )
-    }
-
-    pub(crate) fn from_template_runtime_parts_unfinalized_with_views(
-        tokenizer: Tokenizer,
-        terminal_display_names: Vec<String>,
-        ignore_terminal: Option<TerminalID>,
-        templates: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
-        parser: Arc<crate::runtime::parser_backend::TemplateParser>,
-        vocab: &Vocab,
-        dynamic_vocab: DynamicMaskVocab,
-        prepared_views: Option<Vec<Option<Arc<crate::runtime::FastCommitTemplateDfas>>>>,
     ) -> Constraint {
         let ignore_expr = ignore_terminal.and_then(|t|tokenizer.terminal_expr(t).cloned());
         let terminal_exprs = tokenizer.terminal_exprs().map(ToOwned::to_owned);
@@ -1127,26 +1108,7 @@ impl DynamicConstraint {
             special_token_terminals: Vec::new(),
         };
         let mut inner = Self::constraint_from_runtime_parts(payload, dynamic_vocab, Some(vocab));
-        inner.template_dfas_by_terminal = templates;
         inner.template_parser = Some(parser);
-        inner.fast_template_dfas_by_terminal = if inner.template_parser.as_ref().unwrap().composition().is_some() {
-            assert!(prepared_views.as_ref().is_none_or(Vec::is_empty),
-                "scoped parser must not install an unrelated standalone view inventory");
-            Vec::new() // Scoped providers borrow each component prepared view.
-        } else if let Some(views) = prepared_views {
-            assert_eq!(views.len(), inner.template_dfas_by_terminal.len(),
-                "prepared view inventory must cover every terminal");
-            assert!(inner.template_dfas_by_terminal.iter().zip(&views)
-                .all(|(source, view)| match (source, view) {
-                    (Some(source), Some(view)) => view.is_for_source(source),
-                    (None, None) => true,
-                    _ => false,
-                }),
-                "prepared views must retain their exact immutable source identities");
-            views
-        } else {
-            inner.compute_fast_template_dfas()
-        };
         let _ = inner.late_bind_vocab.set(vocab.clone());
         assert!(!inner.table.is_present(), "data-only constructor created an LR table");
         inner

@@ -58,8 +58,8 @@ fn program(out: &mut Vec<u8>, template: &CommitTemplateDfas, alphabet: u32) {
     links(out,&template.pop_to_read); links(out,&template.pop_to_push); links(out,&template.read_to_push);
 }
 
-pub(super) fn encode(parser: &TemplateParser, templates: &TemplateDfasByTerminal) -> Vec<u8> {
-    assert_eq!(templates.len(),parser.terminal_count as usize);
+pub(super) fn encode(parser: &TemplateParser) -> Vec<u8> {
+    let terminal_sources = || (0..parser.terminal_count as usize).map(|id| parser.terminal_source(id).expect("every terminal has an explicit template"));
     let mut out=Vec::new();
     out.extend_from_slice(MAGIC);
     put(&mut out,parser.state_count); put(&mut out,parser.terminal_count);
@@ -68,8 +68,8 @@ pub(super) fn encode(parser: &TemplateParser, templates: &TemplateDfasByTerminal
     for &terminal in &parser.skip_terminals {
         put(&mut out,previous.map_or(terminal,|old|terminal-old)); previous=Some(terminal);
     }
-    for template in templates {
-        program(&mut out,template.as_ref().expect("every terminal has an explicit template"),parser.state_count);
+    for template in terminal_sources() {
+        program(&mut out,template,parser.state_count);
     }
     program(&mut out,parser.completion_template(),parser.state_count);
     put(&mut out, u32::from(parser.composition().is_some()));
@@ -79,7 +79,7 @@ pub(super) fn encode(parser: &TemplateParser, templates: &TemplateDfasByTerminal
         // Only FINISH/new tiny controls absent from the outer inventory add
         // graph records; offsets and CALL outputs are independent descriptors.
         let mut dictionary = BTreeMap::<usize, u32>::new();
-        for (id, source) in templates.iter().map(|program| program.as_ref().unwrap())
+        for (id, source) in terminal_sources()
             .chain(std::iter::once(parser.completion_template())).enumerate() {
             dictionary.entry(Arc::as_ptr(source) as usize).or_insert(id as u32);
         }
@@ -88,7 +88,7 @@ pub(super) fn encode(parser: &TemplateParser, templates: &TemplateDfasByTerminal
             .chain(std::iter::once(&composition.completion_view)) {
             let key = Arc::as_ptr(&view.source) as usize;
             if let std::collections::btree_map::Entry::Vacant(e) = dictionary.entry(key) {
-                let id = templates.len() as u32 + 1 + extras.len() as u32;
+                let id = parser.terminal_count + 1 + extras.len() as u32;
                 e.insert(id); extras.push(Arc::clone(&view.source));
             }
         }
@@ -421,5 +421,5 @@ pub(super) fn decode(bytes:&[u8])->Result<ParserSeed,String> {
     if input.offset!=bytes.len() {return Err("trailing compact parser bytes".into());}
     // Cycle/phase validation is shared with domain derivation during install.
     // No materialization path can expose these graphs before it succeeds.
-    Ok(ParserSeed {state_count,terminal_count,skip_terminals,completion,programs:Some(templates),composition,embedding,link_grammar})
+    Ok(ParserSeed {state_count,terminal_count,skip_terminals,completion,programs:templates,composition,embedding,link_grammar})
 }

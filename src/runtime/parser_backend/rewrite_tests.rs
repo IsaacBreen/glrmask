@@ -169,17 +169,16 @@ fn staged_parser_preparation_preserves_runtime_finalization_order_and_view_ident
     let mut candidate = dynamic.into_constraints().pop().unwrap();
     assert!(candidate.has_template_parser() && !candidate.table.is_present());
     assert!(candidate.prepare_template_parser().unwrap().is_none());
-    let programs = candidate.template_dfas_by_terminal.clone();
-    let views = candidate.fast_template_dfas_by_terminal.clone();
+    let programs = candidate.template_parser.as_ref().unwrap().terminal_sources();
+    let views = (0..programs.len()).map(|terminal| candidate.fast_terminal_template(terminal).cloned()).collect::<Vec<_>>();
 
     candidate.rebuild_dynamic_runtime_caches();
     assert!(!candidate.table.is_present());
-    for ((source, after), (view, after_view)) in programs.iter()
-        .zip(&candidate.template_dfas_by_terminal)
-        .zip(views.iter().zip(&candidate.fast_template_dfas_by_terminal))
-    {
-        assert!(Arc::ptr_eq(source.as_ref().unwrap(), after.as_ref().unwrap()));
-        assert!(Arc::ptr_eq(view.as_ref().unwrap(), after_view.as_ref().unwrap()),
+    for (terminal, (source, view)) in programs.iter().zip(&views).enumerate() {
+        let after = candidate.terminal_template(terminal);
+        let after_view = candidate.fast_terminal_template(terminal);
+        assert!(Arc::ptr_eq(source.as_ref().unwrap(), after.unwrap()));
+        assert!(Arc::ptr_eq(view.as_ref().unwrap(), after_view.unwrap()),
             "runtime finalization must reuse the already-prepared immutable view");
     }
 
@@ -227,19 +226,19 @@ fn constructor_installs_prepared_views_without_rebuilding() {
         &[expression], Some(&names),
     );
     let templates = vec![Some(Arc::new(pop_word(&[0], true)))];
-    let (parser, runtime) = TemplateParser::compile_with_runtime(
+    let parser = TemplateParser::compile(
         1, 1, BTreeSet::new(), &templates, pop_word(&[0], true),
     ).unwrap();
-    let expected = Arc::clone(runtime[0].as_ref().unwrap());
+    let expected = Arc::clone(parser.local_fast(0).unwrap());
     let dynamic_vocab =
         crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(&vocab);
     let constraint =
-        crate::dynamic_constraint::DynamicConstraint::from_template_runtime_parts_unfinalized_with_views(
-            tokenizer, names, None, templates, Arc::new(parser), &vocab,
-            dynamic_vocab, Some(runtime),
+        crate::dynamic_constraint::DynamicConstraint::from_template_runtime_parts_unfinalized(
+            tokenizer, names, None, Arc::new(parser), &vocab,
+            dynamic_vocab,
         );
     assert!(Arc::ptr_eq(
-        &expected, constraint.fast_template_dfas_by_terminal[0].as_ref().unwrap(),
+        &expected, constraint.fast_terminal_template(0).unwrap(),
     ));
     assert!(!constraint.table.is_present());
 }

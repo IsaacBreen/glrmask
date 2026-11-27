@@ -25,15 +25,18 @@ use crate::compiler::glr::table::GLRTable;
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
 use crate::runtime::artifact::{
-    FastCommitTemplateDfas, FastTemplateDfasByTerminal, TemplateDfasByTerminal,
+    FastCommitTemplateDfas,
 };
 
+#[cfg(test)]
+use crate::runtime::artifact::FastTemplateDfasByTerminal;
 use super::{CommitTemplateDfas, PreparedTemplateParser, TemplateParser};
 
-struct Program {
-    source: Arc<CommitTemplateDfas>,
-    domain: Arc<TemplateDomain>,
-    fast: Option<Arc<FastCommitTemplateDfas>>,
+#[derive(Debug)]
+pub(super) struct Program {
+    pub(super) source: Arc<CommitTemplateDfas>,
+    pub(super) domain: Arc<TemplateDomain>,
+    pub(super) fast: Option<Arc<FastCommitTemplateDfas>>,
 }
 
 impl Program {
@@ -61,9 +64,7 @@ struct DomainGroup {
 }
 
 struct Inventory {
-    templates: TemplateDfasByTerminal,
-    domains: Vec<Arc<TemplateDomain>>,
-    runtime: FastTemplateDfasByTerminal,
+    programs: Vec<Arc<Program>>,
     groups: Vec<DomainGroup>,
 }
 
@@ -85,7 +86,6 @@ fn joined<A: Send, B: Send>(
 fn inventory(
     mut groups: Vec<CompiledGroup<Program>>,
     terminals: usize,
-    runtime: bool,
 ) -> crate::Result<Inventory> {
     let invalid = || crate::Error::Compilation(
         "terminal template inventory must cover the complete terminal domain".into()
@@ -94,9 +94,7 @@ fn inventory(
         return Err(invalid());
     }
     groups.sort_unstable_by_key(|group| group.terminals[0]);
-    let mut templates = vec![None; terminals];
-    let mut domains = vec![None; terminals];
-    let mut views = if runtime { vec![None; terminals] } else { Vec::new() };
+    let mut programs = vec![None; terminals];
     let mut domain_groups = Vec::with_capacity(groups.len());
 
     for group in groups {
@@ -106,17 +104,13 @@ fn inventory(
         let mut members = Vec::with_capacity(group.terminals.len());
         for terminal in group.terminals {
             let terminal = terminal as usize;
-            let Some(slot) = templates.get_mut(terminal) else {
+            let Some(slot) = programs.get_mut(terminal) else {
                 return Err(invalid());
             };
             if slot.is_some() {
                 return Err(invalid());
             }
-            *slot = Some(Arc::clone(&group.program.source));
-            domains[terminal] = Some(Arc::clone(&group.program.domain));
-            if runtime {
-                views[terminal] = group.program.fast.clone();
-            }
+            *slot = Some(Arc::clone(&group.program));
             members.push(terminal);
         }
         domain_groups.push(DomainGroup {
@@ -124,16 +118,12 @@ fn inventory(
             terminals: members,
         });
     }
-    if templates.iter().any(Option::is_none) {
+    if programs.iter().any(Option::is_none) {
         return Err(invalid());
     }
-    let domains = domains.into_iter().map(|domain| {
-        domain.expect("complete inventory checked before materialization")
-    }).collect();
+    let programs = programs.into_iter().map(Option::unwrap).collect();
     Ok(Inventory {
-        templates,
-        domains,
-        runtime: views,
+        programs,
         groups: domain_groups,
     })
 }
@@ -179,9 +169,10 @@ fn shared_inventory(
         groups.iter().map(build).collect::<Vec<_>>()
     };
     let groups = results.into_iter().collect::<crate::Result<Vec<_>>>()?;
-    inventory(groups, templates.len(), runtime)
+    inventory(groups, templates.len())
 }
 
+#[cfg(test)]
 pub(super) fn prepare_terminal_inventory(
     templates: &[Option<Arc<CommitTemplateDfas>>],
     symbols: u32,
@@ -189,7 +180,8 @@ pub(super) fn prepare_terminal_inventory(
     use_parallel: bool,
 ) -> crate::Result<(Vec<Arc<TemplateDomain>>, FastTemplateDfasByTerminal)> {
     let ready = shared_inventory(templates, symbols, runtime, use_parallel)?;
-    Ok((ready.domains, ready.runtime))
+    Ok((ready.programs.iter().map(|p| Arc::clone(&p.domain)).collect(),
+        if runtime { ready.programs.iter().map(|p| p.fast.clone()).collect() } else { Vec::new() }))
 }
 
 fn word_masks(terminals: &[usize]) -> Vec<(usize, u64)> {
@@ -304,17 +296,17 @@ fn assemble(
     skips: BTreeSet<TerminalID>,
     inventory: Inventory,
     completion: Program,
-) -> (TemplateParser, TemplateDfasByTerminal, FastTemplateDfasByTerminal) {
+) -> TemplateParser {
     let (possible, unconditional) = grouped_top_rows(
         symbols, terminals as usize, &inventory.groups, &completion.domain,
     );
-    let parser = TemplateParser {
+    TemplateParser {
         state_count: symbols,
         terminal_count: terminals,
         skip_terminals: skips,
         admission: super::TemplateAdmission::Local(super::LocalAdmission {
             completion_template: completion.source,
-            domains: inventory.domains,
+            programs: inventory.programs,
             completion: completion.domain,
             possible,
             unconditional,
@@ -325,8 +317,7 @@ fn assemble(
         advances: AtomicU64::new(0),
         admissions: AtomicU64::new(0),
         completions: AtomicU64::new(0),
-    };
-    (parser, inventory.templates, inventory.runtime)
+    }
 }
 
 pub(super) fn compile_parser(
@@ -336,7 +327,7 @@ pub(super) fn compile_parser(
     templates: &[Option<Arc<CommitTemplateDfas>>],
     completion: CommitTemplateDfas,
     runtime: bool,
-) -> crate::Result<(TemplateParser, FastTemplateDfasByTerminal)> {
+) -> crate::Result<TemplateParser> {
     if templates.len() != terminals as usize {
         return Err(crate::Error::Compilation(
             "template parser must provide every terminal relation, including explicit empty relations"
@@ -352,8 +343,7 @@ pub(super) fn compile_parser(
         let inventory = shared_inventory(templates, symbols, runtime, states >= 4_096)?;
         let completion = Program::prepare(Arc::new(completion), symbols, false)
             .map_err(crate::Error::Compilation)?;
-        let (parser, _, views) = assemble(symbols, terminals, skips, inventory, completion);
-        Ok((parser, views))
+        Ok(assemble(symbols, terminals, skips, inventory, completion))
     };
     if states >= 4_096 && !crate::compiler::macro_parallelism_disabled() {
         crate::compiler::pipeline::run_with_compile_thread_pool(work)
@@ -422,7 +412,7 @@ pub(super) fn from_compiler_parts(
                 "template conversion would change a composed parser's stack coordinate".into()
             ));
         }
-        let (mut parser, runtime) = compile_parser(
+        let mut parser = compile_parser(
             symbols, table.num_terminals, table.skip_terminals.clone(),
             &templates, completion, true,
         )?;
@@ -445,8 +435,6 @@ pub(super) fn from_compiler_parts(
         return Ok(PreparedTemplateParser {
             source_state_count: table.num_states,
             source_terminal_count: table.num_terminals,
-            templates,
-            runtime,
             parser,
         });
     }
@@ -522,7 +510,7 @@ pub(super) fn from_compiler_parts(
                 for result in retained_results {
                     groups.push(result.unwrap_or_else(|_| unreachable!("checked failures")));
                 }
-                let ready = inventory(groups, table.num_terminals as usize, true)?;
+                let ready = inventory(groups, table.num_terminals as usize)?;
                 Ok((ready, signature_groups, exact_groups))
             },
             || joined(
@@ -540,18 +528,18 @@ pub(super) fn from_compiler_parts(
         let (ordinary, signature_groups, exact_groups) = ordinary?;
         let completion = completion.map_err(crate::Error::classify_template_compile_message)?;
         let metadata = metadata?;
-        let (mut parser, templates, runtime) = assemble(
+        let mut parser = assemble(
             table.num_states, table.num_terminals, table.skip_terminals.clone(),
             ordinary, completion,
         );
         parser.embedding = metadata.embedding;
         parser.link_grammar = metadata.grammar;
-        Ok::<_, crate::Error>((parser, templates, runtime, signature_groups, exact_groups))
+        Ok::<_, crate::Error>((parser, signature_groups, exact_groups))
     };
 
     let use_pool = !crate::compiler::macro_parallelism_disabled()
         && (table.num_terminals > 16 || table.num_states > 256);
-    let (parser, templates, runtime, signature_groups, exact_groups) = if use_pool {
+    let (parser, signature_groups, exact_groups) = if use_pool {
         crate::compiler::pipeline::run_with_compile_thread_pool(work)
     } else {
         work()
@@ -572,8 +560,6 @@ pub(super) fn from_compiler_parts(
     Ok(PreparedTemplateParser {
         source_state_count: table.num_states,
         source_terminal_count: table.num_terminals,
-        templates,
-        runtime,
         parser,
     })
 }
@@ -601,24 +587,24 @@ mod tests {
         let built = from_compiler_parts(&table, None, &[], None, true, false).unwrap();
         for terminal in [1usize, 2] {
             assert!(Arc::ptr_eq(
-                built.templates[0].as_ref().unwrap(),
-                built.templates[terminal].as_ref().unwrap(),
+                built.parser.terminal_source(0).unwrap(),
+                built.parser.terminal_source(terminal).unwrap(),
             ));
             assert!(Arc::ptr_eq(
                 built.parser.local_domain(0).unwrap(), built.parser.local_domain(terminal).unwrap(),
             ));
             assert!(Arc::ptr_eq(
-                built.runtime[0].as_ref().unwrap(),
-                built.runtime[terminal].as_ref().unwrap(),
+                built.parser.local_fast(0).unwrap(),
+                built.parser.local_fast(terminal).unwrap(),
             ));
         }
         assert!(!Arc::ptr_eq(
-            built.templates[0].as_ref().unwrap(),
-            built.templates[3].as_ref().unwrap(),
+            built.parser.terminal_source(0).unwrap(),
+            built.parser.terminal_source(3).unwrap(),
         ));
         for terminal in 0..4 {
-            let source = built.templates[terminal].as_ref().unwrap();
-            assert!(built.runtime[terminal].as_ref().unwrap().is_for_source(source));
+            let source = built.parser.terminal_source(terminal).unwrap();
+            assert!(built.parser.local_fast(terminal).unwrap().is_for_source(source));
         }
     }
 

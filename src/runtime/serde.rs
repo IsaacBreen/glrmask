@@ -3428,7 +3428,6 @@ impl Constraint {
                             crate::automata::lexer::tokenizer::set_compact_artifact_serde(true);
                         let previous_external_tokenizer =
                             crate::automata::lexer::tokenizer::set_external_artifact_serde(true);
-                        let _external_template_programs = crate::runtime::parser_backend::wire::core_programs::externalize(self.has_template_parser());
                         let started = profile.then(std::time::Instant::now);
                         // `bincode::serialize` first runs `serialized_size` and
                         // then serializes again. Custom compact serializers
@@ -3521,7 +3520,7 @@ impl Constraint {
                     || {
                         let started = profile.then(std::time::Instant::now);
                         let bytes = if let Some(parser) = &self.template_parser {
-                            crate::runtime::parser_backend::wire::encode_external(parser, &self.template_dfas_by_terminal, self.artifact_vocab_digest())
+                            crate::runtime::parser_backend::wire::encode_external(parser, self.artifact_vocab_digest())
                         } else if self.table.is_present() {
                             let rules = self.retained_table_rules()
                                 .expect("validated retained grammar rules must remain readable");
@@ -4798,18 +4797,7 @@ impl Constraint {
             if constraint.uses_dynamic_runtime() {
                 constraint.rebuild_dynamic_runtime_caches();
             } else {
-                // ParserSeed::install already prepared these exact indices.
-                // Nothing between installation and here mutates the template
-                // inventory; lexical/vocabulary restoration is independent of
-                // FastCommitTemplateDfas. Cloning the Arc vector retains the
-                // existing indices during finalization without deep-copying
-                // graphs or adding a persistent cache-provenance field.
-                let prepared_template_indices = constraint.has_template_parser()
-                    .then(|| constraint.fast_template_dfas_by_terminal.clone());
-                constraint.rebuild_runtime_caches_impl(
-                    loaded_packed_dwa_dense_masks,
-                    prepared_template_indices,
-                );
+                constraint.rebuild_runtime_caches_impl(loaded_packed_dwa_dense_masks);
             }
         }
         if let Some(total_started) = total_started {
@@ -5996,15 +5984,15 @@ mod tests {
         let constraint = program.compile_with(&LexerDefinition::new(vec![
             TerminalPattern::Literal(b"a".to_vec()), TerminalPattern::Literal(b"b".to_vec()),
         ]), &Vocab::from_entries_unchecked(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]), TemplateBuildOptions::default()).unwrap();
-        let template = constraint.template_dfas_by_terminal[1].as_deref().unwrap();
+        let template = constraint.terminal_template(1).unwrap().as_ref();
         let accepted = *template.pop.states[template.pop.start_state as usize].transitions.get(&7).unwrap();
 
         let loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).expect("template artifact should load");
-        let loaded_template = loaded.template_dfas_by_terminal[1]
-            .as_deref()
+        let loaded_template = loaded.terminal_template(1)
+            .map(|source| source.as_ref())
             .expect("serialized template should survive load");
-        let loaded_fast_template = loaded.fast_template_dfas_by_terminal[1]
-            .as_deref()
+        let loaded_fast_template = loaded.fast_terminal_template(1)
+            .map(|view| view.as_ref())
             .expect("runtime template transition cache should be rebuilt after load");
         assert_eq!(loaded_template.pop, template.pop);
         assert_eq!(loaded_template.read, template.read);
