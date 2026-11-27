@@ -445,7 +445,7 @@ impl DynamicConstraint {
             boundary_completion_index: None,
             tokenizer_has_epsilon_transitions: false,
             ignore_terminal: payload.ignore_terminal,
-            special_token_terminals,
+            special_token_terminals: payload.special_token_terminals,
             dynamic_mask_vocab,
             lazy_dynamic_mask_vocab: std::sync::OnceLock::new(),
             empty_byte_token_ids,
