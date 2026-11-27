@@ -324,6 +324,15 @@ trait FullWalkTransitionTable {
     #[inline(always)]
     fn product_transition_cache_capacity(&self) -> usize { 0 }
 
+    fn memoize_scalar_products(&self) -> bool { true }
+
+    /// Optional existential proof: one unguarded continuing component covers
+    /// every byte in this subtree and is admitted at its parser coordinate.
+    fn proves_live_subtree(
+        &mut self, _product: &FullWalkProduct, _alphabet: [u64; 4],
+        _parser_cache: &mut FullWalkParserCache, _constraint: &Constraint,
+    ) -> bool { false }
+
     /// Complete provider walks can defer output until the exact admitted and
     /// rejected populations are known. This reuses the ordinary adaptive
     /// emitter instead of touching every rejected token in a sparse mask.
@@ -2042,9 +2051,10 @@ struct CachedFullWalkProduct {
 /// Bounded memoization of the same product transition. A saturated cache
 /// simply returns owned states, without losing any correlated alternatives.
 struct FullWalkProductCache {
-    ids: FxHashMap<FullWalkProduct, u16>,
+    ids: FxHashMap<u64, SmallVec<[u16; 1]>>,
     entries: Vec<CachedFullWalkProduct>,
     capacity: usize,
+    memoize_scalar: bool,
 }
 
 impl FullWalkProductCache {
@@ -2056,6 +2066,7 @@ impl FullWalkProductCache {
             ids: FxHashMap::default(),
             entries: Vec::new(),
             capacity: capacity.min(Self::DEAD as usize),
+            memoize_scalar: true,
         }
     }
 
@@ -2067,17 +2078,28 @@ impl FullWalkProductCache {
     }
 
     fn hold(&mut self, product: FullWalkProduct) -> FullWalkCursor {
-        if self.capacity == 0 || product.is_empty() {
+        if self.capacity == 0 || product.is_empty()
+            || (!self.memoize_scalar && product.len() == 1 && product.guarded.is_empty())
+            || product.len() > 8
+            || product.guarded.iter().any(|branch| matches!(&branch.prune_guard,
+                FullWalkPruneGuard::Pending(memories) if memories.len() > 4))
+        {
             return FullWalkCursor::Owned(product);
         }
-        if let Some(&id) = self.ids.get(&product) {
-            return FullWalkCursor::Cached(id);
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        product.hash(&mut hasher);
+        let hash = hasher.finish();
+        if let Some(bucket) = self.ids.get(&hash) {
+            if let Some(&id) = bucket.iter().find(|&&id| self.entries[id as usize].product == product) {
+                return FullWalkCursor::Cached(id);
+            }
         }
         if self.entries.len() == self.capacity {
             return FullWalkCursor::Owned(product);
         }
         let id = self.entries.len() as u16;
-        self.ids.insert(product.clone(), id);
+        self.ids.entry(hash).or_default().push(id);
         self.entries.push(CachedFullWalkProduct {
             product,
             row: [Self::UNKNOWN; 256],
@@ -2665,7 +2687,9 @@ impl<T: FullWalkTransitionTable> FullWalkKernel<'_, T> {
             cached
         } else {
             let merged = self.transitions.merge_states(&lexers);
-            self.union_cache.insert(lexers, merged);
+            if self.union_cache.len() < 1024 && lexers.len() <= 8 {
+                self.union_cache.insert(lexers, merged);
+            }
             merged
         };
         if let Some(lexer) = merged {
@@ -3881,6 +3905,52 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
         && root_branches
             .iter()
             .all(|branch| branch.initial_prune_guard.is_passed())));
+    let result = execute_full_walk_product(
+        state, vocab, trie, root_branches, buf, transitions, parser_cache,
+        &root_parser_nodes, initial_lexer_state,
+        FullWalkTraversalPlan {
+            master_decision, safe_envelope_upper: None, first_match_direct_root,
+            positive_rebuild: false, deferred_output, allow_sparse_root: master_decision.is_none() && direct_residual_slice.is_none(),
+            dense_root_bytes: false, include_empty_root: true,
+        },
+    );
+    #[cfg(test)]
+    if matches!(result, Ok(true)) { TEST_FULL_WALK_USES.with(|count| count.set(count.get() + 1)); }
+    result
+}
+
+struct FullWalkTraversalPlan {
+    master_decision: Option<(u16, bool)>,
+    safe_envelope_upper: Option<u16>,
+    first_match_direct_root: Option<(ResidualCoordinate, u32, TerminalID)>,
+    positive_rebuild: bool,
+    deferred_output: bool,
+    allow_sparse_root: bool,
+    dense_root_bytes: bool,
+    include_empty_root: bool,
+}
+
+/// One traversal for packed, lazy, residual, and recursively scoped lexer
+/// providers. Proofs select the visited domain or certify whole subtrees;
+/// the endpoint predicate and branch relation are independent of scheduling.
+fn execute_full_walk_product<T: FullWalkTransitionTable>(
+    state: &ConstraintState,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    root_branches: &DynamicBranches,
+    buf: &mut [u32],
+    transitions: &mut T,
+    mut parser_cache: FullWalkParserCache,
+    root_parser_nodes: &[u32],
+    initial_lexer_state: u32,
+    plan: FullWalkTraversalPlan,
+) -> Result<bool, String> {
+    let FullWalkTraversalPlan {
+        master_decision, safe_envelope_upper, first_match_direct_root,
+        positive_rebuild, deferred_output, allow_sparse_root,
+        dense_root_bytes, include_empty_root,
+    } = plan;
+    let single_root = root_branches.len() == 1;
     let mut deferred_allowed_markers = Vec::<u64>::new();
     let mut deferred_rejected_markers = Vec::<u64>::new();
     let mut deferred_dead_subtrees = Vec::<u32>::new();
@@ -3890,6 +3960,7 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
     let stack_len = usize::from(trie.full_walk_max_parent_depth()).saturating_add(2);
     let scoped_pruning = transitions.parser_conditioned_dead_skip_default();
     let mut cache = FullWalkProductCache::new(transitions.product_transition_cache_capacity());
+    cache.memoize_scalar = transitions.memoize_scalar_products();
     // Only ordinary, uncached products use the adaptive scalar probe budget.
     // Memoized product edges must not depend on traversal history.
     let probe_budget = if scoped_pruning || cache.capacity != 0
@@ -3915,7 +3986,7 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
         coordinate, parser, terminal,
     });
     if direct.is_none() {
-        for (root, &parser) in root_branches.iter().zip(&root_parser_nodes) {
+        for (root, &parser) in root_branches.iter().zip(root_parser_nodes) {
             roots.push(
                 root.tokenizer_config, parser,
                 FullWalkPruneGuard::from_initial(&root.initial_prune_guard, transitions)?,
@@ -3938,6 +4009,7 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
     let token_markers = vocab.full_walk_token_markers_for(trie);
     let mut token_marker_index = 0usize;
     let mut partition_root_slot = 0usize;
+    let mut output_scope = full_walk_dense::FullWalkOutputScopeCursor::default();
     let mut first_match_direct_future_cache = FxHashMap::<ResidualCoordinate, bool>::default();
 
 
@@ -3953,12 +4025,11 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
     });
     let sparse_root_bytes = if sparse_root_walk_enabled
         && !deferred_output
-        && master_decision.is_none()
-        && direct_residual_slice.is_none()
+        && allow_sparse_root
         && first_match_direct_root.is_none()
         && single_root
         && root_branches[0].initial_prune_guard.is_passed()
-        && vocab.mask_runtime_tokenizer().is_none()
+        && (dense_root_bytes || vocab.mask_runtime_tokenizer().is_none())
 
         && trie.node(0).token_id.is_none()
         && trie.has_full_walk_root_byte_index()
@@ -3991,7 +4062,7 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
                     bytes = Some(residual);
                 }
             }
-        if bytes.is_none() && root.parser_filtered_root {
+        if bytes.is_none() && (dense_root_bytes || root.parser_filtered_root) {
             bytes = kernel.transitions.exact_next_bytes(root.tokenizer_config);
         }
         if bytes.is_none()
@@ -4033,7 +4104,7 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
     let sparse_positive_rebuild = !sparse_root_ranges.is_empty();
     let mut sparse_root_range_index = 0usize;
     let mut sparse_root_range_end = 0u32;
-    if sparse_positive_rebuild {
+    if sparse_positive_rebuild && !positive_rebuild {
         buf.fill(0);
     }
     let mut remaining_ops = if let Some(&(start, end, marker_start)) = sparse_root_ranges.first() {
@@ -4043,8 +4114,7 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
     } else {
         walk_ops.iter()
     };
-    let profile_generic_work =
-        crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_some();
+    let profile_generic_work = kernel.parser_cache.profile;
     let mut profile_byte_ops = 0usize;
     let mut profile_scalar_byte_ops = 0usize;
     let mut profile_two_byte_ops = 0usize;
@@ -4077,12 +4147,22 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
         let Some(&op) = remaining_ops.next() else { break; };
         let parent_depth = op.parent_depth() as usize;
         if op.starts_edge() {
+            let root_slot = partition_root_slot;
+            if parent_depth == 0 && !op.consumes_byte() { partition_root_slot += 1; }
             if let Some(already) = kernel.transitions.pre_admitted_original_mask() {
                 let op_index = walk_ops.len() - remaining_ops.as_slice().len() - 1;
                 let (child, _) = trie.full_walk_dead_subtree(op_index);
-                if vocab.subtree_original_tokens_for(trie, child).iter().all(|&id| {
-                    already.get(id as usize / 32).is_some_and(|&w| w & (1 << (id % 32)) != 0)
+                let end_token = trie.subtree_token_index_range(child).end
+                    .saturating_sub(usize::from(trie.node(0).token_id.is_some()));
+                if output_scope.covers(token_markers, token_marker_index, end_token, |marker| {
+                    full_walk_dense::full_walk_marker_fully_ignored(marker, already, |canonical| {
+                        vocab.token_ids(canonical).is_some_and(|ids| ids.iter().all(|&id| {
+                            already.get(id as usize / 32).is_some_and(|&w| w & (1 << (id % 32)) != 0)
+                        }))
+                    })
                 }) {
+                    #[cfg(test)]
+                    full_walk_dense::TEST_OUTPUT_SCOPE_SKIPPED.with(|count| count.set(count.get() + 1));
                     full_walk_skip_admitted_subtree_generic(
                         trie, walk_ops, &mut remaining_ops, &mut token_marker_index,
                     );
@@ -4091,13 +4171,11 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
             }
             frame.clone_from(stack[parent_depth].as_ref().expect("missing parent product"));
             if parent_depth == 0 && !op.consumes_byte() {
-                let root_slot = partition_root_slot;
-                partition_root_slot += 1;
                 if let Some((safe_radius, whitespace)) = master_decision
                     && let Some(class) = trie.root_layout_class(root_slot)
                     && {
                         let safe_chars = dynamic_mask_llg_master_safe_chars(class);
-                        (safe_chars != 0 && safe_chars <= safe_radius)
+                        (safe_chars != 0 && (safe_chars <= safe_radius || safe_envelope_upper.is_some_and(|upper| safe_chars > upper)))
                             || (whitespace && dynamic_mask_llg_master_is_whitespace(class))
                     }
                 {
@@ -4133,7 +4211,7 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
             if deferred_output {
                 deferred_dead_subtrees.push(child);
                 deferred_negative_work += count;
-            } else if !sparse_positive_rebuild {
+            } else if !positive_rebuild && !sparse_positive_rebuild {
                 for &id in vocab.subtree_original_tokens_for(trie, child) {
                     clear_mask_bit_known_in_range(buf, id);
                 }
@@ -4145,18 +4223,24 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
         }
 
         if op.ends_edge() {
-            if frame.direct.is_none() && matches!(&frame.cursor, FullWalkCursor::Cached(_)) {
+            if frame.direct.is_none() {
                 let op_index = walk_ops.len() - remaining_ops.as_slice().len() - 1;
-                let (child, _) = trie.full_walk_dead_subtree(op_index);
-                if trie.node(child).child_len != 0
-                    && cache.proves_self_loops(&frame.cursor, trie.subtree_bytes(child))
-                    && cache.boundary_allowed(&frame.cursor, &mut kernel)
+                let (child, subtree_end) = trie.full_walk_dead_subtree(op_index);
+                let remaining = subtree_end as usize - op_index;
+                let certified = trie.node(child).child_len != 0 && (
+                    (cache.proves_self_loops(&frame.cursor, trie.subtree_bytes(child))
+                        && cache.boundary_allowed(&frame.cursor, &mut kernel))
+                    || (remaining >= 64 && trie.subtree_tokens(child).len() >= 16
+                        && kernel.transitions.proves_live_subtree(cache.view(&frame.cursor),
+                            trie.subtree_bytes(child), kernel.parser_cache, kernel.constraint))
+                );
+                if certified
                 {
                     let original_count = vocab.subtree_original_tokens_for(trie, child).len();
                     if deferred_output {
                         deferred_positive_work += original_count;
                         deferred_admitted_subtrees.push(child);
-                    } else if sparse_positive_rebuild {
+                    } else if positive_rebuild || sparse_positive_rebuild {
                         for &id in vocab.subtree_original_tokens_for(trie, child) {
                             buf[id as usize / 32] |= 1 << (id % 32);
                         }
@@ -4188,7 +4272,7 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
                     if deferred_output {
                         deferred_positive_work += dynamic_token_marker_original_count(vocab, token_marker);
                         deferred_allowed_markers.push(token_marker);
-                    } else if sparse_positive_rebuild {
+                    } else if positive_rebuild || sparse_positive_rebuild {
                         mark_dynamic_token_marker(vocab, token_marker, buf);
                     }
                 } else {
@@ -4199,7 +4283,7 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
                     if deferred_output {
                         deferred_negative_work += dynamic_token_marker_original_count(vocab, token_marker);
                         deferred_rejected_markers.push(token_marker);
-                    } else if !sparse_positive_rebuild {
+                    } else if !positive_rebuild && !sparse_positive_rebuild {
                         clear_dynamic_token_marker(vocab, token_marker, buf);
                     }
                 }
@@ -4247,7 +4331,7 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
         // Empty-byte aliases live at the root, outside the edge-marker stream.
         // The eager output starts with these set; reproduce that exact root
         // contribution when the positive adaptive emitter starts from zero.
-        if let Some(canonical) = trie.node(0).token_id {
+        if include_empty_root && let Some(canonical) = trie.node(0).token_id {
             for &(word, bits) in vocab.token_word_masks(canonical) {
                 if let Some(slot) = buf.get_mut(word as usize) { *slot |= bits; }
             }
@@ -4292,8 +4376,6 @@ fn try_full_walk_mask_with_table_dispatch<T: FullWalkTransitionTable>(
     // paths. This also handles a token ID that is valid through both routes.
     update_special_token_mask(state, buf);
     state.clear_late_grammar_placeholder_mask(buf);
-    #[cfg(test)]
-    TEST_FULL_WALK_USES.with(|count| count.set(count.get() + 1));
     Ok(true)
 }
 
