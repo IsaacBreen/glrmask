@@ -2667,7 +2667,6 @@ fn segmented_runtime_artifact_v24_ref(
 ) -> Option<SegmentedRuntimeArtifactV24Ref<'_>> {
     let overlay = constraint.static_dynamic_overlay.as_ref()?;
     if overlay.segmented_parser_components.is_empty()
-        && overlay.segmented_boundary_shards.is_empty()
         && overlay.segmented_boundary_parser.is_none()
         && overlay.segmented_boundary_terminal_trie.is_none()
     {
@@ -2694,10 +2693,9 @@ fn segmented_runtime_artifact_v24_ref(
         })
         .collect();
 
-    let boundary_shards = if !overlay.segmented_boundary_shards.is_empty() {
+    let boundary_shards = if overlay.boundary_shards().next().is_some() {
         overlay
-            .segmented_boundary_shards
-            .iter()
+            .boundary_shards()
             .map(|shard| SegmentedBoundaryShardV23Ref {
                 scope: SegmentedBoundaryShardScopeV23Ref::Component {
                     start_component: shard.start_component,
@@ -2836,8 +2834,7 @@ fn segmented_runtime_artifact_ref(
         })
         .collect();
     let boundary_shards = overlay
-        .segmented_boundary_shards
-        .iter()
+        .boundary_shards()
         .map(|shard| {
             let backend = match &shard.backend {
                 crate::runtime::SegmentedBoundaryShardBackend::StaticParser(boundary) => {
@@ -3152,7 +3149,6 @@ fn restore_segmented_runtime_v22(
     // v22 stores one global B. Keep the new shard collection empty so runtime
     // deliberately takes the exact legacy/global fallback rather than
     // pretending the old wire format contained per-start-component roots.
-    overlay.segmented_boundary_shards.clear();
     Ok(())
 }
 
@@ -3495,15 +3491,14 @@ fn restore_segmented_runtime_v23(
     for component in &mut overlay.segmented_parser_components {
         component.boundary = None;
     }
-    for shard in &restored_shards {
+    for shard in restored_shards {
         if let Some(component) = overlay
             .segmented_parser_components
             .get_mut(shard.start_component as usize)
         {
-            component.boundary = Some(shard.clone());
+            component.boundary = Some(shard);
         }
     }
-    overlay.segmented_boundary_shards = restored_shards;
     overlay.segmented_boundary_parser = global_static;
     overlay.segmented_boundary_terminal_trie = global_dynamic;
     Ok(())
@@ -3647,11 +3642,6 @@ fn restore_segmented_runtime_v24(
             }
             shard.start_parser_states = starts;
         }
-        overlay.segmented_boundary_shards = overlay
-            .segmented_parser_components
-            .iter()
-            .filter_map(|component| component.boundary.clone())
-            .collect();
         // Prevent a global/static legacy B from accidentally satisfying the
         // recursive-runtime shape test merely because v24 also serialized
         // linker metadata. As a loaded legacy constraint this node remains an
@@ -3805,7 +3795,6 @@ fn restore_recursive_segmented_runtime_v27(
         overlay.segmented_mask_authoritative = true;
         overlay.segmented_static_baseline = false;
         overlay.segmented_component_union_root_dispatch.clear();
-        overlay.segmented_boundary_shards.clear();
         overlay.segmented_boundary_parser = None;
         overlay.segmented_boundary_terminal_trie = None;
         if !template_backend {
@@ -3892,11 +3881,10 @@ fn restore_recursive_segmented_runtime_v27(
     for component in &mut overlay.segmented_parser_components {
         component.boundary = None;
     }
-    for shard in &restored_shards {
-        overlay.segmented_parser_components[shard.start_component as usize].boundary =
-            Some(shard.clone());
+    for shard in restored_shards {
+        let index = shard.start_component as usize;
+        overlay.segmented_parser_components[index].boundary = Some(shard);
     }
-    overlay.segmented_boundary_shards = restored_shards;
     if !constraint.uses_compact_segmented_parser_runtime() {
         return Err(crate::Error::Serialization(
             "recursive v27 segmented runtime did not restore a provider-native parser"

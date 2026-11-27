@@ -10457,8 +10457,6 @@ mod tests {
                     };
                     shard.mask_vocabulary = Default::default();
                 }
-                overlay.segmented_boundary_shards = overlay.segmented_parser_components.iter()
-                    .filter_map(|component| component.boundary.clone()).collect();
             }
             for prefix in ["", "X", "Xa", "Xaa", "Xaab", "Xaac", "Xaab!", "Xaac?"] {
                 let mut state = constraint.start();

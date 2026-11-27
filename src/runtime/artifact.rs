@@ -9593,22 +9593,17 @@ pub(crate) struct StaticDynamicOverlayMetadata {
     /// body. No runtime parser-NWA branching is involved.
     #[serde(skip, default)]
     pub(crate) segmented_component_union_root_dispatch: Vec<u32>,
-    /// Authoritative cross-component accelerators, optionally restricted to
-    /// model tokens whose parser execution starts in one component.  This is
-    /// the new composition model: boundary acceleration is selected per
-    /// starting component, while the retained component constraints remain
-    /// the ordinary A contribution.  `start_component == None` is the exact
-    /// legacy/global fallback used while older artifacts and compiler paths
-    /// are migrated.
-    #[serde(skip, default)]
-    pub(crate) segmented_boundary_shards: Vec<SegmentedBoundaryShard>,
-    /// Legacy/global v22 storage.  New live compositions also publish an Arc
-    /// to the same backend through `segmented_boundary_shards`; these fields
-    /// remain until the partitioned boundary wire format is versioned.
+    /// Legacy global boundary accelerators.
     #[serde(skip, default)]
     pub(crate) segmented_boundary_parser: Option<Arc<SegmentedBoundaryParser>>,
     #[serde(skip, default)]
     pub(crate) segmented_boundary_terminal_trie: Option<Arc<SegmentedBoundaryTerminalTrie>>,
+}
+
+impl StaticDynamicOverlayMetadata {
+    pub(crate) fn boundary_shards(&self) -> impl Iterator<Item = &SegmentedBoundaryShard> {
+        self.segmented_parser_components.iter().filter_map(|component| component.boundary.as_ref())
+    }
 }
 
 #[derive(Debug, Clone)]

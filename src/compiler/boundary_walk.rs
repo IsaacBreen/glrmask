@@ -6381,8 +6381,8 @@ mod tests {
             ).expect("native shard-scoped strict link on the divergent fixture").constraint
         };
         let overlay = linked.static_dynamic_overlay.as_ref().expect("native static overlay");
-        assert!(!overlay.segmented_boundary_shards.is_empty(), "crossing shards must be installed");
-        assert!(overlay.segmented_boundary_shards.iter().all(|shard|
+        assert!(overlay.boundary_shards().next().is_some(), "crossing shards must be installed");
+        assert!(overlay.boundary_shards().all(|shard|
             matches!(&shard.backend, crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_))));
         let inline = Constraint::from_glrm_grammar(r#"
             start document; nt document = "L" "a" "x" | "R" "a" "y";
@@ -6617,7 +6617,7 @@ mod tests {
             mid_static
                 .static_dynamic_overlay
                 .as_ref()
-                .is_some_and(|overlay| !overlay.segmented_boundary_shards.is_empty()),
+                .is_some_and(|overlay| overlay.boundary_shards().next().is_some()),
             "inner static compose must install its boundary repair before nesting",
         );
         let outer_inputs = [CompiledSubgrammarInput {
@@ -6652,7 +6652,7 @@ mod tests {
                 .as_ref()
                 .and_then(|overlay| overlay.segmented_parser_components.get(1))
                 .and_then(|component| component.constraint.static_dynamic_overlay.as_ref())
-                .is_some_and(|overlay| !overlay.segmented_boundary_shards.is_empty()),
+                .is_some_and(|overlay| overlay.boundary_shards().next().is_some()),
             "outer dynamic wrapper must preserve the child's static internal boundary repair",
         );
         assert!(
@@ -7029,11 +7029,11 @@ mod tests {
             "mid overlay must not acquire a dynamic internal boundary shard",
         );
         assert!(
-            !mid_installed.segmented_boundary_shards.is_empty(),
+            mid_installed.boundary_shards().next().is_some(),
             "mid overlay static shard list must survive the outer install",
         );
         assert!(
-            mid_installed.segmented_boundary_shards.iter().all(|shard| matches!(
+            mid_installed.boundary_shards().all(|shard| matches!(
                 shard.backend,
                 crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
             )),
@@ -7255,8 +7255,7 @@ mod tests {
     /// boundary parser DWAs stored in an existing composed artifact.
     ///
     /// Reads the artifact path from `PARSER_ALIVE_BIN` (no recomposition),
-    /// walks `static_dynamic_overlay.segmented_boundary_shards` (plus each
-    /// retained component's own `boundary` shard, printed distinctly), and for
+    /// walks each retained component's boundary shard, and for
     /// every `StaticParser` backend with a `recursive_parser_dwa` runs the
     /// exact forward-support traversal of `accepted_original_tokens` over the
     /// FINAL parser DWA with that shard's OWN `internal_token_to_originals`
@@ -7385,29 +7384,6 @@ mod tests {
                 candidates.map_or(-1i64, |c| c.len() as i64),
             ));
         };
-        for shard in &overlay.segmented_boundary_shards {
-            let (backend, parser, ito) = match &shard.backend {
-                crate::runtime::SegmentedBoundaryShardBackend::StaticParser(b) => (
-                    "StaticParser",
-                    b.recursive_parser_dwa.as_ref().or(Some(&b.parser_dwa)),
-                    Some(b.internal_token_to_originals.as_slice()),
-                ),
-                crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(_) => {
-                    ("DynamicTerminalTrie", None, None)
-                }
-                crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect => {
-                    ("DynamicDirect", None, None)
-                }
-            };
-            report(
-                "overlay".to_string(),
-                shard.start_component,
-                backend,
-                parser,
-                ito,
-                shard.candidate_tokens.as_deref(),
-            );
-        }
         for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
             if let Some(shard) = component.boundary.as_ref() {
                 let (backend, parser, ito) = match &shard.backend {

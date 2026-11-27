@@ -437,7 +437,6 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
     };
     let overlay = constraint.static_dynamic_overlay.as_mut().unwrap();
     for component in &mut overlay.segmented_parser_components { component.boundary = None; }
-    let mut shards = Vec::with_capacity(published.len());
     for published in published {
         let shard = SegmentedBoundaryShard {
             start_component: published.start_component,
@@ -447,10 +446,9 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
             mask_vocabulary: Default::default(),
             backend: SegmentedBoundaryShardBackend::StaticParser(published.boundary),
         };
-        overlay.segmented_parser_components[shard.start_component as usize].boundary = Some(shard.clone());
-        shards.push(shard);
+        let index = shard.start_component as usize;
+        overlay.segmented_parser_components[index].boundary = Some(shard);
     }
-    overlay.segmented_boundary_shards = shards;
     // B keeps its private quotient. The coordinator coordinate is independently
     // exact for correlated A exclusions and for mapping every B output token.
     overlay.recursive_tokenizer_internal_tsids = Default::default();

@@ -726,7 +726,6 @@ pub(crate) fn install_published_static_boundary_shards(
     overlay: &mut crate::runtime::StaticDynamicOverlayMetadata,
     shards: Vec<PublishedStaticBoundaryShard>,
 ) -> Result<(), String> {
-    overlay.segmented_boundary_shards.clear();
     for component in &mut overlay.segmented_parser_components {
         component.boundary = None;
     }
@@ -749,8 +748,7 @@ pub(crate) fn install_published_static_boundary_shards(
             candidate_tokens: Some(shard.candidate_tokens),
             backend: crate::runtime::SegmentedBoundaryShardBackend::StaticParser(shard.boundary),
         };
-        overlay.segmented_parser_components[component_index].boundary = Some(runtime_shard.clone());
-        overlay.segmented_boundary_shards.push(runtime_shard);
+        overlay.segmented_parser_components[component_index].boundary = Some(runtime_shard);
     }
     Ok(())
 }
@@ -759,7 +757,6 @@ fn install_dynamic_direct_boundary_shards(
     overlay: &mut crate::runtime::StaticDynamicOverlayMetadata,
     boundary_tokens_by_start_component: Option<&[Vec<u32>]>,
 ) {
-    overlay.segmented_boundary_shards.clear();
     for component in &mut overlay.segmented_parser_components {
         component.boundary = None;
     }
@@ -776,8 +773,7 @@ fn install_dynamic_direct_boundary_shards(
                 .map(|tokens| Arc::<[u32]>::from(tokens.clone())),
             backend: crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect,
         };
-        overlay.segmented_parser_components[component_index].boundary = Some(shard.clone());
-        overlay.segmented_boundary_shards.push(shard);
+        overlay.segmented_parser_components[component_index].boundary = Some(shard);
     }
 }
 
@@ -9122,8 +9118,6 @@ fn compose_dynamic_recursive_shared_fast(
             shard.candidate_tokens = ids.map(Arc::<[u32]>::from);
         }
     }
-    overlay.segmented_boundary_shards = overlay.segmented_parser_components.iter()
-        .filter_map(|component| component.boundary.clone()).collect();
 
     // Empty bytes are an explicit "provider-native only" marker. Dynamic
     // recomposition consumes the retained component tree directly. Static or
@@ -9336,8 +9330,6 @@ fn compose_constraints_owned_parent_impl(
             for (index, component) in overlay.segmented_parser_components.iter_mut().enumerate() {
                 if !selected.contains(index) { component.boundary = dynamic[index].clone(); }
             }
-            overlay.segmented_boundary_shards = overlay.segmented_parser_components.iter()
-                .filter_map(|component| component.boundary.clone()).collect();
             constraint.serialized_artifact_cache = None;
         }
         let (terminal_offsets, tokenizer_state_offsets) = constraint.static_dynamic_overlay.as_ref()
@@ -14405,7 +14397,7 @@ table: &child_table,
                         matches!(shard.backend, crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)))),
                 "nested source boundaries must also execute statically",
             );
-            assert!(mid_inner.segmented_boundary_shards.iter().all(|shard|
+            assert!(mid_inner.boundary_shards().all(|shard|
                 matches!(shard.backend, crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_))));
         }
         // Mask-gated corpus from the dynamic reference (no trap): prefixes of
@@ -15059,7 +15051,7 @@ table: &child_table,
             .as_ref()
             .expect("extended composition must retain segmented metadata");
         assert!(
-            !overlay.segmented_boundary_shards.is_empty(),
+            overlay.boundary_shards().next().is_some(),
             "extended composition must publish static shards",
         );
         assert!(
@@ -15394,8 +15386,8 @@ table: &child_table,
                 "parent-block overlay must retain only static inner shards",
             );
             assert!(
-                !inner.segmented_boundary_shards.is_empty()
-                    && inner.segmented_boundary_shards.iter().all(|shard| matches!(
+                inner.boundary_shards().next().is_some()
+                    && inner.boundary_shards().all(|shard| matches!(
                         shard.backend,
                         crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
                     )),
@@ -15803,8 +15795,8 @@ table: &child_table,
                 "parent-block overlay must retain only static inner shards",
             );
             assert!(
-                !inner.segmented_boundary_shards.is_empty()
-                    && inner.segmented_boundary_shards.iter().all(|shard| matches!(
+                inner.boundary_shards().next().is_some()
+                    && inner.boundary_shards().all(|shard| matches!(
                         shard.backend,
                         crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
                     )),
@@ -17314,8 +17306,8 @@ table: &child_table,
                 "parent-block overlay must retain only static inner shards",
             );
             assert!(
-                !inner.segmented_boundary_shards.is_empty()
-                    && inner.segmented_boundary_shards.iter().all(|shard| matches!(
+                inner.boundary_shards().next().is_some()
+                    && inner.boundary_shards().all(|shard| matches!(
                         shard.backend,
                         crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
                     )),

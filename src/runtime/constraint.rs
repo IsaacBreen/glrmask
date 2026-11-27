@@ -3362,11 +3362,6 @@ impl Constraint {
                 shard.start_parser_states = BitSet::new(0);
             }
         }
-        overlay.segmented_boundary_shards = overlay
-            .segmented_parser_components
-            .iter()
-            .filter_map(|component| component.boundary.clone())
-            .collect();
     }
 
     /// Drop the materialized composed-table -> immediate-component parser

@@ -3933,10 +3933,10 @@ mod tests {
         assert!(overlay.segmented_boundary_parser.is_none());
         assert!(overlay.segmented_boundary_terminal_trie.is_none());
         assert!(
-            !overlay.segmented_boundary_shards.is_empty(),
+            overlay.boundary_shards().next().is_some(),
             "static boundary policy must publish component-owned shards",
         );
-        assert!(overlay.segmented_boundary_shards.iter().all(|shard| matches!(
+        assert!(overlay.boundary_shards().all(|shard| matches!(
             shard.backend,
             crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
         )));
@@ -3949,7 +3949,7 @@ mod tests {
             .expect("bound constraint must use the explicit segmented runtime");
         assert!(overlay.segmented_boundary_parser.is_none());
         assert!(overlay.segmented_boundary_terminal_trie.is_none());
-        assert!(overlay.segmented_boundary_shards.iter().all(|shard| matches!(
+        assert!(overlay.boundary_shards().all(|shard| matches!(
             shard.backend,
             crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
         )));
@@ -4032,7 +4032,7 @@ mod tests {
             let overlay = alternative.static_dynamic_overlay.as_ref().unwrap();
             assert!(overlay.segmented_boundary_parser.is_none());
             assert!(overlay.segmented_boundary_terminal_trie.is_none());
-            assert!(overlay.segmented_boundary_shards.iter().all(|shard| matches!(
+            assert!(overlay.boundary_shards().all(|shard| matches!(
                 shard.backend,
                 crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
             )));
@@ -4967,7 +4967,7 @@ mod tests {
         .unwrap();
         let static_bound = parent.bind_grammar("payload", &child).unwrap();
         assert!(static_bound.static_dynamic_overlay.as_ref().unwrap()
-            .segmented_boundary_shards.iter().all(|shard| !matches!(
+            .boundary_shards().all(|shard| !matches!(
                 shard.backend, crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect)));
         let static_loaded = RuntimeConstraint::load(static_bound.save(), &vocab).unwrap();
         let bound = parent
@@ -5076,7 +5076,7 @@ mod tests {
             "recursive runtime must derive state intervals from its component tree",
         );
         let bound_overlay = bound.static_dynamic_overlay.as_ref().unwrap();
-        assert!(bound_overlay.segmented_boundary_shards.iter().all(|shard| {
+        assert!(bound_overlay.boundary_shards().all(|shard| {
             shard.start_parser_states.is_empty()
         }));
         assert!(bound_overlay.segmented_parser_components.iter().all(|component| {
@@ -5107,7 +5107,7 @@ mod tests {
                 .is_empty(),
         );
         let loaded_overlay = loaded.static_dynamic_overlay.as_ref().unwrap();
-        assert!(loaded_overlay.segmented_boundary_shards.iter().all(|shard| {
+        assert!(loaded_overlay.boundary_shards().all(|shard| {
             shard.start_parser_states.is_empty()
         }));
         assert!(loaded_overlay.segmented_parser_components.iter().all(|component| {
@@ -5870,7 +5870,7 @@ mod tests {
             .as_ref()
             .expect("static composition must retain segmented A+B metadata");
         assert!(
-            !overlay.segmented_boundary_shards.is_empty(),
+            overlay.boundary_shards().next().is_some(),
             "static composition must publish component-scoped B shards",
         );
         assert!(
@@ -5883,7 +5883,7 @@ mod tests {
         let loaded_overlay = loaded.static_dynamic_overlay.as_ref().unwrap();
         assert!(loaded_overlay.segmented_boundary_parser.is_none());
         assert!(loaded_overlay.segmented_boundary_terminal_trie.is_none());
-        assert!(!loaded_overlay.segmented_boundary_shards.is_empty());
+        assert!(loaded_overlay.boundary_shards().next().is_some());
         let reference = RuntimeConstraint::compile(
             Grammar::ebnf(r#"start ::= "x" "y" "z""#),
             &vocab,
@@ -6201,8 +6201,8 @@ mod final_unlinked_optimization_tests {
 
     fn assert_static_boundary(constraint: &RuntimeConstraint) {
         let overlay = constraint.static_dynamic_overlay.as_ref().unwrap();
-        assert!(!overlay.segmented_boundary_shards.is_empty());
-        assert!(overlay.segmented_boundary_shards.iter().all(|shard| matches!(
+        assert!(overlay.boundary_shards().next().is_some());
+        assert!(overlay.boundary_shards().all(|shard| matches!(
             shard.backend,
             crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
         )));
@@ -6210,8 +6210,8 @@ mod final_unlinked_optimization_tests {
 
     fn assert_dynamic_boundary(constraint: &RuntimeConstraint) {
         let overlay = constraint.static_dynamic_overlay.as_ref().unwrap();
-        assert!(!overlay.segmented_boundary_shards.is_empty());
-        assert!(overlay.segmented_boundary_shards.iter().all(|shard| matches!(
+        assert!(overlay.boundary_shards().next().is_some());
+        assert!(overlay.boundary_shards().all(|shard| matches!(
             shard.backend,
             crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
         )));

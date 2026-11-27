@@ -229,7 +229,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     }
     let mut specials = Vec::new();
     let mut markers = Vec::new();
-    let mut wrappers = Vec::new(); let mut shards = Vec::new();
+    let mut wrappers = Vec::new();
     for (index, component) in components.into_iter().enumerate() {
         if let Some(queries) = &component.marker_queries {
             markers.extend(queries.terminals.iter().map(|marker| crate::runtime::markers::MarkerTerminal {
@@ -245,7 +245,6 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
         let shard = SegmentedBoundaryShard { start_component: index as u32,
             start_parser_states: crate::ds::bitset::BitSet::new(0), accepts_empty_stack: index == 0,
             candidate_tokens: candidate_tokens[index].clone(), mask_vocabulary: Default::default(), backend: SegmentedBoundaryShardBackend::DynamicDirect };
-        shards.push(shard.clone());
         wrappers.push(SegmentedParserComponent { constraint: component, boundary: Some(shard),
             tokenizer_state_offset: tokenizer_offsets[index], terminal_offset: terminal_offsets[index],
             global_terminal_aliases: vec![], local_tsid_to_global_tsids: vec![],
@@ -256,7 +255,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     constraint.static_dynamic_overlay = Some(StaticDynamicOverlayMetadata {
         terminal_offsets, tokenizer_state_offsets: tokenizer_offsets, segmented_parser_components: wrappers,
         segmented_parser_links: links, segmented_mask_authoritative: true,
-        segmented_boundary_shards: shards, ..Default::default()
+        ..Default::default()
     });
     constraint.sanitize_late_grammar_placeholder_token_domain();
     constraint.validate_template_composition_layout().map_err(fail)?;
