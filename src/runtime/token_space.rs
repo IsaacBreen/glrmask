@@ -504,51 +504,8 @@ impl Constraint {
             }
             Ok(true)
         };
-        if let (Some(&lo), Some(&hi)) = (
-            self.internal_token_buf_offsets.get(class),
-            self.internal_token_buf_offsets.get(class + 1),
-        ) {
-            if let Some(entries) = self.internal_token_buf_flat.get(lo as usize..hi as usize) {
-                for entry in entries {
-                    if !word(entry.word_idx, entry.mask)? {
-                        return Ok(false);
-                    }
-                }
-                return Ok(true);
-            }
-            if let Some(backed) = &self.backed_internal_token_buf_flat {
-                if let Some(entries) = backed.slice(lo as usize, hi as usize) {
-                    for entry in entries {
-                        if !word(entry.word_idx, entry.mask)? {
-                            return Ok(false);
-                        }
-                    }
-                    return Ok(true);
-                }
-                // Unaligned artifact backing cannot yield a borrowed native slice.
-                // Read one existing sparse entry at a time, so cutoff still stops.
-                for index in lo as usize..hi as usize {
-                    let mut entry = None;
-                    backed.for_each_range(index, index + 1, |w, b| entry = Some((w, b)));
-                    let (w, b) = entry.ok_or_else(|| {
-                        crate::Error::Internal(
-                            "bounded token proof: missing class member entry".into(),
-                        )
-                    })?;
-                    if !word(w, b)? {
-                        return Ok(false);
-                    }
-                }
-                return Ok(true);
-            }
-        }
-        if let Some(entries) = self.internal_token_buf_masks.get(class) {
-            for &(index, bits) in entries {
-                if !word(index, bits)? {
-                    return Ok(false);
-                }
-            }
-            return Ok(true);
+        if let Some(result) = self.token_projection.visit_row(class, &mut word) {
+            return result;
         }
         // An artifact may not have restored its mask caches yet. The packed map
         // still defines the members exactly.
@@ -750,27 +707,9 @@ impl Constraint {
 		};
 		let internal_count = self.internal_token_count();
         if internal_count == 0 { return Some(true); }
-		let flat_ready = self.internal_token_buf_offsets.len() == internal_count.saturating_add(1)
-			&& self
-				.internal_token_buf_offsets
-				.last()
-				.is_some_and(|&end| end as usize == self.internal_token_buf_flat_len());
-		let materialized_ready = self.internal_token_buf_masks.len() == internal_count;
-		if crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some() {
-			eprintln!(
-				"[glrmask/profile][possible_match_public_empty] internal_count={} offsets={} flat_len={} materialized={} flat_ready={} materialized_ready={}",
-				internal_count,
-				self.internal_token_buf_offsets.len(),
-				self.internal_token_buf_flat_len(),
-				self.internal_token_buf_masks.len(),
-				flat_ready,
-				materialized_ready,
-			);
-		}
-		if !flat_ready && !materialized_ready {
-			return None;
-		}
-		for &internal_tsid in self.internal_tsids_for_state(tokenizer_state) {
+        if !self.token_projection.has_rows(internal_count) {
+            return None;
+        }		for &internal_tsid in self.internal_tsids_for_state(tokenizer_state) {
 			let Some(tokens) = weight.token_set_for_tsid(internal_tsid) else {
 				continue;
 			};
@@ -787,24 +726,7 @@ impl Constraint {
 				if start > end {
 					return;
 				}
-				if flat_ready {
-					for internal in start..=end {
-						if self.internal_token_buf_offsets[internal]
-							!= self.internal_token_buf_offsets[internal + 1]
-						{
-							has_public = true;
-							break;
-						}
-					}
-				} else {
-					for internal in start..=end {
-						if !self.internal_token_buf_masks[internal].is_empty() {
-							has_public = true;
-							break;
-						}
-					}
-				}
-			});
+                has_public = (start..=end).any(|internal| self.token_projection.row_len(internal) != 0);			});
 			if has_public {
 				return Some(false);
 			}

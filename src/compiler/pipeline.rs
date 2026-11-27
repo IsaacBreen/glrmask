@@ -3671,7 +3671,7 @@ struct CompileDagResult {
     templates_finished_ms: f64,
     terminal_run_collapse_ms: f64,
     prebuilt_parser_dwa: Option<(MappedParserDwa, f64, f64, f64)>,
-    prebuilt_token_mask_caches: Option<(InternalIdMap, crate::runtime::TokenMaskCachePrebuild)>,
+    prebuilt_token_mask_caches: Option<(InternalIdMap, crate::runtime::TokenProjection)>,
 }
 
 fn build_parser_dwa_for_terminal_family(
@@ -4417,7 +4417,7 @@ fn launch_parser_dag_if_ready<'scope>(
                             .original_to_internal
                             .len()
                             .div_ceil(32);
-                        let caches = crate::runtime::TokenMaskCachePrebuild::build(
+                        let caches = crate::runtime::TokenProjection::build(
                             &final_id_map.vocab_tokens.original_to_internal,
                             &internal_to_tokens,
                             mask_words,
@@ -5899,13 +5899,7 @@ fn compile_prepared_with_profile_and_table_construction(
             terminal_live_states: Vec::new(),
             token_classes: crate::runtime::TokenClasses::mapped(internal_ids.vocab_tokens.original_to_internal.clone(), internal_ids.vocab_tokens.internal_to_originals_vecs()),
             token_bytes,
-            internal_token_buf_masks: Vec::new(),
-            word_group_sparse_masks: Vec::new(),
-            word_group_prefix_buf_masks: Default::default(),
-            word_group_sparse_prefix_entries: Vec::new(),
-            word_group_sparse_total_entries: 0,
-            word_group_sparse_max_entries: 0,
-            all_tokens_buf_mask: Box::new([]),
+            token_projection: Default::default(),
             internal_token_dense_words: 0,
             weight_token_masks: Default::default(),
             packed_dwa_token_dense_masks: Default::default(),
@@ -5917,16 +5911,6 @@ fn compile_prepared_with_profile_and_table_construction(
             indexed_dag_dense_transitions: Vec::new(),
             indexed_dag_dense_finals: Vec::new(),
             tokenizer_fast_transitions: prebuilt_tokenizer_fast_transitions,
-            heavy_token_dense_masks: Vec::new(),
-            heavy_token_indices: Vec::new(),
-            internal_token_buf_flat: Box::new([]),
-            backed_internal_token_buf_flat: None,
-            internal_token_buf_offsets: Box::new([]),
-            total_internal_buf_cost: 0,
-            heavy_total_cost: 0,
-            light_avg_cost_x256: 0,
-            internal_token_buf_op_costs: Vec::new(),
-            word_group_buf_op_costs: Vec::new(),
             parser_state_domain_labels: Vec::new(),
             ignore_expr,
             serialized_artifact_cache: None,

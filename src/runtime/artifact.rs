@@ -9810,31 +9810,9 @@ constraint_data_schema! {
     pub(crate) token_classes: crate::runtime::TokenClasses,
     @serde(skip, default)
     pub(crate) token_bytes: TokenByteDomain,
-    /// Precomputed bitmask fragments for each internal token.
-    /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs
-    /// for all original tokens that map to internal token `i`.
-    @serde(skip)
-    pub(crate) internal_token_buf_masks: Vec<InternalTokenBufMasks>,
-    /// Sparse OR-union for each 64-token internal word group.
-    @serde(skip)
-    pub(crate) word_group_sparse_masks: Vec<InternalTokenBufMasks>,
-    /// Dense prefix-unions of 64-token internal word groups.
-    ///
-    /// `word_group_prefix_buf_masks[i]` is the OR-union of word groups
-    /// `[0, i)`. Internal-token groups are disjoint in original-token space,
-    /// so `prefix[end] & !prefix[start]` is the exact dense mask for a full
-    /// internal-word run `[start, end)`.
-    @serde(skip)
-    pub(crate) word_group_prefix_buf_masks: DenseBufMaskRows,
-    /// Prefix sums of `word_group_sparse_masks[i].len()`.
-    @serde(skip)
-    pub(crate) word_group_sparse_prefix_entries: Vec<usize>,
-    pub(crate) word_group_sparse_total_entries: usize,
-    @serde(skip)
-    pub(crate) word_group_sparse_max_entries: usize,
-    /// Precomputed buf output for the full internal token universe (union of all sparse word groups).
-    @serde(skip)
-    pub(crate) all_tokens_buf_mask: Box<[u32]>,
+    /// Canonical original-token output projection.
+    @serde(skip, default)
+    pub(crate) token_projection: super::constraint::TokenProjection,
     @serde(skip)
     pub(crate) internal_token_dense_words: usize,
     @serde(skip)
@@ -9882,45 +9860,6 @@ constraint_data_schema! {
     /// Dense tokenizer transition lookup for commit-time byte scans.
     @serde(skip)
     pub(crate) tokenizer_fast_transitions: FastTokenizerTransitions,
-    /// Dense buf masks for "heavy" internal tokens (those with many buf entries).
-    /// Indexed by internal token ID; None for light tokens.
-    @serde(skip)
-    pub(crate) heavy_token_dense_masks: Vec<Option<Box<[u32]>>>,
-    /// Flattened contiguous array of all internal token buf mask entries.
-    /// All tokens' (word_index, or_mask) pairs concatenated in token order.
-    /// Improves cache locality vs separate Vec allocations per token.
-    @serde(skip)
-    pub(crate) internal_token_buf_flat: Box<[PackedInternalTokenBufMask]>,
-    /// Current IBM2 loads can retain the runtime-native flat sparse-mask slab
-    /// directly inside the owned artifact instead of copying ~0.5-1 MiB.
-    @serde(skip, default)
-    pub(crate) backed_internal_token_buf_flat: Option<BackedInternalTokenBufMasks>,
-    /// Offsets into `internal_token_buf_flat` for each internal token.
-    /// `internal_token_buf_flat[offsets[i]..offsets[i+1]]` gives token i's entries.
-    /// Length = n_internal + 1 (sentinel at end).
-    @serde(skip)
-    pub(crate) internal_token_buf_offsets: Box<[u32]>,
-    /// Pre-computed total cost (sum of entry counts) for all internal tokens.
-    /// Used to avoid O(n_internal) cost analysis in the convert phase.
-    @serde(skip)
-    pub(crate) total_internal_buf_cost: usize,
-    /// Indices of heavy tokens for fast iteration. Length == n_heavy_tokens.
-    @serde(skip)
-    pub(crate) heavy_token_indices: Vec<usize>,
-    /// Total cost of all heavy tokens combined (n_heavy Ã— buf_len).
-    @serde(skip)
-    pub(crate) heavy_total_cost: usize,
-    /// Average cost per light token: (total_cost - heavy_total) / n_light.
-    /// Pre-multiplied by 256 for fixed-point arithmetic to avoid float.
-    @serde(skip)
-    pub(crate) light_avg_cost_x256: usize,
-    /// Exact materialization cost per internal token, after heavy-token dense masks
-    /// have been chosen.
-    @serde(skip)
-    pub(crate) internal_token_buf_op_costs: Vec<usize>,
-    /// Exact materialization cost per 64-token internal word group.
-    @serde(skip)
-    pub(crate) word_group_buf_op_costs: Vec<usize>,
     /// Optional exact quotient of positive parser-state labels used by composed
     /// parser DWAs. Entry `s` is a synthetic fallback label for parser state
     /// `s`; `i32::MAX` means no component-local fallback. Concrete parser-state
