@@ -415,7 +415,51 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
         let ignored = self.routing.leaves[leaf].constraint.ignore_terminal
             .map(|terminal| self.routing.leaves[leaf].terminal_offset + terminal);
         let allowed = ignored.is_some_and(|terminal| self.future_contains(lexer_state, terminal)) || {
-+        };
+            let candidates = self.candidate_local_terminals(lexer_state);
+            let base = self.routing.leaves[leaf].terminal_offset;
+            if self.support_enabled {
+                const MAX_MEMOS: usize = 32;
+                if !self.support_cache.contains_key(&parser_node) && self.support_cache.len() < MAX_MEMOS {
+                    let memo = self.routing.constraint.prepare_scoped_admission_memo(
+                        &parser_cache.nodes[parser_node as usize].gss);
+                    if let Some(profile) = &mut self.support_profile {
+                        profile.builds += 1;
+                        profile.declined += usize::from(memo.is_none());
+                    }
+                    self.support_cache.insert(parser_node, memo);
+                } else if let Some(profile) = &mut self.support_profile {
+                    profile.hits += usize::from(self.support_cache.contains_key(&parser_node));
+                }
+                if let Some(memo) = self.support_cache.get_mut(&parser_node).and_then(Option::as_mut) {
+                    let table = &mut self.tables[leaf];
+                    let count = candidates.len();
+                    let result = memo.matches_leaf(leaf, candidates.iter().copied(),
+                        |terminal| table.future_contains(local, terminal));
+                    if let Some(profile) = &mut self.support_profile {
+                        profile.queries += 1;
+                        profile.input_candidates += count;
+                        profile.exact_entries = self.support_cache.values().filter_map(Option::as_ref)
+                            .map(|memo| memo.entry_count()).sum();
+                    }
+                    self.boundary.insert((lexer_state, parser_node), result);
+                    return result;
+                }
+            }
+            // Exact fallback, retaining the original predicate order.
+            if let Some(provider) = constraint.template_composition_provider() {
+                let closed = provider.close_native(&parser_cache.nodes[parser_node as usize].gss);
+                candidates.into_iter().any(|terminal| {
+                    provider.closed_admits_native(&closed, base + terminal)
+                        && self.tables[leaf].future_contains(local, terminal)
+                })
+            } else {
+                let gss = self.routing.parser_gss(parser_node, parser_cache);
+                constraint.compact_segmented_parser_may_advance_on_any_matching(
+                    &gss, candidates.into_iter().map(|terminal| base + terminal),
+                    |terminal| self.tables[leaf].future_contains(local, terminal - base),
+                ).unwrap_or(false)
+            }
+        };
         self.boundary.insert((lexer_state, parser_node), allowed);
         allowed
     }
