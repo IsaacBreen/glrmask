@@ -169,7 +169,7 @@ fn staged_parser_preparation_preserves_runtime_finalization_order_and_view_ident
     let mut candidate = dynamic.into_constraints().pop().unwrap();
     assert!(candidate.has_template_parser() && !candidate.table.is_present());
     assert!(candidate.prepare_template_parser().unwrap().is_none());
-    let programs = candidate.template_parser.as_ref().unwrap().terminal_sources();
+    let programs = candidate.template_parser().unwrap().terminal_sources();
     let views = (0..programs.len()).map(|terminal| candidate.fast_terminal_template(terminal).cloned()).collect::<Vec<_>>();
 
     candidate.rebuild_dynamic_runtime_caches();
@@ -255,14 +255,14 @@ fn native_compiler_effect_metadata_survives_reload_and_nested_links_without_tabl
         r#"start root; nt root = "a" | "(" root ")";"#,
     ] {
         let component = Constraint::compile(crate::Grammar::glrm(source), &vocab).unwrap();
-        let parser = component.template_parser.as_ref().unwrap();
+        let parser = component.template_parser().unwrap();
         let summary = parser.link_grammar.as_ref().unwrap().stack_effects().unwrap();
         assert_eq!(summary.states, parser.state_count);
         assert!(!summary.effects.is_empty());
         let loaded = Constraint::load(component.save(), &vocab).unwrap();
         assert!(!loaded.table.is_present());
         assert_eq!(
-            loaded.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap()
+            loaded.template_parser().unwrap().link_grammar.as_ref().unwrap()
                 .stack_effects().unwrap(),
             summary,
         );

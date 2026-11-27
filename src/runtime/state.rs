@@ -688,7 +688,7 @@ pub(super) fn frontier_is_accepting(constraint: &Constraint, state: &ParserState
                     .flatten(),
             )
             .any(|stack| {
-                if let Some(parser) = &constraint.template_parser {
+                if let Some(parser) = constraint.template_parser() {
                     return parser.finished(stack);
                 }
                 !stack.is_empty()

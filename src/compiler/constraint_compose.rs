@@ -2965,7 +2965,7 @@ pub(crate) fn build_exact_component_boundary_trigger(
     candidate_tokens: &[u32],
 ) -> Result<Option<DWA>, String> {
     use crate::runtime::parser_backend::scoped_program::ScopedProgram;
-    let parser = constraint.template_parser.as_ref()
+    let parser = constraint.template_parser()
         .expect("LR-BACKED CONSTRAINT TRIGGER CONSTRUCTION IS FORBIDDEN");
     let merged;
     let tokenizer = if let Some(layout) = constraint.recursive_parser_layout()? {
@@ -8114,7 +8114,7 @@ fn build_composed_constraint_unfinalized(
             // Only a nonexecutable coordinate shell. Actual LR execution stays
             // in the retained Dynamic leaves; native constructors never use it.
             assert!(table.num_states==0 && table.action.is_empty() && table.goto.is_empty());
-            crate::runtime::parser_backend::ParserTableStorage::explicit(table)
+            crate::runtime::parser_backend::ParserExecutable::explicit(table)
         } else {table.into()},
         terminal_display_names,
         tokenizer,
@@ -8136,7 +8136,6 @@ fn build_composed_constraint_unfinalized(
         terminal_live_states,
         lr_terminal_templates: template_dfas_by_terminal,
         lr_fast_terminal_templates: Vec::new(),
-            template_parser: None,
         token_classes: crate::runtime::TokenClasses::mapped(original_token_to_internal, internal_token_to_tokens),
         token_bytes,
         internal_token_buf_masks: Vec::new(),
@@ -8877,7 +8876,7 @@ mod tests {
     // Compiler-algorithm fixtures own temporary LR tables directly. These
     // tables are never stored in a Constraint or used by its runtime.
     fn compiler_table_fixture(constraint: &Constraint) -> crate::compiler::glr::table::GLRTable {
-        let grammar = constraint.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap();
+        let grammar = constraint.template_parser().unwrap().link_grammar.as_ref().unwrap();
         let analyzed = grammar.analyze(constraint.terminal_display_names.clone());
         let mut table = crate::compiler::glr::table::GLRTable::build_with_default_construction(
             &analyzed, GlrTableConstruction::ExperimentalCoreMerged);

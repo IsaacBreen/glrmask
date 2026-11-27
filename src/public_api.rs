@@ -3910,7 +3910,7 @@ mod tests {
         }
         let overlay = constraint.static_dynamic_overlay.as_ref().unwrap();
         assert!(
-            constraint.template_parser.as_ref().unwrap().link_grammar.is_some(),
+            constraint.template_parser().unwrap().link_grammar.is_some(),
             "recursive coordinator lost its pure composition grammar metadata",
         );
         for component in &overlay.segmented_parser_components {
@@ -6825,7 +6825,7 @@ mod tiny_cfg_compile_blowup_tests {
                 !constraint.table.is_present(),
                 "the compact grammar must keep its finite templates",
             );
-            assert!(constraint.template_parser.is_some());
+            assert!(constraint.template_parser().is_some());
             assert_exact(&constraint, &COMPACT);
         }
     }

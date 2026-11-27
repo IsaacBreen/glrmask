@@ -30,7 +30,7 @@ impl ScopedProgram {
     }
 
     pub(crate) fn terminal(component: &Constraint, terminal: usize) -> Self {
-        let parser = component.template_parser.as_ref().expect("native component");
+        let parser = component.template_parser().expect("native component");
         Self { source: Arc::clone(parser.terminal_source(terminal).unwrap()),
             domain: Arc::clone(parser.local_domain(terminal).expect("local domain")),
             fast: parser.local_fast(terminal).cloned(),
@@ -38,7 +38,7 @@ impl ScopedProgram {
     }
 
     pub(crate) fn completion(component: &Constraint) -> Self {
-        let parser = component.template_parser.as_ref().expect("native component");
+        let parser = component.template_parser().expect("native component");
         if let Some(composition) = parser.composition() {
             return composition.completion_view.clone();
         }

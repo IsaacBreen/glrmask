@@ -1502,7 +1502,7 @@ impl Constraint {
     /// artifacts may retain their canonical bincode payload and decode it only
     /// when a later composition actually needs grammar structure.
     pub(crate) fn retained_table_rules(&self) -> Result<&[crate::grammar::flat::Rule], String> {
-        if let Some(parser) = &self.template_parser {
+        if let Some(parser) = self.template_parser() {
             return parser.link_grammar.as_ref().map(|grammar| grammar.rules())
                 .ok_or_else(|| "template parser has no source grammar metadata".to_owned());
         }
@@ -1541,7 +1541,7 @@ impl Constraint {
     /// materialized compiler-oracle table; ordinary constraints use that table
     /// directly as before.
     pub(crate) fn composition_start_nullable(&self) -> Result<bool, String> {
-        if let Some(parser) = &self.template_parser {
+        if let Some(parser) = self.template_parser() {
             return parser.embedding.as_ref().map(|embedding| embedding.nullable)
                 .ok_or_else(|| "template parser has no embedding nullability".to_owned());
         }
@@ -2035,7 +2035,7 @@ impl Constraint {
     /// invariant from the first/root leaf instead of the materialized composed
     /// table; ordinary constraints keep the historical direct derivation.
     pub(crate) fn composition_child_return_pop(&self) -> Result<u32, String> {
-        if let Some(parser) = &self.template_parser {
+        if let Some(parser) = self.template_parser() {
             return parser.embedding.as_ref().map(|embedding| embedding.return_pop)
                 .ok_or_else(|| "native parser lacks a finite return convention".to_owned());
         }
@@ -2056,13 +2056,13 @@ impl Constraint {
     }
 
     pub(crate) fn embedded_end_token_ids(&self) -> Vec<u32> {
-        self.template_parser.as_ref().and_then(|parser| parser.link_grammar.as_ref())
+        self.template_parser().and_then(|parser| parser.link_grammar.as_ref())
             .map(|grammar| grammar.embedded_end_token_ids.clone())
             .expect("native parser is missing composition grammar metadata")
     }
 
     pub(crate) fn set_composition_end_token_ids(&mut self, ids: &[u32]) {
-        if let Some(parser) = self.template_parser.as_mut().and_then(Arc::get_mut)
+        if let Some(parser) = self.template_parser_mut().and_then(Arc::get_mut)
             && let Some(grammar) = parser.link_grammar.as_mut() {
             Arc::make_mut(grammar).embedded_end_token_ids = ids.to_vec();
         }
@@ -2072,7 +2072,7 @@ impl Constraint {
     /// updates the executable EOF relation, interface metadata and the finite
     /// nullable return relation; it never reconstructs or materializes an LR table.
     pub(crate) fn set_composition_start_nullable(&mut self, nullable: bool) {
-        if self.template_parser.is_none() {
+        if self.template_parser().is_none() {
             // Explicit retained-LR parser. The historic LR pipeline recorded
             // source nullability directly on the table's embedded-start
             // metadata, which `composition_start_nullable` reads back and the
@@ -2085,7 +2085,7 @@ impl Constraint {
             self.table.set_embedded_start_nullable(nullable);
             return;
         }
-        let parser = self.template_parser.as_mut()
+        let parser = self.template_parser_mut()
             .and_then(Arc::get_mut).expect("source nullability must be set before sharing the native parser");
         if nullable {
             parser.preserve_start_nullable();
@@ -3299,7 +3299,7 @@ impl Constraint {
         let Some(layout) = self.recursive_parser_layout()? else {
             return Ok(None);
         };
-        if let Some(parser) = &self.template_parser {
+        if let Some(parser) = self.template_parser() {
             let composition = parser.composition()
                 .ok_or("native recursive parser has no scoped relations")?;
             return Ok(Some(close_provider_control_stacks(
@@ -3336,7 +3336,7 @@ impl Constraint {
         let Some(layout) = self.recursive_parser_layout()? else {
             return Ok(None);
         };
-        if let Some(parser) = &self.template_parser {
+        if let Some(parser) = self.template_parser() {
             let composition = parser.composition()
                 .ok_or("native recursive parser has no scoped relations")?;
             let provider = RecursiveTemplateReference { parser, composition };
@@ -3377,7 +3377,7 @@ impl Constraint {
         let Some(layout) = self.recursive_parser_layout()? else {
             return Ok(None);
         };
-        if let Some(parser) = &self.template_parser {
+        if let Some(parser) = self.template_parser() {
             let composition = parser.composition()
                 .ok_or("native recursive parser has no scoped relations")?;
             return Ok(Some(stacks_finished_with_provider(
@@ -3547,7 +3547,7 @@ impl Constraint {
         candidates: &BitSet,
     ) -> Option<BitSet> {
         if self.template_composition_provider().is_some() {
-            return Some(self.template_parser.as_ref().unwrap().admitted(stack, candidates));
+            return Some(self.template_parser().unwrap().admitted(stack, candidates));
         }
         if !self.uses_compact_segmented_parser_runtime() {
             return None;
@@ -11165,14 +11165,14 @@ impl Constraint {
     }
 
     pub(crate) fn terminal_template(&self, terminal: usize) -> Option<&Arc<crate::runtime::CommitTemplateDfas>> {
-        match &self.template_parser {
+        match self.template_parser() {
             Some(parser) => parser.terminal_source(terminal),
             None => self.lr_terminal_templates.get(terminal)?.as_ref(),
         }
     }
 
     pub(crate) fn fast_terminal_template(&self, terminal: usize) -> Option<&Arc<FastCommitTemplateDfas>> {
-        match &self.template_parser {
+        match self.template_parser() {
             Some(parser) => parser.local_fast(terminal),
             None => self.lr_fast_terminal_templates.get(terminal)?.as_ref(),
         }

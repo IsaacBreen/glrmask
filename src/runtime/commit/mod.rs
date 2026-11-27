@@ -613,7 +613,7 @@ fn advance_parser_stacks(
     stack: &ParserGSS,
     terminal: u32,
 ) -> ParserGSS {
-    if let Some(parser) = &constraint.template_parser {
+    if let Some(parser) = constraint.template_parser() {
         parser.record_advance();
         return advance_stacks_template_dfa(constraint, stack, terminal)
             .expect("complete template program must contain this terminal");
@@ -652,7 +652,7 @@ fn advance_parser_stacks_owned(
     stack: ParserGSS,
     terminal: u32,
 ) -> ParserGSS {
-    if let Some(parser) = &constraint.template_parser {
+    if let Some(parser) = constraint.template_parser() {
         parser.record_advance();
         return advance_stacks_template_dfa_owned(constraint, stack, terminal)
             .expect("complete template program must contain this terminal");
@@ -692,7 +692,7 @@ fn advance_parser_stacks_profiled(
     stack: &ParserGSS,
     terminal: u32,
 ) -> (ParserGSS, AdvanceProfile) {
-    if let Some(parser) = &constraint.template_parser {
+    if let Some(parser) = constraint.template_parser() {
         parser.record_advance();
         let advanced = advance_stacks_template_dfa(constraint, stack, terminal)
             .expect("complete template program must contain this terminal");
@@ -764,7 +764,7 @@ fn advance_parser_stacks_profiled(
 /// same reduction closure once for admission and again for the actual advance.
 #[inline]
 pub(crate) fn parser_may_advance_on(constraint: &Constraint, stack: &ParserGSS, terminal: u32) -> bool {
-    if let Some(parser) = &constraint.template_parser {
+    if let Some(parser) = constraint.template_parser() {
         return parser.admits(stack, terminal);
     }
 
@@ -905,7 +905,7 @@ fn parser_may_advance_on_any(
     stack: &ParserGSS,
     terminals: &crate::ds::bitset::BitSet,
 ) -> bool {
-    if let Some(parser) = &constraint.template_parser {
+    if let Some(parser) = constraint.template_parser() {
         return parser.admits_any(stack, terminals);
     }
 
@@ -1778,7 +1778,7 @@ fn exact_simulation_prefiltered_admitted_terminals(
     gss: &ParserGSS,
     candidates: &crate::ds::bitset::BitSet,
 ) -> crate::ds::bitset::BitSet {
-    if let Some(parser) = &constraint.template_parser {
+    if let Some(parser) = constraint.template_parser() {
         return parser.admitted(gss, candidates);
     }
 
@@ -1822,7 +1822,7 @@ pub(crate) fn exact_admitted_terminals_for_candidates(
     gss: &ParserGSS,
     candidates: &crate::ds::bitset::BitSet,
 ) -> crate::ds::bitset::BitSet {
-    if let Some(parser) = &constraint.template_parser {
+    if let Some(parser) = constraint.template_parser() {
         return parser.admitted(gss, candidates);
     }
 
@@ -6497,7 +6497,7 @@ fn apply_terminal_to_flat_stacks(
     source: &[u32],
     scratch: &mut FlatActionScratch,
 ) -> Option<bool> {
-    if let Some(parser) = constraint.template_parser.as_ref() {
+    if let Some(parser) = constraint.template_parser() {
         let fast = parser.local_fast(terminal as usize)?;
         let result = flat_template::apply(fast, source, scratch);
         if result.is_some() { parser.record_advance(); }
@@ -6611,7 +6611,7 @@ fn flat_stack_may_advance_on_any(
     terminals: &crate::ds::bitset::BitSet,
     scratch: &mut FlatActionScratch,
 ) -> Option<bool> {
-    if let Some(parser) = constraint.template_parser.as_ref() {
+    if let Some(parser) = constraint.template_parser() {
         if runtime_future_contains_ignore(constraint, terminals) {
             return Some(true);
         }
@@ -10444,7 +10444,7 @@ mod tests {
 
         // Own compiler reference data directly; never restore a table in the
         // native Constraint whose commits and admission are under test.
-        let grammar = constraint.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap();
+        let grammar = constraint.template_parser().unwrap().link_grammar.as_ref().unwrap();
         let table = crate::compiler::glr::table::GLRTable::build_with_default_construction(
             &grammar.analyze(constraint.terminal_display_names.clone()),
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,

@@ -298,7 +298,7 @@ fn eligible_byte_id(view:View<'_>,id:u32)->bool {
 fn probe_grammar_classes(view:View<'_>,buffers:&mut CommitBuffers,w:&mut Witnesses)->crate::Result<Option<bool>> {
     let c=view.constraint;
     if c.static_dynamic_overlay.is_some()
-        || c.template_parser.as_ref().is_some_and(|p|p.composition().is_some()){return Ok(None);}
+        || c.template_parser().is_some_and(|p|p.composition().is_some()){return Ok(None);}
     let dynamic=&c.dynamic_mask_vocab;
     let quotient=dynamic.is_initialized()&&dynamic.is_grammar_quotiented();
     let count=if quotient {dynamic.canonical_token_count()}

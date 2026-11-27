@@ -94,7 +94,7 @@ impl MarkerQueries {
             pairs.push((top, Candidate { terminal, unconditional: certificate == TopAdmission::Always }));
             Ok(())
         };
-        if let Some(parser) = &constraint.template_parser {
+        if let Some(parser) = constraint.template_parser() {
             for &terminal in &terminals {
                 if parser.marker_admits_flat(&[], terminal.terminal_id) { empty.push(terminal.marker_id); }
                 if let Some((default, exceptions)) = parser.marker_top_partition(terminal.terminal_id) {
@@ -253,7 +253,7 @@ impl MarkerQueries {
         for candidate in self.for_top(top) {
             let admitted = candidate.unconditional || if let Some(Some(domain)) = self.lr_domains.get(candidate.terminal.terminal_id as usize) {
                 domain.matches_top_first(stack.iter().rev().copied())
-            } else if let Some(parser) = &constraint.template_parser {
+            } else if let Some(parser) = constraint.template_parser() {
                 parser.marker_admits_flat(stack, candidate.terminal.terminal_id)
             } else {
                 // Only a genuinely suffix-dependent retained-LR query needs a

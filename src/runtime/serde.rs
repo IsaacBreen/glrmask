@@ -2412,7 +2412,7 @@ fn can_reuse_omitted_external_dynamic_vocab(
     external_vocab.is_some()
         && constraint.uses_dynamic_runtime()
         && constraint.has_template_parser()
-        && constraint.template_parser.as_ref().is_some_and(|parser| parser.composition().is_none())
+        && constraint.template_parser().is_some_and(|parser| parser.composition().is_none())
         && constraint.static_dynamic_overlay.is_none()
         && constraint.direct_regular_automaton.is_none()
         && !constraint.tokenizer.has_any_virtual_runtime()
@@ -3519,7 +3519,7 @@ impl Constraint {
                     },
                     || {
                         let started = profile.then(std::time::Instant::now);
-                        let bytes = if let Some(parser) = &self.template_parser {
+                        let bytes = if let Some(parser) = self.template_parser() {
                             crate::runtime::parser_backend::wire::encode_external(parser, self.artifact_vocab_digest())
                         } else if self.table.is_present() {
                             let rules = self.retained_table_rules()
@@ -4139,12 +4139,12 @@ impl Constraint {
                                     } else {
                                         crate::runtime::parser_backend::wire::decode_external_without_vocab(table_section)
                                     };
-                                    return seed.map(|seed| (crate::runtime::parser_backend::ParserTableStorage::absent(), None, Some(seed)));
+                                    return seed.map(|seed| (crate::runtime::parser_backend::ParserExecutable::absent(), None, Some(seed)));
                                 }
                                 if version == EXTERNAL_DWA_CONSTRAINT_VERSION {
                                     // The parser DWA has its own section.
                                     return Ok((
-                                        crate::runtime::parser_backend::ParserTableStorage::absent(),
+                                        crate::runtime::parser_backend::ParserExecutable::absent(),
                                         None,
                                         None,
                                     ));
@@ -4201,7 +4201,7 @@ impl Constraint {
                                     eprintln!("[glrmask/profile][constraint_section] name=table ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
                                 }
                                 result.map(|decoded| (
-                                    crate::runtime::parser_backend::ParserTableStorage::explicit(
+                                    crate::runtime::parser_backend::ParserExecutable::explicit(
                                         decoded.table,
                                     ),
                                     decoded.deferred_rules,

@@ -13,7 +13,7 @@ use crate::compiler::glr::parser::{ParserActionProvider, ParserGSS, ProvidedActi
 use crate::compiler::glr::table::GLRTable;
 use crate::runtime::artifact::TemplateDfasByTerminal;
 use super::scoped_program::ScopedProgram;
-use super::{Constraint, ParserTableStorage, TemplateParser,
+use super::{Constraint, ParserExecutable, TemplateParser,
     TopAdmission};
 #[cfg(test)]
 use super::matches_gss;
@@ -187,7 +187,7 @@ impl Constraint {
     /// Validate serialized namespace metadata using template dimensions alone.
     /// Every child is fully loaded before its containing core reaches this check.
     pub(crate) fn validate_template_composition_layout(&self) -> Result<(), String> {
-        let parser = self.template_parser.as_ref().ok_or("missing template parser")?;
+        let parser = self.template_parser().ok_or("missing template parser")?;
         let Some(composition) = parser.composition() else {
             if self.static_dynamic_overlay.is_some() {
                 return Err("standalone template parser has unsupported composition machinery".into());
@@ -215,7 +215,7 @@ impl Constraint {
     }
 
     pub(crate) fn template_composition_provider(&self) -> Option<TemplateCompositionProvider<'_>> {
-        self.template_parser.as_deref()?.composition_provider()
+        self.template_parser().map(|parser| parser.as_ref())?.composition_provider()
     }
 
     pub(crate) fn install_composition_template_parser(&mut self) -> crate::Result<()> {
@@ -257,8 +257,7 @@ impl Constraint {
         overlay.recursive_compiler_table = Default::default();
         self.lr_terminal_templates.clear();
         self.lr_fast_terminal_templates.clear();
-        self.template_parser = Some(Arc::new(parser));
-        self.table = ParserTableStorage::absent();
+        self.table = ParserExecutable::Native(Arc::new(parser));
         self.deferred_table_rules_blob = None;
         self.deferred_table_rules = Default::default();
         self.serialized_artifact_cache = None;

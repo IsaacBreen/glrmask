@@ -1851,7 +1851,7 @@ mod tests {
     ) {
         // Construction policy belongs to compiler analysis. Check the
         // temporary table directly; it must never enter a Constraint.
-        let source = constraint.template_parser.as_ref().unwrap()
+        let source = constraint.template_parser().unwrap()
             .link_grammar.as_ref().unwrap();
         let analyzed = source.analyze(constraint.terminal_display_names.clone());
         let table = crate::compiler::glr::table::GLRTable::build_with_default_construction(

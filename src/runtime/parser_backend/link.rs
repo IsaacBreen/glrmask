@@ -44,7 +44,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     if parent.sanitize_late_grammar_placeholder_token_domain() {
         parent.rebuild_runtime_caches();
     }
-    let parent_parser = parent.template_parser.as_ref().ok_or_else(|| fail("parent is not table-free"))?;
+    let parent_parser = parent.template_parser().ok_or_else(|| fail("parent is not table-free"))?;
     let parent_embedding = parent_parser.embedding.as_ref()
         .ok_or_else(|| fail("parent artifact lacks a finite embedding relation"))?.clone();
     let mut components = vec![Arc::new(parent)];
@@ -73,7 +73,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     let mut tokenizer_offsets = Vec::new(); let mut names = Vec::new();
     let mut state_count = 0u32; let mut terminal_count = 0u32; let mut tokenizer_count = 0u32;
     for component in &components {
-        let parser = component.template_parser.as_ref().ok_or_else(|| fail("composition contains an LR component"))?;
+        let parser = component.template_parser().ok_or_else(|| fail("composition contains an LR component"))?;
         if component.table.is_present() || parser.embedding.is_none() {
             return Err(fail("component lacks a finite table-free embedding relation; no LR reconstruction is permitted"));
         }
@@ -101,7 +101,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     let mut outer_views = Vec::new();
     let mut exact_views = Vec::new(); let mut control_views = Vec::new();
     for (index, component) in components.iter().enumerate() {
-        let parser = component.template_parser.as_ref().unwrap(); let offset = state_offsets[index];
+        let parser = component.template_parser().unwrap(); let offset = state_offsets[index];
         let ignore_view = if parser.composition().is_none()
             && (component.ignore_terminal.is_some() || !parser.skip_terminals.is_empty()) {
             Some(ScopedProgram::prepare(Arc::new(identity()), parser.state_count)?)
@@ -127,7 +127,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     let mut links = Vec::new();
     for (child_index, slots) in slots.iter().enumerate() {
         let component = child_index + 1;
-        let child_parser = components[component].template_parser.as_ref().unwrap();
+        let child_parser = components[component].template_parser().unwrap();
         let embedding = child_parser.embedding.as_ref().unwrap();
         for &slot in slots {
             let mut call = outer_views[slot as usize].clone();
@@ -151,7 +151,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     }
     let control_start = u32::try_from(exact_views.len()).map_err(|_| fail("too many scoped terminals"))?;
     exact_views.extend(control_views);
-    let parent_parser = components[0].template_parser.as_ref().unwrap();
+    let parent_parser = components[0].template_parser().unwrap();
     let completion = if let Some(composition) = parent_parser.composition() {
         composition.completion_view.clone()
     } else { ScopedProgram { source: Arc::clone(parent_parser.completion_template()),
@@ -167,7 +167,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     let mut remaining_entries = parent_embedding.entries.iter().copied()
         .filter(|terminal| !bound_slots.contains(terminal)).collect::<BTreeSet<_>>();
     for (component, child) in components.iter().enumerate().skip(1) {
-        remaining_entries.extend(child.template_parser.as_ref().unwrap().embedding.as_ref().unwrap()
+        remaining_entries.extend(child.template_parser().unwrap().embedding.as_ref().unwrap()
             .entries.iter().map(|&terminal| terminal_offsets[component] + terminal));
     }
     let mut embedding = (*parent_embedding).clone();
@@ -205,7 +205,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     // DynamicDirect needs the same necessary root-CALL vocabulary proof as
     // static boundary assembly. Keep its original conservative certificate if
     // scoped ignores, nullable or nested components make that proof unavailable.
-    if components.iter().all(|component| component.template_parser.as_ref().unwrap().composition().is_none())
+    if components.iter().all(|component| component.template_parser().unwrap().composition().is_none())
         && links.iter().all(|link| !link.child_start_nullable) {
         let leaves = components.iter().map(Arc::as_ref).collect::<Vec<_>>();
         let global_ignores = crate::compiler::constraint_compose::leaf_ignores_are_globally_erasable(&leaves);
@@ -262,7 +262,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     // Sparse/data-only components can have an interface-tail proof without
     // source grammar rules. Its reusable fingerprint is then unavailable;
     // retain the ordinary conservative candidate query for that component.
-    if constraint.template_parser.as_ref().is_some_and(|parser| parser.link_grammar.is_some())
+    if constraint.template_parser().is_some_and(|parser| parser.link_grammar.is_some())
         && !crate::compiler::boundary_candidates::defer_composition_boundary_candidate_summary_with_queries(
             &mut constraint, vocab, &tail_components, &slots, &component_queries) {
         // A component whose source cannot be fingerprinted keeps the previous
@@ -285,7 +285,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     }
     if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!("[glrmask/profile][native_link_metadata] phase=complete materialized={}",
-            constraint.template_parser.as_ref().and_then(|parser| parser.link_grammar.as_ref())
+            constraint.template_parser().and_then(|parser| parser.link_grammar.as_ref())
                 .is_some_and(|grammar| grammar.is_materialized()));
     }
     Ok(constraint)
@@ -348,7 +348,7 @@ mod candidate_tests {
         };
         check(&linked);
         assert!(linked.boundary_candidate_summary.get().is_none());
-        assert!(linked.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap()
+        assert!(linked.template_parser().unwrap().link_grammar.as_ref().unwrap()
             .deferred_boundary_summary.get().is_some());
         let mut state = linked.start();
         let _ = state.mask();

@@ -9742,7 +9742,7 @@ constraint_data_schema! {
     @serde(default)
     pub(crate) direct_regular_automaton: Option<DirectRegularAutomaton>,
     @serde(with = "crate::runtime::parser_backend::table_serde")
-    pub(crate) table: crate::runtime::parser_backend::ParserTableStorage,
+    pub(crate) table: crate::runtime::parser_backend::ParserExecutable,
     @serde(default)
     pub(crate) terminal_display_names: Vec<String>,
     @serde(with = "crate::runtime::artifact::immutable_tokenizer_serde")
@@ -9816,8 +9816,6 @@ constraint_data_schema! {
     /// Runtime-only compact transition view for commit template products.
     @serde(skip, default)
     pub(crate) lr_fast_terminal_templates: FastTemplateDfasByTerminal,
-    @serde(skip, default)
-    pub(crate) template_parser: Option<Arc<crate::runtime::parser_backend::TemplateParser>>,
     @serde(skip, default)
     pub(crate) token_classes: crate::runtime::TokenClasses,
     @serde(skip, default)

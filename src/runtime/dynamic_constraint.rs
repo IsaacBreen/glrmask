@@ -785,7 +785,7 @@ impl DynamicConstraint {
     /// Shared unfinalized ordinary-dynamic assembly. Native and retained-LR
     /// construction differ only at the representation boundary: the native arm
     /// derives the template parser and drops the table, while the LR arm keeps
-    /// the supplied table through [`ParserTableStorage::explicit`] and never
+    /// the supplied table through [`ParserExecutable::explicit`] and never
     /// derives templates, embeddings, completion domains or stack metadata.
     /// The grammar, tokenizer and dynamic mask vocabulary work is shared by the
     /// callers before this point.
@@ -821,7 +821,7 @@ impl DynamicConstraint {
                 let terminal_exprs = tokenizer.terminal_exprs().map(ToOwned::to_owned);
                 let payload = DynamicConstraintPayloadV2 {
                     v1: DynamicConstraintPayloadV1 {
-                        table: crate::runtime::parser_backend::ParserTableStorage::explicit(table),
+                        table: crate::runtime::parser_backend::ParserExecutable::explicit(table),
                         terminal_display_names,
                         tokenizer,
                         ignore_terminal,
@@ -838,7 +838,7 @@ impl DynamicConstraint {
                 // load validation.
                 let _ = inner.late_bind_vocab.set(vocab.clone());
                 assert!(inner.table.is_present(), "retained LR constructor must retain its LR table");
-                assert!(inner.template_parser.is_none(), "retained LR constructor must not install a template parser");
+                assert!(inner.template_parser().is_none(), "retained LR constructor must not install a template parser");
                 Ok(Self { inner, alternatives: Vec::new(), composition_grammars: vec![None],
                     external_vocab_artifact_cache: None })
             }
@@ -944,18 +944,17 @@ impl DynamicConstraint {
                 // native template path assembles through
                 // `constraint_from_runtime_parts` with an explicitly absent
                 // table), so restore the historic retained-table construction.
-                table: crate::runtime::parser_backend::ParserTableStorage::explicit(table),
+                table: crate::runtime::parser_backend::ParserExecutable::explicit(table),
                 terminal_display_names, tokenizer,
                 ignore_terminal, direct_regular_automaton, token_bytes, ignore_expr, terminal_exprs },
             special_token_terminals,
         }, dynamic_mask_vocab, None)
     }
 
-    /// Shared assembly accepts an absent parser store. A data-only constructor
-    /// does not construct even a placeholder GLR table and installs its program
-    /// before any runtime-derived caches are initialized.
+    /// Shared assembly accepts exactly the selected executable parser, before
+    /// any runtime-derived caches are initialized.
     fn constraint_from_runtime_parts(
-        payload: DynamicConstraintPayloadV2<crate::runtime::parser_backend::ParserTableStorage>,
+        payload: DynamicConstraintPayloadV2<crate::runtime::parser_backend::ParserExecutable>,
         dynamic_mask_vocab: DynamicMaskVocab,
         source_vocab: Option<&Vocab>,
     ) -> Constraint {
@@ -1025,7 +1024,6 @@ impl DynamicConstraint {
             terminal_live_states: Vec::new(),
             lr_terminal_templates: Vec::new(),
             lr_fast_terminal_templates: Vec::new(),
-            template_parser: None,
             token_classes: Default::default(),
             token_bytes: crate::runtime::TokenByteDomain::from_entries(payload.token_bytes),
             internal_token_buf_masks: Vec::new(),
@@ -1100,7 +1098,7 @@ impl DynamicConstraint {
         let terminal_exprs = tokenizer.terminal_exprs().map(ToOwned::to_owned);
         let payload = DynamicConstraintPayloadV2 {
             v1: DynamicConstraintPayloadV1 {
-                table: crate::runtime::parser_backend::ParserTableStorage::absent(),
+                table: crate::runtime::parser_backend::ParserExecutable::Native(parser),
                 terminal_display_names, tokenizer, ignore_terminal,
                 direct_regular_automaton: None, token_bytes: vocab.entries_arc(),
                 ignore_expr, terminal_exprs,
@@ -1108,7 +1106,6 @@ impl DynamicConstraint {
             special_token_terminals: Vec::new(),
         };
         let mut inner = Self::constraint_from_runtime_parts(payload, dynamic_vocab, Some(vocab));
-        inner.template_parser = Some(parser);
         let _ = inner.late_bind_vocab.set(vocab.clone());
         assert!(!inner.table.is_present(), "data-only constructor created an LR table");
         inner

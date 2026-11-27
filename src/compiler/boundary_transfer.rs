@@ -2669,7 +2669,7 @@ mod tests {
     // Compiler analysis fixtures own these tables directly. They never enter
     // a Constraint or participate in its native runtime.
     fn compiler_table_fixture(constraint: &crate::runtime::Constraint) -> GLRTable {
-        let grammar = constraint.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap();
+        let grammar = constraint.template_parser().unwrap().link_grammar.as_ref().unwrap();
         let mut table = GLRTable::build_with_default_construction(
             &grammar.analyze(constraint.terminal_display_names.clone()),
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,

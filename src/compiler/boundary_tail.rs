@@ -680,7 +680,7 @@ fn flat_r1_identity<'a>(
         .is_some_and(|overlay| !overlay.segmented_parser_components.is_empty()) {
         return None;
     }
-    let grammar = constraint.template_parser.as_ref()?.link_grammar.as_deref()?;
+    let grammar = constraint.template_parser()?.link_grammar.as_deref()?;
     // The leaf fingerprint must cover every lexical input to this proof.
     constraint.retained_terminal_exprs()?;
     let fingerprint = checked_fingerprint.and_then(|checked| checked.for_inputs(constraint, vocab))
@@ -1805,7 +1805,7 @@ mod tests {
             &vocabulary, &[("SUB", 999)], &[]).unwrap();
         let expected = summarize_rules_module_r1(&parent, &BTreeMap::new(), &BTreeSet::new()).unwrap();
         assert_eq!(summarize_flat_module_r1_reusing_proof(&parent, &vocabulary, None).unwrap(), expected);
-        assert!(parent.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap()
+        assert!(parent.template_parser().unwrap().link_grammar.as_ref().unwrap()
             .flat_boundary_tail_r1.get().is_some());
         let changed_vocab = vocab(&[(0, b"xx"), (9, b"zz"), (999, b"?")]);
         for variant in 0..5 {
@@ -1818,11 +1818,11 @@ mod tests {
                 1 => { modified.ignore_terminal = Some(0); }
                 2 => { modified.late_grammar_slots.push(crate::runtime::LateGrammarSlot { name: "another".into(), terminal_id: 0 }); }
                 3 => {
-                    let parser = std::sync::Arc::get_mut(modified.template_parser.as_mut().unwrap()).unwrap();
+                    let parser = std::sync::Arc::get_mut(modified.template_parser_mut().unwrap()).unwrap();
                     std::sync::Arc::make_mut(parser.embedding.as_mut().unwrap()).nullable = true;
                 }
                 _ => {
-                    let parser = std::sync::Arc::get_mut(modified.template_parser.as_mut().unwrap()).unwrap();
+                    let parser = std::sync::Arc::get_mut(modified.template_parser_mut().unwrap()).unwrap();
                     let grammar = std::sync::Arc::make_mut(parser.link_grammar.as_mut().unwrap());
                     let mut proof = grammar.flat_boundary_tail_r1.take().unwrap();
                     proof.fingerprint.algorithm_version += 1;
@@ -1855,10 +1855,10 @@ mod tests {
         for variant in 0..4 {
             let mut child = Constraint::from_glrm_grammar(
                 r#"start document; nt document = "cat";"#, &vocabulary).unwrap();
-            let before = bincode::serialize(child.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap()).unwrap();
+            let before = bincode::serialize(child.template_parser().unwrap().link_grammar.as_ref().unwrap()).unwrap();
             let expected = component_entry_prefix_cover(&child);
             assert_eq!(component_entry_prefix_cover_reusing_proof(&child, &vocabulary, None), expected);
-            let grammar = child.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap();
+            let grammar = child.template_parser().unwrap().link_grammar.as_ref().unwrap();
             assert!(grammar.entry_prefix_cover.get().is_some());
             assert_eq!(bincode::serialize(grammar).unwrap(), before);
             let loaded: crate::runtime::parser_backend::link_grammar::LinkGrammar = bincode::deserialize(&before).unwrap();
@@ -1866,7 +1866,7 @@ mod tests {
             assert_eq!(&loaded, grammar.as_ref());
             match variant {
                 0 => {
-                    let parser = std::sync::Arc::get_mut(child.template_parser.as_mut().unwrap()).unwrap();
+                    let parser = std::sync::Arc::get_mut(child.template_parser_mut().unwrap()).unwrap();
                     let grammar = std::sync::Arc::make_mut(parser.link_grammar.as_mut().unwrap());
                     let mut proof = grammar.entry_prefix_cover.take().unwrap();
                     proof.fingerprint.algorithm_version += 1;
@@ -1874,13 +1874,13 @@ mod tests {
                     grammar.entry_prefix_cover.set(proof).unwrap();
                 }
                 1 => {
-                    let parser = std::sync::Arc::get_mut(child.template_parser.as_mut().unwrap()).unwrap();
+                    let parser = std::sync::Arc::get_mut(child.template_parser_mut().unwrap()).unwrap();
                     std::sync::Arc::make_mut(parser.embedding.as_mut().unwrap()).nullable = true;
                     assert!(component_entry_prefix_cover(&child).is_none());
                 }
                 2 => { child.late_grammar_slots.push(crate::runtime::LateGrammarSlot { name: "later".into(), terminal_id: 0 }); }
                 3 => {
-                    let parser = std::sync::Arc::get_mut(child.template_parser.as_mut().unwrap()).unwrap();
+                    let parser = std::sync::Arc::get_mut(child.template_parser_mut().unwrap()).unwrap();
                     let grammar = std::sync::Arc::make_mut(parser.link_grammar.as_mut().unwrap());
                     let mut proof = grammar.entry_prefix_cover.take().unwrap();
                     proof.prefixes = Some(vec![vec![255]]);
@@ -1924,7 +1924,7 @@ mod tests {
             r#"start document; extern token SUB; nt document = "a" SUB "b";"#,
             &vocabulary, &[("SUB", 999)], &[]).unwrap();
         let expected = build_boundary_tail_r1(&parent, &vocabulary).unwrap();
-        let grammar = parent.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap();
+        let grammar = parent.template_parser().unwrap().link_grammar.as_ref().unwrap();
         let mapped = grammar.flat_boundary_tail_r1.get().unwrap().candidate_ids.get().unwrap().clone();
         assert!(expected.candidate_ids.contains(&4) && expected.candidate_ids.contains(&19));
         for _ in 0..3 {
@@ -1957,7 +1957,7 @@ mod tests {
             &vocabulary, &[("SUB", 999)], &[]).unwrap();
         let child = Constraint::from_glrm_grammar(
             r#"start document; nt document = "cat";"#, &vocabulary).unwrap();
-        let parser = std::sync::Arc::get_mut(parent.template_parser.as_mut().unwrap()).unwrap();
+        let parser = std::sync::Arc::get_mut(parent.template_parser_mut().unwrap()).unwrap();
         let grammar = std::sync::Arc::make_mut(parser.link_grammar.as_mut().unwrap());
         let _ = grammar.flat_boundary_tail_r1.take();
         let before = bincode::serialize(&*grammar).unwrap();
@@ -1980,7 +1980,7 @@ mod tests {
                     language.union_with(plain.tail_to_event); language
                 }));
         }
-        let grammar = parent.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap();
+        let grammar = parent.template_parser().unwrap().link_grammar.as_ref().unwrap();
         assert!(grammar.flat_boundary_tail_r1.get().is_some());
         assert_eq!(bincode::serialize(grammar.as_ref()).unwrap(), before);
         let loaded: crate::runtime::parser_backend::link_grammar::LinkGrammar = bincode::deserialize(&before).unwrap();
@@ -2366,7 +2366,7 @@ fn o2_dependency_ready_summary_matches_final_rules_and_nullable_source() {
             MaskMode::B.build_options()).unwrap();
         assert!(constraint.has_template_parser());
         assert!(!constraint.table.is_present());
-        let rules = constraint.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap().rules().len();
+        let rules = constraint.template_parser().unwrap().link_grammar.as_ref().unwrap().rules().len();
         assert_eq!(rules > 64, large, "test must cover small and large grammar inputs: {rules}");
         assert_eq!(constraint.composition_start_nullable().unwrap(), nullable);
         // This independent evaluator bypasses the FlatBoundaryTailR1 proof cache:

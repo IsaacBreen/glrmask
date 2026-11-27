@@ -144,7 +144,7 @@ fn ready_adapter_preserves_template_and_runtime_arc_identity() {
     assert!(!result.table.is_present());
     assert!(Arc::ptr_eq(
         &completion,
-        result.template_parser.as_ref().unwrap().completion_template(),
+        result.template_parser().unwrap().completion_template(),
     ));
     for (terminal, before) in templates.iter().enumerate() {
         let after = result.terminal_template(terminal);

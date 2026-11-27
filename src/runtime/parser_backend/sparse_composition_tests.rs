@@ -67,7 +67,7 @@ fn sparse_builtin_frames_link_and_return_without_table_reconstruction() {
     for nullable in [false, true] {
         let mut child = fixture(nullable, &vocab);
         child.install_template_parser().unwrap();
-        let embedding = child.template_parser.as_ref().unwrap().embedding.as_ref().unwrap();
+        let embedding = child.template_parser().unwrap().embedding.as_ref().unwrap();
         assert_eq!(embedding.return_pop, 1); assert_eq!(embedding.nullable, nullable);
         let child = Constraint::load(child.save(), &vocab).unwrap();
         let host = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "x" C "y";"#).unwrap()

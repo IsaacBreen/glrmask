@@ -3663,7 +3663,7 @@ mod tests {
     // Compiler probes construct temporary tables from pure source metadata;
     // these tables never enter a Constraint or its native runtime.
     fn compiler_table_fixture(constraint: &Constraint) -> GLRTable {
-        let grammar = constraint.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap();
+        let grammar = constraint.template_parser().unwrap().link_grammar.as_ref().unwrap();
         let mut table = GLRTable::build_with_default_construction(
             &grammar.analyze(constraint.terminal_display_names.clone()),
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
@@ -3679,7 +3679,7 @@ mod tests {
         let components = std::iter::once(parent)
             .chain(children.iter().map(|child| child.constraint)).collect::<Vec<_>>();
         if components.iter().any(|component| {
-            let grammar = component.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap();
+            let grammar = component.template_parser().unwrap().link_grammar.as_ref().unwrap();
             grammar.scoped_ignores().iter().flatten()
                 .any(|terminal| Some(*terminal) != component.ignore_terminal)
         }) { return false; }
@@ -3897,7 +3897,7 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let grammar = constraint.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap()
+        let grammar = constraint.template_parser().unwrap().link_grammar.as_ref().unwrap()
             .analyze(constraint.terminal_display_names.clone());
         let disallowed = compute_disallowed_follows(&grammar);
         let a = terminal_id(&constraint, "A");

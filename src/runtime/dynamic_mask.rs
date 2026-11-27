@@ -8339,7 +8339,7 @@ fn parser_child(
     // value. Apply that same generic GSS primitive directly, rather than
     // allocating two annotation-mapping memos/interfaces around the advance.
     // All nontrivial effects retain the complete annotated parser evaluator.
-    if let Some(parser) = &constraint.template_parser
+    if let Some(parser) = constraint.template_parser()
         && !constraint.parser_skip_terminals().contains(&terminal)
         && let Some(template) = parser.terminal_source(terminal as usize)
         && let Some(fast) = parser.local_fast(terminal as usize)
@@ -11664,7 +11664,7 @@ nt start = A | B | A A | A B | B A | B B;
         assert!(tokenizer.has_epsilon_transitions());
         // Temporary compiler analysis is allowed; from_parts derives native
         // relations and drops this table before constructing the Constraint.
-        let grammar = parser_source.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap();
+        let grammar = parser_source.template_parser().unwrap().link_grammar.as_ref().unwrap();
         let mut table = crate::compiler::glr::table::GLRTable::build_with_default_construction(
             &grammar.analyze(parser_source.terminal_display_names.clone()),
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,

@@ -201,7 +201,7 @@ impl LinkGrammar {
 
     pub(crate) fn compose(components: &[Arc<Constraint>], terminal_offsets: &[u32],
         slots: &[Vec<u32>]) -> Result<Option<Arc<Self>>, String> {
-        let sources = components.iter().map(|component| component.template_parser.as_ref()
+        let sources = components.iter().map(|component| component.template_parser()
             .and_then(|parser| parser.link_grammar.clone())).collect::<Option<Vec<_>>>();
         let Some(sources) = sources else { return Ok(None); };
         if sources.len() != terminal_offsets.len() || slots.len() + 1 != sources.len() {
@@ -210,11 +210,11 @@ impl LinkGrammar {
         let mut offsets = Vec::new(); let mut states = 0u32;
         for component in components {
             offsets.push(states);
-            states = states.checked_add(component.template_parser.as_ref().unwrap().state_count)
+            states = states.checked_add(component.template_parser().unwrap().state_count)
                 .ok_or("composition parser coordinate overflow")?;
         }
         let links = slots.iter().enumerate().flat_map(|(child, slots)| {
-            let embedding = components[child + 1].template_parser.as_ref().unwrap().embedding.as_ref().unwrap();
+            let embedding = components[child + 1].template_parser().unwrap().embedding.as_ref().unwrap();
             slots.iter().map(move |&slot| (0, slot, child as u32 + 1, 0, embedding.return_pop, embedding.nullable))
         }).collect();
         Self::compose_sources(sources, terminal_offsets.to_vec(), slots.to_vec(), offsets, states, links)

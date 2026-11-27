@@ -916,7 +916,7 @@ fn fingerprint_for_constraint_with_component_queries(
         .is_some_and(|overlay| !overlay.segmented_parser_components.is_empty()) {
         // The composite digest is defined by validated immediate components and
         // typed links. Its branch does not consume flattened wrapper rules.
-        if constraint.template_parser.as_ref().is_some_and(|parser| parser.link_grammar.is_some()) {
+        if constraint.template_parser().is_some_and(|parser| parser.link_grammar.is_some()) {
             return fingerprint_with_component_queries(constraint, vocab, &[], checked);
         }
     }
@@ -985,7 +985,7 @@ pub(crate) fn defer_composition_boundary_candidate_summary_with_queries(
 ) -> bool {
     let Ok(fingerprint) = fingerprint_for_constraint_with_component_queries(constraint, vocab, checked)
         else { return false; };
-    let Some(grammar) = constraint.template_parser.as_ref()
+    let Some(grammar) = constraint.template_parser()
         .and_then(|parser| parser.link_grammar.as_ref()) else { return false; };
     grammar.deferred_boundary_summary.set(std::sync::Arc::new(
         DeferredCompositionSummary { recipe: Box::new(NativeCompositionBoundaryRecipe {
@@ -995,7 +995,7 @@ pub(crate) fn defer_composition_boundary_candidate_summary_with_queries(
 
 pub(crate) fn materialize_deferred_composition_boundary_summary(constraint: &Constraint) {
     if constraint.boundary_candidate_summary.get().is_some() { return; }
-    let Some(recipe) = constraint.template_parser.as_ref()
+    let Some(recipe) = constraint.template_parser()
         .and_then(|parser| parser.link_grammar.as_ref())
         .and_then(|grammar| grammar.deferred_boundary_summary.get()) else { return; };
     let summary = recipe.completed.get_or_init(|| recipe.recipe.compute());

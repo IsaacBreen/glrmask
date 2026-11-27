@@ -57,61 +57,73 @@ impl DynamicParserBackend {
     }
 }
 
-/// Compile-time / ordinary-LR storage. None really means no table remains.
-/// Deref is a migration guard, not a template-mode fallback implementation.
-///
-/// A backing table can only be installed through the explicit
-/// [`ParserTableStorage::explicit`] constructor, which is reachable only from
-/// ordinary Dynamic construction and serialized LR load paths. The
-/// generic `From<GLRTable>` conversion deliberately keeps panicking so the
-/// default native template path can never silently become LR-backed.
+/// Exactly one executable parser representation. The empty variant is a
+/// decode-time section placeholder (also used by the DWA-only envelope),
+/// never an implicit LR fallback. Native construction installs its immutable
+/// program directly, without constructing or retaining an LR machine.
 #[derive(Debug, Clone)]
-pub(crate) struct ParserTableStorage(Option<GLRTable>);
+pub(crate) enum ParserExecutable {
+    SectionPending,
+    ExplicitLr(GLRTable),
+    Native(Arc<TemplateParser>),
+}
 
-impl ParserTableStorage {
-    pub(crate) fn absent() -> Self { Self(None) }
-    /// Install the ordinary Dynamic runtime's retained executable LR table.
-    /// This is the only supported
-    /// way to make `Deref`/`into_lr` readable; every native constructor must
-    /// keep using [`ParserTableStorage::absent`].
-    pub(crate) fn explicit(table: GLRTable) -> Self { Self(Some(table)) }
-    pub(crate) fn is_present(&self) -> bool { self.0.is_some() }
-    pub(crate) fn as_lr(&self) -> Option<&GLRTable> { self.0.as_ref() }
+impl ParserExecutable {
+    pub(crate) fn absent() -> Self { Self::SectionPending }
+    pub(crate) fn explicit(table: GLRTable) -> Self { Self::ExplicitLr(table) }
+    pub(crate) fn is_present(&self) -> bool { matches!(self, Self::ExplicitLr(_)) }
+    pub(crate) fn as_lr(&self) -> Option<&GLRTable> {
+        match self { Self::ExplicitLr(table) => Some(table), _ => None }
+    }
     pub(crate) fn clone_lr(&self) -> GLRTable { self.deref().clone() }
     pub(crate) fn into_lr(self) -> GLRTable {
-        self.0.expect("LR table requested from a template-only parser; this operation is not supported")
+        match self {
+            Self::ExplicitLr(table) => table,
+            _ => panic!("LR table requested from a template-only parser; this operation is not supported"),
+        }
+    }
+
+    #[inline]
+    fn native(&self) -> Option<&Arc<TemplateParser>> {
+        match self { Self::Native(parser) => Some(parser), _ => None }
+    }
+
+    #[inline]
+    fn native_mut(&mut self) -> Option<&mut Arc<TemplateParser>> {
+        match self { Self::Native(parser) => Some(parser), _ => None }
     }
 }
-impl From<GLRTable> for ParserTableStorage {
+impl From<GLRTable> for ParserExecutable {
     #[track_caller]
     fn from(_table: GLRTable) -> Self {
         panic!("IMPLICIT LR-BACKED CONSTRAINT MATERIALIZATION IS FORBIDDEN: use the selected compiler representation boundary")
     }
 }
-impl Deref for ParserTableStorage {
+impl Deref for ParserExecutable {
     type Target = GLRTable;
     #[track_caller]
     fn deref(&self) -> &GLRTable {
-        self.0.as_ref().expect(
+        self.as_lr().expect(
             "LR CONSTRAINT RUNTIME ACCESS IS FORBIDDEN: this parser has no retained LR table; route this operation through native parser programs",
         )
     }
 }
-impl DerefMut for ParserTableStorage {
+impl DerefMut for ParserExecutable {
     #[track_caller]
     fn deref_mut(&mut self) -> &mut GLRTable {
-        self.0.as_mut().expect(
-            "LR CONSTRAINT TABLE MUTATION IS FORBIDDEN: this parser has no retained LR table",
-        )
+        match self {
+            Self::ExplicitLr(table) => table,
+            _ => panic!("LR CONSTRAINT TABLE MUTATION IS FORBIDDEN: this parser has no retained LR table"),
+        }
     }
 }
 
 pub(crate) mod table_serde {
-    use super::ParserTableStorage;
+    use super::ParserExecutable;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn serialize<S: Serializer>(
-        table: &ParserTableStorage, serializer: S,
+        table: &ParserExecutable, serializer: S,
     ) -> Result<S::Ok, S::Error> {
         if crate::compiler::glr::table::artifact_serde::external_serde_enabled() {
             return 0u8.serialize(serializer);
@@ -126,16 +138,16 @@ pub(crate) mod table_serde {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<ParserTableStorage, D::Error> {
+    ) -> Result<ParserExecutable, D::Error> {
         if crate::compiler::glr::table::artifact_serde::external_serde_enabled() {
             let marker = u8::deserialize(deserializer)?;
             if marker != 0 {
                 return Err(serde::de::Error::custom("invalid external parser placeholder"));
             }
-            return Ok(ParserTableStorage::absent());
+            return Ok(ParserExecutable::absent());
         }
         crate::compiler::glr::table::artifact_serde::deserialize(deserializer)
-            .map(super::ParserTableStorage::explicit)
+            .map(super::ParserExecutable::explicit)
     }
 }
 
@@ -712,25 +724,35 @@ fn sparse_regular_templates(
 
 impl Constraint {
     #[inline]
+    pub(crate) fn template_parser(&self) -> Option<&Arc<TemplateParser>> {
+        self.table.native()
+    }
+
+    #[inline]
+    pub(crate) fn template_parser_mut(&mut self) -> Option<&mut Arc<TemplateParser>> {
+        self.table.native_mut()
+    }
+
+    #[inline]
     pub(crate) fn has_template_parser(&self) -> bool {
-        self.template_parser.is_some()
+        self.template_parser().is_some()
     }
 
     #[inline]
     pub(crate) fn parser_symbol_count(&self) -> u32 {
-        self.template_parser.as_ref()
+        self.template_parser()
             .map_or_else(|| self.table.num_states, |parser| parser.state_count)
     }
 
     #[inline]
     pub(crate) fn parser_terminal_count(&self) -> u32 {
-        self.template_parser.as_ref()
+        self.template_parser()
             .map_or_else(|| self.table.num_terminals, |parser| parser.terminal_count)
     }
 
     #[inline]
     pub(crate) fn parser_has_controls(&self) -> bool {
-        self.template_parser.as_ref().map_or_else(
+        self.template_parser().map_or_else(
             || !self.table.control_terminals.is_empty(),
             |parser| parser.composition()
                 .is_some_and(|composition| composition.has_controls()),
@@ -739,12 +761,12 @@ impl Constraint {
 
     #[inline]
     pub(crate) fn parser_skip_terminals(&self) -> &BTreeSet<TerminalID> {
-        self.template_parser.as_ref()
+        self.template_parser()
             .map_or_else(|| &self.table.skip_terminals, |parser| &parser.skip_terminals)
     }
 
     pub(crate) fn parser_is_control_terminal(&self, terminal: TerminalID) -> bool {
-        self.template_parser.as_ref().map_or_else(
+        self.template_parser().map_or_else(
             || self.table.control_terminals.contains(&terminal),
             |parser| parser.link_grammar.as_ref()
                 .is_some_and(|grammar| grammar.control_terminals.contains(&terminal)),
@@ -752,7 +774,7 @@ impl Constraint {
     }
 
     pub(crate) fn parser_control_terminals(&self) -> BTreeSet<u32> {
-        self.template_parser.as_ref().map_or_else(
+        self.template_parser().map_or_else(
             || self.table.control_terminals.clone(),
             |parser| parser.link_grammar.as_ref()
                 .map_or_else(BTreeSet::new, |grammar| grammar.control_terminals.clone()),
@@ -771,7 +793,7 @@ impl Constraint {
     #[inline]
     pub(crate) fn parser_advance_row(&self, top: u32) -> Option<&BitSet> {
         if self.template_composition_provider().is_some() { return None; }
-        self.template_parser.as_ref().map_or_else(
+        self.template_parser().map_or_else(
             || self.table.advance_row(top),
             |parser| parser.possible_row(top),
         )
@@ -782,7 +804,7 @@ impl Constraint {
         if self.template_composition_provider().is_some() {
             return top < self.parser_symbol_count();
         }
-        if let Some(parser) = &self.template_parser {
+        if let Some(parser) = self.template_parser() {
             let bit = if terminal == EOF {
                 parser.terminal_count as usize
             } else {
@@ -799,7 +821,7 @@ impl Constraint {
         if self.template_composition_provider().is_some() {
             return top < self.parser_symbol_count() && !terminals.is_empty();
         }
-        if let Some(parser) = &self.template_parser {
+        if let Some(parser) = self.template_parser() {
             parser.possible_row(top).is_some_and(|row| {
                 row.words().iter().zip(terminals.words()).any(|(a, b)| a & b != 0)
             })
@@ -811,7 +833,7 @@ impl Constraint {
     #[inline]
     pub(crate) fn parser_unconditional_row(&self, top: u32) -> Option<&BitSet> {
         if self.template_composition_provider().is_some() { return None; }
-        self.template_parser.as_ref().map_or_else(
+        self.template_parser().map_or_else(
             || self.table.unconditional_advance_row(top),
             |parser| parser.unconditional_row(top),
         )
@@ -905,8 +927,7 @@ impl Constraint {
         self.serialized_artifact_cache = None;
         self.deferred_table_rules_blob = None;
         self.deferred_table_rules = Default::default();
-        self.template_parser = Some(Arc::new(prepared.parser));
-        self.table = ParserTableStorage::absent();
+        self.table = ParserExecutable::Native(Arc::new(prepared.parser));
         if let Some(queries) = &self.marker_queries {
             let terminals = queries.terminals.to_vec();
             self.install_marker_terminals(terminals).map_err(crate::Error::Compilation)?;
@@ -917,7 +938,7 @@ impl Constraint {
     #[cfg(feature = "internal-api")]
     pub(crate) fn save_without_effect_metadata_for_diagnostic(&self) -> Vec<u8> {
         fn strip(constraint: &mut Constraint) {
-            if let Some(parser) = constraint.template_parser.as_mut() {
+            if let Some(parser) = constraint.template_parser_mut() {
                 let source = parser.as_ref();
                 let mut replacement = TemplateParser {
                     state_count: source.state_count,
@@ -950,7 +971,7 @@ impl Constraint {
     }
 
     pub(crate) fn parser_backend_report(&self) -> serde_json::Value {
-        match &self.template_parser {
+        match self.template_parser() {
             Some(parser) => {
                 assert!(!self.table.is_present(), "template-only constraint retained an LR table");
                 let mut report = parser.report();
@@ -1025,7 +1046,7 @@ impl Constraint {
                         let mut identities = 0usize;
                         let mut offset = 0usize;
                         for component in &overlay.segmented_parser_components {
-                            let local = component.constraint.template_parser.as_ref()
+                            let local = component.constraint.template_parser()
                                 .expect("native component");
                             for terminal in 0..local.terminal_count as usize {
                                 let view = &composition.outer_views[offset + terminal];

@@ -88,8 +88,8 @@ fn retain_same_owner_paths(constraint: &Constraint, component: usize, bounded: b
     let overlay = constraint.static_dynamic_overlay.as_ref().unwrap();
     let parent = overlay.segmented_parser_components[0].constraint.as_ref();
     let child = overlay.segmented_parser_components[component].constraint.as_ref();
-    if parent.template_parser.as_ref().unwrap().composition().is_some()
-        || child.template_parser.as_ref().unwrap().composition().is_some() { return Ok(true); }
+    if parent.template_parser().unwrap().composition().is_some()
+        || child.template_parser().unwrap().composition().is_some() { return Ok(true); }
     let slots = overlay.segmented_parser_links.iter().filter(|link|
         link.parent_component == 0 && link.child_component as usize == component)
         .map(|link| link.slot_terminal as usize).collect::<std::collections::BTreeSet<_>>();
@@ -110,7 +110,7 @@ fn retain_same_owner_paths(constraint: &Constraint, component: usize, bounded: b
 fn prepared_root_call_candidates(constraint:&Constraint)->Option<Arc<[u32]>> {
     let overlay=constraint.static_dynamic_overlay.as_ref()?;
     if !overlay.segmented_parser_components.iter().all(|component|
-        component.constraint.template_parser.as_ref().is_some_and(|parser|parser.composition().is_none()))
+        component.constraint.template_parser().is_some_and(|parser|parser.composition().is_none()))
         || overlay.segmented_parser_links.iter().any(|link|link.child_start_nullable) {return None;}
     let shard=overlay.segmented_parser_components.first()?.boundary.as_ref()?;
     if shard.start_component!=0 || !matches!(shard.backend,SegmentedBoundaryShardBackend::DynamicDirect) {return None;}
@@ -150,7 +150,7 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
     } else {
         Some(super::boundary_transfer::certify_bounded_closure(&layout.links).map_err(fail)?)
     };
-    let parser = constraint.template_parser.as_ref().ok_or_else(|| fail("missing template parser"))?;
+    let parser = constraint.template_parser().ok_or_else(|| fail("missing template parser"))?;
     let composition = parser.composition().ok_or_else(|| fail("missing composed template inventory"))?;
     if composition.control_start != layout.total_leaf_terminals {
         return Err(fail("static template lexical/parser terminal coordinates disagree"));
