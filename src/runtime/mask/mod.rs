@@ -1275,8 +1275,8 @@ impl DenseMaskAcc {
 // `for_each_stack_top_first_bounded(128, ...)` and declining past the cap is
 // unacceptable for a claimed supported static shard: callers interpret
 // `false` as "run the exact dynamic fallback". This evaluator computes the
-// exact same union the enumeration denotes — union over paths of
-// (DWA acceptance(path) intersect eligibility(path)) — by dynamic programming
+// exact same union the enumeration denotes â€” union over paths of
+// (DWA acceptance(path) intersect eligibility(path)) â€” by dynamic programming
 // over the indexed GSS DAG x DWA product with memoized shared tails. No
 // path-count cap affects correctness.
 //
@@ -3152,7 +3152,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
     /// independently of the current seed accumulator.
     ///
     /// The denotation evaluated below uses only union and intersection with
-    /// parser-DWA weights. Therefore `E(q, G, a) = a âˆ© E(q, G, U)` for every
+    /// parser-DWA weights. Therefore `E(q, G, a) = a Ã¢Ë†Â© E(q, G, U)` for every
     /// seed accumulator `a` and seed universe `U`. Caching `E(q, G, U)` by
     /// `(q, G, tsid)` keeps the result valid when delayed lexer exclusions
     /// produce a different `a` at the next model token.
@@ -3725,94 +3725,16 @@ impl ConstraintState {
         }
     }
 
-    /// Project one visible outer tokenizer state into every raw tokenizer
-    /// state of `component` that it represents.
-    ///
-    /// Before runtime-product compression the composed lexer is a literal
-    /// disjoint union, so this is just `global = component_offset + local`
-    /// (with union state zero acting as the shared reset dispatcher). If the
-    /// composed constraint later installs a deterministic runtime product, a
-    /// visible product state denotes a subset of those old union states; lift
-    /// that retained source relation back through the same offsets rather than
-    /// pretending the product state itself is in component coordinates.
+    /// Project an outer recursive tokenizer state into its owning component.
     fn segmented_local_tokenizer_states(
         &self,
         component_index: usize,
-        component: &crate::runtime::SegmentedParserComponent,
         global_state: u32,
     ) -> SmallVec<[u32; 8]> {
-        if self.constraint.uses_compact_segmented_parser_runtime() {
-            return self
-                .constraint
-                .recursive_tokenizer_state_for_component(component_index, global_state)
-                .into_iter()
-                .collect();
-        }
-        let mut locals = SmallVec::<[u32; 8]>::new();
-        let component_reset = component.constraint.runtime_commit_initial_state();
-        let component_offset = component.tokenizer_state_offset;
-        let component_states = component.constraint.tokenizer.num_states();
-
-        let mut add_source_union_state = |source_state: u32| {
-            // Source-union state zero is the shared reset dispatcher rather
-            // than one component's physical state. In a component projection
-            // it denotes that component's authoritative commit reset.
-            if source_state == 0 {
-                locals.push(component_reset);
-                return;
-            }
-            let Some(local) = source_state.checked_sub(component_offset) else {
-                return;
-            };
-            if local < component_states {
-                locals.push(local);
-            }
-        };
-
-        if global_state == self.constraint.runtime_commit_initial_state() {
-            locals.push(component_reset);
-        } else {
-            add_source_union_state(global_state);
-        }
-
-        locals.sort_unstable();
-        locals.dedup();
-        locals
-    }
-
-    #[inline]
-    fn segmented_local_parser_state(
-        &self,
-        component_index: usize,
-        component: &crate::runtime::SegmentedParserComponent,
-        parser_state: u32,
-    ) -> Option<u32> {
-        if self.constraint.uses_compact_segmented_parser_runtime() {
-            return self
-                .constraint
-                .compact_segmented_parser_local_state(component_index, parser_state);
-        }
-        component
-            .global_to_local_parser_state
-            .get(parser_state as usize)
-            .copied()
-            .filter(|&local| local != u32::MAX)
-    }
-
-    #[inline]
-    fn segmented_component_for_parser_state(
-        &self,
-        dispatch: &[u32],
-        parser_state: u32,
-    ) -> Option<usize> {
-        if self.constraint.uses_compact_segmented_parser_runtime() {
-            return self
-                .constraint
-                .compact_segmented_parser_component(parser_state)
-                .map(|(component, _)| component);
-        }
-        let component = dispatch.get(parser_state as usize).copied()?;
-        (component != u32::MAX).then_some(component as usize)
+        self.constraint
+            .recursive_tokenizer_state_for_component(component_index, global_state)
+            .into_iter()
+            .collect()
     }
 
     fn segmented_local_disallowed(
@@ -3825,15 +3747,10 @@ impl ConstraintState {
         let terminal_end = terminal_start.saturating_add(component.constraint.parser_terminal_count());
         let mut result = TerminalsDisallowed::new();
         for (global_tokenizer_state, terminals) in source.iter() {
-            let local_tokenizer_states = self.segmented_local_tokenizer_states(
-                component_index,
-                component,
-                *global_tokenizer_state,
-            );
+            let local_tokenizer_states = self.segmented_local_tokenizer_states(component_index, *global_tokenizer_state);
             for local_tokenizer_state in local_tokenizer_states {
                 for &terminal in terminals.iter() {
-                    if self.constraint.uses_compact_segmented_parser_runtime()
-                        && let Some(local_terminal) = self
+                    if let Some(local_terminal) = self
                             .constraint
                             .recursive_terminal_for_component(component_index, terminal)
                         {
@@ -3857,254 +3774,15 @@ impl ConstraintState {
         result
     }
 
-    fn try_fill_mask_segmented_deterministic_union_direct(&self, buf: &mut [u32]) -> bool {
-        fn accepted_for_stack(
-            component: &crate::runtime::SegmentedParserComponent,
-            top_first: &[u32],
-        ) -> Weight {
-            let constraint = component.constraint.as_ref();
-            let dwa = &constraint.parser_dwa;
-            let mut ops = crate::ds::weight::ScopedWeightOpCache::default();
-            let mut state_id = dwa.start_state();
-            let mut path_weight = Weight::all();
-            let mut accepted = Weight::empty();
-            let accumulate = |state_id: u32,
-                              path_weight: &Weight,
-                              accepted: &mut Weight,
-                              ops: &mut crate::ds::weight::ScopedWeightOpCache| {
-                if let Some(final_weight) = dwa
-                    .states()
-                    .get(state_id as usize)
-                    .and_then(|state| state.final_weight.as_ref())
-                {
-                    let contribution = ops.intersection(path_weight, final_weight);
-                    if !contribution.is_empty() {
-                        *accepted = ops.union(accepted, &contribution);
-                    }
-                }
-            };
-            accumulate(state_id, &path_weight, &mut accepted, &mut ops);
-            for &parser_state in top_first {
-                let Some(state) = dwa.states().get(state_id as usize) else {
-                    break;
-                };
-                let positive = encode_positive_label(parser_state);
-                let transition = state
-                    .transitions
-                    .get(&positive)
-                    .or_else(|| {
-                        constraint
-                            .parser_state_domain_label(parser_state)
-                            .and_then(|label| state.transitions.get(&label))
-                    })
-                    .or_else(|| state.transitions.get(&DEFAULT_LABEL));
-                let Some((target, edge_weight)) = transition else {
-                    break;
-                };
-                path_weight = ops.intersection(&path_weight, edge_weight);
-                if path_weight.is_empty() {
-                    break;
-                }
-                state_id = *target;
-                accumulate(state_id, &path_weight, &mut accepted, &mut ops);
-            }
-            accepted
-        }
-
-        fn dense_contains(acc: &DenseMaskAcc, token: u32) -> bool {
-            let word = token as usize / 64;
-            let bit = token % 64;
-            acc.0.iter().any(|(_, dense)| {
-                dense.get(word)
-                    .is_some_and(|word_value| (*word_value & (1u64 << bit)) != 0)
-            })
-        }
-
-        fn or_component_weight(
-            outer: &ConstraintState,
-            component_index: usize,
-            component: &crate::runtime::SegmentedParserComponent,
-            global_tokenizer_state: u32,
-            accepted: &Weight,
-            allowed: &DenseMaskAcc,
-            root_disallow: bool,
-            buf: &mut [u32],
-        ) -> bool {
-            let local_tokenizer_states = outer.segmented_local_tokenizer_states(
-                component_index,
-                component,
-                global_tokenizer_state,
-            );
-            if local_tokenizer_states.is_empty() {
-                return true;
-            }
-            let source = component.constraint.as_ref();
-            let blocked = root_disallow
-                .then_some(component.root_disallowed_terminal)
-                .flatten()
-                .and_then(|terminal| source.possible_matches.get(&terminal));
-            for local_tokenizer_state in local_tokenizer_states {
-                for &tsid in source.internal_tsids_for_state(local_tokenizer_state) {
-                    let accepted_tokens = if accepted.is_full() {
-                        source.internal_token_universe()
-                    } else {
-                        accepted.tokens_for_tsid(tsid)
-                    };
-                    if accepted_tokens.is_empty() {
-                        continue;
-                    }
-                    let blocked_tokens = blocked.map(|weight| {
-                        if weight.is_full() {
-                            source.internal_token_universe()
-                        } else {
-                            weight.tokens_for_tsid(tsid)
-                        }
-                    });
-                    for internal_token in accepted_tokens.iter() {
-                        if blocked_tokens
-                            .as_ref()
-                            .is_some_and(|tokens| tokens.contains(internal_token))
-                        {
-                            continue;
-                        }
-                        let mut add_original = |original| -> crate::Result<bool> {
-                            let outer_internal = outer.constraint
-                                .original_token_internal_at(original)
-                                .unwrap_or(u32::MAX);
-                            if outer_internal != u32::MAX && dense_contains(allowed, outer_internal) {
-                                set_original_mask_bit(buf, original);
-                            }
-                            Ok(true)
-                        };
-                        if !source.has_original_token_map() {
-                            let _ = add_original(internal_token);
-                        } else if (internal_token as usize) < source.internal_token_count()
-                            && source.visit_internal_token_members(internal_token as usize, &mut add_original).is_err()
-                        {
-                            return false;
-                        }
-                    }
-                }
-            }
-            true
-        }
-
-        let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
-            return false;
-        };
-        let dispatch = &overlay.segmented_component_union_root_dispatch;
-        if overlay.segmented_parser_components.is_empty()
-            || (!self.constraint.uses_compact_segmented_parser_runtime() && dispatch.is_empty())
-        {
-            return false;
-        }
-        if overlay.segmented_static_baseline {
-            self.fill_mask_uncached(buf);
-        } else {
-            buf.fill(0);
-        }
-        for (&global_tokenizer_state, gss) in self.state.iter() {
-            let mut complete = true;
-            let traversal_complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
-                let Some(allowed) =
-                    self.terminals_disallowed_to_dense_acc(acc, global_tokenizer_state)
-                else {
-                    complete = false;
-                    return;
-                };
-                // Synthetic root final: every component start final contributes.
-                for (component_index, component) in
-                    overlay.segmented_parser_components.iter().enumerate()
-                {
-                    let accepted = accepted_for_stack(component, &[]);
-                    if !or_component_weight(
-                        self,
-                        component_index,
-                        component,
-                        global_tokenizer_state,
-                        &accepted,
-                        &allowed,
-                        true,
-                        buf,
-                    ) {
-                        complete = false;
-                        return;
-                    }
-                }
-                let Some(&global_top) = top_first.first() else {
-                    return;
-                };
-                let Some(component_index) =
-                    self.segmented_component_for_parser_state(dispatch, global_top)
-                else {
-                    return;
-                };
-                let Some(component) = overlay
-                    .segmented_parser_components
-                    .get(component_index)
-                else {
-                    complete = false;
-                    return;
-                };
-                let mut local_top_first = SmallVec::<[u32; 64]>::new();
-                for &global_parser_state in top_first {
-                    let Some(local) = self.segmented_local_parser_state(
-                        component_index,
-                        component,
-                        global_parser_state,
-                    ) else {
-                        break;
-                    };
-                    local_top_first.push(local);
-                }
-                if local_top_first.is_empty() {
-                    return;
-                }
-                let accepted = accepted_for_stack(component, &local_top_first);
-                if !or_component_weight(
-                    self,
-                    component_index,
-                    component,
-                    global_tokenizer_state,
-                    &accepted,
-                    &allowed,
-                    false,
-                    buf,
-                ) {
-                    complete = false;
-                }
-            });
-            if !traversal_complete || !complete {
-                return false;
-            }
-        }
-        if !self.or_segmented_boundary_shards_mask(overlay, buf) {
-            return false;
-        }
-        true
-    }
-
-    /// Evaluate deterministic component A. In the recursive parser runtime,
-    /// immediate-wrapper state intervals select the component directly. Legacy
-    /// materialized-coordinate runtimes use `segmented_component_union_root_dispatch`
-    /// for the same selection. Root final weights are the union of every
-    /// component start final, so we also project an empty stack into each
-    /// component coordinate for the same branch accumulator.
-    fn try_fill_mask_segmented_deterministic_union(&self, buf: &mut [u32]) -> bool {
-        if !self.constraint.uses_compact_segmented_parser_runtime()
-            && crate::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_DIRECT_COMPONENT_DWA_MASK").is_some()
-        {
-            return self.try_fill_mask_segmented_deterministic_union_direct(buf);
-        }
+    /// Evaluate each component's exact local mask, then its boundary shards.
+    /// Scoped state intervals identify the owning component.
+    fn try_fill_mask_segmented(&self, buf: &mut [u32]) -> bool {
         let profile = crate::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
         let total_started_at = profile.then(Instant::now);
         let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
             return false;
         };
-        let dispatch = &overlay.segmented_component_union_root_dispatch;
-        if overlay.segmented_parser_components.is_empty()
-            || (!self.constraint.uses_compact_segmented_parser_runtime() && dispatch.is_empty())
-        {
+        if overlay.segmented_parser_components.is_empty() {
             return false;
         }
 
@@ -4118,13 +3796,12 @@ impl ConstraintState {
             // A control-closed recursive frontier can represent exponentially
             // many valid stacks. Project its shared graph instead of declaring
             // a static-mask failure after enumerating 128 concrete paths.
-            if self.constraint.uses_compact_segmented_parser_runtime() && !gss.is_single_path() {
+            if !gss.is_single_path() {
                 for (component_index, component) in overlay.segmented_parser_components.iter().enumerate() {
-                    let local_tokenizer_states = self.segmented_local_tokenizer_states(
-                        component_index, component, global_tokenizer_state);
+                    let local_tokenizer_states = self.segmented_local_tokenizer_states(component_index, global_tokenizer_state);
                     if local_tokenizer_states.is_empty() { continue; }
                     let projected = gss.map_nonempty_top_prefixes(|&global|
-                        self.segmented_local_parser_state(component_index, component, global));
+                        self.constraint.compact_segmented_parser_local_state(component_index, global));
                     if projected.is_empty() { continue; }
                     let projected = projected.apply_and_prune(|acc|
                         Some(self.segmented_local_disallowed(component_index, component, acc)));
@@ -4135,51 +3812,11 @@ impl ConstraintState {
                 continue;
             }
             let complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
-                // The old materialized segmented union had one synthetic root
-                // whose final language was the union of every component start
-                // final.  The recursive provider coordinate has no such root:
-                // state 0 is the real root leaf state, and CALL is the only way
-                // to make a child active.  Seeding all component roots here in
-                // the recursive runtime would therefore leak a child's scoped
-                // ignore into its parent before the CALL.
-                if !self.constraint.uses_compact_segmented_parser_runtime() {
-                    for (component_index, component) in
-                        overlay.segmented_parser_components.iter().enumerate()
-                    {
-                        let local_tokenizer_states = self
-                            .segmented_local_tokenizer_states(
-                                component_index,
-                                component,
-                                global_tokenizer_state,
-                            );
-                        if local_tokenizer_states.is_empty() {
-                            continue;
-                        }
-                        let local_disallowed =
-                            self.segmented_local_disallowed(component_index, component, acc);
-                        for local_tokenizer_state in local_tokenizer_states {
-                            let mut branch_disallowed = local_disallowed.clone();
-                            if let Some(terminal) = component.root_disallowed_terminal {
-                                branch_disallowed = branch_disallowed.with_insert(
-                                    local_tokenizer_state,
-                                    terminal,
-                                );
-                            }
-                            let root_gss =
-                                ParserGSS::from_single_stack(Vec::new(), branch_disallowed);
-                            projected_states[component_index].merge_insert(
-                                local_tokenizer_state,
-                                root_gss,
-                            );
-                        }
-                    }
-                }
-
                 let Some(&global_top) = top_first.first() else {
                     return;
                 };
                 let Some(component_index) =
-                    self.segmented_component_for_parser_state(dispatch, global_top)
+                    self.constraint.compact_segmented_parser_component(global_top).map(|(component, _)| component)
                 else {
                     return;
                 };
@@ -4189,22 +3826,14 @@ impl ConstraintState {
                 else {
                     return;
                 };
-                let local_tokenizer_states = self.segmented_local_tokenizer_states(
-                    component_index,
-                    component,
-                    global_tokenizer_state,
-                );
+                let local_tokenizer_states = self.segmented_local_tokenizer_states(component_index, global_tokenizer_state);
                 if local_tokenizer_states.is_empty() {
                     return;
                 }
 
                 let mut local_top_first = SmallVec::<[u32; 64]>::new();
                 for &global_parser_state in top_first {
-                    let Some(local) = self.segmented_local_parser_state(
-                        component_index,
-                        component,
-                        global_parser_state,
-                    ) else {
+                    let Some(local) = self.constraint.compact_segmented_parser_local_state(component_index, global_parser_state) else {
                         break;
                     };
                     local_top_first.push(local);
@@ -4231,11 +3860,7 @@ impl ConstraintState {
             }
         }
 
-        if overlay.segmented_static_baseline {
-            self.fill_mask_uncached(buf);
-        } else {
-            buf.fill(0);
-        }
+        buf.fill(0);
         #[cfg(test)]
         segmented_mask_stage_trace("baseline", buf);
         let mut component_times = SmallVec::<[u64; 4]>::new();
@@ -4320,228 +3945,6 @@ impl ConstraintState {
                 boundary_ns,
                 elapsed_ns(started_at),
             );
-        }
-        true
-    }
-
-    /// Exact common-case evaluator for a segmented component parser union.
-    ///
-    /// Each retained component keeps its original token/TSID coordinate and
-    /// therefore its existing dense mask caches.  For a concrete parser stack,
-    /// read the maximal top-first prefix whose composed LR states have a local
-    /// preimage in that component.  The standalone component DWA has no
-    /// transition for the first foreign state, so deeper values are semantically
-    /// irrelevant; truncating there preserves every accepting prefix exactly.
-    /// Ambiguous GSSes deliberately decline this fast path for now.
-    fn try_fill_mask_segmented_single_paths(&self, buf: &mut [u32]) -> bool {
-        let profile_all = crate::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some();
-        let profile_slow = crate::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK_SLOW").is_some();
-        let profile = profile_all || profile_slow;
-        let total_started_at = profile.then(Instant::now);
-        let Some(overlay) = self.constraint.static_dynamic_overlay.as_ref() else {
-            return false;
-        };
-        if self.constraint.uses_compact_segmented_parser_runtime()
-            || !overlay.segmented_component_union_root_dispatch.is_empty()
-        {
-            return self.try_fill_mask_segmented_deterministic_union(buf);
-        }
-        // v22 deliberately flattens all-static retained components into one
-        // ordinary parser-DWA baseline at save time.  After load the live
-        // component list can therefore be empty while B remains separately
-        // serialized and authoritative.  In that shape A comes from
-        // `fill_mask_uncached` below and this evaluator only needs to OR B.
-        if overlay.segmented_parser_components.is_empty() && !overlay.segmented_static_baseline {
-            return false;
-        }
-
-        let mut projected_states = SmallVec::<[ParserStateMap; 4]>::new();
-        projected_states.resize_with(
-            overlay.segmented_parser_components.len(),
-            ParserStateMap::default,
-        );
-
-        for (&global_tokenizer_state, gss) in self.state.iter() {
-            let complete = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
-                for (component_index, component) in
-                    overlay.segmented_parser_components.iter().enumerate()
-                {
-                    let local_tokenizer_states =
-                        self.segmented_local_tokenizer_states(
-                            component_index,
-                            component,
-                            global_tokenizer_state,
-                        );
-                    if local_tokenizer_states.is_empty() {
-                        continue;
-                    }
-
-                    let mut local_top_first = SmallVec::<[u32; 64]>::new();
-                    for &global_parser_state in top_first {
-                        let Some(local) = self.segmented_local_parser_state(
-                            component_index,
-                            component,
-                            global_parser_state,
-                        ) else {
-                            break;
-                        };
-                        local_top_first.push(local);
-                    }
-                    let local_disallowed =
-                        self.segmented_local_disallowed(component_index, component, acc);
-                    let local_stack = if local_top_first.is_empty() {
-                        // An empty *composed* parser stack belongs to the outer
-                        // parent root.  An empty projection of a non-empty
-                        // composed stack means instead that this component does
-                        // not own the current stack top.  In particular, while
-                        // a child is active the buried parent caller frame must
-                        // not reactivate parent A (or its scoped ignore) merely
-                        // because the child's top state has no parent preimage.
-                        if !top_first.is_empty() || component.terminal_offset != 0 {
-                            continue;
-                        }
-                        Vec::new()
-                    } else {
-                        local_top_first.reverse();
-                        local_top_first.into_vec()
-                    };
-                    // Boundary reachability is accounted for separately by B.
-                    // At a synthetic component root suppress standalone scoped
-                    // ignore independently in every lifted lexer lane.
-                    for local_tokenizer_state in local_tokenizer_states {
-                        let mut branch_disallowed = local_disallowed.clone();
-                        if local_stack.is_empty()
-                            && let Some(terminal) = component.root_disallowed_terminal
-                        {
-                            branch_disallowed = branch_disallowed.with_insert(
-                                local_tokenizer_state,
-                                terminal,
-                            );
-                        }
-                        projected_states[component_index].merge_insert(
-                            local_tokenizer_state,
-                            ParserGSS::from_single_stack(
-                                local_stack.clone(),
-                                branch_disallowed,
-                            ),
-                        );
-                    }
-                }
-            });
-            if !complete {
-                return false;
-            }
-        }
-
-        if overlay.segmented_static_baseline {
-            self.fill_mask_uncached(buf);
-        } else {
-            buf.fill(0);
-        }
-        let mut component_buf = None::<Vec<u32>>;
-        let mut component_times = SmallVec::<[u64; 4]>::new();
-        for (component_index, (component, state)) in overlay
-            .segmented_parser_components
-            .iter()
-            .zip(projected_states)
-            .enumerate()
-        {
-            if state.is_empty() {
-                component_times.push(0);
-                continue;
-            }
-            let component_started_at = profile.then(Instant::now);
-            let reused_initial = {
-                let scratch = self.mask_scratch.lock().unwrap();
-                match (
-                    scratch.segmented_component_initial_states.get(component_index),
-                    scratch.segmented_component_initial_masks.get(component_index),
-                ) {
-                    (Some(initial_state), Some(initial_mask)) if initial_state == &state => {
-                        self.or_segmented_component_mask(buf, initial_mask);
-                        true
-                    }
-                    _ => false,
-                }
-            };
-            if reused_initial {
-                component_times.push(component_started_at.map_or(0, elapsed_ns));
-                continue;
-            }
-            if component_buf.is_none() {
-                let mut scratch = self.mask_scratch.lock().unwrap();
-                let mut reusable = std::mem::take(&mut scratch.output_buf);
-                reusable.resize(
-                    buf.len().max(component.constraint.body_mask_len()),
-                    0,
-                );
-                component_buf = Some(reusable);
-            } else if let Some(buffer) = component_buf.as_mut()
-                && buffer.len() < component.constraint.body_mask_len()
-            {
-                buffer.resize(component.constraint.body_mask_len(), 0);
-            }
-            let component_buf = component_buf
-                .as_mut()
-                .expect("active segmented component requires a mask buffer");
-            component_buf.fill(0);
-            let shadow = ConstraintState {
-            terminated: false,
-            markers: None,
-                constraint: component.constraint.as_ref().clone(),
-                state,
-                buffers: CommitBuffers::for_mask_only_shadow(),
-                generation: self.generation,
-                mask_cache: Mutex::new(None),
-                mask_scratch: {
-                    let scratch = self.mask_scratch.lock().unwrap();
-                    scratch
-                        .segmented_component_scratch
-                        .get(component_index)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            Arc::new(Mutex::new(MaskScratch::for_constraint(
-                                component.constraint.as_ref(),
-                            )))
-                        })
-                },
-            };
-            // Preserve the supplied component's runtime backend. A static
-            // component reuses its compiled parser-DWA/mask machinery; a
-            // dynamic component keeps using its exact lexer/parser walker.
-            // Nested segmented components recurse through the same dispatch.
-            shadow.fill_mask(component_buf);
-            if crate::env::var_os("GLRMASK_DEBUG_SEGMENTED_COMPONENT_MASK").is_some() {
-                eprintln!(
-                    "[glrmask/debug][segmented_component_mask] dynamic={} terminal_offset={} mask={:?} state={:?}",
-                    component.constraint.uses_dynamic_runtime(),
-                    component.terminal_offset,
-                    component_buf,
-                    shadow.state,
-                );
-            }
-            self.or_segmented_component_mask(buf, component_buf.as_slice());
-            component_times.push(component_started_at.map_or(0, elapsed_ns));
-        }
-        if let Some(mut reusable) = component_buf.take() {
-            reusable.clear();
-            self.mask_scratch.lock().unwrap().output_buf = reusable;
-        }
-        let boundary_started_at = profile.then(Instant::now);
-        if !self.or_segmented_boundary_shards_mask(overlay, buf) {
-            return false;
-        }
-        let boundary_ns = boundary_started_at.map_or(0, elapsed_ns);
-        if let Some(started_at) = total_started_at {
-            let total_ns = elapsed_ns(started_at);
-            if profile_all || total_ns >= 100_000 {
-                eprintln!(
-                    "[glrmask/profile][segmented_parser_mask] components={} component_ns={component_times:?} boundary_ns={} total_ns={}",
-                    overlay.segmented_parser_components.len(),
-                    boundary_ns,
-                    total_ns,
-                );
-            }
         }
         true
     }
@@ -4951,136 +4354,6 @@ impl ConstraintState {
             if !branch.is_empty() { selected.insert_flat_alternative(lexer, branch); }
         }
         Some(selected)
-    }
-
-    /// OR exact component-trigger candidates into `buf`. Trigger parser labels
-    /// are component-local LR IDs, but its weight coordinate is deliberately
-    /// raw/original: TSID == local tokenizer-state ID and token == original
-    /// model-token ID. This avoids assuming that the ordinary whole-token
-    /// TSID/token quotient also preserves proper-prefix boundary observations.
-    /// This routine intentionally ignores terminal exclusions: doing so can
-    /// only add false-positive candidates and therefore remains a sound gate
-    /// for the exact dynamic crossing evaluator.
-    fn or_exact_component_trigger_candidates(
-        &self,
-        component: &crate::runtime::SegmentedParserComponent,
-        shard: &crate::runtime::SegmentedBoundaryShard,
-        dwa: &crate::automata::weighted_u32::dwa::DWA,
-        buf: &mut [u32],
-    ) -> bool {
-        if component.constraint.has_recursive_segmented_parser_tree() {
-            // Exact trigger labels are still compiled in this component's
-            // transitional materialized-table coordinate. Once its parser is
-            // projected recursively, feeding those leaf-scoped states to the
-            // trigger DWA would be unsound. Decline the accelerator; recursive
-            // DynamicDirect B will validate the resulting token domain through
-            // exact scoped commits. Trigger metadata is pruning only, never
-            // semantics.
-            return false;
-        }
-        for (&global_tokenizer_state, gss) in self.state.iter() {
-            let local_tokenizer_states = self.segmented_local_tokenizer_states(
-                shard.start_component as usize,
-                component,
-                global_tokenizer_state,
-            );
-            if local_tokenizer_states.is_empty() {
-                // An unmappable lexer state is harmless only when this
-                // component cannot own any stack at that lexer key. If an
-                // active shard is present, declining Exact is mandatory:
-                // silently skipping the key could remove real trigger tokens
-                // and create a false-negative dynamic-boundary gate.
-                let mut active = false;
-                let traversal_complete =
-                    gss.for_each_stack_top_first_bounded(128, |top_first, _| {
-                        if active {
-                            return;
-                        }
-                        active = match top_first.first().copied() {
-                            Some(top) if self.constraint.uses_compact_segmented_parser_runtime() => {
-                                self.constraint
-                                    .compact_segmented_parser_component(top)
-                                    .is_some_and(|(owner, _)| owner == shard.start_component as usize)
-                            }
-                            Some(top) => shard.start_parser_states.contains(top as usize),
-                            None => shard.accepts_empty_stack,
-                        };
-                    });
-                if !traversal_complete || active {
-                    return false;
-                }
-                continue;
-            }
-            let mut complete = true;
-            let traversal_complete = gss.for_each_stack_top_first_bounded(128, |top_first, _| {
-                match top_first.first().copied() {
-                    Some(top) if self.constraint.uses_compact_segmented_parser_runtime() => {
-                        if self
-                            .constraint
-                            .compact_segmented_parser_component(top).is_none_or(|(owner, _)| owner != shard.start_component as usize)
-                        {
-                            return;
-                        }
-                    }
-                    Some(top) if !shard.start_parser_states.contains(top as usize) => return,
-                    None if !shard.accepts_empty_stack => return,
-                    _ => {}
-                }
-
-                let mut local_top_first = SmallVec::<[u32; 64]>::new();
-                let mut projection_truncated = false;
-                for &global_parser_state in top_first {
-                    let Some(local) = self.segmented_local_parser_state(
-                        shard.start_component as usize,
-                        component,
-                        global_parser_state,
-                    ) else {
-                        if !self.constraint.uses_compact_segmented_parser_runtime() {
-                            projection_truncated = true;
-                        }
-                        break;
-                    };
-                    local_top_first.push(local);
-                }
-                if projection_truncated || (!top_first.is_empty() && local_top_first.is_empty()) {
-                    // Do not evaluate a trigger language on a silently
-                    // truncated local stack.  A future scoped-GSS proof may
-                    // certify the first foreign state as exactly the caller
-                    // boundary; until then, fallback to the unified dynamic
-                    // recognizer rather than risk losing a deeper-stack
-                    // readiness condition.
-                    complete = false;
-                    return;
-                }
-
-                let accepted = exact_component_trigger_accepted_weight(
-                    component.constraint.as_ref(),
-                    dwa,
-                    &local_top_first,
-                );
-                if accepted.is_empty() {
-                    return;
-                }
-                // Exact trigger construction always leaves the lexical path
-                // support attached, so a universal final result is malformed
-                // for this artifact. Decline rather than interpreting it as a
-                // huge token universe and risk masking a coordinate bug.
-                if accepted.is_full() {
-                    complete = false;
-                    return;
-                }
-                for &local_tokenizer_state in &local_tokenizer_states {
-                    let tokens = accepted.tokens_for_tsid(local_tokenizer_state);
-                    for original_token in tokens.iter() {
-                        set_original_mask_bit(buf, original_token);
-                    }
-                }
-            });
-            if !traversal_complete || !complete {
-                return false;
-            }
-        }
-        true
     }
 
     /// Admit one exact-DAG group's accepted Weight into `buf`, preserving the
@@ -7968,9 +7241,9 @@ impl ConstraintState {
             }
             let filled = if authoritative_dynamic_direct {
                 crate::compiler::boundary_transfer::permit_strict_static_dynamic(|| {
-                    self.try_fill_mask_segmented_single_paths(mask)
+                    self.try_fill_mask_segmented(mask)
                 })
-            } else { self.try_fill_mask_segmented_single_paths(mask) };
+            } else { self.try_fill_mask_segmented(mask) };
             if filled {
                 self.update_control_special_token_mask(mask);
                 self.clear_late_grammar_placeholder_mask(mask);
@@ -8044,46 +7317,6 @@ impl ConstraintState {
             }
             return;
         }
-        if crate::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_PARSER_MASK").is_some()
-            && self
-                .constraint
-                .static_dynamic_overlay
-                .as_ref()
-                .is_some_and(|overlay| !overlay.segmented_parser_components.is_empty())
-            && self.try_fill_mask_segmented_single_paths(mask) {
-                self.update_control_special_token_mask(mask);
-                if crate::env::var_os("GLRMASK_VALIDATE_SEGMENTED_PARSER_MASK").is_some() {
-                    let mut reference = vec![0u32; mask.len()];
-                    self.fill_mask_uncached(&mut reference);
-                    self.update_control_special_token_mask(&mut reference);
-                    if reference != mask {
-                        let reference_only = (0..mask.len() * 32)
-                            .filter(|&token| {
-                                let word = token / 32;
-                                let bit = token % 32;
-                                ((reference[word] >> bit) & 1) != 0
-                                    && ((mask[word] >> bit) & 1) == 0
-                            })
-                            .take(32)
-                            .collect::<Vec<_>>();
-                        let segmented_only = (0..mask.len() * 32)
-                            .filter(|&token| {
-                                let word = token / 32;
-                                let bit = token % 32;
-                                ((reference[word] >> bit) & 1) == 0
-                                    && ((mask[word] >> bit) & 1) != 0
-                            })
-                            .take(32)
-                            .collect::<Vec<_>>();
-                        panic!(
-                            "segmented component parser mask differs from flattened reference; reference_only={reference_only:?} segmented_only={segmented_only:?}"
-                        );
-                    }
-                }
-                self.store_mask_cache_reuse_dense(mask);
-                self.clear_late_grammar_placeholder_mask(mask);
-                return;
-            }
         let cache_hit = self.try_fill_mask_from_cache(mask);
         if !cache_hit {
             let factor_profile = crate::env::var_os("GLRMASK_PROFILE_LOOKAHEAD_FACTOR").is_some();
