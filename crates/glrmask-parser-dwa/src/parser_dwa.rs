@@ -3480,6 +3480,26 @@ impl FiniteWeightOp {
     }
 }
 
+/// A source TSID quotient is exact only when every weight is constant on
+/// each class, including the implicit zero rows absent from sparse weights.
+struct SourceTsidProjection<'a> {
+    map: &'a [u32],
+    class_sizes: [usize; FAST_BOUNDARY_TSID_LIMIT],
+}
+
+impl<'a> SourceTsidProjection<'a> {
+    fn new(map: &'a [u32], target_rows: usize) -> Option<Self> {
+        let mut class_sizes = [0usize; FAST_BOUNDARY_TSID_LIMIT];
+        for &class in map {
+            if class as usize >= target_rows {
+                return None;
+            }
+            class_sizes[class as usize] += 1;
+        }
+        Some(Self { map, class_sizes })
+    }
+}
+
 struct FastBoundaryWeightInterner {
     // Only the new finite-output route enables this policy. A failed private
     // computation is discarded before any graph is published. Returning the
@@ -3600,7 +3620,7 @@ impl FastBoundaryWeightInterner {
         &mut self,
         weight: &Weight,
         by_ptr: &mut FxHashMap<usize, FastBoundaryWeightId>,
-        source_tsid_map: Option<&[u32]>,
+        projection: Option<&SourceTsidProjection<'_>>,
     ) -> Option<FastBoundaryWeightId> {
         if weight.is_empty() {
             return Some(self.empty_id());
@@ -3609,26 +3629,27 @@ impl FastBoundaryWeightInterner {
             return Some(self.all_id());
         }
         let ptr = weight.ptr_key();
-        if source_tsid_map.is_none()
+        if projection.is_none()
             && self.source_last_cache_enabled
             && ptr == self.last_source_ptr
         {
             return Some(self.last_source_id);
         }
         if let Some(&id) = by_ptr.get(&ptr) {
-            if source_tsid_map.is_none() && self.source_last_cache_enabled {
+            if projection.is_none() && self.source_last_cache_enabled {
                 self.last_source_ptr = ptr;
                 self.last_source_id = id;
             }
             return Some(id);
         }
         let mut value: FastBoundaryWeightValue = smallvec::smallvec![0u64; self.tsid_count];
+        let mut represented = [0usize; FAST_BOUNDARY_TSID_LIMIT];
         for (start, end, tokens) in weight.range_entries() {
-            if source_tsid_map.is_none() && end as usize >= self.tsid_count {
+            if projection.is_none() && end as usize >= self.tsid_count {
                 return None;
             }
-            if let Some(map) = source_tsid_map
-                && end as usize >= map.len()
+            if let Some(projection) = projection
+                && end as usize >= projection.map.len()
             {
                 return None;
             }
@@ -3642,8 +3663,8 @@ impl FastBoundaryWeightInterner {
                 }
             }
             for source_tsid in start..=end {
-                let target_tsid = source_tsid_map
-                    .map(|map| map[source_tsid as usize])
+                let target_tsid = projection
+                    .map(|projection| projection.map[source_tsid as usize])
                     .unwrap_or(source_tsid);
                 if target_tsid as usize >= self.tsid_count {
                     return None;
@@ -3656,11 +3677,21 @@ impl FastBoundaryWeightInterner {
                     return None;
                 }
                 *slot = mask;
+                if projection.is_some() && mask != 0 {
+                    represented[target_tsid as usize] += 1;
+                }
+            }
+        }
+        if let Some(projection) = projection {
+            for (class, &mask) in value.iter().enumerate() {
+                if mask != 0 && represented[class] != projection.class_sizes[class] {
+                    return None;
+                }
             }
         }
         let id = self.intern(value);
         by_ptr.insert(ptr, id);
-        if source_tsid_map.is_none() && self.source_last_cache_enabled {
+        if projection.is_none() && self.source_last_cache_enabled {
             self.last_source_ptr = ptr;
             self.last_source_id = id;
         }
@@ -6132,16 +6163,20 @@ fn determinize_with_supports_small_boundary(
     }
     let total_started_at = Instant::now();
     let mut interner = FastBoundaryWeightInterner::new(tsid_count, token_count)?;
+    let source_projection = match source_tsid_map {
+        Some(map) => Some(SourceTsidProjection::new(map, tsid_count)?),
+        None => None,
+    };
     let mut source_weight_ids = FxHashMap::<usize, FastBoundaryWeightId>::default();
     let mut fast_nwa = Vec::with_capacity(nwa.states().len());
     for state in nwa.states() {
         let final_weight = match state.final_weight.as_ref() {
-            Some(weight) => interner.source_weight_id(weight, &mut source_weight_ids, source_tsid_map)?,
+            Some(weight) => interner.source_weight_id(weight, &mut source_weight_ids, source_projection.as_ref())?,
             None => interner.empty_id(),
         };
         let mut epsilons = Vec::with_capacity(state.epsilons.len());
         for (target, weight) in &state.epsilons {
-            let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_tsid_map)?;
+            let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_projection.as_ref())?;
             if weight != 0 {
                 epsilons.push((*target, weight));
             }
@@ -6150,7 +6185,7 @@ fn determinize_with_supports_small_boundary(
         for (&label, branches) in &state.transitions {
             let mut fast_branches = SmallVec::with_capacity(branches.len());
             for (target, weight) in branches {
-                let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_tsid_map)?;
+                let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_projection.as_ref())?;
                 if weight != 0 {
                     fast_branches.push((*target, weight));
                 }
@@ -6250,24 +6285,28 @@ fn normalize_finite_with_read_context_impl(
     }
     let total_started_at = Instant::now();
     let mut interner = FastBoundaryWeightInterner::new(tsid_count, token_count)?;
+    let source_projection = match source_tsid_map {
+        Some(map) => Some(SourceTsidProjection::new(map, tsid_count)?),
+        None => None,
+    };
     interner.limits = Some(limits);
     let mut source_weight_ids = FxHashMap::<usize, FastBoundaryWeightId>::default();
     let mut fast_nwa = Vec::with_capacity(nwa.states().len());
     for state in nwa.states() {
         let final_weight = match state.final_weight.as_ref() {
-            Some(weight) => interner.source_weight_id(weight, &mut source_weight_ids, source_tsid_map)?,
+            Some(weight) => interner.source_weight_id(weight, &mut source_weight_ids, source_projection.as_ref())?,
             None => interner.empty_id(),
         };
         let mut epsilons = Vec::with_capacity(state.epsilons.len());
         for (target, weight) in &state.epsilons {
-            let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_tsid_map)?;
+            let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_projection.as_ref())?;
             epsilons.push((*target, weight));
         }
         let mut transitions = Vec::with_capacity(state.transitions.len());
         for (&label, branches) in &state.transitions {
             let mut fast_branches = SmallVec::with_capacity(branches.len());
             for (target, weight) in branches {
-                let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_tsid_map)?;
+                let weight = interner.source_weight_id(weight, &mut source_weight_ids, source_projection.as_ref())?;
                 if weight != 0 {
                     fast_branches.push((*target, weight));
                 }
@@ -11579,4 +11618,20 @@ fn charge_dwa_size(stage: &'static str, states: &[DWAState]) {
         total.saturating_add(1 + state.transitions.len() as u64)
     });
     glrmask_invariant::__private::charge_template_build_budget(stage, units);
+}
+
+#[cfg(test)]
+#[test]
+fn finite_source_tsid_projection_rejects_implicit_zero_disagreement() {
+    let projection = SourceTsidProjection::new(&[0, 0, 1], 2).unwrap();
+    let mut interner = FastBoundaryWeightInterner::new(2, 4).unwrap();
+    let mut ids = FxHashMap::default();
+    let partial = Weight::from_token_set_for_tsid(0, [1].into_iter().collect());
+    assert!(interner.source_weight_id(&partial, &mut ids, Some(&projection)).is_none());
+    let equal = Weight::from_per_tsid_token_sets([
+        (0, [1].into_iter().collect()),
+        (1, [1].into_iter().collect()),
+    ].into_iter());
+    let id = interner.source_weight_id(&equal, &mut ids, Some(&projection)).unwrap();
+    assert_eq!(interner.values[id as usize].as_slice(), &[2, 0]);
 }
