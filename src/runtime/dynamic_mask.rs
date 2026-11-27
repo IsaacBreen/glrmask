@@ -568,7 +568,6 @@ struct RecursiveFullWalkTransitions<'a> {
     // per byte/finalizer/guard. Offsets are the authoritative layout's exact
     // coordinates, so this view requires no DFA or vocabulary preprocessing.
     leaves: SmallVec<[RecursiveFullWalkLeaf<'a>; 4]>,
-    parser_advance_cache: FxHashMap<(u32, TerminalID), SmallVec<[(u32, u32); 4]>>,
     cache_parser_gss: bool,
     pre_admitted_original_mask: Option<&'a [u32]>,
 }
@@ -612,7 +611,6 @@ impl<'a> RecursiveFullWalkTransitions<'a> {
             constraint,
             total_states: layout.total_tokenizer_states as usize,
             leaves,
-            parser_advance_cache: FxHashMap::default(),
             cache_parser_gss: env_flag("GLRMASK_PROFILE_PARSER_ACC_CACHE", true),
             pre_admitted_original_mask: None,
 
@@ -823,8 +821,7 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
         terminal: TerminalID,
     ) -> SmallVec<[(u32, u32); 4]> {
         debug_assert!(std::sync::Arc::ptr_eq(&constraint.data, &self.constraint.data));
-        let key = (parser_node, terminal);
-        if let Some(cached) = self.parser_advance_cache.get(&key) {
+        if let Some(cached) = parser_cache.nodes[parser_node as usize].advances.scoped(terminal) {
             return cached.clone();
         }
 
@@ -849,7 +846,7 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
                 |reset, partition| add_route(parser_cache, reset, partition.apply(|_| ())))
                 .expect("valid recursive mask reset routes");
         }
-        self.parser_advance_cache.insert(key, result.clone());
+        parser_cache.nodes[parser_node as usize].advances.insert_scoped(terminal, result.clone());
         result
     }
 }
@@ -2106,6 +2103,53 @@ impl ParserBoundaryMemo {
     }
 }
 
+/// One answer per queried terminal, with the most recent local answer first.
+/// The recursive relation instead returns an exact list of reset routes.
+#[derive(Default)]
+enum ParserAdvanceMemo {
+    #[default]
+    Empty,
+    Local {
+        recent: (TerminalID, u32),
+        others: SmallVec<[(TerminalID, u32); 4]>,
+    },
+    Scoped(Box<FxHashMap<TerminalID, SmallVec<[(u32, u32); 4]>>>),
+}
+
+impl ParserAdvanceMemo {
+    #[inline(always)]
+    fn local(&mut self, terminal: TerminalID) -> Option<u32> {
+        let Self::Local { recent, others } = self else { return None; };
+        if recent.0 == terminal { return Some(recent.1); }
+        let entry = others.iter_mut().find(|entry| entry.0 == terminal)?;
+        std::mem::swap(recent, entry);
+        Some(recent.1)
+    }
+
+    fn insert_local(&mut self, terminal: TerminalID, target: u32) {
+        match self {
+            Self::Empty => *self = Self::Local {
+                recent: (terminal, target), others: SmallVec::new(),
+            },
+            Self::Local { recent, others } => {
+                others.push(std::mem::replace(recent, (terminal, target)));
+            }
+            Self::Scoped(_) => unreachable!("walk parser relation changed"),
+        }
+    }
+
+    fn scoped(&self, terminal: TerminalID) -> Option<&SmallVec<[(u32, u32); 4]>> {
+        let Self::Scoped(routes) = self else { return None; };
+        routes.get(&terminal)
+    }
+
+    fn insert_scoped(&mut self, terminal: TerminalID, routes: SmallVec<[(u32, u32); 4]>) {
+        if matches!(self, Self::Empty) { *self = Self::Scoped(Box::default()); }
+        let Self::Scoped(memo) = self else { unreachable!("walk parser relation changed"); };
+        memo.insert(terminal, routes);
+    }
+}
+
 struct FullWalkParserNode {
     gss: ParserStacks,
     /// Lazily mapped only for parser operations still requiring commit annotations.
@@ -2115,9 +2159,7 @@ struct FullWalkParserNode {
     shared_root_admission: SharedRootAdmission,
     reset_lexer: Option<u32>,
     boundary: ParserBoundaryMemo,
-    children: SmallVec<[(TerminalID, u32); 16]>,
-    last_child_terminal: TerminalID,
-    last_child_target: u32,
+    advances: ParserAdvanceMemo,
 }
 
 struct FullWalkParserCanonical {
@@ -2193,9 +2235,7 @@ impl FullWalkParserCache {
             shared_root_admission: None,
             reset_lexer: None,
             boundary: ParserBoundaryMemo::Empty,
-            children: SmallVec::new(),
-            last_child_terminal: TerminalID::MAX,
-            last_child_target: Self::DEAD,
+            advances: ParserAdvanceMemo::Empty,
         });
         id
     }
@@ -2208,25 +2248,11 @@ impl FullWalkParserCache {
         terminal: TerminalID,
     ) -> Option<u32> {
         let node_index = node as usize;
-        let (last_child_terminal, last_child_target) = unsafe {
-            let cached_node = self.nodes.get_unchecked(node_index);
-            (cached_node.last_child_terminal, cached_node.last_child_target)
-        };
-        if last_child_terminal == terminal {
-            let cached = last_child_target;
+        if let Some(cached) = self.nodes[node_index].advances.local(terminal) {
             return (cached != Self::DEAD).then_some(cached);
         }
         if Some(terminal) == constraint.ignore_terminal {
             return Some(node);
-        }
-        if let Some(&(_, cached)) = self.nodes[node_index]
-            .children
-            .iter()
-            .find(|&&(candidate, _)| candidate == terminal)
-        {
-            self.nodes[node_index].last_child_terminal = terminal;
-            self.nodes[node_index].last_child_target = cached;
-            return (cached != Self::DEAD).then_some(cached);
         }
         // With no zero-width control terminals, a single-top parser frontier
         // whose LR row has no action for this terminal cannot advance. This is
@@ -2242,15 +2268,11 @@ impl FullWalkParserCache {
                 .single_top_value()
                 .is_some_and(|top| !constraint.parser_advance_row_allows(top, terminal))
         {
-            self.nodes[node_index].children.push((terminal, Self::DEAD));
-            self.nodes[node_index].last_child_terminal = terminal;
-            self.nodes[node_index].last_child_target = Self::DEAD;
+            self.nodes[node_index].advances.insert_local(terminal, Self::DEAD);
             return None;
         }
         if self.nodes[node_index].admitted.as_ref().is_some_and(|set| !set.contains(terminal as usize)) {
-            self.nodes[node_index].children.push((terminal, Self::DEAD));
-            self.nodes[node_index].last_child_terminal = terminal;
-            self.nodes[node_index].last_child_target = Self::DEAD;
+            self.nodes[node_index].advances.insert_local(terminal, Self::DEAD);
             return None;
         }
         let next = parser_child(constraint, &self.nodes[node_index].gss, terminal);
@@ -2261,9 +2283,7 @@ impl FullWalkParserCache {
         } else {
             Self::DEAD
         };
-        self.nodes[node_index].children.push((terminal, target));
-        self.nodes[node_index].last_child_terminal = terminal;
-        self.nodes[node_index].last_child_target = target;
+        self.nodes[node_index].advances.insert_local(terminal, target);
         (target != Self::DEAD).then_some(target)
     }
 
