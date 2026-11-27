@@ -6109,9 +6109,9 @@ fn parser_child(
     // All nontrivial effects retain the complete annotated parser evaluator.
     if let Some(parser) = constraint.template_parser()
         && !constraint.parser_skip_terminals().contains(&terminal)
-        && let Some(template) = parser.terminal_source(terminal as usize)
-        && let Some(fast) = parser.local_fast(terminal as usize)
-        && let Some(advanced) = super::commit::simple_read_shift::apply(template, fast, stacks)
+        && let Some(relation) = parser.local_relation(terminal as usize)
+        && let Some(fast) = relation.fast.as_ref()
+        && let Some(advanced) = super::commit::simple_read_shift::apply(fast, stacks)
     {
         parser.record_advance();
         #[cfg(test)]

@@ -180,7 +180,7 @@ mod tests {
         for top in 216..243 {push.add_transition(0,encode_negative_label(top),end);}
         let t=template(push);let plans=prepare(&t);let plan=plans[0].as_ref().unwrap();
         let base=ParserGSS::from_single_stack(vec![0,6],TerminalsDisallowed::new());
-        let out=plan.apply(&base).unwrap();
+        let out=plan.apply(&base,0).unwrap();
         assert_eq!(out.top_value_count(),27);
         assert_eq!(out.to_stacks(100).unwrap().len(),27);
         assert_eq!(out.semantically_eq(&literal(&t.push,0,&base),100),Some(true));

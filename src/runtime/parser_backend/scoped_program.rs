@@ -112,7 +112,7 @@ impl ScopedProgram {
             owned
         } else { stack.clone() };
         let output = crate::runtime::commit::template_advance::advance_with_prepared_coordinate(
-            &self.source, input, self.fast.as_deref(), (self.offset, self.symbols));
+            &self.source, input, self.fast.as_ref(), (self.offset, self.symbols));
         self.append_push.map_or(output.clone(), |symbol| output.push(symbol))
     }
 }
@@ -172,7 +172,7 @@ mod tests {
         let a = view(); let b = a.relocated(200).unwrap();
         assert!(Arc::ptr_eq(&a.source, &b.source));
         assert!(Arc::ptr_eq(&a.domain, &b.domain));
-        assert!(Arc::ptr_eq(a.fast.as_ref().unwrap(), b.fast.as_ref().unwrap()));
+        assert!(Arc::ptr_eq(&a.relation, &b.relation));
         assert_eq!(b.offset, 300);
     }
 

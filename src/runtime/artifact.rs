@@ -1624,8 +1624,6 @@ impl FastTokenizerTransitions {
     }
 }
 pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<CommitTemplateDfas>>>;
-#[cfg(test)]
-pub(crate) type FastTemplateDfasByTerminal = Vec<Option<Arc<FastCommitTemplateDfas>>>;
 
 const INLINE_TEMPLATE_TRANSITION_LIMIT: usize = 8;
 
@@ -1714,10 +1712,6 @@ mod fast_template_row_construction_tests {
 
 #[derive(Clone, Default)]
 pub(crate) struct FastCommitTemplateDfas {
-    // In-memory ownership witness only. This is not persisted and is never
-    // accepted as an input-validation certificate. Holding the Arc makes
-    // Arc::make_mut detach any subsequently modified source.
-    source: Option<Arc<CommitTemplateDfas>>,
     pub(crate) read_shift: Option<Box<super::commit::simple_read_shift::PreparedReadShift>>,
     pub(crate) phase_dag: Option<super::commit::phase_dag::PreparedPhaseDag>,
     pub(crate) push_suffixes: Vec<Option<super::commit::push_suffixes::PreparedPushSuffixes>>,
@@ -1726,7 +1720,6 @@ pub(crate) struct FastCommitTemplateDfas {
 impl std::fmt::Debug for FastCommitTemplateDfas {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Preserve the existing derived-view diagnostic representation.
-        // The ownership witness is not another execution graph to print.
         f.debug_struct("FastCommitTemplateDfas")
             .field("read_shift", &self.read_shift)
             .field("phase_dag", &self.phase_dag)
@@ -1736,27 +1729,7 @@ impl std::fmt::Debug for FastCommitTemplateDfas {
 }
 
 impl FastCommitTemplateDfas {
-    pub(crate) fn is_for_source(&self, source: &Arc<CommitTemplateDfas>) -> bool {
-        self.source.as_ref().is_some_and(|old| Arc::ptr_eq(old, source))
-    }
-
-    pub(crate) fn from_shared_source(source: Arc<CommitTemplateDfas>) -> Self {
-        let mut result = Self::from_template(&source);
-        result.source = Some(source);
-        result
-    }
-
-    pub(crate) fn from_shared_preparation(
-        source: Arc<CommitTemplateDfas>,
-        prepared: &super::commit::template_prepare::TemplatePreparation<'_>,
-    ) -> Self {
-        assert!(std::ptr::eq(source.as_ref(), prepared.template()),
-            "prepared fast view must describe its exact immutable source");
-        let mut result = Self::from_prepared(prepared);
-        result.source = Some(source);
-        result
-    }
-
+    #[cfg(test)]
     pub(crate) fn from_template(template: &CommitTemplateDfas) -> Self {
         let prepared = super::commit::template_prepare::TemplatePreparation::new(template).ok();
         Self::from_preparation(template, prepared.as_ref())
@@ -1776,7 +1749,6 @@ impl FastCommitTemplateDfas {
             None => super::commit::push_suffixes::prepare(template),
         };
         Self {
-            source: None,
             read_shift: prepared.and_then(|_| super::commit::simple_read_shift::PreparedReadShift::prepare(template)),
             phase_dag,
             push_suffixes,

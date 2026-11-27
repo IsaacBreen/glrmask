@@ -5318,16 +5318,16 @@ mod tests {
         let loaded_template = loaded.terminal_template(1)
             .map(|source| source.as_ref())
             .expect("serialized template should survive load");
-        let loaded_fast_template = loaded.fast_terminal_template(1)
-            .map(|view| view.as_ref())
-            .expect("runtime template transition cache should be rebuilt after load");
+        let loaded_relation = loaded.template_parser().unwrap().local_relation(1)
+            .expect("immutable template relation should survive load");
+        assert!(loaded_relation.fast.is_some());
         assert_eq!(loaded_template.pop, template.pop);
         assert_eq!(loaded_template.read, template.read);
         assert_eq!(loaded_template.push, template.push);
         assert_eq!(loaded_template.pop_to_read, template.pop_to_read);
         assert_eq!(loaded_template.pop_to_push, template.pop_to_push);
         assert_eq!(loaded_template.read_to_push, template.read_to_push);
-        assert!(loaded_fast_template.is_for_source(loaded.terminal_template(1).unwrap()));
+        assert!(Arc::ptr_eq(&loaded_relation.source, loaded.terminal_template(1).unwrap()));
         assert_eq!(
             loaded_template.pop.states[template.pop.start_state as usize].transitions.get(&7).copied(),
             Some(accepted)

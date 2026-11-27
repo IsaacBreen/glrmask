@@ -141,7 +141,6 @@ std::thread_local! {
 
 #[inline]
 pub(crate) fn apply<A>(
-    _template: &CommitTemplateDfas,
     fast: &FastCommitTemplateDfas,
     input: &LeveledGSS<u32, A>,
 ) -> Option<LeveledGSS<u32, A>>
@@ -248,7 +247,7 @@ mod tests {
     fn check(t: &CommitTemplateDfas, input: &ParserGSS) -> Option<ParserGSS> {
         let before = input.to_stacks(4096).unwrap();
         let fast = FastCommitTemplateDfas::from_template(t);
-        let actual = apply(t, &fast, input);
+        let actual = apply(&fast, input);
         if let Some(actual) = &actual {
             assert_eq!(
                 actual.semantically_eq(&literal(t, input), 65536),
@@ -278,7 +277,7 @@ mod tests {
         for input in inputs {
             let plain = input.apply(|_| ());
             let expected = literal(&t, &input).apply(|_| ());
-            let actual = apply(&t, &fast, &plain).expect("unit GSS must use exact prepared shift");
+            let actual = apply(&fast, &plain).expect("unit GSS must use exact prepared shift");
             used += 1;
             assert_eq!(actual.semantically_eq(&expected, 65536), Some(true));
             assert_eq!(
@@ -380,7 +379,7 @@ mod tests {
         assert_eq!(entries.len(), MAX_READ_SHIFT_ENTRIES);
         for top in [0, 7, 63, MAX_READ_SHIFT_ENTRIES as u32 - 1] {
             let input = ParserGSS::from_single_stack(vec![0, top], TerminalsDisallowed::new());
-            let result = apply(&t, &fast, &input).unwrap();
+            let result = apply(&fast, &input).unwrap();
             assert_eq!(
                 result.semantically_eq(&literal(&t, &input), 65536),
                 Some(true)
@@ -392,7 +391,7 @@ mod tests {
         let over_budget = FastCommitTemplateDfas::from_template(&t);
         assert!(over_budget.read_shift.is_none());
         let input = ParserGSS::from_single_stack(vec![0, top as u32], TerminalsDisallowed::new());
-        assert!(apply(&t, &over_budget, &input).is_none());
+        assert!(apply(&over_budget, &input).is_none());
         assert_eq!(
             literal(&t, &input).semantically_eq(&input.push(7), 65536),
             Some(true)

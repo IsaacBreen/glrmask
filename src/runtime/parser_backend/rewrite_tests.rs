@@ -83,11 +83,14 @@ fn concurrent_inventory_preparation_preserves_domains_and_every_runtime_view() {
                 let pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads).build().unwrap();
                 for _ in 0..3 {
-                    let (domains, views) = pool.install(|| {
+                    let relations = pool.install(|| {
                         prepare_terminal_inventory(&programs, 32, runtime, true)
                     }).unwrap();
+                    let views = if runtime { relations.iter().map(|p| p.fast.as_ref()).collect::<Vec<_>>() }
+                        else { Vec::new() };
                     assert_eq!(format!("{views:?}"), format!("{reference_views:?}"));
-                    for (expected, actual) in reference_domains.iter().zip(&domains) {
+                    for (expected, relation) in reference_domains.iter().zip(&relations) {
+                        let actual = &relation.domain;
                         assert_eq!(expected.to_bytes().unwrap(), actual.to_bytes().unwrap());
                         for top in 0..32 {
                             assert_eq!(expected.classify_top(top), actual.classify_top(top));
@@ -112,16 +115,12 @@ fn alias_preparation_shares_domains_and_all_fast_views() {
     let programs = (0..65).map(|terminal| {
         Some(Arc::clone(if terminal % 2 == 0 { &left } else { &right }))
     }).collect::<Vec<_>>();
-    let (domains, views) =
-        prepare_terminal_inventory(&programs, 32, true, true).unwrap();
+    let relations = prepare_terminal_inventory(&programs, 32, true, true).unwrap();
     for terminal in 2..65 {
-        assert!(Arc::ptr_eq(&domains[terminal], &domains[terminal % 2]));
-        assert!(Arc::ptr_eq(
-            views[terminal].as_ref().unwrap(),
-            views[terminal % 2].as_ref().unwrap(),
-        ));
+        assert!(Arc::ptr_eq(&relations[terminal], &relations[terminal % 2]));
+        assert!(relations[terminal].fast.is_some());
     }
-    assert!(!Arc::ptr_eq(&domains[0], &domains[1]));
+    assert!(!Arc::ptr_eq(&relations[0].domain, &relations[1].domain));
 }
 
 #[test]
@@ -139,14 +138,17 @@ fn different_outputs_share_exact_admission_without_sharing_execution() {
     let c = relation(4, 7);
     let programs = vec![Some(Arc::clone(&a)), Some(Arc::clone(&b)), Some(c),
         Some(Arc::clone(&b)), Some(a)];
-    let (domains, fast) = prepare_terminal_inventory(&programs, 16, true, false).unwrap();
-    assert!(Arc::ptr_eq(&domains[0], &domains[1]));
-    assert!(Arc::ptr_eq(&domains[1], &domains[3]));
-    assert!(Arc::ptr_eq(&domains[0], &domains[4]));
-    assert!(!Arc::ptr_eq(&domains[0], &domains[2]));
-    assert!(!Arc::ptr_eq(fast[0].as_ref().unwrap(), fast[1].as_ref().unwrap()));
-    assert!(fast[0].as_ref().unwrap().is_for_source(programs[0].as_ref().unwrap()));
-    assert!(fast[1].as_ref().unwrap().is_for_source(programs[1].as_ref().unwrap()));
+    let relations = prepare_terminal_inventory(&programs, 16, true, false).unwrap();
+    let domain = |id: usize| &relations[id].domain;
+    assert!(Arc::ptr_eq(domain(0), domain(1)));
+    assert!(Arc::ptr_eq(domain(1), domain(3)));
+    assert!(Arc::ptr_eq(domain(0), domain(4)));
+    assert!(!Arc::ptr_eq(domain(0), domain(2)));
+    assert!(!Arc::ptr_eq(&relations[0], &relations[1]));
+    for id in [0, 1] {
+        assert!(Arc::ptr_eq(&relations[id].source, programs[id].as_ref().unwrap()));
+        assert!(relations[id].fast.is_some());
+    }
 }
 
 #[test]
@@ -195,13 +197,13 @@ fn staged_parser_preparation_preserves_runtime_finalization_order_and_view_ident
     assert!(candidate.has_template_parser() && !candidate.table.is_present());
     assert!(candidate.prepare_template_parser().unwrap().is_none());
     let programs = candidate.template_parser().unwrap().terminal_sources();
-    let views = (0..programs.len()).map(|terminal| candidate.fast_terminal_template(terminal).cloned()).collect::<Vec<_>>();
+    let views = (0..programs.len()).map(|terminal| candidate.template_parser().unwrap().local_relation(terminal).cloned()).collect::<Vec<_>>();
 
     candidate.rebuild_dynamic_runtime_caches();
     assert!(!candidate.table.is_present());
     for (terminal, (source, view)) in programs.iter().zip(&views).enumerate() {
         let after = candidate.terminal_template(terminal);
-        let after_view = candidate.fast_terminal_template(terminal);
+        let after_view = candidate.template_parser().unwrap().local_relation(terminal);
         assert!(Arc::ptr_eq(source.as_ref().unwrap(), after.unwrap()));
         assert!(Arc::ptr_eq(view.as_ref().unwrap(), after_view.unwrap()),
             "runtime finalization must reuse the already-prepared immutable view");
@@ -228,18 +230,15 @@ fn staged_parser_preparation_preserves_runtime_finalization_order_and_view_ident
 }
 
 #[test]
-fn immutable_source_witness_is_invalidated_by_arc_make_mut() {
+fn immutable_relation_keeps_its_source_across_arc_make_mut() {
     let source = split(&phase_fixture(0));
-    let validated =
-        crate::runtime::commit::template_prepare::TemplatePreparation::new(&source).unwrap();
-    let view = FastCommitTemplateDfas::from_shared_preparation(
-        Arc::clone(&source), &validated,
-    );
-    assert!(view.is_for_source(&source));
+    let relation = PreparedRelation::prepare(Arc::clone(&source), 32, true).unwrap();
+    assert!(relation.fast.is_some());
+    assert!(Arc::ptr_eq(&relation.source, &source));
     let mut changed = Arc::clone(&source);
     Arc::make_mut(&mut changed).pop.states[0].is_accepting ^= true;
-    assert!(!view.is_for_source(&changed));
-    assert!(view.is_for_source(&source));
+    assert!(!Arc::ptr_eq(&relation.source, &changed));
+    assert!(Arc::ptr_eq(&relation.source, &source));
 }
 
 #[test]
@@ -254,7 +253,7 @@ fn constructor_installs_prepared_views_without_rebuilding() {
     let parser = TemplateParser::compile(
         1, 1, BTreeSet::new(), &templates, pop_word(&[0], true),
     ).unwrap();
-    let expected = Arc::clone(parser.local_fast(0).unwrap());
+    let expected = Arc::clone(parser.local_relation(0).unwrap());
     let dynamic_vocab =
         crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(&vocab);
     let constraint =
@@ -263,7 +262,7 @@ fn constructor_installs_prepared_views_without_rebuilding() {
             dynamic_vocab,
         );
     assert!(Arc::ptr_eq(
-        &expected, constraint.fast_terminal_template(0).unwrap(),
+        &expected, constraint.template_parser().unwrap().local_relation(0).unwrap(),
     ));
     assert!(!constraint.table.is_present());
 }

@@ -57,7 +57,7 @@ use super::artifact::{
     DynamicMaskTrie,
     DynamicMaskTrieEdge,
     DynamicMaskVocab,
-    FastCommitTemplateDfas, FastDwaTransitionRow, FastDwaTransitions,
+    FastDwaTransitionRow, FastDwaTransitions,
     FastTokenizerTransitions,
     IndexedDagDenseMask, IndexedDagDenseTransition, IndexedDagDenseTransitionMasks,
     IndexedDagDenseTransitionRow, IndexedDagDenseTransitions,
@@ -9436,9 +9436,7 @@ impl Constraint {
         self.template_parser()?.terminal_source(terminal)
     }
 
-    pub(crate) fn fast_terminal_template(&self, terminal: usize) -> Option<&Arc<FastCommitTemplateDfas>> {
-        self.template_parser()?.local_fast(terminal)
-    }
+
 
     fn compute_fast_transitions(&self) -> FastDwaTransitions {
         let Some(dwa) = self.parser_dwa.owned() else {

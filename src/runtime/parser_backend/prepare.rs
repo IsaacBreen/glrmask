@@ -28,15 +28,13 @@ use crate::runtime::artifact::{
     FastCommitTemplateDfas,
 };
 
-#[cfg(test)]
-use crate::runtime::artifact::FastTemplateDfasByTerminal;
 use super::{CommitTemplateDfas, PreparedTemplateParser, TemplateParser};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedRelation {
     pub(crate) source: Arc<CommitTemplateDfas>,
     pub(crate) domain: Arc<TemplateDomain>,
-    pub(crate) fast: Option<Arc<FastCommitTemplateDfas>>,
+    pub(crate) fast: Option<FastCommitTemplateDfas>,
 }
 
 impl PreparedRelation {
@@ -49,11 +47,7 @@ impl PreparedRelation {
             crate::runtime::commit::template_prepare::TemplatePreparation::new(&source)?;
         validated.validate_alphabet(symbols)?;
         let domain = Arc::new(TemplateDomain::from_shared_validated(Arc::clone(&source), &validated)?);
-        let fast = runtime.then(|| Arc::new(
-            FastCommitTemplateDfas::from_shared_preparation(
-                Arc::clone(&source), &validated,
-            )
-        ));
+        let fast = runtime.then(|| FastCommitTemplateDfas::from_prepared(&validated));
         Ok(Self { source, domain, fast })
     }
 }
@@ -197,10 +191,8 @@ pub(super) fn prepare_terminal_inventory(
     symbols: u32,
     runtime: bool,
     use_parallel: bool,
-) -> crate::Result<(Vec<Arc<TemplateDomain>>, FastTemplateDfasByTerminal)> {
-    let ready = shared_inventory(templates, symbols, runtime, use_parallel)?;
-    Ok((ready.programs.iter().map(|p| Arc::clone(&p.domain)).collect(),
-        if runtime { ready.programs.iter().map(|p| p.fast.clone()).collect() } else { Vec::new() }))
+) -> crate::Result<Vec<Arc<PreparedRelation>>> {
+    Ok(shared_inventory(templates, symbols, runtime, use_parallel)?.programs)
 }
 
 fn word_masks(terminals: &[usize]) -> Vec<(usize, u64)> {
@@ -651,8 +643,8 @@ mod tests {
                 built.parser.local_domain(0).unwrap(), built.parser.local_domain(terminal).unwrap(),
             ));
             assert!(Arc::ptr_eq(
-                built.parser.local_fast(0).unwrap(),
-                built.parser.local_fast(terminal).unwrap(),
+                built.parser.local_relation(0).unwrap(),
+                built.parser.local_relation(terminal).unwrap(),
             ));
         }
         assert!(!Arc::ptr_eq(
@@ -661,7 +653,9 @@ mod tests {
         ));
         for terminal in 0..4 {
             let source = built.parser.terminal_source(terminal).unwrap();
-            assert!(built.parser.local_fast(terminal).unwrap().is_for_source(source));
+            let relation = built.parser.local_relation(terminal).unwrap();
+            assert!(Arc::ptr_eq(&relation.source, source));
+            assert!(relation.fast.is_some());
         }
     }
 

@@ -94,7 +94,7 @@ fn ready_adapter_preserves_template_and_runtime_arc_identity() {
         .unwrap();
 
     let templates = prepared.parser.terminal_sources();
-    let runtime = (0..templates.len()).map(|terminal| prepared.parser.local_fast(terminal).cloned()).collect::<Vec<_>>();
+    let runtime = (0..templates.len()).map(|terminal| prepared.parser.local_relation(terminal).cloned()).collect::<Vec<_>>();
     let completion = Arc::clone(prepared.parser.completion_template());
     drop(table);
     drop(analyzed);
@@ -122,7 +122,7 @@ fn ready_adapter_preserves_template_and_runtime_arc_identity() {
         }
     }
     for (terminal, before) in runtime.iter().enumerate() {
-        let after = result.fast_terminal_template(terminal);
+        let after = result.template_parser().unwrap().local_relation(terminal);
         match (before, after) {
             (Some(before), Some(after)) => assert!(Arc::ptr_eq(before, after)),
             (None, None) => {}

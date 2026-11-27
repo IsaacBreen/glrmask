@@ -7,6 +7,7 @@ use crate::compiler::glr::parser::ParserGSS;
 use crate::grammar::flat::TerminalID;
 use crate::runtime::{CommitTemplateDfas, FastCommitTemplateDfas};
 use crate::runtime::constraint::Constraint;
+use crate::runtime::parser_backend::PreparedRelation;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
@@ -19,10 +20,9 @@ pub(crate) fn advance_stacks_template_dfa(
         return Some(crate::compiler::glr::parser::advance_provider_control_closed_stacks(
             &provider, stack, terminal));
     }
-    let dfa = constraint.terminal_template(terminal as usize)?;
-    let fast = constraint.fast_terminal_template(terminal as usize).map(|view| view.as_ref());
-    let output = advance_prepared_relation(dfa, stack, fast);
-    debug_validate_template_output(dfa, stack, &output, terminal);
+    let relation = constraint.template_parser()?.local_relation(terminal as usize)?;
+    let output = advance_prepared_relation(relation, stack);
+    debug_validate_template_output(&relation.source, stack, &output, terminal);
     Some(output)
 }
 
@@ -31,18 +31,18 @@ pub(crate) fn advance_stacks_template_dfa(
 /// program, not an LR shortcut. Try it before cloning the interpreter input.
 #[inline]
 pub(crate) fn advance_prepared_relation(
-    template: &CommitTemplateDfas,
+    relation: &PreparedRelation,
     stack: &ParserGSS,
-    prepared: Option<&FastCommitTemplateDfas>,
 ) -> ParserGSS {
+    let prepared = relation.fast.as_ref();
     if let Some(output) = prepared.and_then(|fast|
-        super::simple_read_shift::apply(template, fast, stack))
+        super::simple_read_shift::apply(fast, stack))
     {
         #[cfg(test)]
         PREPARED_RELATION_SHORTCUTS.with(|count| count.set(count.get() + 1));
         output
     } else {
-        advance_with_prepared_template(template, stack.clone(), prepared)
+        advance_with_prepared_template(&relation.source, stack.clone(), prepared)
     }
 }
 
@@ -60,14 +60,14 @@ pub(super) fn advance_stacks_template_dfa_owned(
         return Some(crate::compiler::glr::parser::advance_provider_control_closed_stacks(
             &provider, &stack, terminal));
     }
-    let dfa = constraint.terminal_template(terminal as usize)?;
+    let relation = constraint.template_parser()?.local_relation(terminal as usize)?;
     let input = debug_template_literal_enabled().then(|| stack.clone());
-    let fast = constraint.fast_terminal_template(terminal as usize).map(|view| view.as_ref());
-    let output = match fast.and_then(|fast| super::simple_read_shift::apply(dfa, fast, &stack)) {
+    let fast = relation.fast.as_ref();
+    let output = match fast.and_then(|fast| super::simple_read_shift::apply(fast, &stack)) {
         Some(output) => output,
-        None => advance_with_prepared_template(dfa, stack, fast),
+        None => advance_with_prepared_template(&relation.source, stack, fast),
     };
-    if let Some(input) = input { debug_validate_template_output(dfa, &input, &output, terminal); }
+    if let Some(input) = input { debug_validate_template_output(&relation.source, &input, &output, terminal); }
     Some(output)
 }
 

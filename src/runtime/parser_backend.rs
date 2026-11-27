@@ -340,8 +340,8 @@ impl TemplateParser {
         }
     }
 
-    pub(crate) fn local_fast(&self, terminal: usize) -> Option<&Arc<crate::runtime::FastCommitTemplateDfas>> {
-        self.local_admission()?.programs.get(terminal)?.fast.as_ref()
+    pub(crate) fn local_relation(&self, terminal: usize) -> Option<&Arc<PreparedRelation>> {
+        self.local_admission()?.programs.get(terminal)
     }
 
     /// Cold projection for compiler inputs and diagnostics; the executable
