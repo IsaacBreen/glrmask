@@ -1,3 +1,4 @@
+use crate::error::ErrorExt;
 use crate::automata::lexer::Lexer;
 use std::collections::BTreeMap;
 
