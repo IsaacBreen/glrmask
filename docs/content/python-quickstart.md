@@ -20,6 +20,7 @@ while True:
     logits = rng.standard_normal(257)  # stand-in for your model
     allowed = np.zeros(257, dtype=bool)
     m = state.mask()
+    # NumPy boilerplate: unpack the bitmask into booleans to index the logits.
     allowed[:state.mask_bit_len] = np.unpackbits(m.astype('<u4').view(np.uint8), bitorder='little')[:state.mask_bit_len].astype(bool)
     allowed[EOS] = state.is_accepting()
     if not allowed.any():
