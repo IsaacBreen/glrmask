@@ -3724,20 +3724,19 @@ pub(crate) struct DynamicLazyUnionMetadata {
     pub(crate) futures: BitSet,
 }
 
-#[derive(Debug)]
-pub(crate) enum AdaptiveByteMemo {
+#[derive(Debug, Clone)]
+pub(crate) enum AdaptiveByteMemo<const UNKNOWN: u32 = { u32::MAX - 1 }> {
     Sparse(SmallVec<[(u8, u32); 8]>),
     Dense(Box<[u32; 256]>),
 }
 
-impl Default for AdaptiveByteMemo {
+impl<const UNKNOWN: u32> Default for AdaptiveByteMemo<UNKNOWN> {
     fn default() -> Self {
         Self::Sparse(SmallVec::new())
     }
 }
 
-impl AdaptiveByteMemo {
-    const UNKNOWN: u32 = u32::MAX - 1;
+impl<const UNKNOWN: u32> AdaptiveByteMemo<UNKNOWN> {
 
     #[inline]
     pub(crate) fn get(&self, byte: u8) -> Option<u32> {
@@ -3745,7 +3744,7 @@ impl AdaptiveByteMemo {
             Self::Sparse(cells) => cells.iter().find_map(|&(b, value)| (b == byte).then_some(value)),
             Self::Dense(row) => {
                 let value = row[byte as usize];
-                (value != Self::UNKNOWN).then_some(value)
+                (value != UNKNOWN).then_some(value)
             }
         }
     }
@@ -3758,7 +3757,7 @@ impl AdaptiveByteMemo {
                 } else if cells.len() < 8 {
                     cells.push((byte, value));
                 } else {
-                    let mut dense = Box::new([Self::UNKNOWN; 256]);
+                    let mut dense = Box::new([UNKNOWN; 256]);
                     for &(b, v) in cells.iter() {
                         dense[b as usize] = v;
                     }

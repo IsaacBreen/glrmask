@@ -1609,7 +1609,7 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
         let futures = if let Some(raw) = self.cache.raw_state_for_config(config) {
             self.cache.tokenizer().possible_future_terminals(raw)
         } else {
-            &self.cache.config_futures[self.cache.config_index(config)?]
+            self.cache.config_future_bits(config)
         };
         (futures.count_ones() <= 16).then(|| {
             futures.iter_ones().map(|terminal| terminal as TerminalID).collect()
@@ -4587,6 +4587,24 @@ const DYNAMIC_NFA_RAW_CONFIG_TAG: u32 = 1 << 31;
 // raw states whose tagged IDs became UNKNOWN or DEAD.
 const DYNAMIC_NFA_RAW_STATE_LIMIT: u32 = DYNAMIC_NFA_RAW_CONFIG_TAG - 4;
 
+/// One canonical language with optional terminal restriction. A reset is
+/// merely an acceptance at the current boundary, not another byte language.
+#[derive(Clone)]
+enum NfaConfig {
+    Subset(NfaSubset),
+    FreshReset(u32),
+}
+
+#[derive(Clone)]
+struct NfaSubset {
+    members: Box<[u32]>,
+    filter: Option<u32>,
+    matched: BitSet,
+    futures: BitSet,
+    row: crate::runtime::artifact::AdaptiveByteMemo<DYNAMIC_NFA_CONFIG_UNKNOWN>,
+    residual: u32,
+}
+
 #[derive(Clone)]
 struct DynamicNfaScanCache<'a> {
     constraint: &'a Constraint,
@@ -4596,25 +4614,14 @@ struct DynamicNfaScanCache<'a> {
     subset_union_requested: bool,
     deadline: Option<Instant>,
     max_collection_items: Option<usize>,
-    config_ids: FxHashMap<Vec<u32>, u32>,
-    configs: Vec<Box<[u32]>>,
-    // A restricted config denotes only paths ending at a terminal in its
-    // admitted set. The set is part of the hash-cons key: equal physical
-    // states with different admitted languages MUST NOT alias.
+    // Hashes narrow the candidates; exact equality is against the sole owned
+    // members/filter. Neither interning table owns duplicate language keys.
+    config_ids: FxHashMap<u64, SmallVec<[u32; 1]>>,
+    configs: Vec<NfaConfig>,
     parser_projection_enabled: bool,
     admitted_sets: Vec<BitSet>,
-    admitted_set_ids: FxHashMap<Vec<u64>, u32>,
-    admitted_config_ids: FxHashMap<(u32, Vec<u32>), u32>,
-    config_admitted: Vec<Option<u32>>,
+    admitted_set_ids: FxHashMap<u64, SmallVec<[u32; 1]>>,
     fresh_reset_ids: FxHashMap<u32, u32>,
-    config_is_fresh_reset: Vec<bool>,
-    transitions: Vec<Option<Box<[u32; 256]>>>,
-    residual_configs: Vec<u32>,
-    // Canonical union metadata for interned multi-state configs. These make a
-    // cached lazy-subset transition genuinely O(1): the strict vocabulary walk
-    // must not rescan every member merely to discover finalizer/future bits.
-    config_matched: Vec<BitSet>,
-    config_futures: Vec<BitSet>,
     raw_start_config: FxHashMap<u32, u32>,
     profile_transition_work: bool,
     profile_step_calls: usize,
@@ -4710,14 +4717,7 @@ impl<'a> DynamicNfaScanCache<'a> {
             parser_projection_enabled: crate::env::var_os("GLRMASK_DISABLE_PARSER_LEXER_PROJECTION").is_none(),
             admitted_sets: Vec::new(),
             admitted_set_ids: FxHashMap::default(),
-            admitted_config_ids: FxHashMap::default(),
-            config_admitted: Vec::new(),
             fresh_reset_ids: FxHashMap::default(),
-            config_is_fresh_reset: Vec::new(),
-            transitions: Vec::new(),
-            residual_configs: Vec::new(),
-            config_matched: Vec::new(),
-            config_futures: Vec::new(),
             raw_start_config: FxHashMap::default(),
             profile_transition_work: crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_some(),
             profile_step_calls: 0,
@@ -4782,6 +4782,87 @@ impl<'a> DynamicNfaScanCache<'a> {
         Ok(())
     }
 
+    fn config_hash(states: &[u32], filter: Option<u32>) -> u64 {
+        let mut hash = FxHasher::default();
+        states.hash(&mut hash);
+        filter.hash(&mut hash);
+        hash.finish()
+    }
+
+    fn find_subset(&self, states: &[u32], filter: Option<u32>) -> Option<u32> {
+        self.config_ids.get(&Self::config_hash(states, filter))?.iter().copied()
+            .find(|&id| {
+                let NfaConfig::Subset(subset) = &self.configs[id as usize] else { return false; };
+                subset.filter == filter && subset.members.as_ref() == states
+            })
+    }
+
+    fn push_subset(
+        &mut self, states: Vec<u32>, filter: Option<u32>, matched: BitSet, futures: BitSet,
+    ) -> Result<u32, String> {
+        self.check_growth(self.configs.len(), 1)?;
+        if self.configs.len() >= DYNAMIC_NFA_RAW_CONFIG_TAG as usize {
+            return Err("dynamic lexer configuration-id namespace exhausted".to_owned());
+        }
+        let id = self.configs.len() as u32;
+        self.config_ids.entry(Self::config_hash(&states, filter)).or_default().push(id);
+        self.configs.push(NfaConfig::Subset(NfaSubset {
+            members: states.into_boxed_slice(), filter, matched, futures,
+            row: Default::default(), residual: DYNAMIC_NFA_CONFIG_UNKNOWN,
+        }));
+        Ok(id)
+    }
+
+    fn subset_at(&self, index: usize) -> &NfaSubset {
+        match &self.configs[index] {
+            NfaConfig::Subset(subset) => subset,
+            NfaConfig::FreshReset(_) => unreachable!("reset must resolve to its byte language"),
+        }
+    }
+
+    fn subset_at_mut(&mut self, index: usize) -> &mut NfaSubset {
+        match &mut self.configs[index] {
+            NfaConfig::Subset(subset) => subset,
+            NfaConfig::FreshReset(_) => unreachable!("reset must resolve to its byte language"),
+        }
+    }
+
+    fn reset_base(&self, config: u32) -> Option<u32> {
+        if self.deterministic || self.raw_state_for_config(config).is_some() { return None; }
+        match self.configs.get(config as usize)? {
+            NfaConfig::FreshReset(base) => Some(*base),
+            NfaConfig::Subset(_) => None,
+        }
+    }
+
+    fn byte_language(&self, config: u32) -> u32 {
+        self.reset_base(config).unwrap_or(config)
+    }
+
+    fn config_filter(&self, config: u32) -> Option<u32> {
+        let config = self.byte_language(config);
+        if self.deterministic || self.raw_state_for_config(config).is_some() { return None; }
+        self.subset_at(config as usize).filter
+    }
+
+    fn config_matched_bits(&self, config: u32) -> &BitSet {
+        let config = self.byte_language(config);
+        if self.deterministic || self.raw_state_for_config(config).is_some() {
+            self.tokenizer.matched_terminal_bitset(self.config_state(config, 0))
+        } else {
+            &self.subset_at(config as usize).matched
+        }
+    }
+
+    fn config_future_bits(&self, config: u32) -> &BitSet {
+        let config = self.byte_language(config);
+        if self.deterministic || self.raw_state_for_config(config).is_some() {
+            self.tokenizer.possible_future_terminals(self.config_state(config, 0))
+        } else {
+            &self.subset_at(config as usize).futures
+        }
+    }
+
     fn intern_config(&mut self, mut states: Vec<u32>) -> Result<u32, String> {
         if self.profile_transition_work {
             self.profile_intern_calls += 1;
@@ -4794,39 +4875,18 @@ impl<'a> DynamicNfaScanCache<'a> {
         {
             return Ok(self.encode_raw_state(*state));
         }
-        if let Some(&id) = self.config_ids.get(states.as_slice()) {
-            if self.profile_transition_work {
-                self.profile_intern_hits += 1;
-            }
+        if let Some(id) = self.find_subset(&states, None) {
+            if self.profile_transition_work { self.profile_intern_hits += 1; }
             return Ok(id);
         }
-        self.check_growth(self.configs.len(), 1)?;
-        if self.configs.len() >= DYNAMIC_NFA_RAW_CONFIG_TAG as usize {
-            return Err(
-                "dynamic lexer configuration-id namespace exhausted below raw-state tag"
-                    .to_owned(),
-            );
-        }
-        let local_id = u32::try_from(self.configs.len())
-            .map_err(|_| "dynamic lexer configuration-id overflow".to_owned())?;
-        let id = local_id;
         let mut matched = BitSet::new(self.tokenizer.num_terminals() as usize);
         let mut futures = BitSet::new(self.tokenizer.num_terminals() as usize);
         for &state in &states {
             matched.union_with(self.tokenizer.matched_terminal_bitset(state));
             futures.union_with(self.tokenizer.possible_future_terminals(state));
         }
-        self.config_ids.insert(states.clone(), id);
-        self.configs.push(states.into_boxed_slice());
-        self.config_admitted.push(None);
-        self.config_is_fresh_reset.push(false);
-        self.transitions.push(None);
-        self.residual_configs.push(DYNAMIC_NFA_CONFIG_UNKNOWN);
-        self.config_matched.push(matched);
-        self.config_futures.push(futures);
-        if self.profile_transition_work {
-            self.profile_intern_new += 1;
-        }
+        let id = self.push_subset(states, None, matched, futures)?;
+        if self.profile_transition_work { self.profile_intern_new += 1; }
         Ok(id)
     }
 
@@ -4860,13 +4920,19 @@ impl<'a> DynamicNfaScanCache<'a> {
         admitted: &BitSet,
     ) -> Result<Option<u32>, String> {
         if self.parser_projection_enabled && !self.deterministic {
-            let filter = if let Some(&id) = self.admitted_set_ids.get(admitted.words()) {
+            let mut hash = FxHasher::default();
+            admitted.words().hash(&mut hash);
+            let hash = hash.finish();
+            let existing = self.admitted_set_ids.get(&hash).and_then(|ids| ids.iter().copied()
+                .find(|&id| self.admitted_sets[id as usize].words() == admitted.words()));
+            let filter = if let Some(id) = existing {
                 id
             } else {
                 self.check_growth(self.admitted_sets.len(), 1)?;
-                let id = self.admitted_sets.len() as u32;
+                let id = u32::try_from(self.admitted_sets.len())
+                    .map_err(|_| "dynamic terminal restriction namespace exhausted".to_owned())?;
                 self.admitted_sets.push(admitted.clone());
-                self.admitted_set_ids.insert(admitted.words().to_vec(), id);
+                self.admitted_set_ids.entry(hash).or_default().push(id);
                 id
             };
             let states = self.tokenizer.singleton_epsilon_closure(state).into_vec();
@@ -4901,20 +4967,8 @@ impl<'a> DynamicNfaScanCache<'a> {
     }
 
     fn config_terminals_subset_of(&self, config: u32, terminals: &BitSet) -> bool {
-        if !self.deterministic && self.raw_state_for_config(config).is_none() {
-            let index = self.config_index(config).expect("known config");
-            return self.config_matched[index].is_subset(terminals)
-                && self.config_futures[index].is_subset(terminals);
-        }
-        for index in 0..self.config_len(config) {
-            let state = self.config_state(config, index);
-            if !self.tokenizer.matched_terminal_bitset(state).is_subset(terminals)
-                || !self.tokenizer.possible_future_terminals(state).is_subset(terminals)
-            {
-                return false;
-            }
-        }
-        true
+        self.config_matched_bits(config).is_subset(terminals)
+            && self.config_future_bits(config).is_subset(terminals)
     }
 
     /// Expand one runtime configuration into its exact epsilon-closed physical
@@ -4927,25 +4981,12 @@ impl<'a> DynamicNfaScanCache<'a> {
         out: &mut SmallVec<[u32; 8]>,
     ) -> Result<(), String> {
         out.clear();
-        if self.deterministic {
-            out.push(config);
-            return Ok(());
+        let config = self.byte_language(config);
+        for index in 0..self.config_len(config) {
+            out.push(self.config_state(config, index));
         }
-        if let Some(state) = self.raw_state_for_config(config) {
-            out.push(state);
-            return Ok(());
-        }
-        let index = self
-            .config_index(config)
-            .ok_or_else(|| "unknown dynamic lexer config".to_owned())?;
-        let states = self
-            .configs
-            .get(index)
-            .ok_or_else(|| "dynamic lexer config index out of range".to_owned())?;
-        out.extend_from_slice(states);
         Ok(())
     }
-
 
     /// Lazy right-trimming of a labeled lexer to one admitted terminal set A.
     ///
@@ -4983,40 +5024,23 @@ impl<'a> DynamicNfaScanCache<'a> {
         }
         states.sort_unstable();
         states.dedup();
-        let key = (filter, states);
-        if let Some(&cached) = self.admitted_config_ids.get(&key) {
+        if let Some(cached) = self.find_subset(&states, Some(filter)) {
             return Ok(cached);
         }
         let mut matched = BitSet::new(self.tokenizer.num_terminals() as usize);
         let mut futures = BitSet::new(self.tokenizer.num_terminals() as usize);
-        for &member in &key.1 {
+        for &member in &states {
             matched.union_with(self.tokenizer.matched_terminal_bitset(member));
             futures.union_with(self.tokenizer.possible_future_terminals(member));
         }
         if matched.is_subset(admitted) && futures.is_subset(admitted) {
             // All reachable outputs are already admitted. Return to the
             // existing raw/hot lane without retaining a redundant product.
-            let states = key.1.clone();
-            let result = self.intern_config(states)?;
-            self.admitted_config_ids.insert(key, result);
-            return Ok(result);
+            return self.intern_config(states);
         }
         matched.intersect_with(admitted);
         futures.intersect_with(admitted);
-        self.check_growth(self.configs.len(), 1)?;
-        if self.configs.len() >= DYNAMIC_NFA_RAW_CONFIG_TAG as usize {
-            return Err("dynamic lexer projected configuration-id namespace exhausted".to_owned());
-        }
-        let result = self.configs.len() as u32;
-        self.configs.push(key.1.clone().into_boxed_slice());
-        self.config_admitted.push(Some(filter));
-        self.config_is_fresh_reset.push(false);
-        self.transitions.push(None);
-        self.residual_configs.push(DYNAMIC_NFA_CONFIG_UNKNOWN);
-        self.config_matched.push(matched);
-        self.config_futures.push(futures);
-        self.admitted_config_ids.insert(key, result);
-        Ok(result)
+        self.push_subset(states, Some(filter), matched, futures)
     }
 
     /// A parser reset accepts the token ending *at this boundary*, even when
@@ -5025,30 +5049,16 @@ impl<'a> DynamicNfaScanCache<'a> {
     /// to the same physical state must not acquire boundary acceptance. Every
     /// byte transition from this wrapper lands in a non-fresh configuration.
     fn fresh_reset_config(&mut self, config: u32) -> Result<u32, String> {
+        let config = self.byte_language(config);
         if let Some(&reset) = self.fresh_reset_ids.get(&config) {
             return Ok(reset);
         }
-        let (states, matched, futures, admitted) = if let Some(raw) = self.raw_state_for_config(config) {
-            (vec![raw].into_boxed_slice(),
-             self.tokenizer.matched_terminal_bitset(raw).clone(),
-             self.tokenizer.possible_future_terminals(raw).clone(), None)
-        } else {
-            let index = self.config_index(config).ok_or_else(|| "unknown projected reset config".to_owned())?;
-            (self.configs[index].clone(), self.config_matched[index].clone(),
-             self.config_futures[index].clone(), self.config_admitted[index])
-        };
         self.check_growth(self.configs.len(), 1)?;
         if self.configs.len() >= DYNAMIC_NFA_RAW_CONFIG_TAG as usize {
             return Err("dynamic lexer reset configuration-id namespace exhausted".to_owned());
         }
         let reset = self.configs.len() as u32;
-        self.configs.push(states);
-        self.config_admitted.push(admitted);
-        self.config_is_fresh_reset.push(true);
-        self.transitions.push(None);
-        self.residual_configs.push(DYNAMIC_NFA_CONFIG_UNKNOWN);
-        self.config_matched.push(matched);
-        self.config_futures.push(futures);
+        self.configs.push(NfaConfig::FreshReset(config));
         self.fresh_reset_ids.insert(config, reset);
         Ok(reset)
     }
@@ -5065,6 +5075,7 @@ impl<'a> DynamicNfaScanCache<'a> {
     }
 
     fn step_config(&mut self, config: u32, byte: u8) -> Result<Option<u32>, String> {
+        let config = self.byte_language(config);
         if self.profile_transition_work {
             self.profile_step_calls += 1;
         }
@@ -5081,25 +5092,20 @@ impl<'a> DynamicNfaScanCache<'a> {
             };
         }
         let config_index = self.config_index(config).ok_or_else(|| "unknown dynamic lexer config".to_owned())?;
-        if let Some(row) = self.transitions[config_index].as_ref() {
-            let cached = row[byte as usize];
-            if cached != DYNAMIC_NFA_CONFIG_UNKNOWN {
-                if self.profile_transition_work {
-                    self.profile_step_cache_hits += 1;
-                }
-                return Ok((cached != DYNAMIC_NFA_CONFIG_DEAD).then_some(cached));
-            }
+        if let Some(cached) = self.subset_at(config_index).row.get(byte) {
+            if self.profile_transition_work { self.profile_step_cache_hits += 1; }
+            return Ok((cached != DYNAMIC_NFA_CONFIG_DEAD).then_some(cached));
         }
         if self.profile_transition_work {
             self.profile_step_cache_misses += 1;
-            self.profile_physical_states_scanned += self.configs[config_index].len();
+            self.profile_physical_states_scanned += self.subset_at(config_index).members.len();
         }
 
         let closed_targets = {
             let mut targets = Vec::<u32>::new();
-            let config_len = self.configs[config_index].len();
+            let config_len = self.subset_at(config_index).members.len();
             for state_index in 0..config_len {
-                let state = self.configs[config_index][state_index];
+                let state = self.subset_at(config_index).members[state_index];
                 let virtual_residual_terminal = self
                     .profile_transition_work
                     .then(|| self.tokenizer.virtual_residual_terminal_for_state(state))
@@ -5127,7 +5133,7 @@ impl<'a> DynamicNfaScanCache<'a> {
                     }
                 }
                 if target != u32::MAX {
-                    if self.config_admitted[config_index].is_some() {
+                    if self.subset_at(config_index).filter.is_some() {
                         // Do not first intern the unrestricted closure only
                         // to discard it while constructing the projection.
                         let closure = self.tokenizer.singleton_epsilon_closure(target);
@@ -5141,7 +5147,7 @@ impl<'a> DynamicNfaScanCache<'a> {
                         targets.push(target_state);
                     } else {
                         let target_index = self.config_index(target_config).ok_or_else(|| "unknown dynamic target config".to_owned())?;
-                        let target_states = &self.configs[target_index];
+                        let target_states = &self.subset_at(target_index).members;
                         self.check_growth(targets.len(), target_states.len())?;
                         targets.extend_from_slice(target_states);
                     }
@@ -5151,18 +5157,21 @@ impl<'a> DynamicNfaScanCache<'a> {
         };
         let target = if closed_targets.is_empty() {
             DYNAMIC_NFA_CONFIG_DEAD
-        } else if let Some(filter) = self.config_admitted[config_index] {
+        } else if let Some(filter) = self.subset_at(config_index).filter {
             self.intern_admitted_config(closed_targets, filter)?
         } else {
             self.intern_config(closed_targets)?
         };
-        let row = self.transitions[config_index]
-            .get_or_insert_with(|| Box::new([DYNAMIC_NFA_CONFIG_UNKNOWN; 256]));
-        row[byte as usize] = target;
+        self.subset_at_mut(config_index).row.insert(byte, target);
         Ok((target != DYNAMIC_NFA_CONFIG_DEAD).then_some(target))
     }
 
     fn residual_config(&mut self, config: u32) -> Result<Option<u32>, String> {
+        if let Some(base) = self.reset_base(config) {
+            return Ok(self.residual_config(base)?.map(|residual| {
+                if residual == base { config } else { residual }
+            }));
+        }
         if self.deterministic {
             return Ok(self
                 .tokenizer
@@ -5176,28 +5185,28 @@ impl<'a> DynamicNfaScanCache<'a> {
                 .then_some(config));
         }
         let config_index = self.config_index(config).ok_or_else(|| "unknown dynamic residual config".to_owned())?;
-        if self.config_admitted[config_index].is_some() {
-            return Ok((!self.config_futures[config_index].is_empty()).then_some(config));
+        if self.subset_at(config_index).filter.is_some() {
+            return Ok((!self.subset_at(config_index).futures.is_empty()).then_some(config));
         }
-        let cached = self.residual_configs[config_index];
+        let cached = self.subset_at(config_index).residual;
         if cached != DYNAMIC_NFA_CONFIG_UNKNOWN {
             return Ok((cached != DYNAMIC_NFA_CONFIG_DEAD).then_some(cached));
         }
 
         let mut residual_states = Vec::new();
-        for &state in self.configs[config_index].iter() {
+        for &state in self.subset_at(config_index).members.iter() {
             if self.tokenizer.exact_dynamic_state_has_future(state)? {
                 residual_states.push(state);
             }
         }
         let residual = if residual_states.is_empty() {
             DYNAMIC_NFA_CONFIG_DEAD
-        } else if residual_states.len() == self.configs[config_index].len() {
+        } else if residual_states.len() == self.subset_at(config_index).members.len() {
             config
         } else {
             self.intern_config(residual_states)?
         };
-        self.residual_configs[config_index] = residual;
+        self.subset_at_mut(config_index).residual = residual;
         Ok((residual != DYNAMIC_NFA_CONFIG_DEAD).then_some(residual))
     }
 
@@ -5256,15 +5265,14 @@ impl<'a> DynamicNfaScanCache<'a> {
 
     #[inline]
     fn config_len(&self, config: u32) -> usize {
-        if self.deterministic || self.raw_state_for_config(config).is_some() {
-            1
-        } else {
-            self.configs[self.config_index(config).expect("known config")].len()
-        }
+        let config = self.byte_language(config);
+        if self.deterministic || self.raw_state_for_config(config).is_some() { 1 }
+        else { self.subset_at(config as usize).members.len() }
     }
 
     #[inline]
     fn config_state(&self, config: u32, index: usize) -> u32 {
+        let config = self.byte_language(config);
         if self.deterministic {
             debug_assert_eq!(index, 0);
             config
@@ -5272,53 +5280,32 @@ impl<'a> DynamicNfaScanCache<'a> {
             debug_assert_eq!(index, 0);
             state
         } else {
-            self.configs[self.config_index(config).expect("known config")][index]
+            self.subset_at(config as usize).members[index]
         }
     }
 
     #[inline]
     fn config_has_finalizer(&self, config: u32) -> bool {
-        if !self.deterministic && self.raw_state_for_config(config).is_none() {
-            return !self.config_matched[self.config_index(config).expect("known config")].is_empty();
-        }
-        !self
-            .tokenizer
-            .matched_terminal_bitset(self.config_state(config, 0))
-            .is_empty()
+        !self.config_matched_bits(config).is_empty()
     }
 
     fn config_matched_terminals(&self, config: u32) -> SmallVec<[TerminalID; 4]> {
-        if !self.deterministic && self.raw_state_for_config(config).is_none() {
-            return self.config_matched[self.config_index(config).expect("known config")]
-                .iter_ones()
-                .map(|terminal| terminal as TerminalID)
-                .collect();
-        }
-        self.tokenizer
-            .matched_terminals_iter(self.config_state(config, 0))
-            .collect()
+        self.config_matched_bits(config).iter_ones().map(|t| t as TerminalID).collect()
     }
 
     #[inline]
     fn config_finalizer_code(&self, config: u32) -> u32 {
-        const NONE: u32 = u32::MAX;
-        const MULTI: u32 = u32::MAX - 1;
-        let terminals = self.config_matched_terminals(config);
-        match terminals.as_slice() {
-            [] => NONE,
-            [terminal] => *terminal,
-            _ => MULTI,
+        let mut terminals = self.config_matched_bits(config).iter_ones();
+        match terminals.next() {
+            None => u32::MAX,
+            Some(terminal) if terminals.next().is_none() => terminal as u32,
+            Some(_) => u32::MAX - 1,
         }
     }
 
     #[inline]
     fn config_future_contains(&self, config: u32, terminal: TerminalID) -> bool {
-        if !self.deterministic && self.raw_state_for_config(config).is_none() {
-            return self.config_futures[self.config_index(config).expect("known config")].contains(terminal as usize);
-        }
-        self.tokenizer
-            .possible_future_terminals(self.config_state(config, 0))
-            .contains(terminal as usize)
+        self.config_future_bits(config).contains(terminal as usize)
     }
 
     fn config_future_contains_exact(
@@ -5326,10 +5313,8 @@ impl<'a> DynamicNfaScanCache<'a> {
         config: u32,
         terminal: TerminalID,
     ) -> Result<bool, String> {
-        if !self.deterministic && self.raw_state_for_config(config).is_none()
-            && self.config_admitted[self.config_index(config).expect("known config")].is_some()
-            && !self.config_futures[self.config_index(config).expect("known config")]
-                .contains(terminal as usize)
+        if self.config_filter(config).is_some()
+            && !self.config_future_bits(config).contains(terminal as usize)
         {
             return Ok(false);
         }
@@ -5358,13 +5343,7 @@ impl<'a> DynamicNfaScanCache<'a> {
 
     #[inline]
     fn config_future_intersects(&self, config: u32, terminals: &BitSet) -> bool {
-        if !self.deterministic && self.raw_state_for_config(config).is_none() {
-            return !terminals.is_disjoint(&self.config_futures[self.config_index(config).expect("known config")]);
-        }
-        !terminals.is_disjoint(
-            self.tokenizer
-                .possible_future_terminals(self.config_state(config, 0)),
-        )
+        !terminals.is_disjoint(self.config_future_bits(config))
     }
 
     fn config_future_intersects_exact(
@@ -5372,9 +5351,8 @@ impl<'a> DynamicNfaScanCache<'a> {
         config: u32,
         terminals: &BitSet,
     ) -> Result<bool, String> {
-        if !self.deterministic && self.raw_state_for_config(config).is_none()
-            && self.config_admitted[self.config_index(config).expect("known config")].is_some()
-            && terminals.is_disjoint(&self.config_futures[self.config_index(config).expect("known config")])
+        if self.config_filter(config).is_some()
+            && terminals.is_disjoint(self.config_future_bits(config))
         {
             return Ok(false);
         }
@@ -5413,14 +5391,14 @@ impl<'a> DynamicNfaScanCache<'a> {
             return Ok(Some(first));
         }
         if configs.iter().any(|&config| {
-            self.config_index(config).is_some_and(|index| self.config_is_fresh_reset[index])
+            self.reset_base(config).is_some()
         }) {
             // A union of physical lexer members alone cannot represent the
             // fresh branch's epsilon acceptance. Preserve the branches instead.
             return Ok(None);
         }
         let filter_for = |config| {
-            self.config_index(config).and_then(|index| self.config_admitted[index])
+            self.config_filter(config)
         };
         let filter = filter_for(first);
         if rest.iter().any(|&config| filter_for(config) != filter) {
@@ -5435,10 +5413,7 @@ impl<'a> DynamicNfaScanCache<'a> {
                 states.push(state);
             } else {
                 let index = self.config_index(config).ok_or_else(|| "dynamic config union referenced an unknown config".to_owned())?;
-                let members = self
-                    .configs
-                    .get(index)
-                    .ok_or_else(|| "dynamic NFA config union referenced an unknown config".to_owned())?;
+                let members = &self.subset_at(index).members;
                 self.check_growth(states.len(), members.len())?;
                 states.extend_from_slice(members);
             }
@@ -10478,14 +10453,14 @@ mod epsilon_only_reset_config_tests {
         let ordinary_empty=scan.intern_config(Vec::new()).unwrap();
         let fresh=scan.fresh_empty_reset_config().unwrap();
         assert_ne!(fresh,ordinary_empty);
-        let fi=scan.config_index(fresh).unwrap();
-        let oi=scan.config_index(ordinary_empty).unwrap();
-        assert!(scan.config_is_fresh_reset[fi]);
-        assert!(!scan.config_is_fresh_reset[oi]);
+        
+        
+        assert!(scan.reset_base(fresh).is_some());
+        assert!(!scan.reset_base(ordinary_empty).is_some());
         assert_eq!(scan.config_len(fresh),0);
         assert!(!scan.config_has_finalizer(fresh));
-        assert!(scan.config_matched[fi].is_empty());
-        assert!(scan.config_futures[fi].is_empty());
+        assert!(scan.config_matched_bits(fresh).is_empty());
+        assert!(scan.config_future_bits(fresh).is_empty());
         assert_eq!(scan.residual_config(fresh).unwrap(),None);
         for byte in 0u8..=u8::MAX {
             assert_eq!(scan.step_config(fresh,byte).unwrap(),None,"byte={byte}");
@@ -10502,8 +10477,8 @@ mod epsilon_only_reset_config_tests {
         assert_eq!(a,b);
         let empty=scan.intern_config(Vec::new()).unwrap();
         assert_ne!(a,empty);
-        assert!(!scan.config_is_fresh_reset[scan.config_index(empty).unwrap()]);
-        assert!(scan.config_is_fresh_reset[scan.config_index(a).unwrap()]);
+        assert!(!scan.reset_base(empty).is_some());
+        assert!(scan.reset_base(a).is_some());
     }
 }
 

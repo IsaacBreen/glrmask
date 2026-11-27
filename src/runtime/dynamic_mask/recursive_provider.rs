@@ -145,11 +145,7 @@ impl<'scan, 'constraint> RecursiveConfigTransitions<'scan, 'constraint> {
         let ScopedConfig { leaf, local } = self.states[state as usize].coordinate;
         let table = &self.tables[leaf];
         let config = table.generic_config_for_state(local);
-        let futures = if table.cache.deterministic || table.cache.raw_state_for_config(config).is_some() {
-            table.cache.tokenizer().possible_future_terminals(table.cache.config_state(config, 0))
-        } else {
-            &table.cache.config_futures[table.cache.config_index(config).expect("known config")]
-        };
+        let futures = table.cache.config_future_bits(config);
         let count = self.routing.leaves[leaf].terminal_count as usize;
         futures.iter_ones().take_while(|&terminal| terminal < count)
             .map(|terminal| terminal as u32).collect()
@@ -418,9 +414,7 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
         let ScopedConfig { leaf, local } = self.states[lexer_state as usize].coordinate;
         if self.resets[leaf] == Some(lexer_state) { return true; }
         let config = self.tables[leaf].generic_config_for_state(local);
-        if !self.tables[leaf].cache.deterministic
-            && self.tables[leaf].cache.config_index(config).is_some_and(|i|
-                self.tables[leaf].cache.config_is_fresh_reset[i]) { return true; }
+        if self.tables[leaf].cache.reset_base(config).is_some() { return true; }
         if let Some(&value) = self.boundary.get(&(lexer_state, parser_node)) { return value; }
         let ignored = self.routing.leaves[leaf].constraint.ignore_terminal
             .map(|terminal| self.routing.leaves[leaf].terminal_offset + terminal);
