@@ -4755,7 +4755,6 @@ impl Regex {
         Tokenizer {
             dfa: self.dfa,
             num_terminals,
-            packed_runtime_transitions: None,
             packed_runtime_transition_segments: Arc::from([]),
             compressed_transition_segments: Arc::from([]),
             packed_runtime_metadata_segments: Arc::from([]),
@@ -14341,7 +14340,6 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 1,
-            packed_runtime_transitions: None,
             packed_runtime_transition_segments: Arc::from([]),
             compressed_transition_segments: Arc::from([]),
             packed_runtime_metadata_segments: Arc::from([]),
@@ -16974,7 +16972,6 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 1,
-            packed_runtime_transitions: None,
             packed_runtime_transition_segments: Arc::from([]),
             compressed_transition_segments: Arc::from([]),
             packed_runtime_metadata_segments: Arc::from([]),
@@ -17027,7 +17024,6 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 2,
-            packed_runtime_transitions: None,
             packed_runtime_transition_segments: Arc::from([]),
             compressed_transition_segments: Arc::from([]),
             packed_runtime_metadata_segments: Arc::from([]),
@@ -17080,7 +17076,6 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 2,
-            packed_runtime_transitions: None,
             packed_runtime_transition_segments: Arc::from([]),
             compressed_transition_segments: Arc::from([]),
             packed_runtime_metadata_segments: Arc::from([]),
@@ -17155,7 +17150,6 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: exprs.len() as u32,
-            packed_runtime_transitions: None,
             packed_runtime_transition_segments: Arc::from([]),
             compressed_transition_segments: Arc::from([]),
             packed_runtime_metadata_segments: Arc::from([]),
@@ -17333,7 +17327,6 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa,
             num_terminals: 1,
-            packed_runtime_transitions: None,
             packed_runtime_transition_segments: Arc::from([]),
             compressed_transition_segments: Arc::from([]),
             packed_runtime_metadata_segments: Arc::from([]),
@@ -17405,7 +17398,6 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa,
             num_terminals: 1,
-            packed_runtime_transitions: None,
             packed_runtime_transition_segments: Arc::from([]),
             compressed_transition_segments: Arc::from([]),
             packed_runtime_metadata_segments: Arc::from([]),
@@ -17566,7 +17558,6 @@ mod tests {
         let tokenizer = Tokenizer {
             dfa: regex.dfa,
             num_terminals: 1,
-            packed_runtime_transitions: None,
             packed_runtime_transition_segments: Arc::from([]),
             compressed_transition_segments: Arc::from([]),
             packed_runtime_metadata_segments: Arc::from([]),
