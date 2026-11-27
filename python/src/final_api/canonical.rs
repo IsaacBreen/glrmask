@@ -398,7 +398,7 @@ impl PyModule {
     }
 
     /// Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`.
-    #[pyo3(signature = (vocab, *, mask_strategy = super::PyMaskStrategy::AUTO), text_signature = "(self, vocab, *, mask_strategy=MaskStrategy.AUTO)")]
+    #[pyo3(signature = (vocab, *, mask_strategy = super::PyMaskStrategy::AUTO), text_signature = "($self, vocab, *, mask_strategy=...)")]
     fn precompile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
@@ -420,7 +420,7 @@ impl PyModule {
     }
 
     /// Finishes compiling the module into a constraint.
-    #[pyo3(signature = (vocab, *, mask_strategy = super::PyMaskStrategy::AUTO), text_signature = "(self, vocab, *, mask_strategy=MaskStrategy.AUTO)")]
+    #[pyo3(signature = (vocab, *, mask_strategy = super::PyMaskStrategy::AUTO), text_signature = "($self, vocab, *, mask_strategy=...)")]
     fn compile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,

@@ -279,7 +279,7 @@ impl PyGrammar {
     }
 
     /// Compiles the grammar into a constraint.
-    #[pyo3(signature = (vocab, *, mask_strategy = PyMaskStrategy::AUTO), text_signature = "(self, vocab, *, mask_strategy=MaskStrategy.AUTO)")]
+    #[pyo3(signature = (vocab, *, mask_strategy = PyMaskStrategy::AUTO), text_signature = "($self, vocab, *, mask_strategy=...)")]
     fn compile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
