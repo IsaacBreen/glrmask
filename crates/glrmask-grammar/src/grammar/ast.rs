@@ -10,7 +10,7 @@ use crate::automata::lexer::ast::Expr;
 use crate::automata::lexer::compile::compile_expression_labeled_nfa;
 use crate::automata::lexer::DFA as LexerDFA;
 use crate::automata::unweighted_u32::dfa::DFA;
-use crate::automata::unweighted_u32::minimize_acyclic::reindex_minimized_acyclic_order;
+use crate::automata::unweighted_u32::minimize_acyclic::{AcyclicDfaReindex, reindex_minimized_acyclic_order};
 use crate::automata::lexer::regex::parse_regex;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::{
@@ -690,6 +690,82 @@ fn grammar_expr_to_lark_with_indent(
             )
             .unwrap();
         }
+    }
+}
+
+/// Borrow the label graph in its chosen emission coordinate. Reindexing is
+/// a view, not another copy of the automaton or another grammar emitter.
+enum ExprEmissionGraph<'a> {
+    Dfa { dfa: &'a DFA, reindex: Option<&'a AcyclicDfaReindex> },
+    Nfa(&'a ExprNFA),
+}
+
+impl ExprEmissionGraph<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Dfa { dfa, reindex } => reindex.map_or(dfa.states.len(), |map| map.old_states_in_new_order.len()),
+            Self::Nfa(expr) => expr.nfa.states.len(),
+        }
+    }
+
+    fn starts(&self) -> Vec<usize> {
+        match self {
+            Self::Dfa { dfa, reindex } => vec![reindex.map_or(dfa.start_state, |map| map.start_state) as usize],
+            Self::Nfa(expr) => expr.nfa.start_states.iter().map(|&state| state as usize).collect(),
+        }
+    }
+
+    fn accepting(&self, state: usize) -> bool {
+        match self {
+            Self::Dfa { dfa, reindex } => dfa.states[reindex.map_or(state, |map| map.old_states_in_new_order[state])].is_accepting,
+            Self::Nfa(expr) => expr.nfa.states[state].is_accepting,
+        }
+    }
+
+    fn for_each_edge(
+        &self, source: usize,
+        mut emit: impl FnMut(Option<i32>, usize) -> Result<(), GlrMaskError>,
+    ) -> Result<(), GlrMaskError> {
+        let mut edge = |label, target: usize| {
+            if target >= self.len() {
+                return Err(GlrMaskError::GrammarParse(format!(
+                    "ExprNFA transition from state {source} targets out-of-range state {target}"
+                )));
+            }
+            emit(label, target)
+        };
+        match self {
+            Self::Dfa { dfa, reindex } => {
+                let old = reindex.map_or(source, |map| map.old_states_in_new_order[source]);
+                for (&label, &target) in &dfa.states[old].transitions {
+                    let target = if let Some(map) = reindex {
+                        let &mapped = map.new_state_of_old.get(target as usize).ok_or_else(|| {
+                            GlrMaskError::GrammarParse(format!("ExprNFA transition targets out-of-range state {target}"))
+                        })?;
+                        if mapped == u32::MAX { continue; }
+                        mapped
+                    } else { target };
+                    edge(Some(label), target as usize)?;
+                }
+            }
+            Self::Nfa(expr) => {
+                let state = &expr.nfa.states[source];
+                for &target in &state.epsilons {
+                    edge(None, target as usize)?;
+                }
+                for (&label, targets) in &state.transitions {
+                    if expr.symbol_for_label(label).is_none() {
+                        return Err(GlrMaskError::GrammarParse(format!(
+                            "ExprNFA transition label {label} is not a valid symbol index"
+                        )));
+                    }
+                    for &target in targets {
+                        edge(Some(label), target as usize)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1526,298 +1602,121 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
-    fn expr_nfa_state_nonterminals(
+    fn emit_expr_graph_leftlinear(
         &mut self,
-        state_count: usize,
-        start: usize,
-        hint: &str,
-        start_lhs: Option<NonterminalID>,
-    ) -> Result<Vec<NonterminalID>, GlrMaskError> {
-        if start >= state_count {
-            return Err(GlrMaskError::GrammarParse(format!(
-                "ExprNFA start state {} is out of range for {} states",
-                start, state_count
-            )));
+        lhs: NonterminalID,
+        expr_nfa: &ExprNFA,
+        graph: ExprEmissionGraph<'_>,
+        flatten_sequences: bool,
+        nonempty: bool,
+    ) -> Result<(), GlrMaskError> {
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+        let rules_before = self.rules.len();
+        let starts = graph.starts();
+        let count = graph.len();
+        if starts.is_empty() || starts.iter().any(|&state| state >= count) {
+            return Err(GlrMaskError::GrammarParse(
+                "ExprNFA emission requires valid start states".into(),
+            ));
         }
+        let nts = (0..count).map(|_| self.fresh_anonymous_nonterminal()).collect::<Vec<_>>();
 
-        let mut nts = Vec::with_capacity(state_count);
-        for state_index in 0..state_count {
-            if Some(state_index) == start_lhs.map(|_| start) {
-                nts.push(start_lhs.unwrap());
-            } else {
-                let _ = hint;
-                nts.push(self.fresh_anonymous_nonterminal());
+        // For the positive-language projection, a prefix before its first
+        // nonempty edge is just epsilon reachability. Compute that Boolean
+        // relation instead of emitting an entire second grammar track.
+        let mut empty_reachable = vec![false; if nonempty { count } else { 0 }];
+        if nonempty {
+            let mut queue = VecDeque::new();
+            for &state in &starts {
+                if !std::mem::replace(&mut empty_reachable[state], true) {
+                    queue.push_back(state);
+                }
+            }
+            let nullable = expr_nfa.symbols.iter().map(|expr| self.expr_is_nullable(expr)).collect::<Vec<_>>();
+            while let Some(source) = queue.pop_front() {
+                graph.for_each_edge(source, |label, target| {
+                    let empty = match label {
+                        None => true,
+                        Some(label) => *nullable.get(label as usize).ok_or_else(|| {
+                            GlrMaskError::GrammarParse(format!("ExprNFA transition label {label} is not a valid symbol index"))
+                        })?,
+                    };
+                    if empty && !std::mem::replace(&mut empty_reachable[target], true) {
+                        queue.push_back(target);
+                    }
+                    Ok(())
+                })?;
+            }
+        } else {
+            for state in starts {
+                self.rules.push(Rule { lhs: nts[state], rhs: Vec::new() });
             }
         }
-        Ok(nts)
+
+        let mut labels = vec![None::<Vec<Symbol>>; expr_nfa.symbols.len()];
+        let mut positive_labels = if nonempty {
+            vec![None::<Option<Symbol>>; labels.len()]
+        } else {
+            Vec::new()
+        };
+        let mut transitions = 0usize;
+        let mut cache_hits = 0usize;
+        for source in 0..count {
+            graph.for_each_edge(source, |label, target| {
+                let mut rhs = vec![Symbol::Nonterminal(nts[source])];
+                if let Some(label) = label {
+                    transitions += 1;
+                    let expr = expr_nfa.symbol_for_label(label).ok_or_else(|| {
+                        GlrMaskError::GrammarParse(format!("ExprNFA transition label {label} is not a valid symbol index"))
+                    })?;
+                    let index = label as usize;
+                    let slot = &mut labels[index];
+                    if slot.is_none() {
+                        *slot = Some(if flatten_sequences {
+                            self.lower_expr_nfa_transition_symbols(expr)?
+                        } else {
+                            vec![self.lower_expr_terminalish(expr)?]
+                        });
+                    } else {
+                        cache_hits += 1;
+                    }
+                    rhs.extend(slot.as_ref().unwrap().iter().cloned());
+                    if nonempty && empty_reachable[source] {
+                        let positive = &mut positive_labels[index];
+                        if positive.is_none() {
+                            *positive = Some(self.lower_nonnullable_expr_symbol(expr)?);
+                        }
+                        if let Some(symbol) = positive.as_ref().unwrap() {
+                            self.rules.push(Rule { lhs: nts[target], rhs: vec![symbol.clone()] });
+                        }
+                    }
+                }
+                self.rules.push(Rule { lhs: nts[target], rhs });
+                Ok(())
+            })?;
+        }
+        for state in 0..count {
+            if graph.accepting(state) {
+                self.rules.push(Rule { lhs, rhs: vec![Symbol::Nonterminal(nts[state])] });
+            }
+        }
+        if profile && transitions >= 64 {
+            eprintln!(
+                "[glrmask/profile][expr_nfa_emit] states={} labeled_edges={} symbols={} reusable_cache_hits={} emitted_rules={} nonempty={}",
+                count, transitions, labels.len(), cache_hits, self.rules.len() - rules_before, nonempty,
+            );
+        }
+        Ok(())
     }
 
     fn emit_expr_dfa_leftlinear(
-        &mut self,
-        lhs: NonterminalID,
-        expr_nfa: &ExprNFA,
-        dfa: &DFA,
+        &mut self, lhs: NonterminalID, expr_nfa: &ExprNFA, dfa: &DFA,
     ) -> Result<(), GlrMaskError> {
-        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
-        let rules_before = self.rules.len();
-        let state_count = dfa.states.len();
-        // Preserve the historical one-symbol edge representation for ordinary
-        // NFAs. Large closed discriminator unions are the only shape where
-        // flattening saves thousands of anonymous wrapper productions.
-        let flatten_sequence_transitions = state_count >= 512;
-        let start = dfa.start_state as usize;
-        let nts = self.expr_nfa_state_nonterminals(state_count, start, "expr_nfa_prefix", None)?;
-        let start_nt = nts[start];
-        self.rules.push(Rule {
-            lhs: start_nt,
-            rhs: Vec::new(),
-        });
-
-        // A transition label can occur on many DFA edges. Lower it exactly once
-        // and reuse the resulting symbol sequence. Compound labels are immutable
-        // grammar fragments just like literals and references; recreating their
-        // wrapper nonterminals per edge can multiply a compact object automaton
-        // into tens of thousands of equivalent productions.
-        let mut reusable_symbols: Vec<Option<Vec<Symbol>>> = vec![None; expr_nfa.symbols.len()];
-        let mut reusable_symbol_cache_hits = 0usize;
-        let mut transition_count = 0usize;
-        for (state_index, state) in dfa.states.iter().enumerate() {
-            for (label, target) in &state.transitions {
-                transition_count += 1;
-                let target = *target as usize;
-                if target >= state_count {
-                    return Err(GlrMaskError::GrammarParse(format!(
-                        "ExprNFA transition from state {state_index} targets out-of-range state {target}"
-                    )));
-                }
-                let symbol_expr = expr_nfa.symbol_for_label(*label).ok_or_else(|| {
-                    GlrMaskError::GrammarParse(format!(
-                        "ExprNFA transition label {label} is not a valid symbol index"
-                    ))
-                })?;
-                let cache_slot = reusable_symbols.get_mut(*label as usize).ok_or_else(|| {
-                    GlrMaskError::GrammarParse(format!(
-                        "ExprNFA transition label {label} is not a valid symbol index"
-                    ))
-                })?;
-                let symbols = if let Some(symbols) = cache_slot.as_ref() {
-                    reusable_symbol_cache_hits += 1;
-                    symbols.clone()
-                } else {
-                    let symbols = if flatten_sequence_transitions {
-                        self.lower_expr_nfa_transition_symbols(symbol_expr)?
-                    } else {
-                        vec![self.lower_expr_terminalish(symbol_expr)?]
-                    };
-                    *cache_slot = Some(symbols.clone());
-                    symbols
-                };
-                let mut rhs = Vec::with_capacity(1 + symbols.len());
-                rhs.push(Symbol::Nonterminal(nts[state_index]));
-                rhs.extend(symbols);
-                self.rules.push(Rule { lhs: nts[target], rhs });
-            }
-        }
-
-        for (state_index, state) in dfa.states.iter().enumerate() {
-            if state.is_accepting {
-                self.rules.push(Rule {
-                    lhs,
-                    rhs: vec![Symbol::Nonterminal(nts[state_index])],
-                });
-            }
-        }
-
-        if profile_enabled && transition_count >= 64 {
-            eprintln!(
-                "[glrmask/profile][expr_nfa_emit] dfa_states={} transitions={} symbols={} reusable_cache_hits={} emitted_rules={}",
-                state_count,
-                transition_count,
-                expr_nfa.symbols.len(),
-                reusable_symbol_cache_hits,
-                self.rules.len() - rules_before,
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Emit an already-minimized acyclic DFA without materializing the
-    /// intermediate DFA copy that only exists to apply the standard reindexing
-    /// convention. The ordering and rule emission are intentionally identical
-    /// to `emit_expr_dfa_leftlinear(reindex_minimized_acyclic_dfa(dfa))`.
-    fn emit_canonical_expr_dfa_leftlinear(
-        &mut self,
-        lhs: NonterminalID,
-        expr_nfa: &ExprNFA,
-        dfa: &DFA,
-    ) -> Result<(), GlrMaskError> {
-        let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
-        let rules_before = self.rules.len();
-        let reindex = reindex_minimized_acyclic_order(dfa);
-        let state_count = reindex.old_states_in_new_order.len();
-        // Preserve ordinary ExprNFA grammar structure; only this large-union
-        // case benefits materially from flattening concatenated edge labels.
-        let flatten_sequence_transitions = state_count >= 512;
-        let start = reindex.start_state as usize;
-        let nts = self.expr_nfa_state_nonterminals(state_count, start, "expr_nfa_prefix", None)?;
-        let start_nt = nts[start];
-        self.rules.push(Rule {
-            lhs: start_nt,
-            rhs: Vec::new(),
-        });
-
-        let mut reusable_symbols: Vec<Option<Vec<Symbol>>> = vec![None; expr_nfa.symbols.len()];
-        let mut reusable_symbol_cache_hits = 0usize;
-        let mut transition_count = 0usize;
-        for (state_index, &old_state) in reindex.old_states_in_new_order.iter().enumerate() {
-            let state = &dfa.states[old_state];
-            for (label, target) in &state.transitions {
-                let target = *target as usize;
-                let Some(&target_state) = reindex.new_state_of_old.get(target) else {
-                    continue;
-                };
-                if target_state == u32::MAX {
-                    continue;
-                }
-                transition_count += 1;
-                let symbol_expr = expr_nfa.symbol_for_label(*label).ok_or_else(|| {
-                    GlrMaskError::GrammarParse(format!(
-                        "ExprNFA transition label {label} is not a valid symbol index"
-                    ))
-                })?;
-                let cache_slot = reusable_symbols.get_mut(*label as usize).ok_or_else(|| {
-                    GlrMaskError::GrammarParse(format!(
-                        "ExprNFA transition label {label} is not a valid symbol index"
-                    ))
-                })?;
-                let symbols = if let Some(symbols) = cache_slot.as_ref() {
-                    reusable_symbol_cache_hits += 1;
-                    symbols.clone()
-                } else {
-                    let symbols = if flatten_sequence_transitions {
-                        self.lower_expr_nfa_transition_symbols(symbol_expr)?
-                    } else {
-                        vec![self.lower_expr_terminalish(symbol_expr)?]
-                    };
-                    *cache_slot = Some(symbols.clone());
-                    symbols
-                };
-                let mut rhs = Vec::with_capacity(1 + symbols.len());
-                rhs.push(Symbol::Nonterminal(nts[state_index]));
-                rhs.extend(symbols);
-                self.rules.push(Rule {
-                    lhs: nts[target_state as usize],
-                    rhs,
-                });
-            }
-        }
-
-        for (state_index, &old_state) in reindex.old_states_in_new_order.iter().enumerate() {
-            if dfa.states[old_state].is_accepting {
-                self.rules.push(Rule {
-                    lhs,
-                    rhs: vec![Symbol::Nonterminal(nts[state_index])],
-                });
-            }
-        }
-
-        if profile_enabled && transition_count >= 64 {
-            eprintln!(
-                "[glrmask/profile][expr_nfa_emit] dfa_states={} transitions={} symbols={} reusable_cache_hits={} emitted_rules={}",
-                state_count,
-                transition_count,
-                expr_nfa.symbols.len(),
-                reusable_symbol_cache_hits,
-                self.rules.len() - rules_before,
-            );
-        }
-
-        Ok(())
-    }
-
-    fn emit_expr_dfa_leftlinear_nonnullable(
-        &mut self,
-        lhs: NonterminalID,
-        expr_nfa: &ExprNFA,
-        dfa: &DFA,
-    ) -> Result<(), GlrMaskError> {
-        let state_count = dfa.states.len();
-        let start = dfa.start_state as usize;
-        if start >= state_count {
-            return Err(GlrMaskError::GrammarParse(format!(
-                "ExprNFA start state {} is out of range for {} states",
-                dfa.start_state, state_count
-            )));
-        }
-
-        let nullable_nts = self.expr_nfa_state_nonterminals(
-            state_count,
-            start,
-            "expr_nfa_nullable_prefix",
-            None,
-        )?;
-        let nonnullable_nts = self.expr_nfa_state_nonterminals(
-            state_count,
-            start,
-            "expr_nfa_nonnullable_prefix",
-            None,
-        )?;
-
-        self.rules.push(Rule {
-            lhs: nullable_nts[start],
-            rhs: Vec::new(),
-        });
-
-        for (state_index, state) in dfa.states.iter().enumerate() {
-            for (label, target) in &state.transitions {
-                let target = *target as usize;
-                if target >= state_count {
-                    return Err(GlrMaskError::GrammarParse(format!(
-                        "ExprNFA transition from state {state_index} targets out-of-range state {target}"
-                    )));
-                }
-                let symbol_expr = expr_nfa.symbol_for_label(*label).ok_or_else(|| {
-                    GlrMaskError::GrammarParse(format!(
-                        "ExprNFA transition label {label} is not a valid symbol index"
-                    ))
-                })?;
-
-                if self.expr_is_nullable(symbol_expr) {
-                    let symbol = self.lower_expr_terminalish(symbol_expr)?;
-                    self.rules.push(Rule {
-                        lhs: nullable_nts[target],
-                        rhs: vec![Symbol::Nonterminal(nullable_nts[state_index]), symbol],
-                    });
-                }
-
-                if let Some(symbol) = self.lower_nonnullable_expr_symbol(symbol_expr)? {
-                    self.rules.push(Rule {
-                        lhs: nonnullable_nts[target],
-                        rhs: vec![Symbol::Nonterminal(nullable_nts[state_index]), symbol],
-                    });
-                }
-
-                let symbol = self.lower_expr_terminalish(symbol_expr)?;
-                self.rules.push(Rule {
-                    lhs: nonnullable_nts[target],
-                    rhs: vec![Symbol::Nonterminal(nonnullable_nts[state_index]), symbol],
-                });
-            }
-        }
-
-        for (state_index, state) in dfa.states.iter().enumerate() {
-            if state.is_accepting {
-                self.rules.push(Rule {
-                    lhs,
-                    rhs: vec![Symbol::Nonterminal(nonnullable_nts[state_index])],
-                });
-            }
-        }
-
-        Ok(())
+        self.emit_expr_graph_leftlinear(
+            lhs, expr_nfa, ExprEmissionGraph::Dfa { dfa, reindex: None },
+            dfa.states.len() >= 512, false,
+        )
     }
 
     fn direct_regular_add_state(automaton: &mut DirectRegularAutomaton) -> u32 {
@@ -2039,109 +1938,7 @@ impl<'a> Lowerer<'a> {
             // data that direct table/runtime paths immediately ignore.
             return Ok(());
         }
-        let state_count = expr_nfa.nfa.states.len();
-        if state_count == 0 || expr_nfa.nfa.start_states.is_empty() {
-            return Err(GlrMaskError::GrammarParse(
-                "ExprNFA direct emission requires at least one start state".into(),
-            ));
-        }
-        let nts = self.expr_nfa_state_nonterminals(
-            state_count,
-            expr_nfa.nfa.start_states[0] as usize,
-            "expr_nfa_direct",
-            None,
-        )?;
-        let rules_before = self.rules.len();
-        let mut reusable_symbols: Vec<Option<Vec<Symbol>>> = vec![None; expr_nfa.symbols.len()];
-        let mut labeled_edges = 0usize;
-        let mut epsilon_edges = 0usize;
-
-        for &start in &expr_nfa.nfa.start_states {
-            let start = start as usize;
-            if start >= state_count {
-                return Err(GlrMaskError::GrammarParse(format!(
-                    "ExprNFA start state {start} is out of range for {state_count} states"
-                )));
-            }
-            self.rules.push(Rule {
-                lhs: nts[start],
-                rhs: Vec::new(),
-            });
-        }
-
-        for (state_index, state) in expr_nfa.nfa.states.iter().enumerate() {
-            for &target in &state.epsilons {
-                let target = target as usize;
-                if target >= state_count {
-                    return Err(GlrMaskError::GrammarParse(format!(
-                        "ExprNFA epsilon transition from state {state_index} targets out-of-range state {target}"
-                    )));
-                }
-                epsilon_edges += 1;
-                self.rules.push(Rule {
-                    lhs: nts[target],
-                    rhs: vec![Symbol::Nonterminal(nts[state_index])],
-                });
-            }
-            for (&label, targets) in &state.transitions {
-                let label_index = usize::try_from(label).map_err(|_| {
-                    GlrMaskError::GrammarParse(format!(
-                        "ExprNFA transition label {label} is negative"
-                    ))
-                })?;
-                let symbol_expr = expr_nfa.symbols.get(label_index).ok_or_else(|| {
-                    GlrMaskError::GrammarParse(format!(
-                        "ExprNFA transition label {label} is not a valid symbol index"
-                    ))
-                })?;
-                let symbols = if let Some(symbols) = reusable_symbols[label_index].as_ref() {
-                    symbols.clone()
-                } else {
-                    let symbols = self.lower_expr_nfa_transition_symbols(symbol_expr)?;
-                    reusable_symbols[label_index] = Some(symbols.clone());
-                    symbols
-                };
-                for &target in targets {
-                    let target = target as usize;
-                    if target >= state_count {
-                        return Err(GlrMaskError::GrammarParse(format!(
-                            "ExprNFA transition from state {state_index} targets out-of-range state {target}"
-                        )));
-                    }
-                    labeled_edges += 1;
-                    let mut rhs = Vec::with_capacity(1 + symbols.len());
-                    rhs.push(Symbol::Nonterminal(nts[state_index]));
-                    rhs.extend(symbols.iter().cloned());
-                    self.rules.push(Rule {
-                        lhs: nts[target],
-                        rhs,
-                    });
-                }
-            }
-        }
-
-        for (state_index, state) in expr_nfa.nfa.states.iter().enumerate() {
-            if state.is_accepting {
-                self.rules.push(Rule {
-                    lhs,
-                    rhs: vec![Symbol::Nonterminal(nts[state_index])],
-                });
-            }
-        }
-
-        if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
-        {
-            eprintln!(
-                "[glrmask/profile][expr_nfa_direct_emit] states={} labeled_edges={} epsilon_edges={} symbols={} emitted_rules={}",
-                state_count,
-                labeled_edges,
-                epsilon_edges,
-                expr_nfa.symbols.len(),
-                self.rules.len() - rules_before,
-            );
-        }
-        Ok(())
+        self.emit_expr_graph_leftlinear(lhs, expr_nfa, ExprEmissionGraph::Nfa(expr_nfa), true, false)
     }
 
     fn emit_expr_nfa(&mut self, lhs: NonterminalID, expr_nfa: &ExprNFA) -> Result<(), GlrMaskError> {
@@ -2152,7 +1949,11 @@ impl<'a> Lowerer<'a> {
             && let Some(dfa) = &expr_nfa.canonical_dfa
             && dfa.compute_is_acyclic()
         {
-            return self.emit_canonical_expr_dfa_leftlinear(lhs, expr_nfa, dfa);
+            let reindex = reindex_minimized_acyclic_order(dfa);
+            return self.emit_expr_graph_leftlinear(
+                lhs, expr_nfa, ExprEmissionGraph::Dfa { dfa, reindex: Some(&reindex) },
+                reindex.old_states_in_new_order.len() >= 512, false,
+            );
         }
         let dfa = expr_nfa.determinize_and_minimize();
         self.emit_expr_dfa_leftlinear(lhs, expr_nfa, &dfa)
@@ -2164,7 +1965,9 @@ impl<'a> Lowerer<'a> {
         expr_nfa: &ExprNFA,
     ) -> Result<(), GlrMaskError> {
         let dfa = expr_nfa.determinize_and_minimize();
-        self.emit_expr_dfa_leftlinear_nonnullable(lhs, expr_nfa, &dfa)
+        self.emit_expr_graph_leftlinear(
+            lhs, expr_nfa, ExprEmissionGraph::Dfa { dfa: &dfa, reindex: None }, false, true,
+        )
     }
 
     fn try_emit_shared_literal_choice_subset(
