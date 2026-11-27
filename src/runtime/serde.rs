@@ -39,10 +39,10 @@ const CONSTRAINT_ARTIFACT_MAGIC: &[u8; 8] = b"GLRCON02";
 const CONSTRAINT_ARTIFACT_HEADER_LEN: usize = CONSTRAINT_ARTIFACT_MAGIC.len() + 32;
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
-const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 48;
+const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 50;
 /// External-vocabulary envelope that retains an executable LR table for
 /// ordinary Dynamic's retained LR backend.
-const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 49;
+const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 51;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -1942,6 +1942,7 @@ struct RecursiveSegmentedParserComponentV27Ref<'a> {
     terminal_offset: u32,
     global_terminal_aliases: &'a [(u32, u32)],
     local_tsid_to_global_tsids: &'a [Vec<u32>],
+    boundary: Option<RecursiveSegmentedBoundaryShardV27Ref<'a>>,
 }
 
 #[derive(Deserialize)]
@@ -1952,6 +1953,7 @@ struct RecursiveSegmentedParserComponentV27 {
     terminal_offset: u32,
     global_terminal_aliases: Vec<(u32, u32)>,
     local_tsid_to_global_tsids: Vec<Vec<u32>>,
+    boundary: Option<RecursiveSegmentedBoundaryShardV27>,
 }
 
 #[derive(Serialize)]
@@ -1984,16 +1986,12 @@ enum RecursiveSegmentedBoundaryShardBackendV27 {
 
 #[derive(Serialize)]
 struct RecursiveSegmentedBoundaryShardV27Ref<'a> {
-    start_component: u32,
-    accepts_empty_stack: bool,
     candidate_tokens: Option<&'a [u32]>,
     backend: RecursiveSegmentedBoundaryShardBackendV27Ref<'a>,
 }
 
 #[derive(Deserialize)]
 struct RecursiveSegmentedBoundaryShardV27 {
-    start_component: u32,
-    accepts_empty_stack: bool,
     candidate_tokens: Option<Vec<u32>>,
     backend: RecursiveSegmentedBoundaryShardBackendV27,
 }
@@ -2003,7 +2001,6 @@ struct RecursiveSegmentedRuntimeArtifactV27Ref<'a> {
     components: Vec<RecursiveSegmentedParserComponentV27Ref<'a>>,
     segmented_parser_links: Vec<SegmentedParserLinkV24Ref>,
     recursive_tokenizer_internal_tsids: Option<&'a [Vec<u32>]>,
-    boundary_shards: Vec<RecursiveSegmentedBoundaryShardV27Ref<'a>>,
 }
 
 #[derive(Deserialize)]
@@ -2011,7 +2008,6 @@ struct RecursiveSegmentedRuntimeArtifactV27 {
     components: Vec<RecursiveSegmentedParserComponentV27>,
     segmented_parser_links: Vec<SegmentedParserLinkV24>,
     recursive_tokenizer_internal_tsids: Option<Vec<Vec<u32>>>,
-    boundary_shards: Vec<RecursiveSegmentedBoundaryShardV27>,
 }
 
 #[derive(Serialize)]
@@ -2461,23 +2457,7 @@ fn segmented_runtime_artifact_ref(
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: &component.global_terminal_aliases,
             local_tsid_to_global_tsids: &component.local_tsid_to_global_tsids,
-        })
-        .collect();
-    let segmented_parser_links = overlay
-        .segmented_parser_links
-        .iter()
-        .map(|link| SegmentedParserLinkV24Ref {
-            parent_component: link.parent_component,
-            slot_terminal: link.slot_terminal,
-            child_component: link.child_component,
-            child_start: link.child_start,
-            return_pop: link.return_pop,
-            child_start_nullable: link.child_start_nullable,
-        })
-        .collect();
-    let boundary_shards = overlay
-        .boundary_shards()
-        .map(|shard| {
+            boundary: component.boundary.as_ref().map(|shard| {
             let backend = match &shard.backend {
                 crate::runtime::SegmentedBoundaryShardBackend::StaticParser(boundary) => {
                     let parser_dwa = &boundary.parser_dwa;
@@ -2495,18 +2475,28 @@ fn segmented_runtime_artifact_ref(
                 }
             };
             RecursiveSegmentedBoundaryShardV27Ref {
-                start_component: shard.start_component,
-                accepts_empty_stack: shard.accepts_empty_stack,
                 candidate_tokens: shard.candidate_tokens.as_deref(),
                 backend,
             }
+            }),
+        })
+        .collect();
+    let segmented_parser_links = overlay
+        .segmented_parser_links
+        .iter()
+        .map(|link| SegmentedParserLinkV24Ref {
+            parent_component: link.parent_component,
+            slot_terminal: link.slot_terminal,
+            child_component: link.child_component,
+            child_start: link.child_start,
+            return_pop: link.return_pop,
+            child_start_nullable: link.child_start_nullable,
         })
         .collect();
     let runtime = RecursiveSegmentedRuntimeArtifactV27Ref {
             components,
             segmented_parser_links,
             recursive_tokenizer_internal_tsids,
-            boundary_shards,
         };
     Some(match overlay.recursive_static_observation.as_deref() {
         Some(observation) => SegmentedRuntimeArtifactV27Ref::RecursiveObserved(runtime, observation),
@@ -2647,6 +2637,7 @@ fn restore_recursive_segmented_runtime_v27(
         })
         .collect::<crate::Result<Vec<_>>>()?;
     let mut components = Vec::with_capacity(decoded_components.len());
+    let mut boundaries = Vec::with_capacity(decoded_components.len());
     let mut expected_tokenizer_state_offset = 0u32;
     for (index, (component, child)) in decoded_components.into_iter().enumerate() {
         if component
@@ -2682,6 +2673,7 @@ fn restore_recursive_segmented_runtime_v27(
                 "recursive v27 component {index} contains an invalid terminal alias"
             )));
         }
+        boundaries.push(component.boundary);
         components.push(crate::runtime::SegmentedParserComponent {
             constraint: Arc::new(child),
             boundary: None,
@@ -2698,10 +2690,9 @@ fn restore_recursive_segmented_runtime_v27(
                 relation.len(),
             )));
         }
-    } else if runtime.boundary_shards.len() != components.len()
-        || runtime.boundary_shards.iter().any(|shard| {
-            !matches!(shard.backend, RecursiveSegmentedBoundaryShardBackendV27::DynamicDirect)
-        })
+    } else if boundaries.iter().any(|shard| {
+        !shard.as_ref().is_some_and(|shard| matches!(shard.backend, RecursiveSegmentedBoundaryShardBackendV27::DynamicDirect))
+    })
     {
         return Err(crate::Error::Serialization(
             "recursive TSID relation can be omitted only for provider-native DynamicDirect components".to_owned(),
@@ -2745,35 +2736,9 @@ fn restore_recursive_segmented_runtime_v27(
             .install_recursive_tokenizer_internal_tsids(relation)
             .map_err(crate::Error::Serialization)?;
     }
-    let component_count = constraint
-        .static_dynamic_overlay
-        .as_ref()
-        .expect("recursive v27 overlay exists")
-        .segmented_parser_components
-        .len();
-    let mut seen = vec![false; component_count];
-    let mut restored_shards = Vec::new();
-    for (index, shard) in runtime.boundary_shards.into_iter().enumerate() {
-        let component_index = shard.start_component as usize;
-        if component_index >= component_count {
-            return Err(crate::Error::Serialization(format!(
-                "recursive v27 boundary shard {index} references unknown component {}",
-                shard.start_component,
-            )));
-        }
-        if seen[component_index] {
-            return Err(crate::Error::Serialization(format!(
-                "recursive v27 runtime contains multiple boundary shards for component {}",
-                shard.start_component,
-            )));
-        }
-        seen[component_index] = true;
-        if shard.accepts_empty_stack && shard.start_component != 0 {
-            return Err(crate::Error::Serialization(format!(
-                "recursive v27 boundary shard {index} gives empty-stack ownership to non-root component {}",
-                shard.start_component,
-            )));
-        }
+    let mut restored_shards = Vec::with_capacity(boundaries.len());
+    for (index, shard) in boundaries.into_iter().enumerate() {
+        let Some(shard) = shard else { continue };
         let backend = match shard.backend {
             RecursiveSegmentedBoundaryShardBackendV27::StaticParser(boundary) => {
                 crate::runtime::SegmentedBoundaryShardBackend::StaticParser(Arc::new(
@@ -2794,13 +2759,11 @@ fn restore_recursive_segmented_runtime_v27(
             tokens.dedup();
             Arc::<[u32]>::from(tokens)
         });
-        restored_shards.push(crate::runtime::SegmentedBoundaryShard {
+        restored_shards.push((index, crate::runtime::SegmentedBoundaryShard {
             mask_vocabulary: Default::default(),
-            start_component: shard.start_component,
-            accepts_empty_stack: shard.accepts_empty_stack,
             candidate_tokens,
             backend,
-        });
+        }));
     }
     let overlay = constraint
         .static_dynamic_overlay
@@ -2809,8 +2772,7 @@ fn restore_recursive_segmented_runtime_v27(
     for component in &mut overlay.segmented_parser_components {
         component.boundary = None;
     }
-    for shard in restored_shards {
-        let index = shard.start_component as usize;
+    for (index, shard) in restored_shards {
         overlay.segmented_parser_components[index].boundary = Some(shard);
     }
     if !constraint.uses_compact_segmented_parser_runtime() {

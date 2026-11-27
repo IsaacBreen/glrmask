@@ -237,8 +237,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
             specials.push(SpecialTokenTerminal { terminal_id: terminal_offsets[index] + special.terminal_id,
                 token_id: special.token_id, token_id_end: special.token_id_end });
         }
-        let shard = SegmentedBoundaryShard { start_component: index as u32,
-            accepts_empty_stack: index == 0,
+        let shard = SegmentedBoundaryShard {
             candidate_tokens: candidate_tokens[index].clone(), mask_vocabulary: Default::default(), backend: SegmentedBoundaryShardBackend::DynamicDirect };
         wrappers.push(SegmentedParserComponent { constraint: component, boundary: Some(shard),
             tokenizer_state_offset: tokenizer_offsets[index], terminal_offset: terminal_offsets[index],

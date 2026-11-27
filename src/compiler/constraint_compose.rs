@@ -162,8 +162,6 @@ pub(crate) fn install_published_static_boundary_shards(
             })?;
         let runtime_shard = crate::runtime::SegmentedBoundaryShard {
             mask_vocabulary: Default::default(),
-            start_component: shard.start_component,
-            accepts_empty_stack: component_index == 0,
             candidate_tokens: Some(shard.candidate_tokens),
             backend: crate::runtime::SegmentedBoundaryShardBackend::StaticParser(shard.boundary),
         };
@@ -182,8 +180,6 @@ fn install_dynamic_direct_boundary_shards(
     for component_index in 0..overlay.segmented_parser_components.len() {
         let shard = crate::runtime::SegmentedBoundaryShard {
             mask_vocabulary: Default::default(),
-            start_component: component_index as u32,
-            accepts_empty_stack: component_index == 0,
             candidate_tokens: boundary_tokens_by_start_component
                 .and_then(|rows| rows.get(component_index))
                 .map(|tokens| Arc::<[u32]>::from(tokens.clone())),
@@ -7730,7 +7726,7 @@ table: &child_table,
             .expect("RIGHT prepared static must retain a segmented overlay");
         let collect = |overlay: &crate::runtime::StaticDynamicOverlayMetadata| {
             let mut shards = std::collections::BTreeMap::new();
-            for component in &overlay.segmented_parser_components {
+            for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
                 let Some(shard) = component.boundary.as_ref() else {
                     continue;
                 };
@@ -7740,7 +7736,7 @@ table: &child_table,
                     continue;
                 };
                 assert!(
-                    shards.insert(shard.start_component, parser.clone()).is_none(),
+                    shards.insert(index as u32, parser.clone()).is_none(),
                     "duplicate start_component shard",
                 );
             }

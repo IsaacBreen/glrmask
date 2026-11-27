@@ -3561,12 +3561,12 @@ impl ConstraintState {
                             .map(|(component, _)| component as u32);
                         contexts.push(format!(
                             "gts={global_tokenizer_state} top={top} owner={owner:?} active={}",
-                            owner == Some(shard.start_component),
+                            owner == Some(component_index as u32),
                         ));
                     }
                     None => contexts.push(format!(
                         "gts={global_tokenizer_state} empty_stack active={}",
-                        shard.accepts_empty_stack,
+                        component_index == 0,
                     )),
                 }
             });
@@ -3582,7 +3582,7 @@ impl ConstraintState {
             .unwrap_or_default();
         eprintln!(
             "[mask-stages] shard[{component_index}] backend={backend} start_component={} candidates={candidates:?} added_bits={added:?} token8={} token9={} contexts={contexts:?}",
-            shard.start_component,
+            component_index,
             added.contains(&8),
             added.contains(&9),
         );
@@ -3623,22 +3623,20 @@ impl ConstraintState {
                 let Some(shard) = component.boundary.as_ref() else {
                     continue;
                 };
-                debug_assert_eq!(shard.start_component as usize, component_index);
                 #[cfg(test)]
                 let before_shard = segmented_mask_stage_trace_enabled().then(|| buf.to_vec());
                 let ok = match &shard.backend {
                     crate::runtime::SegmentedBoundaryShardBackend::StaticParser(boundary) => {
                         self.or_segmented_boundary_parser_mask(
                             boundary,
-                            shard.start_component,
-                            shard.accepts_empty_stack,
+                            component_index as u32,
                             buf,
                         )
                     }
                     crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect => {
                         #[cfg(any(test, feature = "internal-api"))]
                         let _dynamic_cpu = super::boundary_cpu_profile::Span::enter(super::boundary_cpu_profile::Kind::Dynamic);
-                        if !self.segmented_boundary_shard_may_be_active(shard) {
+                        if !self.segmented_boundary_shard_may_be_active(component_index) {
                             continue;
                         }
                         // Strict-static trap (milestone H): a claimed static
@@ -3660,12 +3658,12 @@ impl ConstraintState {
                                 if crate::env::var_os("GLRMASK_DISABLE_BOUNDARY_FRONTIER_SELECTION").is_some() {
                                     return vocab.or_mask(self, buf).expect("exact vocabulary mask failed");
                                 }
-                                let Some(frontier) = self.segmented_boundary_initial_frontier(shard)
+                                let Some(frontier) = self.segmented_boundary_initial_frontier(component_index)
                                     else { return false; };
                                 if frontier.is_empty() { return true; }
                                 if crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_BOUNDARY_CANDIDATE_TRIE").is_some() {
                                     eprintln!("[glrmask/profile][boundary_initial_frontier] component={} before={} after={}",
-                                        shard.start_component, self.state.len(), frontier.len());
+                                        component_index, self.state.len(), frontier.len());
                                 }
                                 let view = ConstraintState {
                                     terminated: self.terminated,
@@ -3877,15 +3875,15 @@ impl ConstraintState {
     /// true so trigger acceleration can never create a false negative.
     fn segmented_boundary_shard_may_be_active(
         &self,
-        shard: &crate::runtime::SegmentedBoundaryShard,
+        component_index: usize,
     ) -> bool {
         // Ownership depends only on the top, not on an enumeration of entire
         // stacks. peek_values is an exact union over all GSS top alternatives.
         for gss in self.state.values() {
-            if shard.accepts_empty_stack && !gss.isolate(None).is_empty() { return true; }
+            if component_index == 0 && !gss.isolate(None).is_empty() { return true; }
             for top in gss.peek_values() {
                 let belongs = self.constraint.compact_segmented_parser_component(top)
-                    .is_some_and(|(owner, _)| owner == shard.start_component as usize);
+                    .is_some_and(|(owner, _)| owner == component_index);
                 if belongs { return true; }
             }
         }
@@ -3897,7 +3895,7 @@ impl ConstraintState {
     /// stack paths. This is input selection for the ordinary shared walker.
     fn segmented_boundary_initial_frontier(
         &self,
-        shard: &crate::runtime::SegmentedBoundaryShard,
+        component_index: usize,
     ) -> Option<ParserStateMap> {
         let mut selected = ParserStateMap::default();
         for (&lexer, gss) in self.state.iter() {
@@ -3906,13 +3904,13 @@ impl ConstraintState {
             let mut keep = SmallVec::<[u32; 4]>::new();
             for &top in &tops {
                 let (owner, _) = self.constraint.compact_segmented_parser_component(top)?;
-                if owner == shard.start_component as usize { keep.push(top); }
+                if owner == component_index { keep.push(top); }
             }
             let empty = gss.isolate(None);
-            let branch = if keep.len() == tops.len() && (shard.accepts_empty_stack || empty.is_empty()) {
+            let branch = if keep.len() == tops.len() && (component_index == 0 || empty.is_empty()) {
                 gss.clone()
             } else {
-                let mut branch = if shard.accepts_empty_stack { empty } else { ParserGSS::empty() };
+                let mut branch = if component_index == 0 { empty } else { ParserGSS::empty() };
                 for top in keep { branch = branch.merge(&gss.isolate(Some(top))); }
                 branch
             };
@@ -4030,7 +4028,6 @@ impl ConstraintState {
         &self,
         boundary: &crate::runtime::SegmentedBoundaryParser,
         start_component: u32,
-        accepts_empty_stack: bool,
         buf: &mut [u32],
     ) -> bool {
         #[cfg(test)]
@@ -4165,7 +4162,7 @@ impl ConstraintState {
             Some(value) => self.constraint
                 .compact_segmented_parser_component(value)
                 .is_some_and(|(owner, _)| owner == start_component as usize),
-            None => accepts_empty_stack,
+            None => start_component == 0,
         };
         let debug_boundary = crate::env::var_os("GLRMASK_DEBUG_SEGMENTED_BOUNDARY_MASK").is_some();
         for (&global_tokenizer_state, gss) in self.state.iter() {

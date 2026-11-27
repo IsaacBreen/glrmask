@@ -113,7 +113,7 @@ fn prepared_root_call_candidates(constraint:&Constraint)->Option<Arc<[u32]>> {
         component.constraint.template_parser().is_some_and(|parser|parser.composition().is_none()))
         || overlay.segmented_parser_links.iter().any(|link|link.child_start_nullable) {return None;}
     let shard=overlay.segmented_parser_components.first()?.boundary.as_ref()?;
-    if shard.start_component!=0 || !matches!(shard.backend,SegmentedBoundaryShardBackend::DynamicDirect) {return None;}
+    if !matches!(shard.backend,SegmentedBoundaryShardBackend::DynamicDirect) {return None;}
     shard.candidate_tokens.as_ref().map(Arc::clone)
 }
 
@@ -439,13 +439,11 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
     for component in &mut overlay.segmented_parser_components { component.boundary = None; }
     for published in published {
         let shard = SegmentedBoundaryShard {
-            start_component: published.start_component,
-            accepts_empty_stack: published.start_component == 0,
             candidate_tokens: Some(published.candidate_tokens),
             mask_vocabulary: Default::default(),
             backend: SegmentedBoundaryShardBackend::StaticParser(published.boundary),
         };
-        let index = shard.start_component as usize;
+        let index = published.start_component as usize;
         overlay.segmented_parser_components[index].boundary = Some(shard);
     }
     // B keeps its private quotient. The coordinator coordinate is independently

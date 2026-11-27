@@ -9357,11 +9357,6 @@ impl StaticDynamicOverlayMetadata {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SegmentedBoundaryShard {
-    /// Component in which the model token starts.
-    pub(crate) start_component: u32,
-    /// Whether an empty composed parser stack belongs to this shard. Only the
-    /// outer/root component normally owns that coordinate.
-    pub(crate) accepts_empty_stack: bool,
     /// Optional conservative model-token summary for the first internal
     /// component crossing. `None` means no trigger information is available;
     /// it must never be interpreted as "no crossings".
