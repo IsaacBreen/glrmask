@@ -9,7 +9,6 @@ use crate::compiler::glr::parser::ParserGSS;
 use crate::grammar::flat::{GrammarDef, Terminal};
 use crate::runtime::Constraint;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
-use crate::ds::leveled_gss::VirtualStack;
 use glrmask_parser_dwa::__private::templates::admissibility::{TemplateDomain, TopAdmission};
 use glrmask_parser_dwa::__private::templates::native::{NativeTableIndex, ProgramCompiler};
 use crate::compiler::glr::table::AdmissionPolicy;
@@ -95,7 +94,7 @@ impl MarkerQueries {
         };
         if let Some(parser) = constraint.template_parser() {
             for &terminal in &terminals {
-                if parser.marker_admits_flat(&[], terminal.terminal_id) { empty.push(terminal.marker_id); }
+                if parser.marker_admits_empty(terminal.terminal_id) { empty.push(terminal.marker_id); }
                 if let Some((default, exceptions)) = parser.marker_top_partition(terminal.terminal_id) {
                     if default == TopAdmission::Never {
                         for (top, certificate) in exceptions { record(top, terminal, certificate)?; }
@@ -242,28 +241,6 @@ impl MarkerQueries {
         }
     }
 
-    pub(crate) fn observe_flat(&self, constraint: &Constraint, stack: &[u32],
-        offset: u64, out: &mut Vec<MarkerEvent>) {
-        let Some(&top) = stack.last() else {
-            out.extend(self.empty.iter().map(|&id| MarkerEvent { id, byte_offset: offset }));
-            return;
-        };
-        let mut fallback = None;
-        for candidate in self.for_top(top) {
-            let admitted = candidate.unconditional || if let Some(Some(domain)) = self.lr_domains.get(candidate.terminal.terminal_id as usize) {
-                domain.matches_top_first(stack.iter().rev().copied())
-            } else if let Some(parser) = constraint.template_parser() {
-                parser.marker_admits_flat(stack, candidate.terminal.terminal_id)
-            } else {
-                // Only a genuinely suffix-dependent retained-LR query needs a
-                // borrowed-stack adapter. Top-certified markers allocate none.
-                let gss = fallback.get_or_insert_with(|| ParserGSS::from_single_stack(stack.to_vec(),
-                    crate::compiler::glr::accumulator::TerminalsDisallowed::new()));
-                crate::runtime::commit::parser_may_advance_on(constraint, gss, candidate.terminal.terminal_id)
-            };
-            if admitted { out.push(MarkerEvent { id: candidate.terminal.marker_id, byte_offset: offset }); }
-        }
-    }
 }
 
 impl Constraint {
@@ -326,12 +303,7 @@ impl MarkerState {
 /// pointer chase, marker branch, or event-buffer operation.
 pub(crate) trait CommitObserver {
     const ENABLED: bool;
-    #[inline] fn checkpoint(&self) -> usize { 0 }
-    #[inline] fn rewind(&mut self, _checkpoint: usize) {}
     #[inline] fn stack(&mut self, _constraint: &Constraint, _stack: &ParserGSS, _offset: usize) {}
-    #[inline] fn flat(&mut self, _constraint: &Constraint, _stack: &[u32], _offset: usize) {}
-    #[inline] fn carried(&mut self, _constraint: &Constraint,
-        _stack: &VirtualStack<u32, TerminalsDisallowed>, _offset: usize) {}
     #[inline] fn frontier(&mut self, constraint: &Constraint, frontier: &super::state::ParserStateMap, offset: usize) {
         if Self::ENABLED {
             for (&lexer, stack) in frontier.iter() {
@@ -341,13 +313,6 @@ pub(crate) trait CommitObserver {
             }
         }
     }
-    #[inline] fn attempt<T>(&mut self, f: impl FnOnce(&mut Self) -> Option<T>) -> Option<T> where Self: Sized {
-        let checkpoint = self.checkpoint();
-        let result = f(self);
-        if result.is_none() { self.rewind(checkpoint); }
-        result
-    }
-    #[inline] fn shifted<T>(&mut self, _offset: usize, f: impl FnOnce(&mut Self) -> T) -> T where Self: Sized { f(self) }
 }
 
 pub(crate) struct NoMarkers;
@@ -361,39 +326,8 @@ pub(crate) struct LiveMarkers<'a> {
 
 impl CommitObserver for LiveMarkers<'_> {
     const ENABLED: bool = true;
-    #[inline] fn checkpoint(&self) -> usize { self.state.events.len() }
-    #[inline] fn rewind(&mut self, checkpoint: usize) { self.state.events.truncate(checkpoint); }
     #[inline] fn stack(&mut self, constraint: &Constraint, stack: &ParserGSS, offset: usize) {
         self.queries.observe_gss(constraint, stack, self.base + offset as u64, &mut self.state.events);
-    }
-    #[inline] fn flat(&mut self, constraint: &Constraint, stack: &[u32], offset: usize) {
-        self.queries.observe_flat(constraint, stack, self.base + offset as u64, &mut self.state.events);
-    }
-    #[inline] fn carried(&mut self, constraint: &Constraint,
-        stack: &VirtualStack<u32, TerminalsDisallowed>, offset: usize) {
-        let Some(&top) = stack.top() else {
-            // A drained virtual prefix can expose an empty word or a shared
-            // nonempty floor. Query its exact existing language, never advance.
-            self.queries.observe_gss(constraint, &stack.clone().into_gss(),
-                self.base + offset as u64, &mut self.state.events);
-            return;
-        };
-        let mut fallback = None;
-        for candidate in self.queries.for_top(top) {
-            if candidate.unconditional || {
-                let gss = fallback.get_or_insert_with(|| stack.clone().into_gss());
-                self.queries.admits_gss(constraint, gss, candidate.terminal.terminal_id)
-            } {
-                self.state.events.push(MarkerEvent { id: candidate.terminal.marker_id,
-                    byte_offset: self.base + offset as u64 });
-            }
-        }
-    }
-    #[inline] fn shifted<T>(&mut self, offset: usize, f: impl FnOnce(&mut Self) -> T) -> T {
-        self.base += offset as u64;
-        let result = f(self);
-        self.base -= offset as u64;
-        result
     }
 }
 
@@ -572,7 +506,7 @@ mod tests {
         assert!(carried.clone().into_gss().contains_empty_stack());
         let mut result = MarkerState::new(&queries);
         LiveMarkers { queries:&queries,state:&mut result,base:10 }
-            .carried(&constraint,&carried,2);
+            .stack(&constraint,&carried.into_gss(),2);
         result.finish(&queries,12,true);
         assert_eq!(result.events,[MarkerEvent {id:7,byte_offset:12}]);
     }

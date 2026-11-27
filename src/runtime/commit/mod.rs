@@ -6,7 +6,7 @@ pub(crate) mod forcing_reference;
 pub(crate) mod template_advance;
 pub(crate) mod push_suffixes;
 #[cfg(test)]
-mod flat_template;
+mod literal_template;
 pub(crate) mod simple_read_shift;
 pub(crate) mod phase_dag;
 pub(crate) mod single_cursor;
@@ -43,7 +43,7 @@ use crate::compiler::glr::table::row::ActionRow;
 use crate::runtime::artifact::DynamicMaskVocab;
 use crate::runtime::constraint::Constraint;
 use crate::runtime::state::{
-    CommitBuffers, ConstraintState, INLINE_PARSER_STATE_CAPACITY, LINEAR_STACK_RESERVE,
+    CommitBuffers, ConstraintState, INLINE_PARSER_STATE_CAPACITY,
     ParserAdmissionCacheEntry, ParserRelativeMaskEqCacheEntry, ParserStateMap,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -163,50 +163,6 @@ fn try_terminal_observation_quotient_commit_reuse(
     true
 }
 
-#[cfg(test)]
-const FLAT_ACTION_MAX_BRANCHES: usize = 16;
-#[cfg(test)]
-const FLAT_ACTION_MAX_STEPS: usize = 256;
-
-#[cfg(test)]
-type FlatInlineStack = SmallVec<[u32; LINEAR_STACK_RESERVE]>;
-
-#[cfg(test)]
-#[derive(Debug, Default)]
-struct FlatActionScratch {
-    pending: SmallVec<[FlatInlineStack; FLAT_ACTION_MAX_BRANCHES]>,
-    complete: SmallVec<[FlatInlineStack; FLAT_ACTION_MAX_BRANCHES]>,
-}
-
-#[cfg(test)]
-impl FlatActionScratch {
-    fn clear(&mut self) {
-        self.pending.clear();
-        self.complete.clear();
-    }
-
-    fn push_pending(&mut self, stack: FlatInlineStack) -> bool {
-        if self.pending.iter().any(|existing| existing == &stack) {
-            return true;
-        }
-        if self.pending.len() == self.pending.capacity() {
-            return false;
-        }
-        self.pending.push(stack);
-        true
-    }
-
-    fn push_complete(&mut self, stack: FlatInlineStack) -> bool {
-        if self.complete.iter().any(|existing| existing == &stack) {
-            return true;
-        }
-        if self.complete.len() == self.complete.capacity() {
-            return false;
-        }
-        self.complete.push(stack);
-        true
-    }
-}
 const SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX: usize = 16;
 
 #[derive(Clone, Copy)]
@@ -2438,27 +2394,6 @@ fn final_stacks(state: &ParserStateMap) -> Vec<(u32, Vec<Vec<u32>>)> {
     grouped.into_iter().collect()
 }
 
-#[cfg(test)]
-fn apply_flat_stack_effect(
-    stack: &mut FlatInlineStack,
-    pop: u32,
-    pushes: &[u32],
-) -> Option<bool> {
-    let pop = pop as usize;
-    // Stack effects are atomic: popping the final visible state is valid when
-    // the same effect pushes a replacement. Only a true underflow is invalid.
-    if pop > stack.len() {
-        return Some(false);
-    }
-    let new_len = stack.len() - pop + pushes.len();
-    if new_len > LINEAR_STACK_RESERVE {
-        return None;
-    }
-    stack.truncate(stack.len() - pop);
-    stack.extend_from_slice(pushes);
-    Some(true)
-}
-
 #[inline]
 fn maybe_normalize_lookahead_invariant_reductions(
     constraint: &Constraint,
@@ -4592,12 +4527,10 @@ mod tests {
     }
 
     #[test]
-    fn flat_stack_effect_can_replace_the_only_state() {
-        let mut stack = FlatInlineStack::new();
-        stack.push(36);
-
-        assert_eq!(apply_flat_stack_effect(&mut stack, 1, &[37]), Some(true));
-        assert_eq!(stack.as_slice(), &[37]);
+    fn single_segment_stack_effect_can_replace_the_only_state() {
+        let mut stack = ParserGSS::from_single_stack(vec![36], TerminalsDisallowed::new());
+        assert!(stack.try_apply_single_segment_stack_effect_in_place(1, &[37]));
+        assert_eq!(stack.to_stacks(2).unwrap(), vec![(vec![37], TerminalsDisallowed::new())]);
     }
 
     #[test]

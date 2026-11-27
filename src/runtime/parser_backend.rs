@@ -528,14 +528,14 @@ impl TemplateParser {
         self.local_domain(terminal as usize).map_or(TopAdmission::Never, |domain| domain.classify_top(top))
     }
 
-    pub(crate) fn marker_admits_flat(&self, stack: &[u32], terminal: u32) -> bool {
+    pub(crate) fn marker_admits_empty(&self, terminal: u32) -> bool {
         if self.composition().is_some() {
-            let gss = ParserGSS::from_single_stack(stack.to_vec(),
+            let gss = ParserGSS::from_single_stack(Vec::new(),
                 crate::compiler::glr::accumulator::TerminalsDisallowed::new());
             return self.admits(&gss, terminal);
         }
         self.local_domain(terminal as usize)
-            .is_some_and(|domain| domain.matches_top_first(stack.iter().rev().copied()))
+            .is_some_and(|domain| domain.start() == DomainProbe::Accept)
     }
 
     pub(crate) fn admits_flat_any(&self, stack: &[u32], candidates: &BitSet) -> bool {
