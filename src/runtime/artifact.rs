@@ -27,7 +27,6 @@ use crate::compiler::glr::table::GLRTable;
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     VocabPartitionDfa, classify_vocab_char_type,
 };
-use crate::compiler::stages::templates::characterize::TerminalCharacterization;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
 use crate::ds::weight::Weight;
 use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
@@ -9086,13 +9085,6 @@ constraint_data_schema! {
     /// older inner `Constraint` bincode layouts.
     @serde(skip, default)
     pub(crate) composition_parser_templates_by_terminal: Vec<Option<UnweightedDfa>>,
-    /// Composition-time symbolic parser characterizations retained from the
-    /// original compile. A later linker can append only the boundary-induced
-    /// reductions/rereductions and recompile affected terminal templates,
-    /// rather than re-solving the component's reduction closure from scratch.
-    @serde(skip, default)
-    pub(crate) composition_parser_characterizations_by_terminal:
-        Vec<Option<TerminalCharacterization>>,
     /// Composition-time grammar adjacency summary. Stored in the outer
     /// versioned artifact envelope so older inner `Constraint` layouts remain
     /// loadable unchanged.

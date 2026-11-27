@@ -529,8 +529,8 @@ struct ConstraintCompositionCacheMetadataRef<'a> {
 struct ConstraintCompositionCacheMetadata {
     composition_parser_templates_by_terminal:
         Vec<Option<crate::automata::unweighted_u32::dfa::DFA>>,
-    composition_parser_characterizations_by_terminal:
-        Vec<Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>>,
+    #[serde(rename = "composition_parser_characterizations_by_terminal")]
+    _obsolete_characterizations: DiscardedSequence<Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>>,
 }
 
 struct CompositionMetadataSplitParts<'a> {
@@ -665,7 +665,6 @@ fn split_composition_metadata_parts(
 fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
     crate::compiler::boundary_candidates::materialize_deferred_composition_boundary_summary(constraint);
     if constraint.composition_parser_templates_by_terminal.is_empty()
-        && constraint.composition_parser_characterizations_by_terminal.is_empty()
         && constraint.composition_grammar_summary.is_none()
         && constraint.boundary_trigger.is_none()
         && constraint.boundary_candidate_summary.get().is_none()
@@ -687,7 +686,7 @@ fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
         composition_parser_templates_by_terminal:
             &constraint.composition_parser_templates_by_terminal,
         composition_parser_characterizations_by_terminal:
-            &constraint.composition_parser_characterizations_by_terminal,
+            &[],
     })
     .expect("composition cache metadata serialization should succeed");
     let (link_raw_len, link_wire, link_compressed) =
@@ -2370,8 +2369,6 @@ impl Constraint {
         let (metadata, cache) = decode_composition_metadata(blob.as_slice())?;
         self.composition_parser_templates_by_terminal =
             cache.composition_parser_templates_by_terminal;
-        self.composition_parser_characterizations_by_terminal =
-            cache.composition_parser_characterizations_by_terminal;
         self.install_composition_link_metadata(metadata)?;
         self.deferred_composition_metadata_blob = None;
         Ok(())
@@ -5081,7 +5078,6 @@ mod tests {
         assert!(matches!(templates, Cow::Owned(_)));
         assert_eq!(templates.as_ref(), expected.as_slice());
         assert!(loaded.composition_parser_templates_by_terminal.is_empty());
-        assert!(loaded.composition_parser_characterizations_by_terminal.is_empty());
         assert!(loaded.deferred_composition_metadata_blob.is_some());
         assert_eq!(loaded.save(), bytes);
         assert_eq!(loaded.start().mask(), original.start().mask());
@@ -5108,44 +5104,6 @@ mod tests {
         assert_eq!(
             loaded.composition_parser_templates_by_terminal,
             constraint.composition_parser_templates_by_terminal,
-        );
-        let mut actual = loaded.start();
-        let mut expected = constraint.start();
-        for token in [0, 1] {
-            assert_eq!(actual.mask(), expected.mask());
-            assert!(actual.commit_token(token));
-            assert!(expected.commit_token(token));
-        }
-        assert_eq!(actual.mask(), expected.mask());
-        assert!(actual.is_accepting());
-        assert_eq!(actual.is_accepting(), expected.is_accepting());
-    }
-
-    #[test]
-    fn current_constraint_artifact_preserves_composition_parser_characterizations() {
-        let constraint = tiny_constraint();
-        assert_eq!(
-            constraint
-                .composition_parser_characterizations_by_terminal
-                .len(),
-            constraint.parser_terminal_count() as usize,
-        );
-        assert!(constraint
-            .composition_parser_characterizations_by_terminal
-            .iter()
-            .any(Option::is_some));
-        let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
-        assert!(loaded
-            .composition_parser_characterizations_by_terminal
-            .is_empty());
-        assert!(loaded.deferred_composition_metadata_blob.is_some());
-        assert_eq!(loaded.start().mask(), constraint.start().mask());
-        loaded
-            .materialize_composition_metadata_for_compilation()
-            .unwrap();
-        assert_eq!(
-            loaded.composition_parser_characterizations_by_terminal,
-            constraint.composition_parser_characterizations_by_terminal,
         );
         let mut actual = loaded.start();
         let mut expected = constraint.start();

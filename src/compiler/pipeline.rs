@@ -83,7 +83,7 @@ use crate::compiler::stages::parser_dwa::{
 };
 use crate::compiler::stages::templates::{Templates, commit_template_dfas_enabled};
 use crate::compiler::stages::templates::characterize::{
-    TerminalCharacterization, try_characterize_terminals_profiled,
+    try_characterize_terminals_profiled,
 };
 use crate::compiler::stages::templates::compile_dfa::{
     specialize_template_dfa_defaults_for_commit_split_input,
@@ -3276,7 +3276,6 @@ fn build_templates_for_compile(
 ) -> Result<(
     Templates,
     Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
-    Vec<Option<TerminalCharacterization>>,
     f64,
 ), String> {
     let templates_started_at = Instant::now();
@@ -3293,7 +3292,6 @@ fn build_templates_for_compile(
         }
         return Ok((
             Templates::default(),
-            vec![None; analyzed_grammar.num_terminals as usize],
             vec![None; analyzed_grammar.num_terminals as usize],
             templates_ms,
         ));
@@ -3344,7 +3342,6 @@ fn build_templates_for_compile(
         return Ok((
             templates,
             template_dfas_by_terminal,
-            vec![None; analyzed_grammar.num_terminals as usize],
             templates_ms,
         ));
     }
@@ -3354,15 +3351,7 @@ fn build_templates_for_compile(
             .map_err(|error| error.to_string())?;
     let (templates, template_profile) =
         Templates::try_from_characterizations_profiled(&characterizations)?;
-    let mut composition_parser_characterizations_by_terminal =
-        vec![None; analyzed_grammar.num_terminals as usize];
-    for (terminal, characterization) in characterizations {
-        if let Some(slot) = composition_parser_characterizations_by_terminal
-            .get_mut(terminal as usize)
-        {
-            *slot = Some(characterization);
-        }
-    }
+    drop(characterizations);
     let mut template_dfas_by_terminal = vec![None; analyzed_grammar.num_terminals as usize];
     let commit_template_dfas_enabled = commit_template_dfas_enabled();
     let mut commit_template_dfas_built = 0usize;
@@ -3430,7 +3419,6 @@ fn build_templates_for_compile(
     Ok((
         templates,
         template_dfas_by_terminal,
-        composition_parser_characterizations_by_terminal,
         elapsed_ms(templates_started_at),
     ))
 }
@@ -3516,9 +3504,7 @@ struct TerminalDagResult {
 struct TemplatesDagResult {
     templates: Templates,
     template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
-    composition_parser_characterizations_by_terminal:
-        Vec<Option<TerminalCharacterization>>,
-    templates_ms: f64,
+        templates_ms: f64,
     templates_started_ms: f64,
     templates_finished_ms: f64,
 }
@@ -4579,11 +4565,11 @@ impl TableStage {
 
     fn templates(&self, grammar: &GrammarDef, analysis: &AnalysisDagLane, compile_started_at: Instant) -> crate::Result<TemplatesDagResult> {
         let templates_started_ms = elapsed_ms(compile_started_at);
-        let (templates, template_dfas_by_terminal, composition_parser_characterizations_by_terminal, templates_ms) =
+        let (templates, template_dfas_by_terminal, templates_ms) =
             build_templates_for_compile(&self.table, &analysis.analyzed_grammar, grammar.ignore_terminal)
                 .map_err(crate::Error::classify_template_compile_message)?;
         Ok(TemplatesDagResult {
-            templates, template_dfas_by_terminal, composition_parser_characterizations_by_terminal,
+            templates, template_dfas_by_terminal,
             templates_ms, templates_started_ms, templates_finished_ms: elapsed_ms(compile_started_at),
         })
     }
@@ -4755,7 +4741,7 @@ fn compile_prepared_with_profile_and_table_construction(
             classify_finished_ms, terminal_dwa_started_ms, terminal_dwa_finished_ms,
         } = terminal;
         let TemplatesDagResult {
-            templates, template_dfas_by_terminal, composition_parser_characterizations_by_terminal,
+            templates, template_dfas_by_terminal,
             templates_ms, templates_started_ms, templates_finished_ms,
         } = templates;
         let mut templates = Some(templates);
@@ -5087,7 +5073,6 @@ fn compile_prepared_with_profile_and_table_construction(
                 runtime_tokenizer_state_map.internal_to_originals,
             ),
             composition_parser_templates_by_terminal,
-            composition_parser_characterizations_by_terminal,
             composition_grammar_summary,
             token_classes: crate::runtime::TokenClasses::mapped(internal_ids.vocab_tokens.original_to_internal.clone(), internal_ids.vocab_tokens.internal_to_originals_vecs()),
             token_bytes,

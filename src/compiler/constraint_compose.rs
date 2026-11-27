@@ -1650,7 +1650,6 @@ fn build_recursive_coordinator(
         // No outer TSID quotient is needed by the provider runtime.
         tokenizer_tsids: crate::runtime::TokenizerTsidMap::partition(vec![0], vec![vec![0]]),
         composition_parser_templates_by_terminal: Vec::new(),
-        composition_parser_characterizations_by_terminal: Vec::new(),
         composition_grammar_summary: None,
         token_classes: crate::runtime::TokenClasses::mapped(Vec::new(), Vec::new()),
         token_bytes,
