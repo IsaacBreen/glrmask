@@ -66,7 +66,8 @@ def test_named_external_terminal_binding(factory):
 def test_named_external_terminal_binding_errors(bad_bindings):
     vocab = _vocab()
     grammar = glrmask.Grammar.from_glrm(_grammar())
-    with pytest.raises((glrmask.GLRMaskError, RuntimeError, OverflowError)):
+    expected = ValueError if bad_bindings == {"END": [-1]} else glrmask.GLRMaskError
+    with pytest.raises(expected):
         for name, value in bad_bindings.items():
             ids = value if isinstance(value, list) else [value]
             grammar = _bound_snapshot(grammar, name, glrmask.TokenSet(ids))
