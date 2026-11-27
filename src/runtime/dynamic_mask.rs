@@ -863,11 +863,14 @@ struct FullWalkConfigCell {
     has_finalizer: bool,
 }
 
-#[derive(Clone)]
+struct HotScalarState {
+    raw: u32,
+    row: [u8; 256],
+}
+
 struct FullWalkHotScalarCache {
     raw_to_hot: FxHashMap<u32, u8>,
-    hot_to_raw: Vec<u32>,
-    rows: Vec<[u8; 256]>,
+    states: Vec<HotScalarState>,
     misses: usize,
     slow: usize,
 }
@@ -876,8 +879,7 @@ impl FullWalkHotScalarCache {
     fn new() -> Self {
         Self {
             raw_to_hot: FxHashMap::default(),
-            hot_to_raw: Vec::new(),
-            rows: Vec::new(),
+            states: Vec::new(),
             misses: 0,
             slow: 0,
         }
@@ -894,7 +896,7 @@ impl FullWalkHotScalarCache {
 
     #[inline(always)]
     fn raw(&self, state: u32) -> Option<u32> {
-        self.hot_to_raw.get(Self::id(state)? as usize).copied()
+        self.states.get(Self::id(state)? as usize).map(|state| state.raw)
     }
 
     #[inline]
@@ -902,13 +904,12 @@ impl FullWalkHotScalarCache {
         if let Some(&id) = self.raw_to_hot.get(&raw) {
             return Some(id);
         }
-        if self.hot_to_raw.len() >= FULL_WALK_HOT_CAPACITY {
+        if self.states.len() >= FULL_WALK_HOT_CAPACITY {
             return None;
         }
-        let id = self.hot_to_raw.len() as u8;
+        let id = self.states.len() as u8;
         self.raw_to_hot.insert(raw, id);
-        self.hot_to_raw.push(raw);
-        self.rows.push([FULL_WALK_HOT_UNKNOWN; 256]);
+        self.states.push(HotScalarState { raw, row: [FULL_WALK_HOT_UNKNOWN; 256] });
         Some(id)
     }
 }
@@ -928,17 +929,11 @@ struct FullWalkConfigTransitions<'a, 'b> {
     cache: &'a mut DynamicNfaScanCache<'b>,
     error: Option<String>,
     raw_cell_rows: Vec<Option<Box<[u64; 256]>>>,
-    bounded_high_raw: bool,
     high_raw_cells: raw_high_memo::TaggedMemo<256>,
     high_raw_targets: raw_high_memo::TaggedMemo<64>,
     hot_scalar: FullWalkHotScalarCache,
     hot_enabled: bool,
-    hot_persist_key: Option<(usize, u64)>,
     raw_target_cells: Vec<u64>,
-    virtual_dense_row_by_raw_state: Vec<u32>,
-    virtual_dense_row_ids: FxHashMap<(u32, u32), u32>,
-    virtual_dense_rows: Vec<[u64; 256]>,
-    virtual_dense_cell_cache_enabled: bool,
     profile: bool,
     cell_calls: usize,
     raw_cell_hits: usize,
@@ -974,30 +969,8 @@ struct FullWalkConfigTransitions<'a, 'b> {
     profile_virtual_dense_pairs: FxHashSet<(u32, u32, u8)>,
 }
 
-thread_local! {
-    // Diagnostic persistence store for the hot-scalar oracle. Move the cache
-    // in/out rather than cloning it so a same-generation warm fill measures
-    // traversal rather than persistence bookkeeping. This is intentionally
-    // thread-scoped and is not yet a production cache-lifecycle design.
-    static FULL_WALK_HOT_PERSIST_CACHE: std::cell::RefCell<
-        FxHashMap<(usize, u64), FullWalkHotScalarCache>
-    > = std::cell::RefCell::new(FxHashMap::default());
-}
-
-#[inline]
-fn full_walk_hot_persist_take(key: (usize, u64)) -> Option<FullWalkHotScalarCache> {
-    FULL_WALK_HOT_PERSIST_CACHE.with(|cache| cache.borrow_mut().remove(&key))
-}
-
-#[inline]
-fn full_walk_hot_persist_put(key: (usize, u64), hot: FullWalkHotScalarCache) {
-    FULL_WALK_HOT_PERSIST_CACHE.with(|cache| {
-        cache.borrow_mut().insert(key, hot);
-    });
-}
-
 impl<'a, 'b> FullWalkConfigTransitions<'a, 'b> {
-    fn new(cache: &'a mut DynamicNfaScanCache<'b>, max_token_len: usize, generation: u64) -> Self {
+    fn new(cache: &'a mut DynamicNfaScanCache<'b>, max_token_len: usize, _generation: u64) -> Self {
     let profile = cache.profile_transition_work;
     let (
         step_calls_start,
@@ -1017,39 +990,15 @@ impl<'a, 'b> FullWalkConfigTransitions<'a, 'b> {
         cache.profile_intern_new,
     );
     let hot_enabled = env_flag("GLRMASK_EXPERIMENT_HOT_SCALAR_CACHE", true);
-    let hot_persist_key = (hot_enabled
-        && env_flag("GLRMASK_EXPERIMENT_HOT_SCALAR_PERSIST", false))
-        .then(|| {
-            (
-                cache.tokenizer() as *const Tokenizer as usize,
-                generation,
-            )
-        });
-    let hot_scalar = if hot_enabled {
-        hot_persist_key
-            .and_then(full_walk_hot_persist_take)
-            .unwrap_or_else(FullWalkHotScalarCache::new)
-    } else {
-        FullWalkHotScalarCache::new()
-    };
     Self {
         cache,
         error: None,
         raw_cell_rows: Vec::new(),
-        bounded_high_raw: {
-            static ENABLED: OnceLock<bool> = OnceLock::new();
-            *ENABLED.get_or_init(||env_flag("GLRMASK_BOUNDED_HIGH_RAW_MEMO", true))
-        },
         high_raw_cells: raw_high_memo::TaggedMemo::new(),
         high_raw_targets: raw_high_memo::TaggedMemo::new(),
-        hot_scalar,
+        hot_scalar: FullWalkHotScalarCache::new(),
         hot_enabled,
-        hot_persist_key,
         raw_target_cells: Vec::new(),
-        virtual_dense_row_by_raw_state: Vec::new(),
-        virtual_dense_row_ids: FxHashMap::default(),
-        virtual_dense_rows: Vec::new(),
-        virtual_dense_cell_cache_enabled: dynamic_virtual_dense_cell_cache_experiment_enabled(),
         profile,
         cell_calls: 0,
         raw_cell_hits: 0,
@@ -1087,57 +1036,13 @@ impl<'a, 'b> FullWalkConfigTransitions<'a, 'b> {
 }
 
 impl FullWalkConfigTransitions<'_, '_> {
-    fn virtual_dense_row_for_raw_state(&mut self, raw_state: u32) -> Option<usize> {
-        const UNKNOWN: u32 = u32::MAX;
-        const NONE: u32 = u32::MAX - 1;
-        let raw_index = raw_state as usize;
-        if self.virtual_dense_row_by_raw_state.len() <= raw_index {
-            self.virtual_dense_row_by_raw_state
-                .resize(raw_index + 1, UNKNOWN);
-        }
-        let cached = self.virtual_dense_row_by_raw_state[raw_index];
-        if cached != UNKNOWN {
-            return (cached != NONE).then_some(cached as usize);
-        }
-        let Some(coordinate) = self
-            .cache
-            .tokenizer()
-            .virtual_residual_direct_coordinate(raw_state)
-        else {
-            self.virtual_dense_row_by_raw_state[raw_index] = NONE;
-            return None;
-        };
-        let Some(key) = self
-            .cache
-            .tokenizer()
-            .virtual_residual_direct_coordinate_finite_mask_dense_key(
-                coordinate,
-                self.profile_max_token_len,
-            )
-        else {
-            self.virtual_dense_row_by_raw_state[raw_index] = NONE;
-            return None;
-        };
-        let row = if let Some(&row) = self.virtual_dense_row_ids.get(&key) {
-            row
-        } else {
-            let row = u32::try_from(self.virtual_dense_rows.len()).ok()?;
-            self.virtual_dense_row_ids.insert(key, row);
-            self.virtual_dense_rows
-                .push([u64::MAX; 256]);
-            row
-        };
-        self.virtual_dense_row_by_raw_state[raw_index] = row;
-        Some(row as usize)
-    }
-
-    fn finish(mut self) -> Result<(), String> {
+    fn finish(self) -> Result<(), String> {
         if self.hot_enabled && crate::env::var_os("GLRMASK_PROFILE_HOT_SCALAR_CACHE").is_some() {
             let hot = &self.hot_scalar;
             eprintln!(
                 "[glrmask/profile][hot_scalar_cache] states={} bytes={} misses={} slow={}",
-                hot.hot_to_raw.len(),
-                hot.rows.len() * 256,
+                hot.states.len(),
+                hot.states.len() * 256,
                 hot.misses,
                 hot.slow,
             );
@@ -1230,12 +1135,6 @@ impl FullWalkConfigTransitions<'_, '_> {
                 self.profile_virtual_dense_pairs.len(),
             );
         }
-        if let Some(key) = self.hot_persist_key
-            && self.hot_enabled
-        {
-            let hot = std::mem::replace(&mut self.hot_scalar, FullWalkHotScalarCache::new());
-            full_walk_hot_persist_put(key, hot);
-        }
         self.error.map_or(Ok(()), Err)
     }
 
@@ -1262,14 +1161,14 @@ impl FullWalkConfigTransitions<'_, '_> {
     #[cold]
     #[inline(never)]
     fn hot_cell_slow(&mut self, hot_id: u8, byte: u8) -> FullWalkConfigCell {
-        let Some(raw_source) = self.hot_scalar.hot_to_raw.get(hot_id as usize).copied()
+        let Some(raw_source) = self.hot_scalar.states.get(hot_id as usize).map(|state| state.raw)
         else {
             self.error = Some("invalid full-walk hot scalar state".to_owned());
             return FullWalkConfigCell { target: u32::MAX, has_finalizer: false };
         };
         let raw_target = self.cache.transition(raw_source, byte);
         if raw_target == u32::MAX {
-            self.hot_scalar.rows[hot_id as usize][byte as usize] = FULL_WALK_HOT_DEAD;
+            self.hot_scalar.states[hot_id as usize].row[byte as usize] = FULL_WALK_HOT_DEAD;
             return FullWalkConfigCell { target: u32::MAX, has_finalizer: false };
         }
 
@@ -1280,7 +1179,7 @@ impl FullWalkConfigTransitions<'_, '_> {
         if simple {
             let target_hot = self.hot_scalar.intern(raw_target);
             if let Some(target_hot) = target_hot {
-                self.hot_scalar.rows[hot_id as usize][byte as usize] = target_hot;
+                self.hot_scalar.states[hot_id as usize].row[byte as usize] = target_hot;
                 return FullWalkConfigCell {
                     target: FullWalkHotScalarCache::tagged(target_hot),
                     has_finalizer: false,
@@ -1288,7 +1187,7 @@ impl FullWalkConfigTransitions<'_, '_> {
             }
         }
 
-        self.hot_scalar.rows[hot_id as usize][byte as usize] = FULL_WALK_HOT_SLOW;
+        self.hot_scalar.states[hot_id as usize].row[byte as usize] = FULL_WALK_HOT_SLOW;
         self.hot_scalar.slow += 1;
         match self.cache.config_for_raw_start(raw_target) {
             Ok(target) => FullWalkConfigCell {
@@ -1330,8 +1229,9 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
             let cached = unsafe {
                 *self
                     .hot_scalar
-                    .rows
+                    .states
                     .get_unchecked(hot_id as usize)
+                    .row
                     .get_unchecked(byte as usize)
             };
             if cached < FULL_WALK_HOT_SLOW {
@@ -1353,12 +1253,11 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
             self.cell_calls += 1;
         }
         let raw_state = self.cache.raw_state_for_config(state);
-        let mut virtual_dense_row = None;
         if let Some(raw_state) = raw_state {
             if self.profile {
                 self.max_raw_state_seen = self.max_raw_state_seen.max(raw_state);
             }
-            if self.bounded_high_raw && raw_state >= RAW_DENSE_MEMO_LIMIT {
+            if raw_state >= RAW_DENSE_MEMO_LIMIT {
                 let key=(u64::from(raw_state)<<8)|u64::from(byte);
                 if let Some(packed)=self.high_raw_cells.get(key) {
                     if self.profile { self.raw_cell_hits += 1; }
@@ -1379,19 +1278,6 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
                         has_finalizer: (packed >> 32) & 1 != 0,
                     };
                 }
-            }
-            if self.virtual_dense_cell_cache_enabled
-                && raw_state >= self.cache.tokenizer().num_states()
-                && let Some(row_id) = self.virtual_dense_row_for_raw_state(raw_state)
-            {
-                let packed = self.virtual_dense_rows[row_id][byte as usize];
-                if packed != UNKNOWN {
-                    return FullWalkConfigCell {
-                        target: packed as u32,
-                        has_finalizer: (packed >> 32) & 1 != 0,
-                    };
-                }
-                virtual_dense_row = Some(row_id);
             }
             if self.profile {
                 self.raw_cell_misses += 1;
@@ -1447,7 +1333,7 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
                 }
             } else {
                 let raw_target_index = raw_target as usize;
-                let cached_target = if self.bounded_high_raw && raw_target >= RAW_DENSE_MEMO_LIMIT {
+                let cached_target = if raw_target >= RAW_DENSE_MEMO_LIMIT {
                     self.high_raw_targets.get(u64::from(raw_target))
                 } else if raw_target_index < self.raw_target_cells.len() {
                     let packed = self.raw_target_cells[raw_target_index];
@@ -1477,7 +1363,7 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
                                     .saturating_add(started.elapsed().as_nanos() as u64);
                             }
                             let packed=u64::from(target) | ((has_finalizer as u64) << 32);
-                            if self.bounded_high_raw && raw_target >= RAW_DENSE_MEMO_LIMIT {
+                            if raw_target >= RAW_DENSE_MEMO_LIMIT {
                                 self.high_raw_targets.insert(u64::from(raw_target), packed);
                             } else {
                                 if self.raw_target_cells.len() <= raw_target_index {
@@ -1538,7 +1424,7 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
             && let Some(raw_state) = raw_state
         {
             let packed=u64::from(returned_cell.target) | ((returned_cell.has_finalizer as u64)<<32);
-            if self.bounded_high_raw && raw_state >= RAW_DENSE_MEMO_LIMIT {
+            if raw_state >= RAW_DENSE_MEMO_LIMIT {
                 self.high_raw_cells.insert((u64::from(raw_state)<<8)|u64::from(byte),packed);
             } else {
                 let raw_state = raw_state as usize;
@@ -1549,15 +1435,6 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
                     .get_or_insert_with(|| Box::new([UNKNOWN; 256]));
                 let slot = unsafe { row.get_unchecked_mut(byte as usize) };
                 if *slot == UNKNOWN { *slot = packed; }
-            }
-        }
-        if self.error.is_none()
-            && let Some(row_id) = virtual_dense_row
-        {
-            let slot = &mut self.virtual_dense_rows[row_id][byte as usize];
-            if *slot == UNKNOWN {
-                *slot = u64::from(returned_cell.target)
-                    | ((returned_cell.has_finalizer as u64) << 32);
             }
         }
         returned_cell
@@ -6149,11 +6026,6 @@ pub(crate) fn dynamic_mask_flat16_profile_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
         .get_or_init(|| crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_FLAT16_PHASES").is_some())
-}
-
-#[inline]
-fn dynamic_virtual_dense_cell_cache_experiment_enabled() -> bool {
-    crate::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_VIRTUAL_DENSE_CELL_CACHE").is_some()
 }
 
 pub(crate) fn dynamic_mask_cache_enabled() -> bool {
