@@ -462,10 +462,10 @@ impl TemplateAdvanceRuntime {
             &fallback_template
         };
         let advanced = evaluate_template_language(
-            template,
+            serialized_template, template,
             terminal,
             Phase::Pop,
-            template.pop.start_state,
+            serialized_template.pop.start_state,
             language,
             self,
         );
@@ -497,7 +497,8 @@ pub(super) enum Phase {
 /// the union of equal-target suffixes. Exactness follows by induction on the
 /// acyclic product of template phase/state and canonical stack-trie node.
 fn evaluate_template_language(
-    template: &FastCommitTemplateDfas,
+    template: &CommitTemplateDfas,
+    fast: &FastCommitTemplateDfas,
     terminal: TerminalID,
     phase: Phase,
     state_id: u32,
@@ -550,17 +551,17 @@ fn evaluate_template_language(
                 .iter()
                 .copied()
                 .collect::<SmallVec<[(u32, u32); 8]>>();
-            let default_target = dfa_state.default_target;
+            let default_target = dfa_state.transitions.get(&DEFAULT_LABEL).copied();
             let mut by_target = SmallVec::<[(u32, u32); 8]>::new();
             for (top, suffix) in branches {
-                let target = dfa_state.transitions.get(top as i32).or(default_target);
+                let target = fast.input_target(0, state_id, &dfa_state.transitions, top as i32).or(default_target);
                 if let Some(target) = target {
                     merge_target(&mut by_target, target, suffix, runtime);
                 }
             }
             for (target, suffixes) in by_target {
                 let branch = evaluate_template_language(
-                    template,
+                    template, fast,
                     terminal,
                     Phase::Pop,
                     target,
@@ -572,7 +573,7 @@ fn evaluate_template_language(
 
             if let Some(Some(read_state)) = template.pop_to_read.get(state_id as usize) {
                 let branch = evaluate_template_language(
-                    template,
+                    template, fast,
                     terminal,
                     Phase::Read,
                     *read_state,
@@ -583,7 +584,7 @@ fn evaluate_template_language(
             }
             if let Some(Some(push_state)) = template.pop_to_push.get(state_id as usize) {
                 let branch = evaluate_template_language(
-                    template,
+                    template, fast,
                     terminal,
                     Phase::Push,
                     *push_state,
@@ -609,14 +610,14 @@ fn evaluate_template_language(
                 .collect::<SmallVec<[(u32, u32); 8]>>();
             let mut by_target = SmallVec::<[(u32, u32); 8]>::new();
             for (top, suffix) in branches {
-                if let Some(target) = dfa_state.transitions.get(top as i32) {
+                if let Some(target) = fast.input_target(1, state_id, &dfa_state.transitions, top as i32) {
                     let selected = runtime.interner.push_key(suffix, top);
                     merge_target(&mut by_target, target, selected, runtime);
                 }
             }
             for (target, selected) in by_target {
                 let branch = evaluate_template_language(
-                    template,
+                    template, fast,
                     terminal,
                     Phase::Read,
                     target,
@@ -628,7 +629,7 @@ fn evaluate_template_language(
 
             if let Some(Some(push_state)) = template.read_to_push.get(state_id as usize) {
                 let branch = evaluate_template_language(
-                    template,
+                    template, fast,
                     terminal,
                     Phase::Push,
                     *push_state,
@@ -645,7 +646,7 @@ fn evaluate_template_language(
             if dfa_state.is_accepting {
                 output = language;
             }
-            dfa_state.transitions.for_each(|label, target| {
+            for (&label, &target) in &dfa_state.transitions {
                 if !is_negative_label(label) {
                     panic!(
                         "commit template push DFA contains non-push label {label} at state {state_id}"
@@ -656,7 +657,7 @@ fn evaluate_template_language(
                     negative_to_positive_label(label) as u32,
                 );
                 let branch = evaluate_template_language(
-                    template,
+                    template, fast,
                     terminal,
                     Phase::Push,
                     target,
@@ -664,7 +665,7 @@ fn evaluate_template_language(
                     runtime,
                 );
                 output = runtime.union_languages(output, branch);
-            });
+            }
         }
     }
 
@@ -1162,10 +1163,10 @@ mod tests {
             .expect("test GSS has one uniform accumulator");
         let fast_template = FastCommitTemplateDfas::from_template(&template);
         let output = evaluate_template_language(
-            &fast_template,
+            &template, &fast_template,
             0,
             Phase::Pop,
-            fast_template.pop.start_state,
+            template.pop.start_state,
             language,
             &mut runtime,
         );
@@ -1203,10 +1204,10 @@ mod tests {
             .expect("input canonicalization fits its independent budget");
         let fast_template = FastCommitTemplateDfas::from_template(&template);
         let output = evaluate_template_language(
-            &fast_template,
+            &template, &fast_template,
             0,
             Phase::Pop,
-            fast_template.pop.start_state,
+            template.pop.start_state,
             language,
             &mut runtime,
         );

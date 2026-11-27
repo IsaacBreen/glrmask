@@ -11,6 +11,8 @@
 
 use super::{FlatActionScratch, FlatInlineStack, FLAT_ACTION_MAX_STEPS, LINEAR_STACK_RESERVE};
 use crate::runtime::artifact::FastCommitTemplateDfas;
+use crate::runtime::CommitTemplateDfas;
+use crate::compiler::glr::labels::DEFAULT_LABEL;
 
 #[inline]
 fn charge(left: &mut usize, amount: usize) -> Option<()> {
@@ -47,7 +49,8 @@ fn push_outputs(
 }
 
 fn read_outputs(
-    template: &FastCommitTemplateDfas,
+    template: &CommitTemplateDfas,
+    fast: &FastCommitTemplateDfas,
     mut state: u32,
     base: &[u32],
     scratch: &mut FlatActionScratch,
@@ -56,22 +59,23 @@ fn read_outputs(
     loop {
         charge(left, 1)?;
         let row = template.read.states.get(state as usize)?;
-        if row.default_target.is_some() { return None; }
+        if row.transitions.contains_key(&DEFAULT_LABEL) { return None; }
         if row.is_accepting { emit(base, &[], scratch, left)?; }
         if let Some(push) = template.read_to_push.get(state as usize).copied().flatten() {
-            push_outputs(template, push, base, scratch, left)?;
+            push_outputs(fast, push, base, scratch, left)?;
         }
         // Epsilon phase links and empty READ words work even on an empty
         // stack. Only an actual READ edge needs a visible input symbol.
         let Some(&top) = base.last() else { break; };
-        let Some(next) = row.transitions.get(top as i32) else { break; };
+        let Some(next) = fast.input_target(1, state, &row.transitions, top as i32) else { break; };
         state = next;
     }
     Some(())
 }
 
 fn evaluate(
-    template: &FastCommitTemplateDfas,
+    template: &CommitTemplateDfas,
+    fast: &FastCommitTemplateDfas,
     source: &[u32],
     scratch: &mut FlatActionScratch,
 ) -> Option<bool> {
@@ -85,15 +89,15 @@ fn evaluate(
         let base = &source[..keep];
         if row.is_accepting { emit(base, &[], scratch, &mut left)?; }
         if let Some(push) = template.pop_to_push.get(state as usize).copied().flatten() {
-            push_outputs(template, push, base, scratch, &mut left)?;
+            push_outputs(fast, push, base, scratch, &mut left)?;
         }
         if let Some(read) = template.pop_to_read.get(state as usize).copied().flatten() {
-            read_outputs(template, read, base, scratch, &mut left)?;
+            read_outputs(template, fast, read, base, scratch, &mut left)?;
         }
         let Some(&top) = base.last() else { break; };
         // Resolve explicit shadowing BEFORE testing destination productivity:
         // an explicit dead edge still excludes that symbol from DEFAULT.
-        let Some(next) = row.transitions.get(top as i32).or(row.default_target) else { break; };
+        let Some(next) = fast.input_target(0, state, &row.transitions, top as i32).or_else(|| row.transitions.get(&DEFAULT_LABEL).copied()) else { break; };
         state = next;
         keep -= 1;
     }
@@ -101,12 +105,13 @@ fn evaluate(
 }
 
 pub(super) fn apply(
-    template: &FastCommitTemplateDfas,
+    template: &CommitTemplateDfas,
+    fast: &FastCommitTemplateDfas,
     source: &[u32],
     scratch: &mut FlatActionScratch,
 ) -> Option<bool> {
     scratch.clear();
-    let result = evaluate(template, source, scratch);
+    let result = evaluate(template, fast, source, scratch);
     if result.is_none() { scratch.clear(); }
     result
 }
@@ -115,8 +120,7 @@ pub(super) fn apply(
 mod tests {
     use super::*;
     use crate::automata::unweighted_u32::dfa::{DFA, DFAState};
-    use crate::compiler::glr::labels::{DEFAULT_LABEL, encode_negative_label, negative_to_positive_label};
-    use crate::runtime::CommitTemplateDfas;
+    use crate::compiler::glr::labels::{encode_negative_label, negative_to_positive_label};
     use std::collections::{BTreeMap, BTreeSet};
 
     fn graph(n: usize) -> DFA {
@@ -196,7 +200,7 @@ mod tests {
             for word in &words {
                 let expected = literal(&t, word);
                 let mut scratch = FlatActionScratch::default();
-                match apply(&fast, word, &mut scratch) {
+                match apply(&t, &fast, word, &mut scratch) {
                     Some(nonempty) => { assert_eq!(nonempty, !expected.is_empty()); assert_eq!(outputs(&scratch), expected); checked += 1; }
                     None => { assert!(scratch.complete.is_empty()); declined += 1; }
                 }
@@ -217,7 +221,7 @@ mod tests {
         let fast = FastCommitTemplateDfas::from_template(&t);
         for source in [vec![], vec![0,1], vec![0,2]] {
             let mut scratch = FlatActionScratch::default();
-            assert!(apply(&fast, &source, &mut scratch).is_some());
+            assert!(apply(&t, &fast, &source, &mut scratch).is_some());
             assert_eq!(outputs(&scratch), literal(&t, &source));
         }
     }
@@ -232,13 +236,13 @@ mod tests {
         }
         let fast = FastCommitTemplateDfas::from_template(&t);
         let source = vec![0]; let mut scratch = FlatActionScratch::default();
-        assert!(apply(&fast, &source, &mut scratch).is_none());
+        assert!(apply(&t, &fast, &source, &mut scratch).is_none());
         assert!(scratch.complete.is_empty()); assert_eq!(source, [0]);
         let mut t = blank(2);
         t.pop_to_push = vec![Some(0)];
         t.push.states[0].transitions.insert(encode_negative_label(1), 1);
         t.push.states[1].is_accepting = true;
-        assert!(apply(&FastCommitTemplateDfas::from_template(&t), &[0; LINEAR_STACK_RESERVE], &mut scratch).is_none());
+        assert!(apply(&t, &FastCommitTemplateDfas::from_template(&t), &[0; LINEAR_STACK_RESERVE], &mut scratch).is_none());
         assert!(scratch.complete.is_empty());
     }
 
@@ -250,7 +254,7 @@ mod tests {
         t.push.states[1].is_accepting = true;
         let fast = FastCommitTemplateDfas::from_template(&t);
         let mut scratch = FlatActionScratch::default();
-        assert!(apply(&fast, &[0], &mut scratch).is_none());
+        assert!(apply(&t, &fast, &[0], &mut scratch).is_none());
         assert!(scratch.complete.is_empty());
         assert!(!scratch.complete.spilled());
     }

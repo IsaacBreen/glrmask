@@ -1683,44 +1683,18 @@ impl FastTemplateTransitionRow {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct FastTemplateDfaState {
-    pub(crate) is_accepting: bool,
-    pub(crate) default_target: Option<u32>,
-    pub(crate) transitions: FastTemplateTransitionRow,
-}
+/// Only wide input rows warrant a separate hash index. Every other field
+/// (including DEFAULT, acceptance, links and all PUSH edges) is observed
+/// directly on the immutable source graph.
+type WideTemplateRows = FxHashMap<u32, FxHashMap<i32, u32>>;
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct FastTemplateDfa {
-    pub(crate) states: Vec<FastTemplateDfaState>,
-    pub(crate) start_state: u32,
-}
-
-impl FastTemplateDfa {
-    fn from_dfa(dfa: &UnweightedDfa) -> Self {
-        Self {
-            states: dfa
-                .states
-                .iter()
-                .map(|state| {
-                    let default_target = state.transitions.get(&DEFAULT_LABEL).copied();
-                    FastTemplateDfaState {
-                        is_accepting: state.is_accepting,
-                        default_target,
-                        transitions: FastTemplateTransitionRow::from_entries(
-                            state
-                                .transitions
-                                .iter()
-                                .filter(|(label, _)| **label != DEFAULT_LABEL)
-                                .map(|(&label, &target)| (label, target)),
-                            state.transitions.len() - usize::from(default_target.is_some()),
-                        ),
-                    }
-                })
-                .collect(),
-            start_state: dfa.start_state,
-        }
-    }
+fn wide_template_rows(dfa: &UnweightedDfa) -> WideTemplateRows {
+    dfa.states.iter().enumerate().filter_map(|(id, row)| {
+        if row.transitions.len() <= INLINE_TEMPLATE_TRANSITION_LIMIT { return None; }
+        let mut index = FxHashMap::with_capacity_and_hasher(row.transitions.len(), Default::default());
+        index.extend(row.transitions.iter().map(|(&label, &target)| (label, target)));
+        Some((id as u32, index))
+    }).collect()
 }
 
 #[cfg(test)]
@@ -1762,12 +1736,7 @@ pub(crate) struct FastCommitTemplateDfas {
     pub(crate) input_cursor: Option<super::commit::single_cursor::PreparedInputCursor>,
     pub(crate) phase_dag: Option<super::commit::phase_dag::PreparedPhaseDag>,
     pub(crate) push_suffixes: Vec<Option<super::commit::push_suffixes::PreparedPushSuffixes>>,
-    pub(crate) pop: FastTemplateDfa,
-    pub(crate) read: FastTemplateDfa,
-    pub(crate) push: FastTemplateDfa,
-    pub(crate) pop_to_read: Vec<Option<u32>>,
-    pub(crate) pop_to_push: Vec<Option<u32>>,
-    pub(crate) read_to_push: Vec<Option<u32>>,
+    input_rows: [WideTemplateRows; 2],
 }
 
 impl std::fmt::Debug for FastCommitTemplateDfas {
@@ -1779,17 +1748,21 @@ impl std::fmt::Debug for FastCommitTemplateDfas {
             .field("input_cursor", &self.input_cursor)
             .field("phase_dag", &self.phase_dag)
             .field("push_suffixes", &self.push_suffixes)
-            .field("pop", &self.pop)
-            .field("read", &self.read)
-            .field("push", &self.push)
-            .field("pop_to_read", &self.pop_to_read)
-            .field("pop_to_push", &self.pop_to_push)
-            .field("read_to_push", &self.read_to_push)
+            .field("wide_input_rows", &self.input_rows)
             .finish()
     }
 }
 
 impl FastCommitTemplateDfas {
+    #[inline]
+    pub(crate) fn input_target(&self, phase: usize, id: u32,
+        row: &std::collections::BTreeMap<i32, u32>, label: i32) -> Option<u32> {
+        match self.input_rows[phase].get(&id) {
+            Some(index) => index.get(&label).copied(),
+            None => row.get(&label).copied(),
+        }
+    }
+
     pub(crate) fn is_for_source(&self, source: &Arc<CommitTemplateDfas>) -> bool {
         self.source.as_ref().is_some_and(|old| Arc::ptr_eq(old, source))
     }
@@ -1844,12 +1817,7 @@ impl FastCommitTemplateDfas {
             input_cursor,
             phase_dag,
             push_suffixes,
-            pop: FastTemplateDfa::from_dfa(&template.pop),
-            read: FastTemplateDfa::from_dfa(&template.read),
-            push: FastTemplateDfa::from_dfa(&template.push),
-            pop_to_read: template.pop_to_read.clone(),
-            pop_to_push: template.pop_to_push.clone(),
-            read_to_push: template.read_to_push.clone(),
+            input_rows: [wide_template_rows(&template.pop), wide_template_rows(&template.read)],
         }
     }
 }
