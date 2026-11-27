@@ -14150,7 +14150,7 @@ mod dense_internal_token_mask_tests {
                 (2, b"ab".to_vec()),
                 (3, b"ba".to_vec()),
             ]);
-        let mut constraint = Constraint::from_glrm_grammar(
+        let constraint = Constraint::from_glrm_grammar(
             r#"
                 start start;
                 t A = "a" | "ab";
@@ -14243,7 +14243,7 @@ mod dense_internal_token_mask_tests {
             grammar.push_str(&format!("T{byte_index} T{byte_index}"));
         }
         grammar.push_str(";\n");
-        let mut constraint = Constraint::from_glrm_grammar(
+        let constraint = Constraint::from_glrm_grammar(
             &grammar,
             &vocab,
         )

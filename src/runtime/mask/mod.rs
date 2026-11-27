@@ -2,6 +2,8 @@ pub(crate) mod profile;
 pub(crate) mod queue;
 mod static_dwa_walk;
 use static_dwa_walk::{StackWalkEvent, walk_single_stack};
+#[cfg(test)]
+use crate::automata::lexer::Lexer;
 
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::grammar::flat::TerminalID;

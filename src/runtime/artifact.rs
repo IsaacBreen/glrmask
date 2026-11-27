@@ -276,6 +276,7 @@ impl ParserDwaStorage {
         }
     }
 
+    #[cfg(feature = "internal-api")]
     pub(crate) fn transition_count(&self) -> usize {
         match self {
             Self::Owned(dwa) => dwa.num_transitions(),
