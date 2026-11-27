@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::{collections::HashMap, hint::black_box, path::{Path,PathBuf}, time::Instant};
 use std::hash::{Hash,Hasher};
 
-fn decode(s:&str)->Vec<u8>{s.as_bytes().chunks_exact(2).map(|p|u8::from_str_radix(std::str::from_utf8(p).unwrap(),16).unwrap()).collect()}
+fn decode(s:&str)->Vec<u8>{s.as_bytes().as_chunks::<2>().0.iter().map(|p|u8::from_str_radix(std::str::from_utf8(p).unwrap(),16).unwrap()).collect()}
 fn tokenize(bytes:&[u8], map:&HashMap<Vec<u8>,u32>,max:usize)->Vec<u32>{
     let mut result=vec![]; let mut i=0;
     while i<bytes.len(){
