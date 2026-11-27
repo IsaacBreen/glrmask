@@ -496,25 +496,33 @@ fn live_rows(dwa: &DWA, topo: &[usize], forward: bool) -> Vec<LiveRow> {
         for (label, target, weight) in state.transitions.entries() {
             let t = target as usize;
             if t >= n { continue; }
-            let domain = source.unwrap_or(&rows[t].domain);
-            let restricted = if forward.is_some() && weight.is_subset(domain) {
-                weight.clone()
-            } else {
-                let use_index = if forward.is_some() {
-                    state.transitions.len() >= 8
-                } else { fanin[t] >= 8 };
-                let index = if use_index && !domain.is_empty() && !domain.is_full() {
-                    Some(&*indexes.entry(domain.ptr_key()).or_insert_with(|| domain.intersection_index()))
-                } else { None };
-                memoized_intersection(&mut memo, weight, domain, index)
-            };
+            let domain = &rows[t].domain;
+            let index = if fanin[t] >= 8 && !domain.is_empty() && !domain.is_full() {
+                Some(&*indexes.entry(domain.ptr_key()).or_insert_with(|| domain.intersection_index()))
+            } else { None };
+            let mut restricted = memoized_intersection(&mut memo, weight, domain, index);
+            if let Some(source) = source {
+                // Incoming domains restrict reachable contexts; they are not
+                // a certificate of coaccessibility. Always intersect the
+                // target's backward-live domain before restricting the source.
+                // This intermediate operand need not outlive the local memo,
+                // so do not use its pointer as a memo key.
+                if !restricted.is_subset(source) {
+                    restricted = restricted.intersection(source);
+                }
+            }
             if !restricted.is_empty() {
                 arcs.push(ArcRow { label, target, weight: restricted });
             }
         }
-        let domain = source.cloned().unwrap_or_else(|| {
-            Weight::union_all(std::iter::once(&final_weight).chain(arcs.iter().map(|arc| &arc.weight)))
-        });
+        // Every stored weight is within the optional incoming domain. A
+        // single component covering that domain proves the union without
+        // constructing it. Otherwise compute the exact productive union.
+        let domain = match source {
+            Some(source) if final_weight == *source ||
+                arcs.iter().any(|arc| arc.weight == *source) => source.clone(),
+            _ => Weight::union_all(std::iter::once(&final_weight).chain(arcs.iter().map(|arc| &arc.weight))),
+        };
         rows[u] = LiveRow { domain, final_weight, arcs };
     }
     rows
@@ -574,7 +582,8 @@ fn merge_height(
             mapping[u] = id;
             finals.push(std::mem::replace(&mut rows[u], LiveRow::empty()).final_weight);
         }
-        output.push(DWAState { final_weight: Some(batch_build_weight(finals)), ..Default::default() });
+        let final_weight = batch_build_weight(finals);
+        output.push(DWAState { final_weight: (!final_weight.is_empty()).then_some(final_weight), ..Default::default() });
         return;
     }
     let mut classes: Vec<RowClass> = Vec::new();
@@ -849,6 +858,25 @@ mod tests {
             "path-conditioned minimization changed the weighted language",
         );
         assert!(minimized.num_states() < original.num_states());
+    }
+
+    #[test]
+    fn incoming_path_domains_do_not_certify_dead_suffixes() {
+        let live = weight(&[(0, &[(1, 4)])]);
+        let dead = weight(&[(0, &[(5, 8)])]);
+        let mut states = vec![DWAState::default(); 5];
+        states[0].transitions.insert(1, (1, live.union(&dead)));
+        states[0].transitions.insert(2, (2, dead.clone()));
+        states[1].transitions.insert(3, (3, live.clone()));
+        states[1].transitions.insert(4, (4, dead.clone()));
+        states[2].final_weight = Some(Weight::empty());
+        states[3].final_weight = Some(live.clone());
+        states[4].final_weight = Some(live);
+        let original = DWA::from_parts(states, 0);
+        let minimized = minimize_acyclic_owned_path_conditioned(original.clone());
+        assert_eq!(find_difference(&original, &minimized).unwrap(), None);
+        assert_eq!(minimized.num_transitions(), 2);
+        assert!(minimized.states().iter().all(|s| s.final_weight.as_ref().is_none_or(|w| !w.is_empty())));
     }
 
     #[test]
