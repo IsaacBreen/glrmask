@@ -728,7 +728,9 @@ struct Scratch {
     single_target_seen_epoch: u32,
     // Suffix DAG
     dag_nodes: Vec<Option<DagNode>>,
+    #[cfg(test)]
     dag_queue: Vec<usize>,
+    #[cfg(test)]
     dag_disallowed: Vec<Option<BitSet>>,
     dense_dag_disallowed: Vec<BitSet>,
     dense_dag_disallowed_active: Vec<bool>,
@@ -1431,6 +1433,7 @@ fn build_dfa_with_group_filter(
     }
 }
 
+#[cfg(test)]
 fn intersect_node_disallowed(
     scratch: &mut Scratch,
     pos: usize,
@@ -1444,6 +1447,7 @@ fn intersect_node_disallowed(
     }
 }
 
+#[cfg(test)]
 fn node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
     scratch
         .dag_disallowed
@@ -1454,6 +1458,7 @@ fn node_disallows_gid(scratch: &Scratch, pos: usize, gid: usize) -> bool {
 }
 
 #[inline]
+#[cfg(test)]
 fn ensure_position_slot<T>(slots: &mut Vec<Option<T>>, pos: usize) {
     if pos >= slots.len() {
         slots.resize_with(pos + 1, || None);
@@ -1484,7 +1489,9 @@ impl Scratch {
             single_target_seen: vec![0; num_groups],
             single_target_seen_epoch: 1,
             dag_nodes: Vec::new(),
+            #[cfg(test)]
             dag_queue: Vec::new(),
+            #[cfg(test)]
             dag_disallowed: Vec::new(),
             dense_dag_disallowed: Vec::new(),
             dense_dag_disallowed_active: Vec::new(),
@@ -2001,7 +2008,8 @@ fn run_batch(
     }
 }
 
-fn hash_suffixes(
+#[cfg(test)]
+fn hash_suffixes_reference(
     dfa: &Dfa,
     slice: &[u8],
     scratch: &mut Scratch,
@@ -2119,46 +2127,6 @@ fn hash_suffixes(
     scratch.dag_queue.len()
 }
 
-fn trie_target_disallowed_at(
-    dfa: &Dfa,
-    scratch: &Scratch,
-    position: usize,
-) -> Option<BitSet> {
-    let mut combined = None::<BitSet>;
-    if scratch.trie_target_bits_enabled {
-        let bit_base = position * scratch.dirty_words;
-        for word_index in 0..scratch.dirty_words {
-            let mut bits = scratch.trie_target_group_bits[bit_base + word_index];
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
-                let gid = word_index * 64 + bit;
-                if gid >= scratch.num_groups {
-                    continue;
-                }
-                if let Some(current) = combined.as_mut() {
-                    intersect_disallowed(current, dfa.disallowed_for(gid));
-                } else {
-                    combined = Some(dfa.disallowed_for(gid).clone());
-                }
-            }
-        }
-    } else {
-        let base = position * scratch.num_groups;
-        for gid in 0..scratch.num_groups {
-            if scratch.trie_target_group_counts[base + gid] == 0 {
-                continue;
-            }
-            if let Some(current) = combined.as_mut() {
-                intersect_disallowed(current, dfa.disallowed_for(gid));
-            } else {
-                combined = Some(dfa.disallowed_for(gid).clone());
-            }
-        }
-    }
-    combined
-}
-
 fn fill_trie_target_disallowed_at(
     dfa: &Dfa,
     trie_target_bits_enabled: bool,
@@ -2208,7 +2176,7 @@ fn ensure_dense_disallowed_slots(scratch: &mut Scratch, len: usize) {
     if scratch.dense_dag_disallowed.len() < len + 1 {
         scratch
             .dense_dag_disallowed
-            .resize_with(len + 1, || BitSet::new(scratch.num_groups));
+            .resize_with(len + 1, || BitSet::new(0));
         scratch.dense_dag_disallowed_active.resize(len + 1, false);
     }
     scratch.dense_dag_disallowed_active[..len + 1].fill(false);
@@ -2236,6 +2204,9 @@ fn dense_intersect_node_disallowed(scratch: &mut Scratch, pos: usize, incoming: 
         scratch.dense_dag_disallowed[pos].intersect_with(incoming);
     } else {
         let slot = &mut scratch.dense_dag_disallowed[pos];
+        if slot.len() != incoming.len() {
+            *slot = BitSet::new(incoming.len());
+        }
         slot.clear_all();
         slot.union_with(incoming);
         scratch.dense_dag_disallowed_active[pos] = true;
@@ -2256,6 +2227,26 @@ struct PrecomputedDenseSuffixRoot {
     disallowed: BitSet,
 }
 
+/// Where the initial suffix obligations came from. Both representations
+/// describe the same union of latest (position, terminal group) observations.
+#[derive(Clone, Copy)]
+enum SuffixRoots {
+    Collected,
+    TrieAggregate,
+}
+
+fn hash_suffixes(
+    dfa: &Dfa,
+    slice: &[u8],
+    scratch: &mut Scratch,
+    _profile_signature_detail: bool,
+) -> usize {
+    hash_suffix_dag(
+        dfa, slice, scratch, SuffixRoots::Collected, None,
+        super::super::super::vocab_reuse_dense_disallowed_slots_enabled(),
+    )
+}
+
 fn hash_trie_suffixes_dense(
     dfa: &Dfa,
     slice: &[u8],
@@ -2263,10 +2254,7 @@ fn hash_trie_suffixes_dense(
     precomputed_root: Option<PrecomputedDenseSuffixRoot>,
 ) -> usize {
     hash_trie_suffixes_dense_impl(
-        dfa,
-        slice,
-        scratch,
-        precomputed_root,
+        dfa, slice, scratch, precomputed_root,
         super::super::super::vocab_reuse_dense_disallowed_slots_enabled(),
     )
 }
@@ -2278,165 +2266,142 @@ fn hash_trie_suffixes_dense_impl(
     precomputed_root: Option<PrecomputedDenseSuffixRoot>,
     reuse_disallowed_slots: bool,
 ) -> usize {
+    hash_suffix_dag(
+        dfa, slice, scratch, SuffixRoots::TrieAggregate,
+        precomputed_root, reuse_disallowed_slots,
+    )
+}
+
+/// All suffix edges advance strictly in byte position. Seed all root
+/// obligations, then materialize each structural node and propagate its
+/// allowed edges in a single forward pass: every predecessor's restriction
+/// is final by the time this position is processed. Hash in reverse order.
+/// This also preserves structural nodes reached only by disallowed edges;
+/// their observations have exactly the same meaning as in the literal DAG.
+fn hash_suffix_dag(
+    dfa: &Dfa,
+    slice: &[u8],
+    scratch: &mut Scratch,
+    roots: SuffixRoots,
+    precomputed_root: Option<PrecomputedDenseSuffixRoot>,
+    reuse_disallowed_slots: bool,
+) -> usize {
     let len = slice.len();
     scratch.dag_nodes.clear();
+    if !reuse_disallowed_slots {
+        scratch.dense_dag_disallowed.clear();
+        scratch.dense_dag_disallowed_active.clear();
+    }
+    ensure_dense_disallowed_slots(scratch, len);
     scratch.dag_nodes.resize_with(len + 1, || None);
-    if reuse_disallowed_slots {
-        ensure_dense_disallowed_slots(scratch, len);
-    } else {
-        scratch.dag_disallowed.clear();
-        scratch.dag_disallowed.resize_with(len + 1, || None);
+    let mut first = len;
+    let mut last = 0;
+    let mut precomputed_pos = None;
+    if let Some(root) = precomputed_root
+        && root.pos < len
+    {
+        precomputed_pos = Some(root.pos);
+        first = first.min(root.pos);
+        last = last.max(root.pos);
+        dense_intersect_node_disallowed(scratch, root.pos, &root.disallowed);
+        scratch.dag_nodes[root.pos] = Some(DagNode {
+            hash: 0, edges: root.edges, end_state: root.end_state,
+        });
     }
 
-    let mut precomputed_root_pos = None;
-    if let Some(root) = precomputed_root
-        && root.pos < len {
-            precomputed_root_pos = Some(root.pos);
-            if reuse_disallowed_slots {
-                let slot = &mut scratch.dense_dag_disallowed[root.pos];
-                slot.clear_all();
-                slot.union_with(&root.disallowed);
-                scratch.dense_dag_disallowed_active[root.pos] = true;
-            } else {
-                scratch.dag_disallowed[root.pos] = Some(root.disallowed);
+    for root_index in 0..scratch.targets.len() {
+        let pos = scratch.targets[root_index];
+        if pos >= len || precomputed_pos == Some(pos) {
+            continue;
+        }
+        first = first.min(pos);
+        last = last.max(pos);
+        match roots {
+            SuffixRoots::Collected => {
+                let gids = scratch.target_gids.get(&pos).map(|gids| gids.as_slice())
+                    .or_else(|| (scratch.single_target_pos == pos)
+                        .then_some(scratch.single_target_gids.as_slice()));
+                if let Some((&first_gid, rest)) = gids.and_then(|gids| gids.split_first()) {
+                    let slot = &mut scratch.dense_dag_disallowed[pos];
+                    if slot.len() != scratch.num_groups {
+                        *slot = BitSet::new(scratch.num_groups);
+                    }
+                    slot.clear_all();
+                    slot.union_with(dfa.disallowed_for(first_gid));
+                    for &gid in rest {
+                        intersect_disallowed(slot, dfa.disallowed_for(gid));
+                    }
+                    scratch.dense_dag_disallowed_active[pos] = true;
+                }
             }
-            scratch.dag_nodes[root.pos] = Some(DagNode {
-                hash: 0,
-                edges: root.edges,
-                end_state: root.end_state,
-            });
-        }
-
-    for &pos in &scratch.targets {
-        if pos >= len {
-            continue;
-        }
-        if precomputed_root_pos == Some(pos) {
-            continue;
-        }
-        if reuse_disallowed_slots {
-            let initialized = fill_trie_target_disallowed_at(
-                dfa,
-                scratch.trie_target_bits_enabled,
-                scratch.dirty_words,
-                scratch.num_groups,
-                &scratch.trie_target_group_bits,
-                &scratch.trie_target_group_counts,
-                pos,
-                &mut scratch.dense_dag_disallowed[pos],
-            );
-            scratch.dense_dag_disallowed_active[pos] = initialized;
-        } else {
-            scratch.dag_disallowed[pos] = trie_target_disallowed_at(dfa, scratch, pos);
+            SuffixRoots::TrieAggregate => {
+                let slot = &mut scratch.dense_dag_disallowed[pos];
+                if slot.len() != scratch.num_groups {
+                    *slot = BitSet::new(scratch.num_groups);
+                }
+                scratch.dense_dag_disallowed_active[pos] = fill_trie_target_disallowed_at(
+                    dfa, scratch.trie_target_bits_enabled, scratch.dirty_words,
+                    scratch.num_groups, &scratch.trie_target_group_bits,
+                    &scratch.trie_target_group_counts, pos, slot,
+                );
+            }
         }
         scratch.dag_nodes[pos] = Some(DagNode {
-            hash: 0,
-            edges: EdgeList::new(),
-            end_state: STATE_NONE,
+            hash: 0, edges: EdgeList::new(), end_state: STATE_NONE,
         });
     }
 
     let mut node_count = 0usize;
-    for pos in 1..len {
-        if scratch.dag_nodes[pos].is_none() {
-            continue;
-        }
-        node_count += 1;
-        let (end_state, edges) = if precomputed_root_pos == Some(pos) {
-            let node = scratch.dag_nodes[pos]
-                .as_ref()
-                .expect("precomputed dense suffix root was initialized");
-            (
-                (node.end_state != STATE_NONE).then_some(node.end_state),
-                node.edges.clone(),
-            )
-        } else {
-            run_suffix(
-                dfa,
-                &slice[pos..],
-                pos,
-                &mut scratch.suffix_match_positions,
-                &mut scratch.suffix_dirty_groups,
-            )
-        };
-        for &(_, target) in &edges {
-            if target < len && scratch.dag_nodes[target].is_none() {
-                scratch.dag_nodes[target] = Some(DagNode {
-                    hash: 0,
-                    edges: EdgeList::new(),
-                    end_state: STATE_NONE,
-                });
+    let mut pos = first;
+    while pos <= last {
+        if let Some(mut node) = scratch.dag_nodes[pos].take() {
+            node_count += 1;
+            if precomputed_pos != Some(pos) {
+                let (end_state, edges) = run_suffix(
+                    dfa, &slice[pos..], pos,
+                    &mut scratch.suffix_match_positions,
+                    &mut scratch.suffix_dirty_groups,
+                );
+                node.end_state = end_state.unwrap_or(STATE_NONE);
+                node.edges = edges;
             }
-        }
-        if precomputed_root_pos != Some(pos) {
-            scratch.dag_nodes[pos] = Some(DagNode {
-                hash: 0,
-                edges,
-                end_state: end_state.unwrap_or(STATE_NONE),
-            });
-        }
-    }
-
-    for pos in 1..len {
-        let Some(node) = scratch.dag_nodes[pos].as_ref() else {
-            continue;
-        };
-        let edges = node.edges.clone();
-        for &(gid, target) in &edges {
-            let disallows = if reuse_disallowed_slots {
-                dense_node_disallows_gid(scratch, pos, gid)
-            } else {
-                node_disallows_gid(scratch, pos, gid)
-            };
-            if disallows {
-                continue;
-            }
-            if target < len {
-                if reuse_disallowed_slots {
-                    dense_intersect_node_disallowed(scratch, target, dfa.disallowed_for(gid));
-                } else {
-                    intersect_node_disallowed(scratch, target, dfa.disallowed_for(gid));
+            for &(gid, target) in &node.edges {
+                debug_assert!(target > pos);
+                if target < len {
+                    if scratch.dag_nodes[target].is_none() {
+                        scratch.dag_nodes[target] = Some(DagNode {
+                            hash: 0, edges: EdgeList::new(), end_state: STATE_NONE,
+                        });
+                        last = last.max(target);
+                    }
+                    if !dense_node_disallows_gid(scratch, pos, gid) {
+                        dense_intersect_node_disallowed(scratch, target, dfa.disallowed_for(gid));
+                    }
                 }
             }
+            scratch.dag_nodes[pos] = Some(node);
         }
+        pos += 1;
     }
 
-    for pos in (1..len).rev() {
-        let Some(node) = scratch.dag_nodes[pos].as_ref() else {
+    for pos in (first..=last).rev() {
+        let Some(mut node) = scratch.dag_nodes[pos].take() else {
             continue;
         };
-        let end_state = node.end_state;
-        let edges = node.edges.clone();
         let mut h = new_hasher();
         h.write_u64(dfa.completion_with_disallowed(
-            end_state,
-            if reuse_disallowed_slots {
-                dense_disallowed_ref(scratch, pos)
-            } else {
-                scratch.dag_disallowed[pos].as_ref()
-            },
+            node.end_state, dense_disallowed_ref(scratch, pos),
         ));
-        for &(gid, target) in &edges {
-            let disallows = if reuse_disallowed_slots {
-                dense_node_disallows_gid(scratch, pos, gid)
-            } else {
-                node_disallows_gid(scratch, pos, gid)
-            };
-            if disallows {
-                continue;
+        for &(gid, target) in &node.edges {
+            if !dense_node_disallows_gid(scratch, pos, gid) {
+                h.write_u64(gid as u64);
+                h.write_u64(scratch.dag_nodes.get(target)
+                    .and_then(|node| node.as_ref()).map_or(0, |node| node.hash));
             }
-            h.write_u64(gid as u64);
-            h.write_u64(
-                scratch
-                    .dag_nodes
-                    .get(target)
-                    .and_then(|node| node.as_ref())
-                    .map_or(0, |node| node.hash),
-            );
         }
-        scratch.dag_nodes[pos].as_mut().unwrap().hash = h.finish();
+        node.hash = h.finish();
+        scratch.dag_nodes[pos] = Some(node);
     }
-
     node_count
 }
 
@@ -2592,58 +2557,6 @@ fn run_suffix(
     (end_state, edges)
 }
 
-fn try_hash_single_target_suffix(
-    dfa: &Dfa,
-    slice: &[u8],
-    scratch: &mut Scratch,
-) -> Option<usize> {
-    let pos = scratch.single_target_pos;
-    if pos == usize::MAX {
-        return None;
-    }
-    let len = slice.len();
-
-    if pos >= len {
-        scratch.single_target_hash_pos = pos;
-        scratch.single_target_hash = 0;
-        return Some(0);
-    }
-
-    let (&first_gid, rest) = scratch.single_target_gids.split_first()?;
-    let mut root_disallowed = dfa.disallowed_for(first_gid).clone();
-    for &gid in rest {
-        intersect_disallowed(&mut root_disallowed, dfa.disallowed_for(gid));
-    }
-
-    let (end_state, edges) = run_suffix(
-        dfa,
-        &slice[pos..],
-        pos,
-        &mut scratch.suffix_match_positions,
-        &mut scratch.suffix_dirty_groups,
-    );
-    if edges.iter().any(|&(_, target)| target < len) {
-        return None;
-    }
-
-    let mut h = new_hasher();
-    h.write_u64(dfa.completion_with_disallowed(
-        end_state.unwrap_or(STATE_NONE),
-        Some(&root_disallowed),
-    ));
-    for &(gid, _target) in &edges {
-        if root_disallowed.contains(gid) {
-            continue;
-        }
-        h.write_u64(gid as u64);
-        h.write_u64(0);
-    }
-
-    scratch.single_target_hash_pos = pos;
-    scratch.single_target_hash = h.finish();
-    Some(1)
-}
-
 /// Compute a token's full signature over a batch of initial states.
 /// Also cleans up match_positions for dirty groups (maintaining the NONE invariant).
 fn finish_token_signature(
@@ -2772,14 +2685,7 @@ fn compute_token_state_observation_words(
 
     let target_count = scratch.targets.len();
     if target_count == 1 {
-        if try_hash_single_target_suffix(dfa, token, scratch).is_none() {
-            ensure_target_gids_map(
-                &mut scratch.target_gids,
-                scratch.single_target_pos,
-                scratch.single_target_gids.as_slice(),
-            );
-            hash_suffixes(dfa, token, scratch, false);
-        }
+        hash_single_target_suffix_dense(dfa, token, scratch);
     } else if target_count > 0 {
         hash_suffixes(dfa, token, scratch, false);
     }
@@ -3000,16 +2906,7 @@ fn token_signature(
     );
     let target_count = scratch.targets.len();
     if target_count == 1 {
-        if let Some(dag_nodes) = try_hash_single_target_suffix(dfa, token, scratch) {
-            let _ = dag_nodes;
-        } else {
-            ensure_target_gids_map(
-                &mut scratch.target_gids,
-                scratch.single_target_pos,
-                scratch.single_target_gids.as_slice(),
-            );
-            hash_suffixes(dfa, token, scratch, false);
-        }
+        hash_single_target_suffix_dense(dfa, token, scratch);
     } else if target_count > 0 {
         hash_suffixes(dfa, token, scratch, false);
     }
@@ -3871,16 +3768,7 @@ fn trie_walk_chunk_signatures_from_prefix<S: AsRef<[u8]> + Sync>(
                     stats.single_target_tokens += 1;
                 }
                 let single_target_started_at = profile.then(Instant::now);
-                if dense_suffix_dag {
-                    hash_single_target_suffix_dense(dfa, token, scratch);
-                } else if try_hash_single_target_suffix(dfa, token, scratch).is_none() {
-                        ensure_target_gids_map(
-                            &mut scratch.target_gids,
-                            scratch.single_target_pos,
-                            scratch.single_target_gids.as_slice(),
-                        );
-                        hash_suffixes(dfa, token, scratch, false);
-                }
+                hash_single_target_suffix_dense(dfa, token, scratch);
                 stats.single_target_suffix_ms += elapsed_ms(single_target_started_at);
             } else if target_count > 0 {
                 if profile {
@@ -7244,7 +7132,7 @@ mod shared_base_tests {
         generic.targets.extend([1usize, 2]);
         generic.target_gids.insert(1, SmallVec::from_slice(&[0]));
         generic.target_gids.insert(2, SmallVec::from_slice(&[1]));
-        hash_suffixes(&dfa, token, &mut generic, false);
+        hash_suffixes_reference(&dfa, token, &mut generic, false);
 
         let mut dense = Scratch::new(1, dfa.num_groups);
         dense.trie_target_bits_enabled = true;
