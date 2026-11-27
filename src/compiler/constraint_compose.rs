@@ -40,8 +40,9 @@ use crate::compiler::stages::templates::characterize::{
     try_characterize_selected_terminals_for_terminal_count,
 };
 use crate::compiler::stages::templates::Templates;
+#[cfg(test)]
+use crate::compiler::glr::table::Action;
 use crate::compiler::glr::table::{
-    Action,
     ComposedTable,
     ControlEliminationReport,
 };
@@ -1674,9 +1675,7 @@ fn remap_composition_template_label(label: i32, state_relation: &[Vec<u32>]) -> 
 }
 
 
-/// in the same transition traversal.  The eager composition fast path needs
-/// both representations immediately, so rebuilding the skeleton afterward
-/// would just walk and allocate every transported transition a second time.
+/// Remap the template and construct its weighted skeleton in one traversal.
 pub(crate) fn transport_composition_template_dfa_with_skeleton(
     mut dfa: UnweightedDfa,
     state_relation: &[Vec<u32>],

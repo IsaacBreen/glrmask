@@ -1624,6 +1624,7 @@ impl FastTokenizerTransitions {
     }
 }
 pub(crate) type TemplateDfasByTerminal = Vec<Option<Arc<CommitTemplateDfas>>>;
+#[cfg(test)]
 pub(crate) type FastTemplateDfasByTerminal = Vec<Option<Arc<FastCommitTemplateDfas>>>;
 
 const INLINE_TEMPLATE_TRANSITION_LIMIT: usize = 8;

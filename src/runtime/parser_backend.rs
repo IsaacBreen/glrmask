@@ -568,8 +568,9 @@ impl TemplateParser {
                 .expect("validated finite completion relation"),
             link_program::nullable_return(0),
         ]).expect("nullable completion must remain finite");
+        let symbols = self.composition().map_or(self.state_count, |linked| linked.completion_view.symbols);
         let relation = Arc::new(PreparedRelation::prepare(
-            Arc::new(completion), self.state_count, false,
+            Arc::new(completion), symbols, false,
         ).expect("validated nullable completion relation"));
         match &mut self.admission {
             TemplateAdmission::Local(local) => {
