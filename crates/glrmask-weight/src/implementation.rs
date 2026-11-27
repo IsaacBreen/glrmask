@@ -2147,6 +2147,7 @@ fn union_compact_entries_handwritten(left: &Weight, right: &Weight) -> Weight {
     builder.finish()
 }
 
+#[cfg(test)]
 fn combined_boundaries(left: &[WeightRangeEntry], right: &[WeightRangeEntry]) -> SmallVec<[u64; 32]> {
     let mut boundaries = SmallVec::<[u64; 32]>::with_capacity((left.len() + right.len()) * 2);
     for entry in left.iter().chain(right.iter()) {
@@ -2158,6 +2159,7 @@ fn combined_boundaries(left: &[WeightRangeEntry], right: &[WeightRangeEntry]) ->
     boundaries
 }
 
+#[cfg(test)]
 fn active_tokens<'a>(
     entries: &'a [WeightRangeEntry],
     index: &mut usize,
@@ -2230,69 +2232,24 @@ where
 
 
 fn difference_weights(left: &Weight, right: &Weight) -> Weight {
-    let mut right_iter = right.0.range_values();
-    let mut right_entry = right_iter.next();
+    // A left join emits exactly the left domain, including gaps in the right
+    // operand, and stops when the left operand is exhausted.
     let mut builder = CompactRangeBuilder::new();
     let mut same_as_left = true;
-
-    for (left_range, left_tokens) in left.0.range_values() {
-        let left_start = *left_range.start();
-        let left_end = *left_range.end();
-        let mut cursor = u64::from(left_start);
-        let left_end_u64 = u64::from(left_end);
-
-        while let Some((right_range, _)) = right_entry.as_ref() {
-            if *right_range.end() < left_start {
-                right_entry = right_iter.next();
-            } else {
-                break;
+    for (range, (left_tokens, right_tokens)) in
+        left.0.range_values().left_join(right.0.range_values())
+    {
+        match difference_token_sets(Some(left_tokens), right_tokens) {
+            Some(tokens) => {
+                same_as_left &= same_shared_token_set(&tokens, left_tokens);
+                builder.push(*range.start(), *range.end(), tokens);
             }
-        }
-
-        while cursor <= left_end_u64 {
-            let Some((right_range, right_tokens)) = right_entry.as_ref() else {
-                builder.push(cursor as u32, left_end, Arc::clone(left_tokens));
-                break;
-            };
-            let right_start = u64::from(*right_range.start());
-            let right_end = u64::from(*right_range.end());
-
-            if right_start > left_end_u64 {
-                builder.push(cursor as u32, left_end, Arc::clone(left_tokens));
-                break;
-            }
-            if right_end < cursor {
-                right_entry = right_iter.next();
-                continue;
-            }
-
-            if cursor < right_start {
-                let gap_end = (right_start - 1).min(left_end_u64);
-                builder.push(cursor as u32, gap_end as u32, Arc::clone(left_tokens));
-                cursor = gap_end + 1;
-                if cursor > left_end_u64 {
-                    break;
-                }
-            }
-
-            let overlap_end = left_end_u64.min(right_end);
-            if let Some(tokens) = shared_token_difference(left_tokens, right_tokens) {
-                if !same_shared_token_set(&tokens, left_tokens) {
-                    same_as_left = false;
-                }
-                builder.push(cursor as u32, overlap_end as u32, tokens);
-            } else {
+            None => {
                 same_as_left = false;
                 builder.flush();
             }
-            cursor = overlap_end + 1;
-
-            if right_end <= overlap_end {
-                right_entry = right_iter.next();
-            }
         }
     }
-
     if same_as_left {
         left.clone()
     } else {
@@ -2301,78 +2258,34 @@ fn difference_weights(left: &Weight, right: &Weight) -> Weight {
 }
 
 fn intersect_weights(left: &Weight, right: &Weight) -> Weight {
-    let mut left_iter = left.0.range_values();
-    let mut right_iter = right.0.range_values();
-    let mut left_entry = left_iter.next();
-    let mut right_entry = right_iter.next();
-
-    let mut builder = CompactRangeBuilder::new();
+    // An inner join visits only overlaps and stops when either operand ends.
+    // Track each operand's original ranges only while the output could still
+    // be that exact representation. This preserves the old conservative
+    // pointer-identity shortcut, including its treatment of split ranges.
+    let mut left_ranges = left.0.range_values();
+    let mut right_ranges = right.0.range_values();
     let mut same_as_left = true;
     let mut same_as_right = true;
-
-    loop {
-        let (left_range, left_tokens, right_range, right_tokens) = match (left_entry, right_entry)
-        {
-            (Some((left_range, left_tokens)), Some((right_range, right_tokens))) => {
-                (left_range, left_tokens, right_range, right_tokens)
-            }
-            (Some(_), None) => {
-                same_as_left = false;
-                break;
-            }
-            (None, Some(_)) => {
-                same_as_right = false;
-                break;
-            }
-            (None, None) => break,
-        };
-        let start = (*left_range.start()).max(*right_range.start());
-        let end = (*left_range.end()).min(*right_range.end());
-        let left_start = *left_range.start();
-        let left_end = *left_range.end();
-        let right_start = *right_range.start();
-        let right_end = *right_range.end();
-
-        if start <= end {
-            if start != left_start || end != left_end {
-                same_as_left = false;
-            }
-            if start != right_start || end != right_end {
-                same_as_right = false;
-            }
-            if let Some(tokens) = shared_token_intersection(left_tokens, right_tokens) {
-                if !Arc::ptr_eq(&tokens, left_tokens) {
-                    same_as_left = false;
-                }
-                if !Arc::ptr_eq(&tokens, right_tokens) {
-                    same_as_right = false;
-                }
-                builder.push(start, end, tokens);
-            } else {
-                same_as_left = false;
-                same_as_right = false;
-            }
-        } else if left_end < right_start {
+    let mut builder = CompactRangeBuilder::new();
+    for (range, (left_tokens, right_tokens)) in
+        left.0.range_values().inner_join(right.0.range_values())
+    {
+        let Some(tokens) = shared_token_intersection(left_tokens, right_tokens) else {
             same_as_left = false;
-        } else if right_end < left_start {
             same_as_right = false;
-        }
-
-        if left_end <= right_end {
-            left_entry = left_iter.next();
-        } else {
-            left_entry = Some((left_range, left_tokens));
-        }
-        if right_end <= left_end {
-            right_entry = right_iter.next();
-        } else {
-            right_entry = Some((right_range, right_tokens));
-        }
+            continue;
+        };
+        same_as_left = same_as_left
+            && Arc::ptr_eq(&tokens, left_tokens)
+            && left_ranges.next().is_some_and(|(original, _)| original == range);
+        same_as_right = same_as_right
+            && Arc::ptr_eq(&tokens, right_tokens)
+            && right_ranges.next().is_some_and(|(original, _)| original == range);
+        builder.push(*range.start(), *range.end(), tokens);
     }
-
-    if same_as_left {
+    if same_as_left && left_ranges.next().is_none() {
         left.clone()
-    } else if same_as_right {
+    } else if same_as_right && right_ranges.next().is_none() {
         right.clone()
     } else {
         builder.finish()
@@ -3250,15 +3163,11 @@ impl Weight {
     }
 
     fn intersection_uncached_impl(&self, other: &Self) -> Self {
-        if let (Some(left), Some(right)) = (single_compact_entry(self), single_compact_entry(other))
-        {
-            combine_single_entries(&left, &right, intersect_token_sets)
-        } else if let Some(single) = single_compact_entry(self) {
-            intersect_single_entry_with_weight(&single, other)
-        } else if let Some(single) = single_compact_entry(other) {
-            intersect_single_entry_with_weight(&single, self)
-        } else {
-            intersect_weights(self, other)
+        match (single_compact_entry(self), single_compact_entry(other)) {
+            (Some(left), Some(right)) => combine_single_entries(&left, &right, intersect_token_sets),
+            (Some(single), None) => intersect_single_entry_with_weight(&single, other),
+            (None, Some(single)) => intersect_single_entry_with_weight(&single, self),
+            (None, None) => intersect_weights(self, other),
         }
     }
 
