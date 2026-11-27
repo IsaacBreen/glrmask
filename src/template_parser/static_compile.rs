@@ -626,8 +626,6 @@ pub(super) fn compile(
         ids.tokenizer_states.original_to_internal, ids.tokenizer_states.internal_to_originals,
     );
     inner.token_classes = crate::runtime::TokenClasses::mapped(ids.vocab_tokens.original_to_internal.clone(), ids.vocab_tokens.internal_to_originals_vecs());
-    inner.internal_token_bytes =
-        pm::build_internal_token_bytes_from_groups(vocab, &ids.vocab_tokens.internal_to_originals);
     inner.rebuild_runtime_caches();
     assert!(
         !inner.table.is_present(),

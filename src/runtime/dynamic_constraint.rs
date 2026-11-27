@@ -1036,8 +1036,6 @@ impl DynamicConstraint {
             token_classes: Default::default(),
             token_bytes: payload.token_bytes,
             packed_token_bytes: None,
-            internal_token_bytes: BTreeMap::new(),
-            token_bytes_dense: Vec::new(),
             internal_token_buf_masks: Vec::new(),
             sliding_word_group_buf_masks: Default::default(),
             word_group_sparse_masks: Vec::new(),

@@ -10072,14 +10072,6 @@ constraint_data_schema! {
     /// map used by compiler/composition code.
     @serde(skip, default)
     pub(crate) packed_token_bytes: Option<Arc<token_bytes_artifact_serde::PackedTokenBytes>>,
-    // Compiler-side scratch/result metadata only. No runtime or composition
-    // path reads this field; composition rebuilds the map for its result when
-    // needed. Persisting it duplicated token bytes inside every constraint.
-    @serde(skip, default)
-    pub(crate) internal_token_bytes: BTreeMap<u32, Vec<u8>>,
-    @serde(skip)
-    pub(crate) token_bytes_dense: Vec<Option<Box<[u8]>>>,
-
     /// Precomputed bitmask fragments for each internal token.
     /// `internal_token_buf_masks[i]` contains (word_index, or_mask) pairs
     /// for all original tokens that map to internal token `i`.

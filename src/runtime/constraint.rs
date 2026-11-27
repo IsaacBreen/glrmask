@@ -9973,7 +9973,6 @@ impl Constraint {
             derived_ms,
         } = token_mask_profile;
 
-        self.token_bytes_dense = Vec::new();
         self.internal_token_dense_words = dense_mask_words;
         self.weight_token_dense_masks = dense_masks;
         if !preserve_packed_dwa_dense_masks {
@@ -11491,18 +11490,6 @@ impl Constraint {
             .collect()
     }
 
-    fn compute_dense_token_bytes(&self) -> Vec<Option<Box<[u8]>>> {
-        let Some(max_token_id) = self.max_original_token_id() else {
-            return Vec::new();
-        };
-
-        let mut dense = vec![None; max_token_id as usize + 1];
-        for (token_id, bytes) in self.token_bytes_iter() {
-            dense[token_id as usize] = Some(bytes.to_vec().into_boxed_slice());
-        }
-        dense
-    }
-
     pub(crate) fn compute_fast_template_dfas(&self) -> FastTemplateDfasByTerminal {
         let mut shared = rustc_hash::FxHashMap::<
             usize, Arc<FastCommitTemplateDfas>,
@@ -11955,10 +11942,6 @@ impl Constraint {
         );
         self.word_group_buf_op_costs =
             Self::compute_word_group_buf_op_costs(&self.internal_token_buf_op_costs);
-    }
-
-    pub(crate) fn build_dense_token_bytes(&mut self) {
-        self.token_bytes_dense = self.compute_dense_token_bytes();
     }
 
     /// Build fast transition lookup tables from the DWA's BTreeMap transitions.

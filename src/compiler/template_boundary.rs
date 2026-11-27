@@ -455,8 +455,6 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
         .map_err(|_| fail("static template TSID coordinate initialized twice"))?;
     overlay.recursive_static_observation = observation.map(Arc::new);
     constraint.tokenizer_tsids = crate::runtime::TokenizerTsidMap::scoped(root_tsids, inverse_tsids);
-    constraint.internal_token_bytes = pm::build_internal_token_bytes_from_groups(vocab,
-        &common.vocab_tokens.internal_to_originals);
     constraint.token_classes = crate::runtime::TokenClasses::mapped(common.vocab_tokens.original_to_internal, common.vocab_tokens.internal_to_originals);
     constraint.possible_matches = possible_matches;
     constraint.possible_matches_complete = true;

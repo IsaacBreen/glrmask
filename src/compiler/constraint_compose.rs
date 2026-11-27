@@ -65,7 +65,7 @@ use crate::compiler::stages::templates::compile_dfa::{
 };
 use crate::compiler::stages::templates::Templates;
 use crate::compiler::constraint_possible_matches::{
-    build_internal_token_bytes_from_groups, runtime_dynamic_vocab_for_vocab,
+    runtime_dynamic_vocab_for_vocab,
 };
 use crate::compiler::glr::table::{
     Action,
@@ -8037,7 +8037,6 @@ fn build_composed_constraint_unfinalized(
     ignore_expr: Option<crate::automata::regex::Expr>,
     terminal_live_states: Vec<Vec<u32>>,
     tokenizer_fast_transitions: crate::runtime::FastTokenizerTransitions,
-    defer_internal_token_bytes: bool,
     defer_dynamic_mask_vocab: bool,
     vocab: &Vocab,
     retained_lr_coordinator: bool,
@@ -8054,11 +8053,6 @@ fn build_composed_constraint_unfinalized(
         deferred_vocab_singleton_original_ids,
     } = internal_ids;
     debug_assert!(deferred_vocab_singleton_original_ids.is_none());
-    let internal_token_bytes = if defer_internal_token_bytes {
-        BTreeMap::new()
-    } else {
-        build_internal_token_bytes_from_groups(vocab, &vocab_tokens.internal_to_originals)
-    };
     let ManyToOneIdMap {
         original_to_internal: state_to_internal_tsid,
         internal_to_originals: internal_tsid_to_states,
@@ -8148,8 +8142,6 @@ fn build_composed_constraint_unfinalized(
         token_classes: crate::runtime::TokenClasses::mapped(original_token_to_internal, internal_token_to_tokens),
         token_bytes,
         packed_token_bytes: None,
-        internal_token_bytes,
-        token_bytes_dense: Vec::new(),
         internal_token_buf_masks: Vec::new(),
         sliding_word_group_buf_masks: Default::default(),
         word_group_sparse_masks: Vec::new(),
@@ -8474,7 +8466,6 @@ fn compose_dynamic_recursive_shared_fast(
         None,
         Vec::new(),
         root_fast_transitions,
-        true,
         true,
         vocab,
         true,

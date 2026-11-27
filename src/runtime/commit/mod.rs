@@ -1037,14 +1037,6 @@ fn parser_stacks_only(gss: &ParserGSS) -> Vec<Vec<u32>> {
 }
 
 
-fn token_bytes_for_id(constraint: &Constraint, token_id: u32) -> Option<&[u8]> {
-    constraint
-        .token_bytes_dense
-        .get(token_id as usize)
-        .and_then(|bytes| bytes.as_deref())
-        .or_else(|| constraint.token_bytes_for_id(token_id))
-}
-
 const COMMIT_ASSERT_MASK_EQUIVALENCE: u8 = 1 << 0;
 const COMMIT_ASSERT_FAST_PATH_EQUIVALENCE: u8 = 1 << 1;
 
@@ -1387,7 +1379,7 @@ fn commit_token_impl_observed<O: CommitObserver>(
     token_id: u32,
     observer: &mut O,
 ) -> Result<(), String> {
-    let bytes = token_bytes_for_id(constraint, token_id);
+    let bytes = constraint.token_bytes_for_id(token_id);
     let has_special = constraint.has_special_token_id(token_id);
     if bytes.is_none() && !has_special {
         return Err(format!(
@@ -1561,7 +1553,7 @@ fn commit_token_no_fast_path_reference(
     state: &mut ParserStateMap,
     token_id: u32,
 ) -> Result<(), String> {
-    let bytes = token_bytes_for_id(constraint, token_id);
+    let bytes = constraint.token_bytes_for_id(token_id);
     let has_special = constraint.has_special_token_id(token_id);
     if bytes.is_none() && !has_special {
         return Err(format!(
@@ -1626,13 +1618,13 @@ fn assert_commit_fast_path_equivalence(
             actual_semantic.is_accepting(),
             reference_semantic.is_accepting(),
             "commit fast-path completion mismatch for token_id {token_id} bytes {}\nactual={actual_canonical:?}\nreference={reference_canonical:?}",
-            format_optional_token_bytes(token_bytes_for_id(constraint, token_id)),
+            format_optional_token_bytes(constraint.token_bytes_for_id(token_id)),
         );
         assert_eq!(
             actual_semantic.mask(),
             reference_semantic.mask(),
             "commit fast-path successor-mask mismatch for token_id {token_id} bytes {}\nactual={actual_canonical:?}\nreference={reference_canonical:?}",
-            format_optional_token_bytes(token_bytes_for_id(constraint, token_id)),
+            format_optional_token_bytes(constraint.token_bytes_for_id(token_id)),
         );
     }
 }
@@ -8384,7 +8376,7 @@ impl ConstraintState {
         markers.begin();
         let queries = constraint.marker_queries.as_deref().expect("marker-enabled state has immutable queries");
         let base = markers.byte_offset;
-        let width = token_bytes_for_id(constraint, token_id).map_or(0, |bytes| bytes.len());
+        let width = constraint.token_bytes_for_id(token_id).map_or(0, |bytes| bytes.len());
         let next = base.checked_add(width as u64).ok_or("marker byte position overflow")?;
         let result = commit_token_impl_observed(constraint, &mut self.state, &mut self.buffers, token_id,
             &mut LiveMarkers { queries, state: markers, base });
@@ -8413,7 +8405,7 @@ impl ConstraintState {
     }
 
     pub(crate) fn knows_token_id(&self, token_id: u32) -> bool {
-        token_bytes_for_id(&self.constraint, token_id).is_some()
+        self.constraint.token_bytes_for_id(token_id).is_some()
             || self.constraint.has_special_token_id(token_id)
     }
 
@@ -9000,7 +8992,7 @@ impl ConstraintState {
     fn commit_token_raw_inner(&mut self, token_id: u32) -> Result<(), String> {
         if let Some(result) = self.commit_end_token(token_id) { return result; }
         let constraint = self.constraint.clone();
-        let bytes = token_bytes_for_id(&constraint, token_id);
+        let bytes = constraint.token_bytes_for_id(token_id);
         if !self.knows_token_id(token_id) {
             self.reject_after_failed_commit();
             return Err(format!(
@@ -9029,7 +9021,7 @@ impl ConstraintState {
     pub(crate) fn commit_token_dynamic(&mut self, token_id: u32) -> Result<(), String> {
         if let Some(result) = self.commit_end_token(token_id) { return result; }
         let constraint = self.constraint.clone();
-        let bytes = token_bytes_for_id(&constraint, token_id);
+        let bytes = constraint.token_bytes_for_id(token_id);
         if !self.knows_token_id(token_id) {
             self.reject_after_failed_commit();
             return Err(format!(
@@ -9069,7 +9061,7 @@ impl ConstraintState {
         use std::time::Instant;
 
         let constraint = self.constraint.clone();
-        let bytes = token_bytes_for_id(&constraint, token_id);
+        let bytes = constraint.token_bytes_for_id(token_id);
         let assertion_flags = commit_assertion_flags();
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
@@ -9099,7 +9091,7 @@ impl ConstraintState {
             return result.map(|()| CommitProfile::default());
         }
         let constraint = self.constraint.clone();
-        let bytes = token_bytes_for_id(&constraint, token_id);
+        let bytes = constraint.token_bytes_for_id(token_id);
         let has_special = constraint.has_special_token_id(token_id);
         if bytes.is_none() && !has_special {
             self.reject_after_failed_commit();
@@ -9168,7 +9160,7 @@ impl ConstraintState {
             return result.map(|()| (Vec::new(), final_stacks(&self.state), CommitProfile::default()));
         }
         let constraint = self.constraint.clone();
-        let bytes = token_bytes_for_id(&constraint, token_id);
+        let bytes = constraint.token_bytes_for_id(token_id);
         let has_special = constraint.has_special_token_id(token_id);
         if bytes.is_none() && !has_special {
             self.reject_after_failed_commit();

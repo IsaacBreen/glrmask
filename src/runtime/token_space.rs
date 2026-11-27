@@ -54,21 +54,18 @@ impl TokenizerTsidMap {
     /// into the cache rather than reconstructing it during compiler linking.
     pub(crate) fn partition(primary: Vec<u32>, inverse: Vec<Vec<u32>>) -> Self {
         let count = inverse.len();
-        debug_assert!({
-            let mut expected = vec![Vec::new(); count];
-            let mut valid = true;
-            for (state, &id) in primary.iter().enumerate() {
-                if id != u32::MAX {
-                    if let Some(group) = expected.get_mut(id as usize) {
-                        group.push(state as u32);
-                    } else {
-                        valid = false;
-                        break;
-                    }
-                }
-            }
-            valid && inverse == expected
-        }, "compiler TSID partition must have its canonical exact inverse");
+        debug_assert!(
+            inverse.iter().enumerate().all(|(id, states)| {
+                states.windows(2).all(|pair| pair[0] < pair[1])
+                    && states.iter().all(|&state| {
+                        primary.get(state as usize).is_some_and(|&mapped| {
+                            mapped != u32::MAX && mapped as usize == id
+                        })
+                    })
+            }) && inverse.iter().map(Vec::len).sum::<usize>()
+                == primary.iter().filter(|&&id| id != u32::MAX).count(),
+            "compiler TSID partition must have its canonical exact inverse",
+        );
         let groups = if count <= primary.len() {
             TsidGroups::Partition {
                 count,

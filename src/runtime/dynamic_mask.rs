@@ -9719,7 +9719,8 @@ pub(crate) fn or_mask_dynamic_additions(state: &ConstraintState, buf: &mut [u32]
 /// OR only requested candidate bits from the complete exact dynamic result
 /// into `buf`. `candidate_mask` filters the result after traversal; it never
 /// restricts which vocabulary prefixes/endpoints the strict walker visits.
-pub(crate) fn or_mask_dynamic_candidate_additions(
+#[cfg(test)]
+fn or_mask_dynamic_candidate_additions(
     state: &ConstraintState,
     buf: &mut [u32],
     candidate_mask: &[u32],
