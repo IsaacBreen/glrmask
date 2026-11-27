@@ -7744,7 +7744,7 @@ impl Tokenizer {
         active_terminals: &[bool],
         relevant_bytes: &[bool; 256],
     ) -> Option<Tokenizer> {
-        if original_to_quotient.len() != self.num_states() as usize
+        if self.has_any_virtual_runtime() || original_to_quotient.len() != self.num_states() as usize
             || active_terminals.len() != self.num_terminals as usize
             || representatives.is_empty()
             || original_to_quotient.get(self.start_state() as usize).copied() != Some(0)
@@ -7781,12 +7781,12 @@ impl Tokenizer {
             if !members.contains(&representative) {
                 return None;
             }
-            let representative_finalizers = filtered(self.dfa.finalizers(representative));
+            let representative_finalizers = filtered(self.physical_finalizers(representative));
             let representative_futures =
-                filtered(self.dfa.possible_future_group_ids(representative));
+                filtered(self.physical_futures(representative));
             for &member in members {
-                if filtered(self.dfa.finalizers(member)) != representative_finalizers
-                    || filtered(self.dfa.possible_future_group_ids(member))
+                if filtered(self.physical_finalizers(member)) != representative_finalizers
+                    || filtered(self.physical_futures(member))
                         != representative_futures
                 {
                     return None;
@@ -7806,10 +7806,8 @@ impl Tokenizer {
                     }
                 }
                 let mapped_epsilon = |state: u32| {
-                    let mut targets = self.dfa.states()[state as usize]
-                        .epsilon_transitions
-                        .iter()
-                        .map(|&target| original_to_quotient[target as usize])
+                    let mut targets = self.physical_epsilon_targets(state)
+                        .map(|target| original_to_quotient[target as usize])
                         .collect::<Vec<_>>();
                     targets.sort_unstable();
                     targets.dedup();
@@ -7845,10 +7843,8 @@ impl Tokenizer {
                 })
                 .collect::<Vec<_>>();
             dfa.set_transitions_from_sorted_entries(class as u32, transitions);
-            let mut epsilon_targets = self.dfa.states()[representative as usize]
-                .epsilon_transitions
-                .iter()
-                .map(|&target| original_to_quotient[target as usize])
+            let mut epsilon_targets = self.physical_epsilon_targets(representative)
+                .map(|target| original_to_quotient[target as usize])
                 .collect::<Vec<_>>();
             epsilon_targets.sort_unstable();
             epsilon_targets.dedup();
@@ -7857,8 +7853,8 @@ impl Tokenizer {
             }
             dfa.overwrite_state_metadata(
                 class as u32,
-                filtered(self.dfa.finalizers(representative)),
-                filtered(self.dfa.possible_future_group_ids(representative)),
+                filtered(self.physical_finalizers(representative)),
+                filtered(self.physical_futures(representative)),
             );
         }
         Some(Tokenizer {
@@ -7897,7 +7893,8 @@ impl Tokenizer {
         source_to_self: &[u32],
         source_to_rebuilt: &[u32],
     ) -> bool {
-        if source.num_terminals != self.num_terminals
+        if source.has_any_virtual_runtime() || self.has_any_virtual_runtime()
+            || source.num_terminals != self.num_terminals
             || source_to_self.len() != source.num_states() as usize
             || source_to_rebuilt.len() != source.num_states() as usize
             || source_to_self
@@ -7920,26 +7917,22 @@ impl Tokenizer {
                 continue;
             }
             let target_state = source_to_self[source_state as usize];
-            if source.dfa.finalizers(source_state) != self.dfa.finalizers(target_state)
-                || source.dfa.possible_future_group_ids(source_state)
-                    != self.dfa.possible_future_group_ids(target_state)
+            if source.physical_finalizers(source_state) != self.physical_finalizers(target_state)
+                || source.physical_futures(source_state)
+                    != self.physical_futures(target_state)
             {
                 return false;
             }
 
             mapped_epsilon.clear();
             mapped_epsilon.extend(
-                source.dfa.states()[source_state as usize]
-                    .epsilon_transitions
-                    .iter()
-                    .map(|&next| source_to_self[next as usize]),
+                source.physical_epsilon_targets(source_state)
+                    .map(|next| source_to_self[next as usize]),
             );
             mapped_epsilon.sort_unstable();
             mapped_epsilon.dedup();
             target_epsilon.clear();
-            target_epsilon.extend_from_slice(
-                &self.dfa.states()[target_state as usize].epsilon_transitions,
-            );
+            target_epsilon.extend(self.physical_epsilon_targets(target_state));
             target_epsilon.sort_unstable();
             target_epsilon.dedup();
             if mapped_epsilon != target_epsilon {
@@ -7980,7 +7973,8 @@ impl Tokenizer {
         rebuilt: &Tokenizer,
         rebuilt_to_self: &[u32],
     ) -> Option<Vec<u32>> {
-        if source.num_terminals != rebuilt.num_terminals
+        if source.has_any_virtual_runtime() || rebuilt.has_any_virtual_runtime() || self.has_any_virtual_runtime()
+            || source.num_terminals != rebuilt.num_terminals
             || source.num_terminals != self.num_terminals
             || rebuilt_to_self.len() != rebuilt.num_states() as usize
         {
@@ -8014,21 +8008,17 @@ impl Tokenizer {
                 continue;
             }
             let source_state = source_state as u32;
-            if source.dfa.finalizers(source_state) != rebuilt.dfa.finalizers(rebuilt_state)
-                || source.dfa.possible_future_group_ids(source_state)
-                    != rebuilt.dfa.possible_future_group_ids(rebuilt_state)
+            if source.physical_finalizers(source_state) != rebuilt.physical_finalizers(rebuilt_state)
+                || source.physical_futures(source_state)
+                    != rebuilt.physical_futures(rebuilt_state)
                 || source.state_has_epsilon_transitions(source_state)
                     != rebuilt.state_has_epsilon_transitions(rebuilt_state)
             {
                 return None;
             }
-            let source_epsilon = &source.dfa.states()[source_state as usize].epsilon_transitions;
-            let rebuilt_epsilon = &rebuilt.dfa.states()[rebuilt_state as usize].epsilon_transitions;
-            let mapped_epsilon = source_epsilon
-                .iter()
-                .map(|&target| *source_to_rebuilt.get(target as usize).unwrap_or(&u32::MAX))
-                .collect::<Vec<_>>();
-            if mapped_epsilon != *rebuilt_epsilon {
+            let mapped_epsilon = source.physical_epsilon_targets(source_state)
+                .map(|target| *source_to_rebuilt.get(target as usize).unwrap_or(&u32::MAX));
+            if !mapped_epsilon.eq(rebuilt.physical_epsilon_targets(rebuilt_state)) {
                 return None;
             }
             let source_transitions = source
@@ -8053,6 +8043,7 @@ impl Tokenizer {
             }
         }
 
+        self.materialize_runtime_metadata_for_structural_mutation();
         self.invalidate_derived_caches();
         let original_self_states = self.num_states() as usize;
         let mut source_to_self = vec![u32::MAX; source.num_states() as usize];
@@ -8081,11 +8072,8 @@ impl Tokenizer {
                 .set_transitions_from_sorted_entries(target_state, transitions);
             self.dfa.overwrite_state_metadata(
                 target_state,
-                source.dfa.finalizers(source_state_u32).clone(),
-                source
-                    .dfa
-                    .possible_future_group_ids(source_state_u32)
-                    .clone(),
+                source.physical_finalizers(source_state_u32).clone(),
+                source.physical_futures(source_state_u32).clone(),
             );
         }
         debug_assert_eq!(
@@ -8388,11 +8376,11 @@ impl Tokenizer {
         );
 
         let left_offset = 1u32;
-        let right_offset = left_offset + left.dfa.num_states() as u32;
+        let right_offset = left_offset + left.num_states();
         let mut dfa = DFA::new(
             1usize
-                .saturating_add(left.dfa.num_states())
-                .saturating_add(right.dfa.num_states()),
+                .saturating_add((left.num_states() as usize))
+                .saturating_add((right.num_states() as usize)),
         );
         let num_groups = left.num_terminals as usize;
         dfa.ensure_group_capacity(num_groups);
@@ -8403,31 +8391,26 @@ impl Tokenizer {
             dfa.set_group_u8set(group as u32, left_set.union(&right_set));
         }
 
-        let copy_source = |target: &mut DFA, source: &DFA, offset: u32| {
-            for (state_index, state) in source.states().iter().enumerate() {
-                let target_state = offset + state_index as u32;
+        let copy_source = |target: &mut DFA, source: &Tokenizer, offset: u32| {
+            for state in 0..source.num_states() {
+                let target_state = offset + state;
                 target.set_transitions_from_sorted_entries(
                     target_state,
-                    state
-                        .transitions
-                        .iter()
-                        .map(|(byte, &destination)| (byte, offset + destination))
-                        .collect(),
+                    source.physical_transitions_from(state)
+                        .map(|(byte, destination)| (byte, offset + destination)).collect(),
                 );
-                for &destination in &state.epsilon_transitions {
+                for destination in source.physical_epsilon_targets(state) {
                     target.add_epsilon_transition(target_state, offset + destination);
                 }
                 target.overwrite_state_metadata(
                     target_state,
-                    state.finalizers.clone(),
-                    source
-                        .possible_future_group_ids(state_index as u32)
-                        .clone(),
+                    source.physical_finalizers(state).clone(),
+                    source.physical_futures(state).clone(),
                 );
             }
         };
-        copy_source(&mut dfa, &left.dfa, left_offset);
-        copy_source(&mut dfa, &right.dfa, right_offset);
+        copy_source(&mut dfa, left, left_offset);
+        copy_source(&mut dfa, right, right_offset);
         dfa.add_epsilon_transition(0, left_offset + left.start_state());
         dfa.add_epsilon_transition(0, right_offset + right.start_state());
 
@@ -8562,25 +8545,26 @@ impl Tokenizer {
             original_to_view:mapping,view_to_original:inverse})
     }
 
-    fn physical_epsilon_count(&self, state: u32) -> usize {
+    /// Borrow one physical epsilon row in its local coordinate, then rebase
+    /// targets on iteration. No expanded epsilon graph or per-query vector.
+    fn physical_epsilon_row(&self, state: u32) -> (&[u32], u32) {
         if let Some(segment) = self.packed_runtime_metadata_segment_for_state(state) {
-            return segment.metadata.epsilon_targets(segment.local_state(state)).len();
+            return (segment.metadata.epsilon_targets(segment.local_state(state)), segment.state_offset);
         }
-        self.dfa.states().get(state as usize).map_or(0, |row| row.epsilon_transitions.len())
+        (self.dfa.states().get(state as usize).map_or(&[][..], |row| row.epsilon_transitions.as_slice()), 0)
     }
 
-    fn for_each_epsilon_target(&self, state: u32, mut visit: impl FnMut(u32)) {
-        if let Some(segment) = self.packed_runtime_metadata_segment_for_state(state) {
-            for &target in segment.metadata.epsilon_targets(segment.local_state(state)) {
-                visit(segment.state_offset + target);
-            }
-            return;
-        }
-        if let Some(dfa_state) = self.dfa.states().get(state as usize) {
-            for &target in &dfa_state.epsilon_transitions {
-                visit(target);
-            }
-        }
+    pub(super) fn physical_epsilon_targets(&self, state: u32) -> impl ExactSizeIterator<Item = u32> + '_ {
+        let (targets, offset) = self.physical_epsilon_row(state);
+        targets.iter().map(move |&target| offset + target)
+    }
+
+    fn physical_epsilon_count(&self, state: u32) -> usize {
+        self.physical_epsilon_row(state).0.len()
+    }
+
+    fn for_each_epsilon_target(&self, state: u32, visit: impl FnMut(u32)) {
+        self.physical_epsilon_targets(state).for_each(visit);
     }
 
     fn epsilon_graph_is_acyclic(&self) -> bool {
@@ -8636,7 +8620,7 @@ impl Tokenizer {
     }
 
     #[inline]
-    fn physical_finalizers(&self, state: u32) -> &BitSet {
+    pub(super) fn physical_finalizers(&self, state: u32) -> &BitSet {
         if let Some(segment) = self.packed_runtime_metadata_segment_for_state(state) {
             return segment
                 .metadata
@@ -8671,7 +8655,7 @@ impl Tokenizer {
     }
 
     #[inline]
-    fn physical_futures(&self, state: u32) -> &BitSet {
+    pub(super) fn physical_futures(&self, state: u32) -> &BitSet {
         if let Some(segment) = self.packed_runtime_metadata_segment_for_state(state) {
             return segment
                 .metadata
@@ -8700,17 +8684,7 @@ impl Tokenizer {
                 continue;
             }
             result.push(state);
-            if let Some(segment) = self.packed_runtime_metadata_segment_for_state(state) {
-                stack.extend(
-                    segment
-                        .metadata
-                        .epsilon_targets(segment.local_state(state))
-                        .iter()
-                        .map(|target| segment.state_offset + *target),
-                );
-            } else if let Some(dfa_state) = self.dfa.states().get(state as usize) {
-                stack.extend_from_slice(&dfa_state.epsilon_transitions);
-            }
+            stack.extend(self.physical_epsilon_targets(state));
         }
         result.sort_unstable();
         result
@@ -12891,7 +12865,7 @@ impl Tokenizer {
     }
 
     #[inline]
-    fn physical_transitions_from(&self, state: u32) -> TokenizerTransitionsIter<'_> {
+    pub(super) fn physical_transitions_from(&self, state: u32) -> TokenizerTransitionsIter<'_> {
         if let Some(segment) = self.packed_runtime_transition_segment_for_state(state)
             && let Some((bytes, targets)) = segment.row(state)
         {
