@@ -2054,54 +2054,6 @@ impl FrozenFiniteScanner {
     }
 }
 
-fn collect_finite_profile_frozen(
-    scanner: &FrozenFiniteScanner,
-    trie: &FiniteTrie,
-    tokens: &[Arc<[u8]>],
-    node: u32,
-    config: u32,
-    out: &mut Vec<ProfileRun>,
-    pair_visits: &mut usize,
-    uniform_subtrees: &mut usize,
-    uniform_tokens: &mut usize,
-) {
-    *pair_visits += 1;
-    let current = &trie.nodes[node as usize];
-    let loops = scanner.self_loops[config as usize];
-    let covered = crate::ds::u8set::U8Set::from_words(current.subtree_bytes).is_subset(&loops);
-    if covered {
-        let signature = scanner.signature(config);
-        push_profile_run(out, current.subtree_start, current.subtree_end, signature);
-        *uniform_subtrees += 1;
-        *uniform_tokens += (current.subtree_end - current.subtree_start) as usize;
-        return;
-    }
-    if let Some(token) = current.token {
-        push_profile_run(
-            out,
-            token as u32,
-            token as u32 + 1,
-            scanner.signature(config),
-        );
-    }
-    for &child in &current.children {
-        let target = scanner.step_bytes(config, trie.edge(child, tokens));
-        if target != DEAD {
-            collect_finite_profile_frozen(
-                scanner,
-                trie,
-                tokens,
-                child,
-                target,
-                out,
-                pair_visits,
-                uniform_subtrees,
-                uniform_tokens,
-            );
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct ProfileRun {
     start: u32,
@@ -2124,59 +2076,150 @@ fn push_profile_run(out: &mut Vec<ProfileRun>, start: u32, end: u32, signature: 
     out.push(ProfileRun { start, end, signature });
 }
 
+/// Only transition availability differs between lazy and frozen scanning.
+/// Both supply a sufficient certificate for a uniform subtree.
+trait FiniteProfileMachine {
+    fn step_bytes(&mut self, config: u32, bytes: &[u8]) -> u32;
+    fn signature(&self, config: u32) -> u32;
+    fn self_loops(&self, config: u32) -> Option<crate::ds::u8set::U8Set>;
+}
+
+impl FiniteProfileMachine for &FrozenFiniteScanner {
+    fn step_bytes(&mut self, config: u32, bytes: &[u8]) -> u32 {
+        FrozenFiniteScanner::step_bytes(self, config, bytes)
+    }
+    fn signature(&self, config: u32) -> u32 {
+        FrozenFiniteScanner::signature(self, config)
+    }
+    fn self_loops(&self, config: u32) -> Option<crate::ds::u8set::U8Set> {
+        Some(self.self_loops[config as usize])
+    }
+}
+
+struct LazyFiniteScanner<'a, 'b> {
+    scanner: &'a mut Scanner<'b>,
+    self_loops: &'a [crate::ds::u8set::U8Set],
+}
+
+impl FiniteProfileMachine for LazyFiniteScanner<'_, '_> {
+    fn step_bytes(&mut self, config: u32, bytes: &[u8]) -> u32 {
+        self.scanner.step_bytes(config, bytes)
+    }
+    fn signature(&self, config: u32) -> u32 {
+        self.scanner.signature(config)
+    }
+    fn self_loops(&self, config: u32) -> Option<crate::ds::u8set::U8Set> {
+        self.scanner.singleton_state(config).map(|state| self.self_loops[state as usize])
+    }
+}
+
+#[derive(Default)]
+struct ProfileWork {
+    visits: usize,
+    uniform_subtrees: usize,
+    uniform_tokens: usize,
+}
+
+impl ProfileWork {
+    fn add(&mut self, other: Self) {
+        self.visits += other.visits;
+        self.uniform_subtrees += other.uniform_subtrees;
+        self.uniform_tokens += other.uniform_tokens;
+    }
+}
+
 fn collect_finite_profile(
-    scanner: &mut Scanner<'_>,
+    scanner: &mut impl FiniteProfileMachine,
     trie: &FiniteTrie,
     tokens: &[Arc<[u8]>],
-    self_loops: &[crate::ds::u8set::U8Set],
     node: u32,
     config: u32,
     out: &mut Vec<ProfileRun>,
-    pair_visits: &mut usize,
-    uniform_subtrees: &mut usize,
-    uniform_tokens: &mut usize,
-    max_profile_runs: usize,
-    max_pair_visits: usize,
+    work: &mut ProfileWork,
+    max_runs: usize,
+    max_visits: usize,
 ) -> bool {
-    *pair_visits += 1;
-    if *pair_visits > max_pair_visits {
+    work.visits += 1;
+    if work.visits > max_visits {
         return false;
     }
     let current = &trie.nodes[node as usize];
-    if let Some(state) = scanner.singleton_state(config) {
-        let loops = self_loops[state as usize];
-        let covered = crate::ds::u8set::U8Set::from_words(current.subtree_bytes).is_subset(&loops);
-        if covered {
-            let signature = scanner.signature(config);
-            push_profile_run(
-                out,
-                current.subtree_start,
-                current.subtree_end,
-                signature,
-            );
-            *uniform_subtrees += 1;
-            *uniform_tokens += (current.subtree_end - current.subtree_start) as usize;
-            return out.len() <= max_profile_runs;
-        }
+    if scanner.self_loops(config).is_some_and(|loops|
+        crate::ds::u8set::U8Set::from_words(current.subtree_bytes).is_subset(&loops))
+    {
+        push_profile_run(out, current.subtree_start, current.subtree_end, scanner.signature(config));
+        work.uniform_subtrees += 1;
+        work.uniform_tokens += (current.subtree_end - current.subtree_start) as usize;
+        return out.len() <= max_runs;
     }
     if let Some(token) = current.token {
-        let signature = scanner.signature(config);
-        push_profile_run(out, token as u32, token as u32 + 1, signature);
-        if out.len() > max_profile_runs {
+        push_profile_run(out, token as u32, token as u32 + 1, scanner.signature(config));
+        if out.len() > max_runs {
             return false;
         }
     }
     for &child in &current.children {
         let target = scanner.step_bytes(config, trie.edge(child, tokens));
-        if target != DEAD
-            && !collect_finite_profile(
-                scanner, trie, tokens, self_loops, child, target, out, pair_visits,
-                uniform_subtrees, uniform_tokens, max_profile_runs, max_pair_visits,
-            ) {
-                return false;
-            }
+        if target != DEAD && !collect_finite_profile(
+            scanner, trie, tokens, child, target, out, work, max_runs, max_visits,
+        ) {
+            return false;
+        }
     }
     true
+}
+
+struct FiniteProfileStore {
+    profiles: Vec<Arc<[ProfileRun]>>,
+    ids: FxHashMap<Arc<[ProfileRun]>, u32>,
+    runs: usize,
+}
+
+impl FiniteProfileStore {
+    fn new() -> Self {
+        Self { profiles: vec![Arc::from([])], ids: FxHashMap::default(), runs: 0 }
+    }
+
+    fn intern(&mut self, values: Vec<ProfileRun>) -> u32 {
+        if values.is_empty() {
+            return 0;
+        }
+        if let Some(&id) = self.ids.get(values.as_slice()) {
+            return id;
+        }
+        let id = self.profiles.len() as u32;
+        self.runs += values.len();
+        let values: Arc<[ProfileRun]> = Arc::from(values);
+        self.ids.insert(Arc::clone(&values), id);
+        self.profiles.push(values);
+        id
+    }
+}
+
+struct FiniteRowPartition {
+    state_class: Vec<u32>,
+    fingerprints: Vec<Vec<u32>>,
+    ids: FxHashMap<Vec<u32>, u32>,
+}
+
+impl FiniteRowPartition {
+    fn new(states: usize) -> Self {
+        Self { state_class: vec![0; states], fingerprints: Vec::new(), ids: FxHashMap::default() }
+    }
+
+    fn assign(&mut self, raw_states: Vec<u32>, fingerprint: Vec<u32>) {
+        let class = if let Some(&id) = self.ids.get(&fingerprint) {
+            id
+        } else {
+            let id = self.fingerprints.len() as u32;
+            self.ids.insert(fingerprint.clone(), id);
+            self.fingerprints.push(fingerprint);
+            id
+        };
+        for raw in raw_states {
+            self.state_class[raw as usize] = class;
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2664,17 +2707,11 @@ fn observe_finite_projection(
 
     let root_token = trie.nodes[0].token;
     let root_children = trie.nodes[0].children.clone();
-    let mut state_class = vec![0u32; input.tokenizer.num_states() as usize];
-    let mut class_fingerprints = Vec::<Vec<u32>>::new();
-    let mut class_ids = FxHashMap::<Vec<u32>, u32>::default();
-
-    let mut profiles = vec![Arc::<[ProfileRun]>::from([])];
-    let mut profile_ids = FxHashMap::<Arc<[ProfileRun]>, u32>::default();
+    let mut rows = FiniteRowPartition::new(input.tokenizer.num_states() as usize);
+    let mut store = FiniteProfileStore::new();
     let mut bucket_cache = FxHashMap::<(u32, u32), u32>::default();
     let mut cache_hits = 0usize;
-    let mut pair_visits = 0usize;
-    let mut uniform_subtrees = 0usize;
-    let mut uniform_tokens = 0usize;
+    let mut profile_work = ProfileWork::default();
     let self_loops = input.tokenizer.all_self_loop_bytes();
     let adaptive_budget = !bypass_adaptive_budget
         && input.subset_parent_order.is_none()
@@ -2706,7 +2743,6 @@ fn observe_finite_projection(
     } else {
         (usize::MAX, usize::MAX)
     };
-    let mut profile_run_count = 0usize;
 
     let parallel_profile_override = std::env::var("GLRMASK_L1_FINITE_PARALLEL_PROFILES").ok();
     let force_parallel_profiles = parallel_profile_override
@@ -2768,31 +2804,18 @@ fn observe_finite_projection(
             .par_iter()
             .map(|&(child, target)| {
                 let mut values = Vec::<ProfileRun>::new();
-                let mut visits = 0usize;
-                let mut uniform = 0usize;
-                let mut uniform_token_count = 0usize;
-                collect_finite_profile_frozen(
-                    &frozen,
-                    trie,
-                    tokens,
-                    child,
-                    target,
-                    &mut values,
-                    &mut visits,
-                    &mut uniform,
-                    &mut uniform_token_count,
+                let mut work = ProfileWork::default();
+                let completed = collect_finite_profile(
+                    &mut &frozen, trie, tokens, child, target, &mut values,
+                    &mut work, usize::MAX, usize::MAX,
                 );
-                (
-                    Arc::<[ProfileRun]>::from(values),
-                    visits,
-                    uniform,
-                    uniform_token_count,
-                )
+                debug_assert!(completed);
+                (values, work)
             })
             .collect::<Vec<_>>();
 
         if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
-            let mut visit_counts = results.iter().map(|(_, visits, _, _)| *visits).collect::<Vec<_>>();
+            let mut visit_counts = results.iter().map(|(_, work)| work.visits).collect::<Vec<_>>();
             visit_counts.sort_unstable();
             let quantile = |num: usize, den: usize| -> usize {
                 if visit_counts.is_empty() { return 0; }
@@ -2815,26 +2838,12 @@ fn observe_finite_projection(
             );
         }
         let mut key_profile = vec![0u32; keys.len()];
-        for (key, (values, visits, uniform, uniform_token_count)) in
-            results.into_iter().enumerate()
-        {
-            pair_visits += visits;
-            uniform_subtrees += uniform;
-            uniform_tokens += uniform_token_count;
-            let profile = if values.is_empty() {
-                0
-            } else if let Some(&profile) = profile_ids.get(&values) {
-                profile
-            } else {
-                let profile = profiles.len() as u32;
-                profile_ids.insert(Arc::clone(&values), profile);
-                profiles.push(values);
-                profile
-            };
+        for (key, (values, work)) in results.into_iter().enumerate() {
+            profile_work.add(work);
+            let profile = store.intern(values);
             key_profile[key] = profile;
             bucket_cache.insert(keys[key], profile);
         }
-
         for (start, raw_states, ids) in work {
             let mut fingerprint =
                 Vec::with_capacity(root_children.len() + usize::from(root_token.is_some()));
@@ -2844,17 +2853,7 @@ fn observe_finite_projection(
             for id in ids {
                 fingerprint.push(if id == usize::MAX { 0 } else { key_profile[id] });
             }
-            let class = if let Some(&class) = class_ids.get(&fingerprint) {
-                class
-            } else {
-                let class = class_fingerprints.len() as u32;
-                class_ids.insert(fingerprint.clone(), class);
-                class_fingerprints.push(fingerprint);
-                class
-            };
-            for raw in raw_states {
-                state_class[raw as usize] = class;
-            }
+            rows.assign(raw_states, fingerprint);
         }
         if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
             eprintln!(
@@ -2886,43 +2885,23 @@ fn observe_finite_projection(
                     profile
                 } else {
                     let mut values = Vec::new();
-                    let remaining_runs = profile_run_budget.saturating_sub(profile_run_count);
+                    let remaining_runs = profile_run_budget.saturating_sub(store.runs);
                     if !collect_finite_profile(
-                        &mut scanner,
-                        trie,
-                        tokens,
-                        self_loops.as_ref(),
-                        child,
-                        target,
-                        &mut values,
-                        &mut pair_visits,
-                        &mut uniform_subtrees,
-                        &mut uniform_tokens,
-                        remaining_runs,
-                        pair_visit_budget,
+                        &mut LazyFiniteScanner { scanner: &mut scanner, self_loops: self_loops.as_ref() },
+                        trie, tokens, child, target, &mut values, &mut profile_work,
+                        remaining_runs, pair_visit_budget,
                     ) {
                         if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
                             eprintln!(
                                 "[glrmask/profile][l1_finite_budget_abort] partition={} profile_runs={} pair_visits={} max_profile_runs={} max_pair_visits={} action=residual",
-                                input.partition_label, profile_run_count + values.len(), pair_visits,
+                                input.partition_label, store.runs + values.len(), profile_work.visits,
                                 profile_run_budget, pair_visit_budget,
                             );
                         }
                         return None;
                     }
-                    let values: Arc<[ProfileRun]> = Arc::from(values);
-                    let profile = if values.is_empty() {
-                        0
-                    } else if let Some(&profile) = profile_ids.get(&values) {
-                        profile
-                    } else {
-                        let profile = profiles.len() as u32;
-                        profile_run_count += values.len();
-                        profile_ids.insert(Arc::clone(&values), profile);
-                        profiles.push(values);
-                        profile
-                    };
-                    if profile_run_count > profile_run_budget {
+                    let profile = store.intern(values);
+                    if store.runs > profile_run_budget {
                         return None;
                     }
                     bucket_cache.insert(key, profile);
@@ -2931,17 +2910,7 @@ fn observe_finite_projection(
                 fingerprint.push(profile);
             }
 
-            let class = if let Some(&class) = class_ids.get(&fingerprint) {
-                class
-            } else {
-                let class = class_fingerprints.len() as u32;
-                class_ids.insert(fingerprint.clone(), class);
-                class_fingerprints.push(fingerprint);
-                class
-            };
-            for raw in raw_states {
-                state_class[raw as usize] = class;
-            }
+            rows.assign(raw_states, fingerprint);
         }
     }
     let scan_ms = scan_started.elapsed().as_secs_f64() * 1000.0;
@@ -2951,13 +2920,13 @@ fn observe_finite_projection(
             input.partition_label, input.tokenizer.num_states(), aliases.len(), trie.nodes.len(),
             scanner.configs.len(), scanner.signatures.len(), bucket_cache.len(), cache_hits,
             pair_visits, uniform_subtrees, uniform_tokens,
-            profiles.iter().map(|profile| profile.len()).sum::<usize>(), profiles.len(),
-            class_fingerprints.len(), finite_vocab_cache_hit, prep_ms, scan_ms,
+            store.runs, store.profiles.len(),
+            rows.fingerprints.len(), finite_vocab_cache_hit, prep_ms, scan_ms,
         );
     }
     Some(FiniteObservation {
-        vocab: finite_vocab, signatures: scanner.signatures, state_class,
-        class_fingerprints, profiles, prep_ms, scan_ms,
+        vocab: finite_vocab, signatures: scanner.signatures, state_class: rows.state_class,
+        class_fingerprints: rows.fingerprints, profiles: store.profiles, prep_ms, scan_ms,
     })
 }
 
