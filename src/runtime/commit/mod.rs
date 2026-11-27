@@ -2892,8 +2892,8 @@ impl ConstraintState {
         previous_state: Option<ParserStateMap>,
         commit_succeeded: bool,
     ) {
-        // A failed commit leaves the state exactly as it was, so the cached mask
-        // still describes it and the generation must not advance.
+        // Rejection has already invalidated the mask in the commit path. Only
+        // successful commits participate in generation-based mask reuse.
         if !commit_succeeded {
             return;
         }

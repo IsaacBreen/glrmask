@@ -389,10 +389,6 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
         #[cfg(not(test))]
         { 2048 }
     }
-    #[inline(always)]
-    fn cache_two_branch_products(&self) -> bool { true }
-    fn cache_single_branch_products(&self) -> bool { true }
-
     #[inline]
     fn terminal_is_ignore(&self, constraint: &Constraint, terminal: TerminalID) -> bool {
         self.routing.terminal_is_ignore(constraint, terminal)
