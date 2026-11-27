@@ -12,7 +12,6 @@ use crate::compiler::glr::parser::ParserGSS;
 pub(crate) struct ScopedProgram {
     pub(crate) relation: Arc<PreparedRelation>,
     pub(crate) offset: u32,
-    pub(crate) symbols: u32,
     pub(crate) guard_owner: bool,
     /// Explicit CALL crossing, applied after the local relation succeeds.
     pub(crate) append_push: Option<u32>,
@@ -27,14 +26,14 @@ impl ScopedProgram {
     pub(crate) fn prepare(source: Arc<CommitTemplateDfas>, symbols: u32) -> crate::Result<Self> {
         let relation = Arc::new(PreparedRelation::prepare(source, symbols, true)
             .map_err(crate::Error::Compilation)?);
-        Ok(Self { relation, offset: 0, symbols, guard_owner: true, append_push: None })
+        Ok(Self { relation, offset: 0, guard_owner: true, append_push: None })
     }
 
     pub(crate) fn terminal(component: &Constraint, terminal: usize) -> Self {
         let parser = component.template_parser().expect("native component");
         let relation = Arc::clone(&parser.local_admission()
-            .expect("local component").programs[terminal]);
-        Self { relation, offset: 0, symbols: parser.state_count,
+            .expect("local component").programs.get(terminal).expect("terminal relation"));
+        Self { relation, offset: 0,
             guard_owner: true, append_push: None }
     }
 
@@ -44,7 +43,7 @@ impl ScopedProgram {
             return composition.completion_view.clone();
         }
         Self { relation: Arc::clone(&parser.local_admission().expect("local component").completion),
-            offset: 0, symbols: parser.state_count, guard_owner: false, append_push: None }
+            offset: 0, guard_owner: false, append_push: None }
     }
 
     pub(crate) fn relocated(&self, offset: u32) -> crate::Result<Self> {

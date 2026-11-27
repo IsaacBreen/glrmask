@@ -189,7 +189,7 @@ enum TemplateAdmission {
 
 #[derive(Debug, Clone)]
 struct LocalAdmission {
-    programs: Vec<Arc<PreparedRelation>>,
+    programs: prepare::LocalPrograms,
     completion: Arc<PreparedRelation>,
     top_rows: prepare::TopCertificateRows,
 }

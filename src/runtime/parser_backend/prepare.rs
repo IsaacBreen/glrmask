@@ -31,6 +31,7 @@ use super::{CommitTemplateDfas, PreparedTemplateParser, TemplateParser};
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedRelation {
     pub(crate) source: Arc<CommitTemplateDfas>,
+    pub(crate) symbols: u32,
     pub(crate) domain: Arc<TemplateDomain>,
     pub(crate) execution: Option<PreparedExecution>,
 }
@@ -46,7 +47,7 @@ impl PreparedRelation {
         validated.validate_alphabet(symbols)?;
         let domain = Arc::new(TemplateDomain::from_shared_validated(Arc::clone(&source), &validated)?);
         let execution = runtime.then(|| PreparedExecution::from_prepared(&validated));
-        Ok(Self { source, domain, execution })
+        Ok(Self { source, symbols, domain, execution })
     }
 }
 
@@ -55,8 +56,49 @@ struct DomainGroup {
     terminals: Vec<usize>,
 }
 
+/// Terminal dispatch owns the shared executable inventory. Dense IDs need
+/// no translation. A fanout table is kept only when it saves pointer storage.
+#[derive(Debug, Clone)]
+pub(super) struct LocalPrograms {
+    relations: Arc<[Arc<PreparedRelation>]>,
+    dispatch: Option<Arc<[u32]>>,
+}
+
+impl LocalPrograms {
+    fn new(relations: Vec<Arc<PreparedRelation>>, ids: Vec<u32>) -> Self {
+        if ids.len() == relations.len() {
+            debug_assert!(ids.iter().enumerate().all(|(index, &id)| index == id as usize));
+            return Self { relations: relations.into(), dispatch: None };
+        }
+        let pointer_bytes = std::mem::size_of::<Arc<PreparedRelation>>();
+        if relations.len().saturating_mul(pointer_bytes)
+            .saturating_add(ids.len().saturating_mul(std::mem::size_of::<u32>()))
+            < ids.len().saturating_mul(pointer_bytes) {
+            Self { relations: relations.into(), dispatch: Some(ids.into()) }
+        } else {
+            let dense = ids.into_iter().map(|id| Arc::clone(&relations[id as usize]))
+                .collect::<Vec<_>>();
+            Self { relations: dense.into(), dispatch: None }
+        }
+    }
+
+    #[inline]
+    pub(super) fn get(&self, terminal: usize) -> Option<&Arc<PreparedRelation>> {
+        let id = match &self.dispatch {
+            Some(ids) => *ids.get(terminal)? as usize,
+            None => terminal,
+        };
+        self.relations.get(id)
+    }
+
+    pub(super) fn iter(&self) -> impl Iterator<Item = &Arc<PreparedRelation>> {
+        let len = self.dispatch.as_ref().map_or(self.relations.len(), |ids| ids.len());
+        (0..len).map(|terminal| self.get(terminal).expect("validated terminal dispatch"))
+    }
+}
+
 struct Inventory {
-    programs: Vec<Arc<PreparedRelation>>,
+    programs: LocalPrograms,
     groups: Vec<DomainGroup>,
 }
 
@@ -86,7 +128,8 @@ fn inventory(
         return Err(invalid());
     }
     groups.sort_unstable_by_key(|group| group.terminals[0]);
-    let mut programs = vec![None; terminals];
+    let mut ids = vec![u32::MAX; terminals];
+    let mut relations = Vec::with_capacity(groups.len());
     let mut domain_groups = Vec::<DomainGroup>::with_capacity(groups.len());
     let mut projection_ids = FxHashMap::<u64, Vec<usize>>::default();
 
@@ -113,26 +156,29 @@ fn inventory(
             bucket.push(index);
             index
         };
+        let id = u32::try_from(relations.len()).map_err(|_| invalid())?;
+        if id == u32::MAX { return Err(invalid()); }
+        relations.push(group.program);
         let members = &mut domain_groups[domain_group].terminals;
         for terminal in group.terminals {
             let terminal = terminal as usize;
-            let Some(slot) = programs.get_mut(terminal) else {
+            let Some(slot) = ids.get_mut(terminal) else {
                 return Err(invalid());
             };
-            if slot.is_some() {
+            if *slot != u32::MAX {
                 return Err(invalid());
             }
-            *slot = Some(Arc::clone(&group.program));
+            *slot = id;
             members.push(terminal);
         }
     }
     // Source groups may interleave their terminal IDs. The sparse bitset
     // compiler requires increasing members within each predicate group.
     for group in &mut domain_groups { group.terminals.sort_unstable(); }
-    if programs.iter().any(Option::is_none) {
+    if ids.contains(&u32::MAX) {
         return Err(invalid());
     }
-    let programs = programs.into_iter().map(Option::unwrap).collect();
+    let programs = LocalPrograms::new(relations, ids);
     Ok(Inventory {
         programs,
         groups: domain_groups,
@@ -190,7 +236,7 @@ pub(super) fn prepare_terminal_inventory(
     runtime: bool,
     use_parallel: bool,
 ) -> crate::Result<Vec<Arc<PreparedRelation>>> {
-    Ok(shared_inventory(templates, symbols, runtime, use_parallel)?.programs)
+    Ok(shared_inventory(templates, symbols, runtime, use_parallel)?.programs.iter().cloned().collect())
 }
 
 fn word_masks(terminals: &[usize]) -> Vec<(usize, u64)> {

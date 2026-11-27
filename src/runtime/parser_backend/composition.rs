@@ -179,7 +179,7 @@ impl TemplateComposition {
             view.validate_coordinate(state_count)?;
         }
         let key = |view: &ScopedProgram| (
-            Arc::as_ptr(&view.relation), view.offset, view.symbols,
+            Arc::as_ptr(&view.relation), view.offset,
             view.guard_owner, view.append_push,
         );
         let mut ids = FxHashMap::default();
