@@ -456,6 +456,82 @@ impl<T> PackedRuntimeSeqPool<T> {
     }
 }
 
+/// Exactly one token-set representation for a wide owned runtime DWA.
+#[derive(Debug)]
+enum OwnedTokenSets {
+    Chunked {
+        chunks: Box<[PackedRuntimeTokenSetChunk]>,
+        locations: Box<[PackedRuntimeTokenSetLocation]>,
+    },
+    Flat32 {
+        ranges: Box<[[u32; 2]]>,
+        spans: Box<[PackedRuntimeTokenSetSpan]>,
+    },
+    Flat16 {
+        ranges: Box<[[u16; 2]]>,
+        spans: Box<[PackedRuntimeTokenSetSpan]>,
+    },
+    Materialized {
+        sets: Box<[Arc<RangeSetBlaze<u32>>]>,
+        word_spans: Box<[u32]>,
+    },
+}
+
+impl OwnedTokenSets {
+    fn len(&self) -> usize {
+        match self {
+            Self::Chunked { locations, .. } => locations.len(),
+            Self::Flat32 { spans, .. } | Self::Flat16 { spans, .. } => spans.len(),
+            Self::Materialized { sets, .. } => sets.len(),
+        }
+    }
+
+    fn flat16(&self) -> Option<(&[[u16; 2]], &[PackedRuntimeTokenSetSpan])> {
+        match self {
+            Self::Flat16 { ranges, spans } => Some((ranges, spans)),
+            _ => None,
+        }
+    }
+
+    fn materialized(&self) -> Option<(&[Arc<RangeSetBlaze<u32>>], &[u32])> {
+        match self {
+            Self::Materialized { sets, word_spans } => Some((sets, word_spans)),
+            _ => None,
+        }
+    }
+
+    fn get(&self, id: u32) -> Option<PackedRuntimeTokenSetRef<'_>> {
+        let index = id as usize;
+        let (storage, word_spans) = match self {
+            Self::Materialized { sets, word_spans } => (
+                PackedRuntimeTokenSetStorageRef::Materialized(sets.get(index)?),
+                *word_spans.get(index)?,
+            ),
+            Self::Flat16 { ranges, spans } => {
+                let span = spans.get(index)?;
+                let start = span.start as usize;
+                let end = start.checked_add(span.len as usize)?;
+                (PackedRuntimeTokenSetStorageRef::Flat16(ranges.get(start..end)?), span.word_spans)
+            }
+            Self::Flat32 { ranges, spans } => {
+                let span = spans.get(index)?;
+                let start = span.start as usize;
+                let end = start.checked_add(span.len as usize)?;
+                (PackedRuntimeTokenSetStorageRef::Flat(ranges.get(start..end)?), span.word_spans)
+            }
+            Self::Chunked { chunks, locations } => {
+                let location = locations.get(index)?;
+                let chunk = chunks.get(location.chunk as usize)?;
+                let span = chunk.spans.get(location.local as usize)?;
+                let start = span.start as usize;
+                let end = start.checked_add(span.len as usize)?;
+                (PackedRuntimeTokenSetStorageRef::Flat(chunk.ranges.get(start..end)?), span.word_spans)
+            }
+        };
+        Some(PackedRuntimeTokenSetRef { id, storage, word_spans })
+    }
+}
+
 /// Allocation-light, read-only view of the current packed parser DWA.
 ///
 /// This is intentionally separate from the compiler-facing `DWA`: current
@@ -472,26 +548,7 @@ pub struct PackedRuntimeDwa {
     /// access prefers these arrays, so they are live execution storage rather
     /// than serialization-only preparation.
     owned_narrow: Option<OwnedNarrowPackedRuntimeDwa>,
-    // DWF1 compatibility representation: one decoded range slab per wire
-    // chunk plus token-id -> (chunk,local) indirection.
-    token_set_chunks: Box<[PackedRuntimeTokenSetChunk]>,
-    token_set_locations: Box<[PackedRuntimeTokenSetLocation]>,
-    // DWF2 representation: one global slab and one span per token set. DWF2
-    // carries per-chunk set/range counts, so the loader can allocate these
-    // arrays once and decode all chunks directly into disjoint final slices.
-    flat_token_ranges: Option<Box<[[u32; 2]]>>,
-    /// Narrow runtime token-set slab used when every internal token id fits
-    /// in u16. This is execution data, not a serialization cache: mask
-    /// planning reads these ranges directly and DWF6 can persist the slab
-    /// without re-encoding millions of RangeSetBlaze ranges.
-    flat_token_ranges_u16: Option<Box<[[u16; 2]]>>,
-    flat_token_spans: Option<Box<[PackedRuntimeTokenSetSpan]>>,
-    // Freshly compiled constraints already own canonical interned token sets.
-    // Keep those Arcs directly instead of immediately copying millions of
-    // RangeSetBlaze ranges into a second flat slab. Loaded artifacts continue
-    // to use the flat chunk/location representation above.
-    materialized_token_sets: Option<Box<[Arc<RangeSetBlaze<u32>>]>>,
-    materialized_token_word_spans: Option<Box<[u32]>>,
+    token_sets: Option<OwnedTokenSets>,
     geometries: Box<[Vec<(u32, u32)>]>,
     weights: Box<[PackedRuntimeWeight]>,
     weight_token_ids: Box<[u32]>,
@@ -2218,22 +2275,15 @@ impl PackedRuntimeDwa {
 
     #[inline]
     fn prefer_runtime_shaped_wire(&self) -> bool {
-        self.backed.is_none()
-            && self.flat_token_ranges_u16.is_some()
-            && self.flat_token_spans.is_some()
-            && (self.states.len() >= 20_000
-                || self
-                    .flat_token_ranges_u16
-                    .as_ref()
-                    .is_some_and(|ranges| ranges.len() >= 262_144))
+        self.token_sets.as_ref().and_then(OwnedTokenSets::flat16)
+            .is_some_and(|(ranges, _)| self.states.len() >= 20_000 || ranges.len() >= 262_144)
     }
 
     pub fn runtime_shaped_fast_wire_len(&self) -> Option<usize> {
         if !self.prefer_runtime_shaped_wire() {
             return None;
         }
-        let ranges = self.flat_token_ranges_u16.as_deref()?;
-        let spans = self.flat_token_spans.as_deref()?;
+        let (ranges, spans) = self.token_sets.as_ref()?.flat16()?;
         if spans.len() != self.token_set_count() {
             return None;
         }
@@ -2266,8 +2316,7 @@ impl PackedRuntimeDwa {
         if dst.len() != self.runtime_shaped_fast_wire_len()? {
             return None;
         }
-        let ranges = self.flat_token_ranges_u16.as_deref()?;
-        let spans = self.flat_token_spans.as_deref()?;
+        let (ranges, spans) = self.token_sets.as_ref()?.flat16()?;
         let mut wire = WireCopyPlan::new(dst, false);
         wire.bytes(b"DWF7");
         wire.u32(self.start_state);
@@ -2326,12 +2375,11 @@ impl PackedRuntimeDwa {
         let split_target_weight = self.states.len() > (1usize << 17)
             || self.target_pool.values.iter().any(|&value| value >= (1 << 17))
             || self.weight_id_pool.values.iter().any(|&value| value >= (1 << 15));
-        let raw_u16_ranges = split_target_weight
-            .then_some(self.flat_token_ranges_u16.as_deref())
+        let raw_flat16 = split_target_weight
+            .then(|| self.token_sets.as_ref()?.flat16())
             .flatten();
-        let raw_u16_spans = split_target_weight
-            .then_some(self.flat_token_spans.as_deref())
-            .flatten();
+        let raw_u16_ranges = raw_flat16.map(|(ranges, _)| ranges);
+        let raw_u16_spans = raw_flat16.map(|(_, spans)| spans);
         // DWF6's token body is the fixed-width u16 runtime slab. A large DWA
         // that does not use that runtime representation must fall back to
         // DWF3 rather than writing a varint body under DWF6 magic.
@@ -2385,7 +2433,7 @@ impl PackedRuntimeDwa {
         let word_spans: &[u32] = if let Some(spans) = raw_u16_spans {
             owned_word_spans = spans.iter().map(|span| span.word_spans).collect::<Vec<_>>();
             &owned_word_spans
-        } else if let Some(spans) = self.materialized_token_word_spans.as_deref() {
+        } else if let Some(spans) = self.token_sets.as_ref().and_then(OwnedTokenSets::materialized).map(|(_, spans)| spans) {
             spans
         } else {
             owned_word_spans = (0..self.token_set_count())
@@ -2861,29 +2909,14 @@ impl PackedRuntimeDwa {
         if self.backed.is_none() && self.owned_narrow.is_none()
             && std::env::var_os("GLRMASK_PROFILE_DWA_LAYOUT").is_some()
         {
-            let token_range_count = self
-                .materialized_token_sets
-                .as_ref()
-                .map(|sets| sets.iter().map(|set| set.ranges().len()).sum::<usize>())
-                .or_else(|| self.flat_token_ranges.as_ref().map(|ranges| ranges.len()))
-                .unwrap_or_else(|| self.token_set_chunks.iter().map(|chunk| chunk.ranges.len()).sum());
-            let token_max = self
-                .materialized_token_sets
-                .as_ref()
-                .and_then(|sets| sets.iter().flat_map(|set| set.ranges()).map(|r| *r.end()).max())
-                .or_else(|| {
-                    self.flat_token_ranges
-                        .as_ref()
-                        .and_then(|ranges| ranges.iter().map(|range| range[1]).max())
-                })
-                .or_else(|| {
-                    self.token_set_chunks
-                        .iter()
-                        .flat_map(|chunk| chunk.ranges.iter())
-                        .map(|range| range[1])
-                        .max()
-                })
-                .unwrap_or(0);
+            let mut token_range_count = 0usize;
+            let mut token_max = 0u32;
+            for id in 0..self.token_set_count() {
+                if let Some(set) = self.token_set(id as u32) {
+                    token_range_count += set.range_count();
+                    set.for_each_range(|_, hi| token_max = token_max.max(hi));
+                }
+            }
             let geometry_ranges = self.geometries.iter().map(Vec::len).sum::<usize>();
             let geometry_max = self
                 .geometries
@@ -2958,10 +2991,7 @@ impl PackedRuntimeDwa {
         }
         let profile = std::env::var_os("GLRMASK_PROFILE_DWA_FAST_WIRE").is_some();
         if std::env::var_os("GLRMASK_PROFILE_DWA_LAYOUT").is_some() {
-            let token_ranges = self
-                .flat_token_ranges_u16
-                .as_ref()
-                .map_or(0, |ranges| ranges.len());
+            let token_ranges = self.token_sets.as_ref().and_then(OwnedTokenSets::flat16).map_or(0, |(ranges, _)| ranges.len());
             eprintln!(
                 "[glrmask/profile][packed_runtime_dwa_append_layout] states={} token_sets={} token_ranges_u16={} prefer_runtime_shaped={} direct_len={:?}",
                 self.states.len(),
@@ -3250,13 +3280,7 @@ impl PackedRuntimeDwa {
             start_state,
             backed: Some(backed),
             owned_narrow: None,
-            token_set_chunks: Box::new([]),
-            token_set_locations: Box::new([]),
-            flat_token_ranges: None,
-            flat_token_ranges_u16: None,
-            flat_token_spans: None,
-            materialized_token_sets: None,
-            materialized_token_word_spans: None,
+            token_sets: None,
             geometries: Box::new([]),
             weights: Box::new([]),
             weight_token_ids: Box::new([]),
@@ -3997,35 +4021,24 @@ impl PackedRuntimeDwa {
             states,
             other_ms,
         ) = other_result?;
-        let (token_set_chunks, token_set_locations, flat_token_ranges, flat_token_spans) =
-            match decoded_token_sets {
-                DecodedFastTokenSets::Dwf1(token_set_chunks) => {
-                    let mut token_set_locations =
-                        Vec::<PackedRuntimeTokenSetLocation>::with_capacity(token_set_count);
-                    for (chunk, decoded) in token_set_chunks.iter().enumerate() {
-                        for local in 0..decoded.spans.len() {
-                            token_set_locations.push(PackedRuntimeTokenSetLocation {
-                                chunk: chunk as u32,
-                                local: local as u32,
-                            });
-                        }
+        let token_sets = match decoded_token_sets {
+            DecodedFastTokenSets::Dwf1(chunks) => {
+                let mut locations = Vec::with_capacity(token_set_count);
+                for (chunk, decoded) in chunks.iter().enumerate() {
+                    for local in 0..decoded.spans.len() {
+                        locations.push(PackedRuntimeTokenSetLocation {
+                            chunk: chunk as u32,
+                            local: local as u32,
+                        });
                     }
-                    (
-                        token_set_chunks.into_boxed_slice(),
-                        token_set_locations.into_boxed_slice(),
-                        None,
-                        None,
-                    )
                 }
-                DecodedFastTokenSets::Dwf2 { ranges, spans } => {
-                    (
-                        Vec::<PackedRuntimeTokenSetChunk>::new().into_boxed_slice(),
-                        Vec::<PackedRuntimeTokenSetLocation>::new().into_boxed_slice(),
-                        Some(ranges),
-                        Some(spans),
-                    )
+                OwnedTokenSets::Chunked {
+                    chunks: chunks.into_boxed_slice(),
+                    locations: locations.into_boxed_slice(),
                 }
-            };
+            }
+            DecodedFastTokenSets::Dwf2 { ranges, spans } => OwnedTokenSets::Flat32 { ranges, spans },
+        };
         let scan_ms = scan_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
@@ -4046,13 +4059,7 @@ impl PackedRuntimeDwa {
             start_state,
             backed: None,
             owned_narrow: None,
-            token_set_chunks,
-            token_set_locations,
-            flat_token_ranges,
-            flat_token_ranges_u16: None,
-            flat_token_spans,
-            materialized_token_sets: None,
-            materialized_token_word_spans: None,
+            token_sets: Some(token_sets),
             geometries: geometries.into_boxed_slice(),
             weights: weights.into_boxed_slice(),
             weight_token_ids: weight_token_ids.into_boxed_slice(),
@@ -4435,7 +4442,6 @@ impl PackedRuntimeDwa {
             None
         };
         let owned_narrow_present = owned_narrow.is_some();
-        let keep_flat_token_ranges = narrow_token_ranges && !owned_narrow_present;
 
         if let Some(total_started) = total_started {
             eprintln!(
@@ -4456,16 +4462,19 @@ impl PackedRuntimeDwa {
             start_state: dwa.start_state(),
             backed: None,
             owned_narrow,
-            token_set_chunks: Box::new([]),
-            token_set_locations: Box::new([]),
-            flat_token_ranges: None,
-            flat_token_ranges_u16: keep_flat_token_ranges
-                .then(|| flat_token_ranges_u16.into_boxed_slice()),
-            flat_token_spans: keep_flat_token_ranges.then(|| flat_token_spans.into_boxed_slice()),
-            materialized_token_sets: (!narrow_token_ranges && !owned_narrow_present)
-                .then(|| token_sets.into_boxed_slice()),
-            materialized_token_word_spans: (!narrow_token_ranges && !owned_narrow_present)
-                .then(|| token_word_spans.into_boxed_slice()),
+            token_sets: if owned_narrow_present {
+                None
+            } else if narrow_token_ranges {
+                Some(OwnedTokenSets::Flat16 {
+                    ranges: flat_token_ranges_u16.into_boxed_slice(),
+                    spans: flat_token_spans.into_boxed_slice(),
+                })
+            } else {
+                Some(OwnedTokenSets::Materialized {
+                    sets: token_sets.into_boxed_slice(),
+                    word_spans: token_word_spans.into_boxed_slice(),
+                })
+            },
             geometries: geometries.into_boxed_slice(),
             weights: if owned_narrow_present { Box::new([]) } else { weights.into_boxed_slice() },
             weight_token_ids: if owned_narrow_present { Box::new([]) } else { weight_token_ids.into_boxed_slice() },
@@ -4713,13 +4722,10 @@ impl PackedRuntimeDwa {
             start_state: dwa.start_state(),
             backed: None,
             owned_narrow: None,
-            token_set_chunks: token_set_chunks.into_boxed_slice(),
-            token_set_locations: token_set_locations.into_boxed_slice(),
-            flat_token_ranges: None,
-            flat_token_ranges_u16: None,
-            flat_token_spans: None,
-            materialized_token_sets: None,
-            materialized_token_word_spans: None,
+            token_sets: Some(OwnedTokenSets::Chunked {
+                chunks: token_set_chunks.into_boxed_slice(),
+                locations: token_set_locations.into_boxed_slice(),
+            }),
             geometries: geometries.into_boxed_slice(),
             weights: weights.into_boxed_slice(),
             weight_token_ids: weight_token_ids.into_boxed_slice(),
@@ -5043,13 +5049,10 @@ impl PackedRuntimeDwa {
             start_state,
             backed: None,
             owned_narrow: None,
-            token_set_chunks: token_set_chunks.into_boxed_slice(),
-            token_set_locations: token_set_locations.into_boxed_slice(),
-            flat_token_ranges: None,
-            flat_token_ranges_u16: None,
-            flat_token_spans: None,
-            materialized_token_sets: None,
-            materialized_token_word_spans: None,
+            token_sets: Some(OwnedTokenSets::Chunked {
+                chunks: token_set_chunks.into_boxed_slice(),
+                locations: token_set_locations.into_boxed_slice(),
+            }),
             geometries: geometries.into_boxed_slice(),
             weights: weights.into_boxed_slice(),
             weight_token_ids: weight_token_ids.into_boxed_slice(),
@@ -5101,14 +5104,7 @@ impl PackedRuntimeDwa {
         if let Some(backed) = &self.backed {
             return backed.token_set_count;
         }
-        self.materialized_token_sets.as_ref().map_or_else(
-            || {
-                self.flat_token_spans
-                    .as_ref()
-                    .map_or(self.token_set_locations.len(), |spans| spans.len())
-            },
-            |sets| sets.len(),
-        )
+        self.token_sets.as_ref().map_or(0, OwnedTokenSets::len)
     }
 
     /// Return the packed token-set ids referenced by transition weights.
@@ -5177,10 +5173,7 @@ impl PackedRuntimeDwa {
     pub fn materialized_token_sets_with_word_spans(
         &self,
     ) -> Option<(&[Arc<RangeSetBlaze<u32>>], &[u32])> {
-        Some((
-            self.materialized_token_sets.as_deref()?,
-            self.materialized_token_word_spans.as_deref()?,
-        ))
+        self.token_sets.as_ref()?.materialized()
     }
 
     #[inline]
@@ -5385,48 +5378,7 @@ impl PackedRuntimeDwa {
                 word_spans: span.word_spans,
             });
         }
-        if let Some(sets) = &self.materialized_token_sets {
-            let tokens = sets.get(id as usize)?;
-            let word_spans = *self
-                .materialized_token_word_spans
-                .as_ref()?
-                .get(id as usize)?;
-            return Some(PackedRuntimeTokenSetRef {
-                id,
-                storage: PackedRuntimeTokenSetStorageRef::Materialized(tokens),
-                word_spans,
-            });
-        }
-        if let (Some(ranges), Some(spans)) = (&self.flat_token_ranges_u16, &self.flat_token_spans) {
-            let span = *spans.get(id as usize)?;
-            let start = span.start as usize;
-            let end = start.checked_add(span.len as usize)?;
-            return Some(PackedRuntimeTokenSetRef {
-                id,
-                storage: PackedRuntimeTokenSetStorageRef::Flat16(ranges.get(start..end)?),
-                word_spans: span.word_spans,
-            });
-        }
-        if let (Some(ranges), Some(spans)) = (&self.flat_token_ranges, &self.flat_token_spans) {
-            let span = *spans.get(id as usize)?;
-            let start = span.start as usize;
-            let end = start.checked_add(span.len as usize)?;
-            return Some(PackedRuntimeTokenSetRef {
-                id,
-                storage: PackedRuntimeTokenSetStorageRef::Flat(ranges.get(start..end)?),
-                word_spans: span.word_spans,
-            });
-        }
-        let location = *self.token_set_locations.get(id as usize)?;
-        let chunk = self.token_set_chunks.get(location.chunk as usize)?;
-        let span = *chunk.spans.get(location.local as usize)?;
-        let start = span.start as usize;
-        let end = start + span.len as usize;
-        Some(PackedRuntimeTokenSetRef {
-            id,
-            storage: PackedRuntimeTokenSetStorageRef::Flat(&chunk.ranges[start..end]),
-            word_spans: span.word_spans,
-        })
+        self.token_sets.as_ref()?.get(id)
     }
 
     #[inline]
