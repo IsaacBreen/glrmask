@@ -19,7 +19,10 @@ use smallvec::SmallVec;
 use super::constraint::Constraint;
 
 pub(crate) const LINEAR_STACK_RESERVE: usize = 64;
+// Work buffers retain their tuned capacity; live sequence storage is smaller.
 pub(crate) const INLINE_PARSER_STATE_CAPACITY: usize = 64;
+pub(crate) const LIVE_FRONTIER_CAPACITY: usize = 4;
+pub(crate) type FrontierEntries = SmallVec<[(u32, ParserGSS); LIVE_FRONTIER_CAPACITY]>;
 
 /// Parser paths grouped by tokenizer state, stored inline for the common small
 /// frontier. Entries remain sorted by tokenizer-state ID. The bounded flat
@@ -28,7 +31,7 @@ pub(crate) const INLINE_PARSER_STATE_CAPACITY: usize = 64;
 /// normalize equal-key entries when they need map semantics.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct ParserStateMap {
-    pub(crate) entries: SmallVec<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>,
+    pub(crate) entries: FrontierEntries,
 }
 
 impl std::fmt::Debug for ParserStateMap {
@@ -182,15 +185,16 @@ impl ParserStateMap {
     }
 
     /// Associate the sole existing GSS with a small sorted set of tokenizer
-    /// states. Arc clones are allocation-free and eight entries fit inline.
+    /// states. Arc clones are allocation-free; the vector may spill independently.
     pub(crate) fn replace_single_keys(&mut self, keys: &[u32]) -> bool {
-        if self.entries.len() != 1 || keys.is_empty() || keys.len() > INLINE_PARSER_STATE_CAPACITY {
+        if self.entries.len() != 1 || keys.is_empty() {
             return false;
         }
         if keys.windows(2).any(|pair| pair[0] >= pair[1]) {
             return false;
         }
         let (_, gss) = self.entries.pop().unwrap();
+        self.entries.reserve(keys.len());
         for &key in &keys[..keys.len() - 1] {
             self.entries.push((key, gss.clone()));
         }
@@ -204,7 +208,6 @@ impl ParserStateMap {
     pub(crate) fn replace_uniform_gss_keys(&mut self, keys: &[u32]) -> bool {
         if self.entries.is_empty()
             || keys.is_empty()
-            || keys.len() > INLINE_PARSER_STATE_CAPACITY
             || keys.windows(2).any(|pair| pair[0] >= pair[1])
         {
             return false;
@@ -219,8 +222,9 @@ impl ParserStateMap {
             return false;
         }
 
-        let old = std::mem::take(&mut self.entries);
-        let (_, gss) = old.into_iter().next().expect("nonempty state checked");
+        let (_, gss) = self.entries.swap_remove(0);
+        self.entries.clear();
+        self.entries.reserve(keys.len());
         for &key in &keys[..keys.len() - 1] {
             self.entries.push((key, gss.clone()));
         }
@@ -244,7 +248,7 @@ impl FromIterator<(u32, ParserGSS)> for ParserStateMap {
 
 impl IntoIterator for ParserStateMap {
     type Item = (u32, ParserGSS);
-    type IntoIter = smallvec::IntoIter<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>;
+    type IntoIter = smallvec::IntoIter<[(u32, ParserGSS); LIVE_FRONTIER_CAPACITY]>;
 
     fn into_iter(self) -> Self::IntoIter { self.entries.into_iter() }
 }
@@ -682,8 +686,7 @@ pub struct ConstraintState {
     pub(crate) terminated: bool,
     pub(crate) markers: Option<crate::runtime::markers::MarkerState>,
     pub(crate) constraint: Constraint,
-    // Keep the tuned 64-slot inline frontier: cloning copies only live GSS handles, and
-    // the following commit does not allocate/detach a separate frontier container.
+    // Small live frontier; scratch and bounded commit algorithms retain their own capacity.
     pub(crate) state: ParserStateMap,
     /// Monotonically increasing counter, bumped on every commit.
     /// Used for cheap cache invalidation in fill_mask.
@@ -755,6 +758,25 @@ impl ConstraintState {
     /// end-token policy.
     pub(crate) fn frontier_complete(&self) -> bool {
         frontier_is_accepting(&self.constraint, &self.state, false)
+    }
+
+    #[cfg(feature = "internal-api")]
+    pub(crate) fn frontier_shape(&self) -> (usize, usize, usize, usize, Vec<u32>) {
+        let entries = &self.state.entries;
+        let mut keys = Vec::new();
+        let mut ptr_duplicates = 0;
+        let mut equal_duplicates = 0;
+        for (i, (key, gss)) in entries.iter().enumerate() {
+            if keys.last() != Some(key) { keys.push(*key); }
+            let previous = &entries[..i];
+            if previous.iter().any(|(k, g)| k == key && gss.ptr_eq(g)) {
+                ptr_duplicates += 1;
+            } else if previous.iter().any(|(k, g)| k == key && gss == g) {
+                equal_duplicates += 1;
+            }
+        }
+        (entries.len(), keys.len(), ptr_duplicates, equal_duplicates,
+         entries.iter().map(|(k, _)| *k).collect())
     }
 
     pub(crate) fn parser_root_count(&self) -> usize {
@@ -1031,6 +1053,27 @@ mod clone_and_scratch_tests {
         }));
         assert!(failed.is_err());
         assert!(!commit_scratch(&c).linear_stack_original.contains(&98765));
+    }
+
+    #[test]
+    fn bulk_rekey_reuses_spilled_frontier_storage() {
+        let c = constraint("start root; nt root = 'a'+;");
+        let initial = c.start();
+        let gss = initial.state.values().next().unwrap().clone();
+        let mut frontier = ParserStateMap::singleton(0, gss.clone());
+        let keys: Vec<u32> = (0..65).collect();
+        assert!(frontier.replace_single_keys(&keys));
+        assert!(frontier.entries.spilled());
+        assert!(frontier.values().all(|value| value.ptr_eq(&gss)));
+        let storage = frontier.entries.as_ptr();
+        assert!(frontier.replace_uniform_gss_keys(&[100]));
+        assert_eq!(frontier.entries.as_ptr(), storage);
+        assert!(frontier.replace_single_keys(&keys));
+        assert_eq!(frontier.entries.as_ptr(), storage);
+        assert_eq!(frontier.keys().copied().collect::<Vec<_>>(), keys);
+        assert!(frontier.values().all(|value| value.ptr_eq(&gss)));
+        assert!(!frontier.replace_uniform_gss_keys(&[2, 1]));
+        assert_eq!(frontier.keys().copied().collect::<Vec<_>>(), keys);
     }
 
     #[test]

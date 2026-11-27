@@ -478,7 +478,7 @@ impl FlatFrontierScratch {
         self.retired_gss = still_retired;
     }
 
-    fn recycle_old_entries(&mut self, old_entries: SmallVec<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>) {
+    fn recycle_old_entries(&mut self, old_entries: impl IntoIterator<Item = (u32, ParserGSS)>) {
         for (_, gss) in old_entries {
             if gss.can_replace_single_path_state_in_place(&[0]) {
                 debug_assert!(self.gss_pool.len() < FLAT_FRONTIER_GSS_POOL_CAPACITY);
@@ -523,14 +523,14 @@ impl FlatFrontierScratch {
             return false;
         }
 
-        let mut new_entries = SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
+        let mut new_entries = std::mem::take(&mut state.entries);
+        self.recycle_old_entries(new_entries.drain(..));
         new_entries.reserve(keys.len());
         for &key in &keys[..keys.len() - 1] {
             new_entries.push((key, shared.clone()));
         }
         new_entries.push((*keys.last().unwrap(), shared));
-        let old_entries = std::mem::replace(&mut state.entries, new_entries);
-        self.recycle_old_entries(old_entries);
+        state.entries = new_entries;
         true
     }
 
@@ -565,7 +565,9 @@ impl FlatFrontierScratch {
             selected.push(self.gss_pool.swap_remove(pool_index));
         }
 
-        let mut new_entries = SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
+        let mut new_entries = std::mem::take(&mut state.entries);
+        self.recycle_old_entries(new_entries.drain(..));
+        new_entries.reserve(keys.len());
         for (mut gss, &key) in selected.into_iter().zip(keys) {
             let replaced = gss.try_replace_single_path_state_in_place(stack, acc.clone());
             debug_assert!(replaced, "uniform flat-frontier spare eligibility changed");
@@ -575,8 +577,7 @@ impl FlatFrontierScratch {
             new_entries.push((key, gss));
         }
 
-        let old_entries = std::mem::replace(&mut state.entries, new_entries);
-        self.recycle_old_entries(old_entries);
+        state.entries = new_entries;
         true
     }
 }
@@ -1517,7 +1518,7 @@ fn coalesce_uniform_runtime_source_states(
             eligible = false;
             break;
         }
-        let mut used = [false; INLINE_PARSER_STATE_CAPACITY];
+        let mut used = SmallVec::<[bool; INLINE_PARSER_STATE_CAPACITY]>::from_elem(false, alternatives.len());
         for (_, expected) in representative {
             let Some(match_index) = alternatives
                 .iter()
@@ -7078,14 +7079,14 @@ fn try_commit_multi_state_lexer_only(
         remaining_for_assignment[source_index] -= 1;
     }
 
-    let old_entries = std::mem::take(&mut state.entries);
+    let mut old_entries = std::mem::take(&mut state.entries);
     let mut old_gss = SmallVec::<[Option<ParserGSS>; INLINE_PARSER_STATE_CAPACITY]>::new();
-    old_gss.extend(old_entries.into_iter().map(|(_, gss)| Some(gss)));
+    old_gss.extend(old_entries.drain(..).map(|(_, gss)| Some(gss)));
     let mut available_pool = SmallVec::<
         [Option<ParserGSS>; FLAT_FRONTIER_GSS_POOL_CAPACITY],
     >::new();
     available_pool.extend(frontier.gss_pool.drain(..).map(Some));
-    let mut new_entries = SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
+    let mut new_entries = old_entries;
     for ((tokenizer_state, source_index), pool_index) in
         output.into_iter().zip(pool_assignment)
     {
@@ -7474,8 +7475,8 @@ fn try_commit_flat_frontier_in_place_observed<O: CommitObserver>(
     // shared persistent nodes never lands in the token hot path.
     let mut available = SmallVec::<[Option<ParserGSS>; 32]>::new();
     available.extend(frontier.gss_pool.drain(..).map(Some));
-    let old_entries = std::mem::take(&mut state.entries);
-    for (_, gss) in old_entries {
+    let mut old_entries = std::mem::take(&mut state.entries);
+    for (_, gss) in old_entries.drain(..) {
         if gss.can_replace_single_path_state_in_place(&[0]) {
             available.push(Some(gss));
         } else {
@@ -7484,7 +7485,7 @@ fn try_commit_flat_frontier_in_place_observed<O: CommitObserver>(
     }
     debug_assert_eq!(available.len(), available_count);
 
-    let mut new_entries = SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
+    let mut new_entries = old_entries;
     for (output_index, &output) in outputs.iter().enumerate() {
         let mut gss = available[assignments[output_index]]
             .take()

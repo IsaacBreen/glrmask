@@ -590,3 +590,8 @@ path = "tests/token_id_limit.rs"
 [[test]]
 name = "seed3229_token_commit_stall"
 path = "tests/seed3229_token_commit_stall.rs"
+
+[[example]]
+name = "frontier_capacity_bench"
+path = "examples/dev/frontier_capacity_bench.rs"
+required-features = ["internal-api"]

@@ -1131,6 +1131,8 @@ pub mod __private {
         fn has_parser_ambiguity(&self) -> bool;
         fn parser_path_count(&self, limit: usize) -> usize;
         fn parser_root_count(&self) -> usize;
+        #[cfg(feature = "internal-api")]
+        fn frontier_shape(&self) -> (usize, usize, usize, usize, Vec<u32>);
     }
 
     impl ConstraintStateExt for ConstraintState {
@@ -1187,6 +1189,10 @@ pub mod __private {
 
         fn parser_root_count(&self) -> usize {
             ConstraintState::parser_root_count(self)
+        }
+        #[cfg(feature = "internal-api")]
+        fn frontier_shape(&self) -> (usize, usize, usize, usize, Vec<u32>) {
+            ConstraintState::frontier_shape(self)
         }
 
     }
