@@ -3014,6 +3014,7 @@ fn encode_current_runtime_wire(
     out
 }
 
+#[cfg(test)]
 fn decode_current_runtime_wire(
     section: &[u8],
     backing: Arc<Vec<u8>>,

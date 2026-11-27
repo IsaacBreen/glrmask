@@ -154,7 +154,7 @@ pub(super) fn save(root: &Module) -> Vec<u8> {
 fn decode_exact(value: Exact) -> Result<TokenSet> {
     let mut previous = None;
     for &(a, b) in &value.ranges {
-        if b > crate::__private::MAX_TOKEN_ID || a > b || previous.is_some_and(|p| u64::from(p) + 1 >= u64::from(a)) { return Err(err("unnormalized token-set ranges")); }
+        if b > glrmask_vocab::__private::MAX_TOKEN_ID || a > b || previous.is_some_and(|p| u64::from(p) + 1 >= u64::from(a)) { return Err(err("unnormalized token-set ranges")); }
         previous = Some(b);
     }
     Ok(TokenSet::from_ranges(value.ranges.iter().map(|&(a, b)| a..b + 1)))
