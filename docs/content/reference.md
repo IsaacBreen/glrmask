@@ -101,7 +101,7 @@ constraint = call.compile(vocab)
 module can be saved with externs unbound. Precompiled work is for one vocabulary; compiling or precompiling it with another is an error.
 
 `constraint.save()` and `Constraint.load(data, vocab)` save and load a compiled constraint. The vocabulary isn't saved,
-and `load` checks that you pass the one it was compiled for. Bytes saved by one GLRMask version may not load in another. Only load artifacts you trust.
+and `load` checks that you pass the one it was compiled for. Bytes saved by one GLRMask version may not load in another. Load artifacts only from trusted sources; malformed input is rejected where detected, but this is not a hardened untrusted-data parser.
 
 ### Expressions
 

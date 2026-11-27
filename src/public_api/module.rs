@@ -1382,7 +1382,6 @@ impl Module {
 
     pub fn save(&self) -> Vec<u8> { with_deep_stack(|| artifact::save(self)) }
     /// May fail if saved by a different GLRMask version.
-    /// Only load artifacts you trust.
     pub fn load(bytes: &[u8]) -> Result<Self> {
         with_deep_stack(|| artifact::load(bytes, None))
     }

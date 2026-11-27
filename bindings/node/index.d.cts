@@ -111,10 +111,10 @@ export declare class Module implements Disposable {
   compileSync(vocab: Vocab, options?: CompileOptions): Constraint;
   save(): Promise<Uint8Array>;
   saveSync(): Uint8Array;
-  /** May fail if saved by a different GLRMask version. Only load artifacts you trust. */
+  /** May fail if saved by a different GLRMask version. */
   static load(data: Uint8Array): Promise<Module>;
 
-  /** May fail if saved by a different GLRMask version. Only load artifacts you trust. */
+  /** May fail if saved by a different GLRMask version. */
   static loadSync(data: Uint8Array): Module;
   clone(): Module;
   /** Frees the native handle now instead of at garbage collection. */
@@ -133,9 +133,9 @@ export declare class Constraint implements Disposable {
   save(): Promise<Uint8Array>;
 
   saveSync(): Uint8Array;
-  /** May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. Only load artifacts you trust. */
+  /** May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. */
   static load(data: Uint8Array, vocab: Vocab): Promise<Constraint>;
-  /** May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. Only load artifacts you trust. */
+  /** May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. */
   static loadSync(data: Uint8Array, vocab: Vocab): Constraint;
   clone(): Constraint;
   /** Frees the native handle now instead of at garbage collection. */

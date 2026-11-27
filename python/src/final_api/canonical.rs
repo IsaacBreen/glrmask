@@ -456,7 +456,7 @@ impl PyModule {
         Ok(PyBytes::new(slf.py(), &bytes))
     }
 
-    /// May fail if saved by a different GLRMask version. Only load artifacts you trust.
+    /// May fail if saved by a different GLRMask version.
     #[staticmethod]
     #[pyo3(signature = (data, /))]
     fn load(py: Python<'_>, data: &[u8]) -> PyResult<Self> {

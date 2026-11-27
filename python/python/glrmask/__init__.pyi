@@ -185,7 +185,7 @@ class Module:
         ...
     @staticmethod
     def load(data: bytes, /) -> Module:
-        """May fail if saved by a different GLRMask version. Only load artifacts you trust."""
+        """May fail if saved by a different GLRMask version."""
         ...
     def copy(self) -> Module:
         ...
@@ -209,7 +209,7 @@ class Constraint:
         ...
     @staticmethod
     def load(data: bytes, vocab: Vocab, /) -> Constraint:
-        """May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. Only load artifacts you trust."""
+        """May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with."""
         ...
 
 @final

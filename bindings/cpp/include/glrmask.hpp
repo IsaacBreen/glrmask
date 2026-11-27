@@ -338,7 +338,7 @@ public:
         glrmask_bytes* p = nullptr; detail::check(glrmask_module_save(native_handle(), &p)); return detail::take_bytes(p);
     }
 
-    /// May fail if saved by a different GLRMask version. Only load artifacts you trust.
+    /// May fail if saved by a different GLRMask version.
     static Module load(const Bytes& bytes) { return load(bytes.data(), bytes.size()); }
     static Module load(const std::uint8_t* bytes, std::size_t size) {
         glrmask_module* p = nullptr; detail::check(glrmask_module_load(bytes, size, &p)); return Module(p);
@@ -361,7 +361,7 @@ public:
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_constraint_mask_bit_len(native_handle(), &n)); return n; }
 
     Bytes save() const { glrmask_bytes* p = nullptr; detail::check(glrmask_constraint_save(native_handle(), &p)); return detail::take_bytes(p); }
-    /// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. Only load artifacts you trust.
+    /// May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.
     static Constraint load(const Bytes& bytes, const Vocab& vocab) { return load(bytes.data(), bytes.size(), vocab); }
     static Constraint load(const std::uint8_t* bytes, std::size_t size, const Vocab& vocab) {
         glrmask_constraint* p = nullptr; detail::check(glrmask_constraint_load(bytes, size, vocab.native_handle(), &p)); return Constraint(p);
