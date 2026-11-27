@@ -61,13 +61,13 @@ struct ControlRows {
 }
 
 impl ControlRows {
-    fn build(state_count: u32, control_start: u32, views: &[ScopedProgram]) -> Self {
-        let mut cursors = views[control_start as usize..].iter()
-            .map(|view| (active_control_ranges(view), 0u32)).collect::<Vec<_>>();
+    fn build<'a>(state_count: u32, controls: impl Iterator<Item = (u32, &'a ScopedProgram)>) -> Self {
+        let mut cursors = controls
+            .map(|(id, view)| (id, active_control_ranges(view), 0u32)).collect::<Vec<_>>();
         // False (end) sorts before true (start) for adjacent intervals of
         // the same control; all events at one coordinate are applied together.
         let mut pending = BinaryHeap::<Reverse<(u32, bool, usize)>>::new();
-        for (i, (ranges, end)) in cursors.iter_mut().enumerate() {
+        for (i, (_, ranges, end)) in cursors.iter_mut().enumerate() {
             if let Some(range) = ranges.next() {
                 *end = range.end;
                 pending.push(Reverse((range.start, true, i)));
@@ -83,8 +83,8 @@ impl ControlRows {
             if position >= state_count { break; }
             while pending.peek().is_some_and(|event| event.0.0 == position) {
                 let Reverse((_, start, cursor)) = pending.pop().unwrap();
-                let control = control_start + cursor as u32;
-                let (ranges, end) = &mut cursors[cursor];
+                let (control, ranges, end) = &mut cursors[cursor];
+                let control = *control;
                 if start {
                     active.insert(control);
                     pending.push(Reverse((*end, false, cursor)));
@@ -178,7 +178,6 @@ impl TemplateComposition {
         for view in views.iter().chain(&outer_views).chain(std::iter::once(&completion_view)) {
             view.validate_coordinate(state_count)?;
         }
-        let controls_by_top = ControlRows::build(state_count, control_start, &views);
         let key = |view: &ScopedProgram| (
             Arc::as_ptr(&view.relation), view.offset, view.symbols,
             view.guard_owner, view.append_push,
@@ -201,6 +200,19 @@ impl TemplateComposition {
             .collect::<crate::Result<Vec<_>>>()?.into_boxed_slice();
         let outer_ids = outer_views.into_iter().map(intern)
             .collect::<crate::Result<Vec<_>>>()?.into_boxed_slice();
+        // Closure is a union of relations, so applying one descriptor twice
+        // cannot add an output. Keep all logical IDs for explicit dispatch
+        // and serialization, but schedule only the first control alias.
+        let mut seen = vec![false; descriptors.len()];
+        let controls_by_top = ControlRows::build(state_count,
+            view_ids.iter().enumerate().skip(control_start as usize)
+                .filter_map(|(index, &id)| {
+                    if std::mem::replace(&mut seen[id as usize], true) {
+                        None
+                    } else {
+                        Some((index as u32, &descriptors[id as usize]))
+                    }
+                }));
         Ok(Self {
             control_start, descriptors: descriptors.into_boxed_slice(),
             view_ids, outer_ids, completion_view, controls_by_top,
@@ -513,7 +525,7 @@ mod prepared_relation_tests {
         let views = vec![scoped_shift.clone(), scoped_default.relocated(11).unwrap(),
             scoped_shift.relocated(11).unwrap(), scoped_suffix.relocated(13).unwrap(),
             scoped_default.relocated(100_000).unwrap()];
-        let rows = ControlRows::build(1_000_000, 1, &views);
+        let rows = ControlRows::build(1_000_000, views.iter().enumerate().skip(1).map(|(id, view)| (id as u32, view)));
         assert!(rows.starts.len() < 32);
         assert!(rows.rows.len() < 16);
         for top in (0..150).chain(99_990..100_030).chain([999_999]) {
