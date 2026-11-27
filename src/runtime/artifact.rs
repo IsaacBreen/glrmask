@@ -1845,6 +1845,15 @@ impl DynamicMaskTrieFullWalkOp {
     pub(crate) fn child_is_token(&self) -> bool { self.meta & Self::TOKEN != 0 }
 }
 
+/// Rank index over edge-start positions in the strict byte program.
+/// One bit per operation plus one prefix rank per 64 operations replaces
+/// the previous u32 edge ID stored for every operation.
+#[derive(Debug, Clone, Copy, Default)]
+struct FullWalkEdgeBlock {
+    starts: u64,
+    preceding_edges: u32,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskTrie {
     pub(crate) nodes: Vec<DynamicMaskTrieNode>,
@@ -1852,8 +1861,7 @@ pub(crate) struct DynamicMaskTrie {
     subtree_tokens: Vec<u32>,
     walk_edges: Vec<DynamicMaskTrieWalkEdge>,
     full_walk_ops: Vec<DynamicMaskTrieFullWalkOp>,
-    /// Edge index owning each strict full-walk op. Read only after death.
-    full_walk_op_edges: Vec<u32>,
+    full_walk_edge_blocks: Vec<FullWalkEdgeBlock>,
     /// Starting full-walk op index for each DFS-preorder walk edge, plus one
     /// sentinel at the end. Combined with `DynamicMaskTrieWalkEdge::subtree_end`
     /// this gives an O(1) exact jump past a dead child subtree.
@@ -1952,7 +1960,7 @@ impl DynamicMaskTrie {
             subtree_tokens: Vec::new(),
             walk_edges: Vec::new(),
             full_walk_ops: Vec::new(),
-            full_walk_op_edges: Vec::new(),
+            full_walk_edge_blocks: Vec::new(),
             full_walk_edge_op_starts: Vec::new(),
             full_walk_root_byte_op_starts: None,
             full_walk_max_parent_depth: 0,
@@ -2027,8 +2035,10 @@ impl DynamicMaskTrie {
 
     #[inline(always)]
     pub(crate) fn full_walk_dead_subtree(&self, op_index: usize) -> (u32, u32) {
-        debug_assert!(op_index < self.full_walk_op_edges.len());
-        let edge_index = unsafe { *self.full_walk_op_edges.get_unchecked(op_index) } as usize;
+        debug_assert!(op_index < self.full_walk_ops.len());
+        let block = unsafe { self.full_walk_edge_blocks.get_unchecked(op_index >> 6) };
+        let through = u64::MAX >> (63 - (op_index & 63));
+        let edge_index = (block.preceding_edges + (block.starts & through).count_ones() - 1) as usize;
         let edge = unsafe { *self.walk_edges.get_unchecked(edge_index) };
         let subtree_end_edge = edge.subtree_end as usize;
         debug_assert!(subtree_end_edge < self.full_walk_edge_op_starts.len());
@@ -2172,7 +2182,7 @@ impl DynamicMaskTrie {
 
     fn finalize_full_walk(&mut self) {
         self.full_walk_ops.clear();
-        self.full_walk_op_edges.clear();
+        self.full_walk_edge_blocks.clear();
         self.full_walk_edge_op_starts.clear();
         self.full_walk_root_byte_op_starts = None;
         self.full_walk_max_parent_depth = self
@@ -2182,10 +2192,8 @@ impl DynamicMaskTrie {
             .max()
             .unwrap_or(0);
         self.full_walk_ops.reserve(self.edge_bytes.len().max(self.walk_edges.len()));
-        self.full_walk_op_edges
-            .reserve(self.edge_bytes.len().max(self.walk_edges.len()));
         self.full_walk_edge_op_starts.reserve(self.walk_edges.len() + 1);
-        for (edge_index, edge) in self.walk_edges.iter().copied().enumerate() {
+        for edge in self.walk_edges.iter().copied() {
             self.full_walk_edge_op_starts
                 .push(self.full_walk_ops.len() as u32);
             let start = edge.byte_start as usize;
@@ -2199,7 +2207,6 @@ impl DynamicMaskTrie {
                     | DynamicMaskTrieFullWalkOp::END;
                 if child_is_token { meta |= DynamicMaskTrieFullWalkOp::TOKEN; }
                 self.full_walk_ops.push(DynamicMaskTrieFullWalkOp { meta });
-                self.full_walk_op_edges.push(edge_index as u32);
                 continue;
             }
             for (index, &byte) in bytes.iter().enumerate() {
@@ -2211,12 +2218,21 @@ impl DynamicMaskTrie {
                     if child_is_token { meta |= DynamicMaskTrieFullWalkOp::TOKEN; }
                 }
                 self.full_walk_ops.push(DynamicMaskTrieFullWalkOp { meta });
-                self.full_walk_op_edges.push(edge_index as u32);
             }
         }
         self.full_walk_edge_op_starts
             .push(self.full_walk_ops.len() as u32);
-        debug_assert_eq!(self.full_walk_op_edges.len(), self.full_walk_ops.len());
+        self.full_walk_edge_blocks.resize(
+            self.full_walk_ops.len().div_ceil(64), FullWalkEdgeBlock::default());
+        for &op in &self.full_walk_edge_op_starts[..self.walk_edges.len()] {
+            let op = op as usize;
+            self.full_walk_edge_blocks[op >> 6].starts |= 1u64 << (op & 63);
+        }
+        let mut rank = 0u32;
+        for block in &mut self.full_walk_edge_blocks {
+            block.preceding_edges = rank;
+            rank += block.starts.count_ones();
+        }
         debug_assert_eq!(
             self.full_walk_edge_op_starts.len(),
             self.walk_edges.len() + 1
@@ -2425,6 +2441,20 @@ impl DynamicMaskTrie {
 struct LegacyTrieNodes<'a>(&'a DynamicMaskTrie);
 struct LegacyTrieEdges<'a>(&'a DynamicMaskTrie);
 struct LegacyTrieTokenNodes<'a>(&'a DynamicMaskTrie);
+struct LegacyTrieOpEdges<'a>(&'a DynamicMaskTrie);
+
+impl serde::Serialize for LegacyTrieOpEdges<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut seq = serializer.serialize_seq(Some(self.0.full_walk_ops.len()))?;
+        for (edge, span) in self.0.full_walk_edge_op_starts.windows(2).enumerate() {
+            for _ in span[0]..span[1] {
+                seq.serialize_element(&(edge as u32))?;
+            }
+        }
+        seq.end()
+    }
+}
 
 impl serde::Serialize for LegacyTrieNodes<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -2482,7 +2512,7 @@ impl serde::Serialize for DynamicMaskTrie {
         wire.serialize_field("subtree_tokens", &self.subtree_tokens)?;
         wire.serialize_field("walk_edges", &self.walk_edges)?;
         wire.serialize_field("full_walk_ops", &self.full_walk_ops)?;
-        wire.serialize_field("full_walk_op_edges", &self.full_walk_op_edges)?;
+        wire.serialize_field("full_walk_op_edges", &LegacyTrieOpEdges(self))?;
         wire.serialize_field("full_walk_edge_op_starts", &self.full_walk_edge_op_starts)?;
         wire.serialize_field("full_walk_root_byte_op_starts",
             &self.full_walk_root_byte_op_starts.as_deref().map(|row| row.as_slice()))?;
