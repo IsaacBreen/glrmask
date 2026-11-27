@@ -734,6 +734,9 @@ pub(crate) fn publish_walk_boundary_shard_work(
             (dwa, materialize_ms, normalize_started_at.elapsed().as_secs_f64() * 1000.0)
         }
     };
+    ensure_positive_runtime_parser_dwa(&parser_dwa)?;
+    if compose_profile_enabled() {
+        eprintln!(
             "[glrmask/profile][constraint_walk_shard_publish] start_component={} terms={} parser_states={} parser_trans={} templates_ms={templates_ms:.3} materialize_ms={materialize_ms:.3} normalize_ms={normalize_ms:.3}",
             work.start_component,
             selected.iter().filter(|slot| **slot).count(),
@@ -741,7 +744,6 @@ pub(crate) fn publish_walk_boundary_shard_work(
             parser_dwa.num_transitions(),
         );
     }
-    finish_walk_shard_publication(
     finish_walk_shard_publication(
         work.start_component,
         work.candidate_tokens,
