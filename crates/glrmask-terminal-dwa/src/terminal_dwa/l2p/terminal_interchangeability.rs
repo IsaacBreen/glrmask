@@ -164,6 +164,7 @@ struct OutputProjectionSeed {
     active_terminals: Arc<[bool]>,
     output_pairs: Arc<[OutputPair]>,
     output_pair_by_state: Arc<[u32]>,
+    quotient: Option<Arc<TiQuotient>>,
 }
 
 /// Sparse topology of the byte-restricted tokenizer DFA. Its real-state domain
@@ -1093,6 +1094,7 @@ impl TiRawDiscoveryData {
             active_terminals: Arc::from(vec![true; tokenizer.num_terminals() as usize]),
             output_pairs: full_output_pairs,
             output_pair_by_state: Arc::from(full_output_pair_by_state),
+            quotient: None,
         };
 
         Self {
@@ -1158,6 +1160,7 @@ impl TiDiscoveryContext {
             active_terminals: Arc::from(active_terminals.to_vec()),
             output_pairs: Arc::clone(&dfa.output_pairs),
             output_pair_by_state: Arc::clone(&dfa.output_pair_by_state),
+            quotient: dfa.quotient.get().cloned(),
         });
     }
 
@@ -2173,6 +2176,7 @@ fn refine_partition<'a>(
 /// finalizer/future pair of its raw destination, not of the quotient
 /// representative of that destination.
 struct TiQuotient {
+    class_for_state: Arc<[u32]>,
     rows: Vec<Box<[(u8, u32, u32)]>>,
     predecessors: Vec<Vec<u32>>,
     output_sources: Vec<Vec<u32>>,
@@ -2269,9 +2273,10 @@ impl TiQuotient {
             sources.dedup();
         }
         let root = classes[topology.initial_state];
+        let class_for_state: Arc<[u32]> = classes.into();
         let (scanner_state_count, scanner_class_for_original, scanner_representative_for_class) =
-            topology.scanner_projection_from_internal_quotient(classes.into(), representatives.into());
-        Self { rows, predecessors, output_sources, root, dead, real, raw,
+            topology.scanner_projection_from_internal_quotient(Arc::clone(&class_for_state), representatives.into());
+        Self { class_for_state, rows, predecessors, output_sources, root, dead, real, raw,
             scanner_state_count, scanner_class_for_original, scanner_representative_for_class }
     }
 
@@ -2388,7 +2393,8 @@ struct InterchangeabilityDfa {
     observed_output_pair_is_observed: Vec<bool>,
     observed_output_pair_ids_by_terminal: Vec<Vec<u32>>,
     observed_output_pair_support_shapes_by_terminal: Vec<SupportTrackShape>,
-    quotient: OnceLock<TiQuotient>,
+    previous_quotient: Option<(Arc<TiQuotient>, Vec<u32>)>,
+    quotient: OnceLock<Arc<TiQuotient>>,
 }
 
 impl InterchangeabilityDfa {
@@ -2450,10 +2456,11 @@ impl InterchangeabilityDfa {
                 }
             }
         }
+        let previous_quotient = seed.quotient.as_ref().map(|q| (Arc::clone(q), projected));
         Self { topology, output_pairs: output_pairs.into(), output_pair_lookup,
             output_pair_by_state, observed_output_pairs, observed_output_pair_is_observed,
             observed_output_pair_ids_by_terminal, observed_output_pair_support_shapes_by_terminal,
-            quotient: OnceLock::new() }
+            previous_quotient, quotient: OnceLock::new() }
     }
 
     fn interchange_map(&self, left: TerminalID, right: TerminalID) -> Option<InterchangeMap> {
@@ -2475,9 +2482,10 @@ impl InterchangeabilityDfa {
             if !self.observed_output_pair_is_observed[target as usize] { return None; }
             swap.insert(id, target);
         }
-        let quotient = self.quotient.get_or_init(|| TiQuotient::new(
+        let quotient = self.quotient.get_or_init(|| Arc::new(TiQuotient::new(
             &self.topology, &self.output_pair_by_state, self.output_pairs.len(),
-        ));
+            self.previous_quotient.as_ref().map(|(q, labels)| (q.as_ref(), labels.as_slice())),
+        )));
         // Bound actual affected work, not total tokenizer size. A declined
         // certificate leaves the terminals separate; it cannot accept a
         // partially explored permutation.
@@ -2723,6 +2731,7 @@ pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
         active_terminals: Arc::from(active_terminals.to_vec()),
         output_pairs: Arc::clone(&dfa.output_pairs),
         output_pair_by_state: Arc::clone(&dfa.output_pair_by_state),
+        quotient: dfa.quotient.get().cloned(),
     });
     if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
         eprintln!("[glrmask/profile][terminal_interchangeability] active={} root_observed_states={} quotient_states={} checked_pairs={} accepted_pairs={} elapsed_ms={:.3}",
@@ -5940,6 +5949,7 @@ mod tests {
                 active_terminals: Arc::from(active),
                 output_pairs: Arc::clone(&dfa.output_pairs),
                 output_pair_by_state: Arc::clone(&dfa.output_pair_by_state),
+                quotient: dfa.quotient.get().cloned(),
             });
         }
     }
