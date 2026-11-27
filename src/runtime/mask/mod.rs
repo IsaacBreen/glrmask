@@ -6071,8 +6071,8 @@ impl ConstraintState {
                     let mut removed_bits = 0u64;
                     let mut unchanged_words = 0u64;
                     let mut unchanged_bits = 0u64;
-                    let mut added_cost = 0u64;
-                    let mut removed_cost = 0u64;
+                    let (added_cost, removed_cost) = self.constraint
+                        .estimate_internal_dense_delta_cost(&cache_data.merged_dense, &merged);
                     let capture_delta_summary = delta_profile_enabled;
                     let n_internal = self.constraint.internal_token_count();
                     let word_len = merged.len().max(cache_data.merged_dense.len());
@@ -6095,40 +6095,9 @@ impl ConstraintState {
                         if capture_delta_summary {
                             added_bits += added.count_ones() as u64;
                         }
-                        if added == valid_mask {
-                            if let Some(group_mask) = self.constraint.word_group_sparse_masks.get(wi) {
-                                added_cost += group_mask.len() as u64;
-                            } else {
-                                added_cost += self
-                                    .constraint
-                                    .internal_bits_grouped_buf_op_cost(wi, added, valid_mask, copy_cost_words as usize)
-                                    as u64;
-                            }
-                        } else if added != 0 {
-                            added_cost += self
-                                .constraint
-                                .internal_bits_grouped_buf_op_cost(wi, added, valid_mask, copy_cost_words as usize)
-                                as u64;
-                        }
-
                         let removed = previous & !current;
                         if capture_delta_summary {
                             removed_bits += removed.count_ones() as u64;
-                        }
-                        if removed == valid_mask {
-                            if let Some(group_mask) = self.constraint.word_group_sparse_masks.get(wi) {
-                                removed_cost += group_mask.len() as u64;
-                            } else {
-                                removed_cost += self
-                                    .constraint
-                                    .internal_bits_grouped_buf_op_cost(wi, removed, valid_mask, copy_cost_words as usize)
-                                    as u64;
-                            }
-                        } else if removed != 0 {
-                            removed_cost += self
-                                .constraint
-                                .internal_bits_grouped_buf_op_cost(wi, removed, valid_mask, copy_cost_words as usize)
-                                as u64;
                         }
                     }
 
