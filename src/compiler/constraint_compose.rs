@@ -17,7 +17,7 @@ use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use crate::automata::lexer::ast::Expr;
 use crate::automata::weighted_u32::determinize::determinize;
 use crate::automata::weighted_u32::dwa::DWA;
-use crate::automata::weighted_u32::nwa::{NWA, NWAState};
+use crate::automata::weighted_u32::nwa::NWA;
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::compiler::glr::labels::{
@@ -1384,44 +1384,23 @@ fn remap_composition_template_label(label: i32, state_relation: &[Vec<u32>]) -> 
 }
 
 
-/// Remap the template and construct its weighted skeleton in one traversal.
-pub(crate) fn transport_composition_template_dfa_with_skeleton(
+/// Relocate the authoritative template topology. Its consuming weighted
+/// backend attaches weights only after selecting the fragment.
+pub(crate) fn transport_composition_template_dfa(
     mut dfa: UnweightedDfa,
     state_relation: &[Vec<u32>],
-) -> Option<(UnweightedDfa, NWA)> {
-    let mut nwa_states = Vec::with_capacity(dfa.states.len());
+) -> Option<UnweightedDfa> {
     for state in &mut dfa.states {
-        let old = std::mem::take(&mut state.transitions);
         let mut mapped = BTreeMap::new();
-        let mut nwa_transitions = BTreeMap::new();
-        for (label, target) in old {
+        for (label, target) in std::mem::take(&mut state.transitions) {
             let mapped_label = remap_composition_template_label(label, state_relation)?;
             if let Some(previous) = mapped.insert(mapped_label, target)
-                && previous != target
-            {
-                return None;
-            }
-            if let Some(previous) = nwa_transitions.insert(
-                mapped_label,
-                vec![(target, Weight::empty())],
-            ) && previous[0].0 != target
-            {
-                return None;
-            }
+                && previous != target { return None; }
         }
         state.transitions = mapped;
-        nwa_states.push(NWAState {
-            final_weight: state.is_accepting.then(Weight::empty),
-            transitions: nwa_transitions,
-            epsilons: Vec::new(),
-        });
     }
-    let start_state = dfa.start_state;
-    let nwa = NWA::from_parts(nwa_states, vec![start_state]);
-    Some((dfa, nwa))
+    Some(dfa)
 }
-
-
 
 pub(crate) fn merged_terminal_display_names(
     parent: &Constraint,

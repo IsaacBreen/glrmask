@@ -89,24 +89,6 @@ fn empty_bundle_nwa() -> NWA {
     nwa
 }
 
-fn instantiate_weighted_nwa_from_skeleton(skeleton: &NWA, weight: &Weight) -> NWA {
-    let mut bundle = skeleton.clone();
-    for state in  bundle.states_mut() {
-        if state.final_weight.is_some() {
-            state.final_weight = Some(weight.clone());
-        }
-        for targets in state.transitions.values_mut() {
-            for (_, edge_weight) in targets {
-                *edge_weight = weight.clone();
-            }
-        }
-        for (_, epsilon_weight) in &mut state.epsilons {
-            *epsilon_weight = weight.clone();
-        }
-    }
-
-    bundle
-}
 
 fn clear_subset_key(key: &mut SubsetKey) {
     for word in key.iter_mut() {
@@ -381,9 +363,9 @@ impl Templates {
             return Some(empty_bundle_nwa());
         }
         Some(
-            self.by_terminal_nwa
+            self.by_terminal
                 .get(&terminal)
-                .map(|template_nwa| instantiate_weighted_nwa_from_skeleton(template_nwa, weight))
+                .map(|dfa| super::compile_dfa::instantiate_template_nwa(dfa, weight))
                 .unwrap_or_else(empty_bundle_nwa),
         )
     }
@@ -1682,7 +1664,6 @@ mod tests {
                 (1, template(1, 11)),
                 (2, template(2, 12)),
             ]),
-            by_terminal_nwa: BTreeMap::new(),
         };
         let first_shared = weight(0..=7);
         let first_other = weight(8..=15);
@@ -1733,7 +1714,6 @@ mod tests {
             by_terminal: (0..16u32)
                 .map(|terminal| (terminal, long_template(terminal as i32)))
                 .collect(),
-            by_terminal_nwa: BTreeMap::new(),
         };
         let bundles = (0..20u32)
             .map(|index| {

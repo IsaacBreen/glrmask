@@ -905,12 +905,29 @@ fn empty_transfer() -> TerminalCharacterization {
 /// lexical DWA, never confused with real terminals).
 #[derive(Clone)]
 pub(crate) struct FragmentLibrary {
-    pub templates: Templates,
+    pub templates: BTreeMap<TerminalID, NWA>,
+    pub diagnostic_dfas: Option<BTreeMap<TerminalID, UnweightedDfa>>,
     /// Synthetic fragment key per link index for Entry / Finish exports.
     pub entry_keys: Vec<TerminalID>,
     pub finish_keys: Vec<TerminalID>,
     pub ordinary_terms: usize,
     pub templates_ms: f64,
+}
+
+/// Only this boundary backend consumes weighted skeletons. Release the raw
+/// template inventory after conversion unless an opt-in diagnostic needs it.
+fn boundary_template_inventory(
+    templates: Templates,
+) -> (BTreeMap<TerminalID, NWA>, Option<BTreeMap<TerminalID, UnweightedDfa>>) {
+    use glrmask_parser_dwa::__private::templates::compile_dfa::dfa_to_nwa_skeleton;
+    let diagnostics = crate::env::var_os("GLRMASK_PROFILE_BOUNDARY_LEAF_TEMPLATES").is_some();
+    let mut skeletons = BTreeMap::new();
+    let mut diagnostic_dfas = diagnostics.then(BTreeMap::new);
+    for (terminal, dfa) in templates.by_terminal {
+        skeletons.insert(terminal, dfa_to_nwa_skeleton(&dfa));
+        if let Some(dfas) = &mut diagnostic_dfas { dfas.insert(terminal, dfa); }
+    }
+    (skeletons, diagnostic_dfas)
 }
 
 /// Link-scoped exact transfer cache prepared for the union of terminals
@@ -1406,13 +1423,13 @@ pub(crate) fn build_fragment_library_from_prepared(
         combined.insert(terminal, transfer.clone());
         ordinary_terms += 1;
     }
-    let templates = Templates::from_characterizations(&combined);
+    let (templates, diagnostic_dfas) = boundary_template_inventory(Templates::from_characterizations(&combined));
     let templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
     // The bounded-DAG composer requires acyclic fragments (the engine already
     // guarantees acyclic nt re-reduction graphs by loud decline/panic; this
     // checks the compiled template NWAs themselves). A cyclic fragment would
     // reintroduce unbounded control words through the back door.
-    for (&key, fragment) in &templates.by_terminal_nwa {
+    for (&key, fragment) in &templates {
         if !fragment.is_acyclic() {
             return Err(format!(
                 "signed link fragment {key} is cyclic; bounded flat closure cannot use it",
@@ -1421,6 +1438,7 @@ pub(crate) fn build_fragment_library_from_prepared(
     }
     Ok(FragmentLibrary {
         templates,
+        diagnostic_dfas,
         entry_keys: prepared.entry_keys.clone(),
         finish_keys: prepared.finish_keys.clone(),
         ordinary_terms,
@@ -1544,13 +1562,12 @@ fn build_fragment_library_cached_impl(
                 // relocation + skeleton construction. Only concrete read/pop
                 // and write/push labels are renamed; DEFAULT remains universal.
                 // No cancellation or template specialization is done here.
-                if let Some((dfa, nwa)) =
-                    crate::compiler::constraint_compose::transport_composition_template_dfa_with_skeleton(
+                if let Some(dfa) =
+                    crate::compiler::constraint_compose::transport_composition_template_dfa(
                         cached.clone(), relation,
                     )
                 {
                     reused.by_terminal.insert(terminal, dfa);
-                    reused.by_terminal_nwa.insert(terminal, nwa);
                     continue;
                 }
             }
@@ -1648,13 +1665,13 @@ fn build_fragment_library_cached_impl(
 
     let mut templates = Templates::from_characterizations(&combined);
     templates.by_terminal.append(&mut reused.by_terminal);
-    templates.by_terminal_nwa.append(&mut reused.by_terminal_nwa);
+    let (templates, diagnostic_dfas) = boundary_template_inventory(templates);
     let templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
     if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         eprintln!("[glrmask/profile][boundary_prepared_templates] component={start_component} enabled={reuse_prepared} ordinary={ordinary_terms} reused={reused_count} rebuilt={} relocation_ms={relocation_ms:.3} total_ms={templates_ms:.3}",
             ordinary_terms - reused_count);
     }
-    for (&key, fragment) in &templates.by_terminal_nwa {
+    for (&key, fragment) in &templates {
         if !fragment.is_acyclic() {
             return Err(format!(
                 "signed link fragment {key} is cyclic; bounded flat closure cannot use it",
@@ -1663,6 +1680,7 @@ fn build_fragment_library_cached_impl(
     }
     Ok(FragmentLibrary {
         templates,
+        diagnostic_dfas,
         entry_keys: cache.entry_keys.clone(),
         finish_keys: cache.finish_keys.clone(),
         ordinary_terms,
@@ -2705,14 +2723,11 @@ mod tests {
                 let scoped = scope_characterization(&local, &injection).unwrap();
                 let fresh = Templates::from_characterizations(&BTreeMap::from([(0, scoped)]));
                 let relation = (0..5).map(|state| vec![state + offset]).collect::<Vec<_>>();
-                let (relocated, skeleton) =
-                    crate::compiler::constraint_compose::transport_composition_template_dfa_with_skeleton(
+                let relocated =
+                    crate::compiler::constraint_compose::transport_composition_template_dfa(
                         original.by_terminal[&0].clone(), &relation,
                     ).unwrap();
                 assert_same_template_language(&relocated, &fresh.by_terminal[&0]).unwrap();
-                let rebuilt = Templates::from_terminal_dfas(BTreeMap::from([(0, relocated)]));
-                assert_eq!(skeleton.start_states(), rebuilt.by_terminal_nwa[&0].start_states());
-                assert_eq!(skeleton.states(), rebuilt.by_terminal_nwa[&0].states());
             }
         }
     }

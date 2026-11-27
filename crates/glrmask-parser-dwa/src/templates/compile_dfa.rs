@@ -178,27 +178,30 @@ fn dfa_size(dfa: &UnweightedDfa) -> (usize, usize) {
     (dfa.states.len(), transitions)
 }
 
-fn dfa_to_nwa_skeleton(dfa: &UnweightedDfa) -> NWA {
-    let states = dfa
-        .states
-        .iter()
-        .map(|state| NWAState {
-            final_weight: state.is_accepting.then(Weight::empty),
-            transitions: state
-                .transitions
-                .iter()
-                .map(|(&label, &target)| (label, vec![(target, Weight::empty())]))
-                .collect(),
-            epsilons: Vec::new(),
-        })
-        .collect();
-
-    NWA::from_parts(
-        states,
-        vec![dfa.start_state],
-    )
+/// Materialize only at an actual weighted-graph consumer. A template DFA
+/// already specifies every edge and final; the coefficient is supplied by
+/// the consuming bundle or fragment, never stored in the template inventory.
+pub(crate) fn weighted_template_rows<'a>(
+    dfa: &'a UnweightedDfa, weight: &'a Weight, offset: u32, continuation: Option<u32>,
+) -> impl Iterator<Item = NWAState> + 'a {
+    dfa.states.iter().map(move |state| NWAState {
+        final_weight: (state.is_accepting && continuation.is_none()).then(|| weight.clone()),
+        transitions: state.transitions.iter().map(|(&label, &target)| {
+            (label, vec![(offset + target, weight.clone())])
+        }).collect(),
+        epsilons: continuation.filter(|_| state.is_accepting && !weight.is_empty())
+            .map(|target| vec![(target, weight.clone())]).unwrap_or_default(),
+    })
 }
 
+pub(crate) fn instantiate_template_nwa(dfa: &UnweightedDfa, weight: &Weight) -> NWA {
+    NWA::from_parts(weighted_template_rows(dfa, weight, 0, None).collect(), vec![dfa.start_state])
+}
+
+/// Unweighted topology adapter for the legacy boundary NWA compiler.
+pub fn dfa_to_nwa_skeleton(dfa: &UnweightedDfa) -> NWA {
+    instantiate_template_nwa(dfa, &Weight::empty())
+}
 
 #[cfg(test)]
 fn nfa_epsilon_closure(nfa: &NFA, seeds: impl IntoIterator<Item = u32>) -> BTreeSet<u32> {
@@ -1179,7 +1182,6 @@ fn try_compile_template_dfa_with_profile(
 #[derive(Debug, Clone, Default)]
 pub struct Templates {
     pub by_terminal: BTreeMap<TerminalID, UnweightedDfa>,
-    pub by_terminal_nwa: BTreeMap<TerminalID, NWA>,
 }
 
 /// One raw graph for an existing exact characterization class. Consumers keep
@@ -1190,11 +1192,10 @@ pub struct TemplateDfaGroup {
     pub dfa: UnweightedDfa,
 }
 
-type CompiledCharacterization = (Vec<TerminalID>, UnweightedDfa, Option<NWA>, TemplateCompilationSample);
+type CompiledCharacterization = (Vec<TerminalID>, UnweightedDfa, TemplateCompilationSample);
 
 fn try_compile_characterization_groups(
     characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
-    include_skeletons: bool,
 ) -> Result<(Vec<(&TerminalCharacterization, Vec<TerminalID>)>, Vec<CompiledCharacterization>, TemplateCompileProfile), String> {
     use rayon::prelude::*;
     let skip_minimize = skip_template_minimization_enabled();
@@ -1205,10 +1206,7 @@ fn try_compile_characterization_groups(
     let groups: Vec<_> = grouped.into_iter().collect();
     let build = |(characterization, terminals): &(&TerminalCharacterization, Vec<TerminalID>)| {
         let result = try_compile_template_dfa_with_profile(characterization, skip_minimize)
-            .map(|(dfa, sample)| {
-                let skeleton = include_skeletons.then(|| dfa_to_nwa_skeleton(&dfa));
-                (terminals.clone(), dfa, skeleton, sample)
-            });
+            .map(|(dfa, sample)| (terminals.clone(), dfa, sample));
         (terminals[0], result)
     };
     let results: Vec<(TerminalID, Result<CompiledCharacterization, String>)> =
@@ -1236,7 +1234,7 @@ fn try_compile_characterization_groups(
         .collect::<Vec<_>>();
     super::report_macro_item_timings(
         "template_compile_characterizations",
-        &compiled.iter().map(|(_, _, _, sample)| sample.total_ms()).collect::<Vec<_>>(),
+        &compiled.iter().map(|(_, _, sample)| sample.total_ms()).collect::<Vec<_>>(),
     );
     let profile = TemplateCompileProfile {
         unique_characterizations: groups.len(),
@@ -1252,14 +1250,7 @@ impl Templates {
     pub fn from_terminal_dfas(
         by_terminal: BTreeMap<TerminalID, UnweightedDfa>,
     ) -> Self {
-        let by_terminal_nwa = by_terminal
-            .iter()
-            .map(|(&terminal, dfa)| (terminal, dfa_to_nwa_skeleton(dfa)))
-            .collect();
-        Self {
-            by_terminal,
-            by_terminal_nwa,
-        }
+        Self { by_terminal }
     }
 
     /// Build exact templates for a constant-depth direct-regular parser table.
@@ -1301,7 +1292,6 @@ impl Templates {
         }
 
         let mut by_terminal = BTreeMap::new();
-        let mut by_terminal_nwa = BTreeMap::new();
         for (terminal, targets_by_source) in targets_by_terminal.into_iter().enumerate() {
             let terminal = terminal as u32;
             let mut dfa = UnweightedDfa::new();
@@ -1325,14 +1315,11 @@ impl Templates {
                     dfa.add_transition(dfa.start_state, encode_positive_label(source), middle);
                 }
             }
-            let skeleton = dfa_to_nwa_skeleton(&dfa);
             by_terminal.insert(terminal, dfa);
-            by_terminal_nwa.insert(terminal, skeleton);
         }
 
         Some(Self {
             by_terminal,
-            by_terminal_nwa,
         })
     }
 
@@ -1360,12 +1347,10 @@ impl Templates {
     pub fn try_from_characterizations_profiled(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
     ) -> Result<(Self, TemplateCompileProfile), String> {
-        Self::try_from_characterizations_with_outputs(characterizations, true)
+        Self::compile_characterizations(characterizations)
     }
 
-    /// Compile the same exact terminal DFAs without producing unused NWA
-    /// skeletons. Runtime parser installation consumes only these DFAs;
-    /// composition callers retain the existing dual-output constructor.
+    /// Compile the authoritative terminal template languages.
     pub fn dfas_from_characterizations(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
     ) -> BTreeMap<TerminalID, UnweightedDfa> {
@@ -1376,7 +1361,7 @@ impl Templates {
     pub fn try_dfas_from_characterizations(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
     ) -> Result<BTreeMap<TerminalID, UnweightedDfa>, String> {
-        Self::try_from_characterizations_with_outputs(characterizations, false)
+        Self::compile_characterizations(characterizations)
             .map(|output| output.0.by_terminal)
     }
 
@@ -1394,11 +1379,10 @@ impl Templates {
     ) -> Result<(Vec<TemplateDfaGroup>, TemplateCompileProfile), String> {
         let started_at = Instant::now();
         let (groups, compiled, mut profile) =
-            try_compile_characterization_groups(characterizations, false)?;
+            try_compile_characterization_groups(characterizations)?;
         let fanout_started_at = Instant::now();
-        let output = compiled.into_iter().map(|(terminals, dfa, skeleton, sample)| {
+        let output = compiled.into_iter().map(|(terminals, dfa, sample)| {
             profile.observe_compilation(&sample, terminals.len());
-            debug_assert!(skeleton.is_none());
             TemplateDfaGroup { terminals, dfa }
         }).collect::<Vec<_>>();
         profile.fanout_ms = elapsed_ms(fanout_started_at);
@@ -1417,24 +1401,19 @@ impl Templates {
         Ok((output, profile))
     }
 
-    fn try_from_characterizations_with_outputs(
+    fn compile_characterizations(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
-        include_skeletons: bool,
-    ) -> Result<(Self, TemplateCompileProfile), String> {
+        ) -> Result<(Self, TemplateCompileProfile), String> {
         let total_started_at = Instant::now();
         let (groups, compiled, mut profile) =
-            try_compile_characterization_groups(characterizations, include_skeletons)?;
+            try_compile_characterization_groups(characterizations)?;
 
         let mut by_terminal = BTreeMap::new();
-        let mut by_terminal_nwa = BTreeMap::new();
         let fanout_started_at = Instant::now();
-        for (terminals, dfa, skeleton, sample) in compiled {
+        for (terminals, dfa, sample) in compiled {
             profile.observe_compilation(&sample, terminals.len());
             for terminal in terminals {
                 by_terminal.insert(terminal, dfa.clone());
-                if let Some(skeleton) = &skeleton {
-                    by_terminal_nwa.insert(terminal, skeleton.clone());
-                }
             }
         }
         profile.fanout_ms = elapsed_ms(fanout_started_at);
@@ -1442,7 +1421,7 @@ impl Templates {
 
         let validation_started_at = Instant::now();
         if template_quotient_validation_enabled() {
-            validate_template_quotient(&groups, &by_terminal, &by_terminal_nwa, include_skeletons);
+            validate_template_quotient(&groups, &by_terminal);
         }
         profile.validation_ms = elapsed_ms(validation_started_at);
         profile.total_ms += profile.validation_ms;
@@ -1451,8 +1430,7 @@ impl Templates {
         Ok((
             Self {
                 by_terminal,
-                by_terminal_nwa,
-            },
+                },
             profile,
         ))
     }
@@ -1512,20 +1490,11 @@ fn find_dfa_language_mismatch(
     None
 }
 
-fn nwa_skeleton_matches_dfa(dfa: &UnweightedDfa, skeleton: &NWA) -> bool {
-    let expected = dfa_to_nwa_skeleton(dfa);
-    expected.start_states() == skeleton.start_states() && expected.states() == skeleton.states()
-}
 
 fn validate_template_quotient(
     groups: &[(&TerminalCharacterization, Vec<TerminalID>)],
     by_terminal: &BTreeMap<TerminalID, UnweightedDfa>,
-    by_terminal_nwa: &BTreeMap<TerminalID, NWA>,
-    include_skeletons: bool,
 ) {
-    if !include_skeletons {
-        assert!(by_terminal_nwa.is_empty(), "DFA-only construction emitted an unused skeleton");
-    }
     for (characterization, terminals) in groups {
         let representative = terminals[0];
         let representative_dfa = by_terminal.get(&representative).unwrap_or_else(|| {
@@ -1540,15 +1509,6 @@ fn validate_template_quotient(
                 cached, representative_dfa,
                 "template quotient fanout mismatch for terminal {terminal} and representative {representative}"
             );
-            if include_skeletons {
-                let cached_skeleton = by_terminal_nwa.get(&terminal).unwrap_or_else(|| {
-                    panic!("missing template NWA skeleton for terminal {terminal}")
-                });
-                assert!(
-                    nwa_skeleton_matches_dfa(cached, cached_skeleton),
-                    "template NWA skeleton is not the DFA skeleton for terminal {terminal}"
-                );
-            }
         }
 
         validate_template_quotient_representative(characterization, representative_dfa, representative);
@@ -2272,8 +2232,7 @@ mod tests {
             ]);
             let complete = Templates::from_characterizations(&input);
             let (dfa_only, profile) =
-                Templates::try_from_characterizations_with_outputs(&input, false).unwrap();
-            assert!(dfa_only.by_terminal_nwa.is_empty());
+                Templates::compile_characterizations(&input).unwrap();
             assert_eq!(complete.by_terminal, dfa_only.by_terminal);
             assert_eq!(Templates::dfas_from_characterizations(&input), complete.by_terminal);
             assert_eq!(profile.unique_characterizations, 2);
@@ -2302,8 +2261,8 @@ mod tests {
                 assert_eq!(find_nfa_dfa_language_mismatch(&nfa, &dfa_only.by_terminal[&terminal]), None);
             }
             let groups = grouped.into_iter().collect::<Vec<_>>();
-            validate_template_quotient(&groups, &dfa_only.by_terminal, &dfa_only.by_terminal_nwa, false);
-            validate_template_quotient(&groups, &complete.by_terminal, &complete.by_terminal_nwa, true);
+            validate_template_quotient(&groups, &dfa_only.by_terminal);
+            validate_template_quotient(&groups, &complete.by_terminal);
         }
     }
 
@@ -2313,7 +2272,6 @@ mod tests {
         let full = super::Templates::from_characterizations(&input);
         let only = super::Templates::dfas_from_characterizations(&input);
         assert!(full.by_terminal.is_empty());
-        assert!(full.by_terminal_nwa.is_empty());
         assert_eq!(only, full.by_terminal);
         let (groups, profile) = super::Templates::grouped_dfas_from_characterizations(&input);
         assert!(groups.is_empty());

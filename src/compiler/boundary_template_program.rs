@@ -226,13 +226,13 @@ fn compile_shared_classed_prepared(
 }
 
 pub(super) fn assemble(
-    templates: &Templates,
+    templates: &BTreeMap<u32, NWA>,
     controls: &[u32],
     max_controls_per_gap: u32,
     lexical: &DWA,
     state_budget: Option<usize>,
 ) -> Result<(NWA, usize, usize), String> {
-    assemble_impl(&templates.by_terminal_nwa, controls, Some(max_controls_per_gap), lexical, state_budget, None)
+    assemble_impl(templates, controls, Some(max_controls_per_gap), lexical, state_budget, None)
 }
 
 fn assemble_impl(

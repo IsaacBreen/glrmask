@@ -26,7 +26,8 @@ use crate::compiler::stages::equiv_types::InternalIdMap;
 use crate::compiler::stages::resolve_negatives::{
     apply_finality_fixpoint, resolve_negative_codes_in_nwa,
 };
-use crate::compiler::stages::templates::Templates;
+use crate::compiler::stages::templates::{Templates, compile_dfa::weighted_template_rows};
+use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
 use crate::weight_row::SparseWeightRow;
@@ -768,15 +769,15 @@ fn bundle_signature(bundle: &TerminalBundle) -> BundleSignature {
         .collect()
 }
 
-fn terminal_template_has_acceptance(template: &NWA) -> bool {
-    template.states().iter().any(|state| state.final_weight.is_some())
+fn terminal_template_has_acceptance(template: &UnweightedDfa) -> bool {
+    template.states.iter().any(|state| state.is_accepting)
 }
 
 fn terminal_bundle_has_acceptance(bundle: &TerminalBundle, templates: &Templates) -> bool {
     bundle.iter().any(|(&terminal, weight)| {
         !weight.is_empty()
             && templates
-                .by_terminal_nwa
+                .by_terminal
                 .get(&terminal)
                 .is_some_and(terminal_template_has_acceptance)
     })
@@ -7207,62 +7208,13 @@ fn compute_productive_terminal_states(summaries: &StateSummaries) -> Vec<bool> {
 
 fn append_weighted_template_redirecting_finals(
     arena: &mut NWA,
-    template: &NWA,
+    template: &UnweightedDfa,
     weight: &Weight,
     continuation_state: u32,
 ) -> NwaBody {
-    if std::env::var_os("GLRMASK_EXPERIMENT_BULK_FRAGMENT_APPEND").is_some() {
-        let offset = arena.states().len() as u32;
-        let starts = template
-            .start_states()
-            .iter()
-            .map(|state| offset + *state)
-            .collect::<Vec<_>>();
-        let states = arena.states_mut();
-        states.reserve(template.states().len());
-        for source in template.states() {
-            let mut appended = source.clone();
-            for targets in appended.transitions.values_mut() {
-                for (target, edge_weight) in targets {
-                    *target += offset;
-                    *edge_weight = weight.clone();
-                }
-            }
-            for (target, epsilon_weight) in &mut appended.epsilons {
-                *target += offset;
-                *epsilon_weight = weight.clone();
-            }
-            if appended.final_weight.take().is_some() {
-                appended.epsilons.push((continuation_state, weight.clone()));
-            }
-            states.push(appended);
-        }
-        return NwaBody { start_states: starts };
-    }
-
     let offset = arena.states().len() as u32;
-    let body = arena.append_with_body(template);
-    let appended_len = template.states().len();
-
-    for state_id in offset as usize..offset as usize + appended_len {
-        let state = &mut arena.states_mut()[state_id];
-        for targets in state.transitions.values_mut() {
-            for (_, edge_weight) in targets {
-                *edge_weight = weight.clone();
-            }
-        }
-        for (_, epsilon_weight) in &mut state.epsilons {
-            *epsilon_weight = weight.clone();
-        }
-    }
-
-    for state_id in offset as usize..offset as usize + appended_len {
-        if arena.states_mut()[state_id].final_weight.take().is_some() {
-            arena.add_epsilon(state_id as u32, continuation_state, weight.clone());
-        }
-    }
-
-    body
+    arena.states_mut().extend(weighted_template_rows(template, weight, offset, Some(continuation_state)));
+    NwaBody { start_states: vec![offset + template.start_state] }
 }
 
 /// Internal compiler splice for an already weighted deterministic terminal bundle.
@@ -7337,7 +7289,7 @@ fn append_branch_fragment(
         if weight.is_empty() {
             return None;
         }
-        let template = templates.by_terminal_nwa.get(&terminal)?;
+        let template = templates.by_terminal.get(&terminal)?;
         return Some(append_weighted_template_redirecting_finals(
             arena,
             template,
@@ -7360,7 +7312,7 @@ fn append_branch_fragment(
             if weight.is_empty() {
                 continue;
             }
-            let template = templates.by_terminal_nwa.get(&terminal)?;
+            let template = templates.by_terminal.get(&terminal)?;
             let body = append_weighted_template_redirecting_finals(
                 arena,
                 template,
@@ -7836,7 +7788,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
 
     let parallel_fragments_done = if parallel_fragment_assembly {
         enum FragmentSource<'a> {
-            WeightedTemplate(&'a NWA, &'a Weight),
+            WeightedTemplate(&'a UnweightedDfa, &'a Weight),
             Bundle(&'a NWA),
         }
         struct FragmentTask<'a> {
@@ -7889,7 +7841,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
                         valid = false;
                         break;
                     }
-                    let Some(template) = templates.by_terminal_nwa.get(&terminal) else {
+                    let Some(template) = templates.by_terminal.get(&terminal) else {
                         valid = false;
                         break;
                     };
@@ -7902,7 +7854,7 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
                     FragmentSource::Bundle(source)
                 };
                 let len = match source {
-                    FragmentSource::WeightedTemplate(template, _) => template.states().len(),
+                    FragmentSource::WeightedTemplate(template, _) => template.states.len(),
                     FragmentSource::Bundle(bundle) => bundle.states().len(),
                 };
                 let Some(after) = next_offset.checked_add(len as u32) else {
@@ -7922,46 +7874,29 @@ fn build_parser_nwa_from_terminal_dwa_for_terminal_count(
                 let built = tasks
                     .par_iter()
                     .map(|task| {
-                        let (source, override_weight) = match task.source {
-                            FragmentSource::WeightedTemplate(source, weight) => {
-                                (source, Some(weight))
-                            }
-                            FragmentSource::Bundle(source) => (source, None),
-                        };
-                        let starts = source
-                            .start_states()
-                            .iter()
-                            .map(|state| task.offset + *state)
-                            .collect::<Vec<_>>();
-                        let mut output = Vec::<NWAState>::with_capacity(source.states().len());
-                        for source_state in source.states() {
-                            let mut appended = source_state.clone();
-                            for targets in appended.transitions.values_mut() {
-                                for (target, edge_weight) in targets {
-                                    *target += task.offset;
-                                    if let Some(weight) = override_weight {
-                                        *edge_weight = weight.clone();
+                        let (starts, output): (Vec<u32>, Vec<NWAState>) = match task.source {
+                            FragmentSource::WeightedTemplate(source, weight) => (
+                                vec![task.offset + source.start_state],
+                                weighted_template_rows(source, weight, task.offset, Some(task.target_continuation)).collect(),
+                            ),
+                            FragmentSource::Bundle(source) => {
+                                let starts = source.start_states().iter().map(|state| task.offset + *state).collect();
+                                let mut output = Vec::with_capacity(source.states().len());
+                                for source_state in source.states() {
+                                    let mut appended = source_state.clone();
+                                    for targets in appended.transitions.values_mut() {
+                                        for (target, _) in targets { *target += task.offset; }
                                     }
+                                    for (target, _) in &mut appended.epsilons { *target += task.offset; }
+                                    if let Some(weight) = appended.final_weight.take()
+                                        && !weight.is_empty() {
+                                        appended.epsilons.push((task.target_continuation, weight));
+                                    }
+                                    output.push(appended);
                                 }
+                                (starts, output)
                             }
-                            for (target, epsilon_weight) in &mut appended.epsilons {
-                                *target += task.offset;
-                                if let Some(weight) = override_weight {
-                                    *epsilon_weight = weight.clone();
-                                }
-                            }
-                            if let Some(final_weight) = appended.final_weight.take() {
-                                let continuation_weight = override_weight
-                                    .cloned()
-                                    .unwrap_or(final_weight);
-                                if !continuation_weight.is_empty() {
-                                    appended
-                                        .epsilons
-                                        .push((task.target_continuation, continuation_weight));
-                                }
-                            }
-                            output.push(appended);
-                        }
+                        };
                         (task.from, starts, output)
                     })
                     .collect::<Vec<_>>();
@@ -8633,7 +8568,7 @@ pub fn build_terminal_bundle_preimage_domain_nwa(
         .collect::<BTreeMap<_, _>>();
     if terminal_weights
         .keys()
-        .any(|terminal| !templates.by_terminal_nwa.contains_key(terminal))
+        .any(|terminal| !templates.by_terminal.contains_key(terminal))
     {
         return None;
     }
@@ -8935,7 +8870,7 @@ pub fn build_boolean_terminal_bundle_nwa(
     if terminals.is_empty()
         || terminals
             .iter()
-            .any(|terminal| !templates.by_terminal_nwa.contains_key(terminal))
+            .any(|terminal| !templates.by_terminal.contains_key(terminal))
     {
         return None;
     }
@@ -10301,7 +10236,8 @@ mod tests {
     use crate::compiler::glr::table::testing::build_test_table;
     use crate::compiler::glr::table::Action;
     use crate::compiler::stages::resolve_negatives::resolve_negative_codes_in_nwa;
-    use crate::compiler::stages::templates::Templates;
+    use crate::compiler::stages::templates::{Templates, compile_dfa::weighted_template_rows};
+use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
     use crate::ds::weight::Weight;
     use crate::grammar::flat::{
         DirectRegularAutomaton, GrammarDef, Rule, Symbol, Terminal,

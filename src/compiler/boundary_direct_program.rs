@@ -16,9 +16,9 @@ pub(super) fn compile(
         || (depths == 1 && !context.links.is_empty()) { return None; }
     let ports = lexical.states().len().checked_mul(depths)?;
     if ports > 200_000 { return None; }
-    let template_ids = library.templates.by_terminal_nwa.keys().enumerate()
+    let template_ids = library.templates.keys().enumerate()
         .map(|(i, &t)| (t, i)).collect::<BTreeMap<_, _>>();
-    let templates = library.templates.by_terminal_nwa.values().collect::<Vec<_>>();
+    let templates = library.templates.values().collect::<Vec<_>>();
     let mut coefficients = vec![Weight::all()];
     let mut indices = rustc_hash::FxHashMap::default(); indices.insert(coefficients[0].ptr_key(), 0);
     let mut weight_id = |weight: &Weight| -> usize {
@@ -102,8 +102,8 @@ pub(super) fn compile(
             }
             let mut originals=0usize;let mut projected=0usize;let mut records=Vec::new();
             for (&key,&copies) in &counts {
-                let original=library.templates.by_terminal_nwa.get(&key)?;
-                let reduced=library.templates.by_terminal.get(&key)
+                let original=library.templates.get(&key)?;
+                let reduced=library.diagnostic_dfas.as_ref().and_then(|dfas| dfas.get(&key))
                     .and_then(|dfa|admission::project(dfa,context.total_scoped_states));
                 let before=original.states().len();
                 let after=reduced.as_ref().map_or(before,|dfa|dfa.states.len());
