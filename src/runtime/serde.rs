@@ -123,7 +123,7 @@ impl NativeSectionSource<'_> {
 const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R38\0";
 const CURRENT_RUNTIME_HEADER_LEN: usize = CURRENT_RUNTIME_MAGIC.len() + 2 * 8;
 const STATIC_RESIDUAL_MASK_MAGIC: [u8; 4] = *b"SRM3";
-const CURRENT_CORE_MAGIC: [u8; 4] = *b"C29\0";
+const CURRENT_CORE_MAGIC: [u8; 4] = *b"C30\0";
 const CURRENT_CORE_HEADER_LEN: usize = CURRENT_CORE_MAGIC.len() + 2 * 8;
 
 /// Clone a large already-serialized artifact without forcing one core to move
@@ -3290,15 +3290,11 @@ impl Constraint {
         }
         let total_started = profile.then(std::time::Instant::now);
         const PARALLEL_ASSEMBLY_MAX_PACKED_DWA_BYTES: usize = 1024 * 1024;
-        let packed_dwa_wire_len = self
-            .packed_parser_dwa
-            .as_ref()
+        let packed_dwa_wire_len = self.parser_dwa.packed()
             .and_then(|packed| packed.fast_wire_len());
-        let direct_dwa_wire_len = self
-            .packed_parser_dwa
-            .as_ref()
+        let direct_dwa_wire_len = self.parser_dwa.packed()
             .and_then(|packed| packed.direct_fast_wire_len());
-        let parallel_assembly_candidate = self.packed_parser_dwa.is_none()
+        let parallel_assembly_candidate = self.parser_dwa.packed().is_none()
             || packed_dwa_wire_len
                 .is_some_and(|len| len <= PARALLEL_ASSEMBLY_MAX_PACKED_DWA_BYTES);
         const DIRECT_TOKENIZER_MIN_BYTES: usize = 400 * 1024;
@@ -3427,8 +3423,6 @@ impl Constraint {
                         weight_pool
                     },
                     || {
-                        let previous_external =
-                            crate::automata::weighted::dwa::set_external_serde(true);
                         let previous_external_table =
                             crate::compiler::glr::table::artifact_serde::set_external_serde(true);
                         let previous_compact_tokenizer =
@@ -3484,7 +3478,6 @@ impl Constraint {
                         crate::compiler::glr::table::artifact_serde::set_external_serde(
                             previous_external_table,
                         );
-                        crate::automata::weighted::dwa::set_external_serde(previous_external);
                         encode_result.expect("Constraint core serialization should succeed");
                         if let Some(started) = started {
                             eprintln!(
@@ -3509,9 +3502,9 @@ impl Constraint {
                     || {
                         rayon::join(
                     || {
-                        let Some(_packed) = self.packed_parser_dwa.as_ref() else {
+                        let Some(_packed) = self.parser_dwa.packed() else {
                             let started = profile.then(std::time::Instant::now);
-                            let bytes = self.parser_dwa.artifact_packed_bytes();
+                            let bytes = self.parser_dwa.owned().expect("owned DWA section").artifact_packed_bytes();
                             if let Some(started) = started {
                                 eprintln!(
                                     "[glrmask/profile][constraint_save_section] name=dwa ms={:.3} bytes={}",
@@ -3642,9 +3635,7 @@ impl Constraint {
         // When available, `fast_wire_len()` is the exact current packed-DWA
         // length. Small fallback DWAs may require actual emission before their
         // byte length is known.
-        let estimated_dwa_wire_len = self
-            .packed_parser_dwa
-            .as_ref()
+        let estimated_dwa_wire_len = self.parser_dwa.packed()
             .and_then(|packed| packed.fast_wire_len())
             .unwrap_or(dwa.len());
         // For ordinary constraints, materializing the small packed-DWA section
@@ -3653,9 +3644,7 @@ impl Constraint {
         // sections are ordinary byte slices, copy them into disjoint final
         // ranges in parallel. Large JS-like DWAs keep direct emission below to
         // avoid creating a second 10+ MiB DWA buffer.
-        let packed_dwa_for_parallel = self
-            .packed_parser_dwa
-            .as_ref()
+        let packed_dwa_for_parallel = self.parser_dwa.packed()
             .filter(|packed| packed.backed_fast_wire_bytes().is_none())
             .filter(|packed| {
                 packed
@@ -3663,14 +3652,12 @@ impl Constraint {
                     .is_some_and(|len| len <= PARALLEL_ASSEMBLY_MAX_PACKED_DWA_BYTES)
             })
             .map(|packed| packed.fast_wire_bytes());
-        let backed_packed_dwa = self
-            .packed_parser_dwa
-            .as_ref()
+        let backed_packed_dwa = self.parser_dwa.packed()
             .and_then(|packed| packed.backed_fast_wire_bytes());
         let parallel_dwa = backed_packed_dwa
             .or(packed_dwa_for_parallel.as_deref())
             .or_else(|| (!dwa.is_empty()).then_some(dwa.as_slice()))
-            .or_else(|| self.packed_parser_dwa.is_none().then_some(dwa.as_slice()));
+            .or_else(|| self.parser_dwa.packed().is_none().then_some(dwa.as_slice()));
         let dwa_source = if let Some(bytes) = parallel_dwa {
             NativeSectionSource::Bytes(bytes)
         } else if let Some(len) = direct_dwa_wire_len {
@@ -3721,7 +3708,7 @@ impl Constraint {
                     NativeSectionSource::Bytes(source) => bytes.extend_from_slice(source),
                     NativeSectionSource::AppendDwa(_) => {
                         let started = profile.then(std::time::Instant::now);
-                        self.packed_parser_dwa.as_ref().expect("packed DWA source")
+                        self.parser_dwa.packed().expect("packed DWA source")
                             .append_fast_wire_bytes(&mut bytes);
                         if let Some(started) = started {
                             eprintln!(
@@ -3802,7 +3789,7 @@ impl Constraint {
             let write_dwa = || {
                 if let Some(destination) = direct_dwa_destination {
                     let started = profile.then(std::time::Instant::now);
-                    self.packed_parser_dwa.as_ref().expect("packed DWA source")
+                    self.parser_dwa.packed().expect("packed DWA source")
                         .write_direct_fast_wire_bytes(destination)
                         .expect("direct DWA length should match final section");
                     if let Some(started) = started {
@@ -4405,8 +4392,6 @@ impl Constraint {
                     eprintln!("[glrmask/profile][constraint_section] name=weights_packed ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
                 }
                 let decode_core = || -> Result<_, String> {
-                    let previous_external =
-                        crate::automata::weighted::dwa::set_external_serde(true);
                     let previous_external_table =
                         crate::compiler::glr::table::artifact_serde::set_external_serde(true);
                     let previous_compact_tokenizer =
@@ -4455,7 +4440,6 @@ impl Constraint {
                     crate::compiler::glr::table::artifact_serde::set_external_serde(
                         previous_external_table,
                     );
-                    crate::automata::weighted::dwa::set_external_serde(previous_external);
                     decoded
                 };
                 let artifact = decode_core()?;
@@ -4483,8 +4467,7 @@ impl Constraint {
         }
         constraint.token_classes = original_token_map;
         let attach_dwa_started = profile.then(std::time::Instant::now);
-        constraint.parser_dwa = crate::automata::weighted::dwa::DWA::new(0, 0);
-        constraint.packed_parser_dwa = Some(parser_dwa);
+        constraint.parser_dwa = crate::runtime::artifact::ParserDwaStorage::Packed(parser_dwa);
         let attach_dwa_ms = attach_dwa_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         constraint.table = table;
@@ -4651,9 +4634,7 @@ impl Constraint {
                 if !deferred
                 && let Some((ids, rows)) = runtime.packed_dwa_dense_masks {
                     let expected_words = constraint.internal_token_count().div_ceil(64);
-                    let token_set_count = constraint
-                        .packed_parser_dwa
-                        .as_ref()
+                    let token_set_count = constraint.parser_dwa.packed()
                         .map_or(0, |dwa| dwa.token_set_count());
                     let cache = crate::runtime::artifact::PackedDwaDenseWeightMaskCache::from_flat(
                         token_set_count,
@@ -5511,7 +5492,7 @@ mod tests {
     fn current_save_handles_packed_dwa_without_fast_wire_length() {
         let mut constraint = tiny_constraint();
         let packed = crate::automata::weighted::dwa::PackedRuntimeDwa::from_dwa(
-            &constraint.parser_dwa,
+            constraint.parser_dwa.owned().expect("owned test DWA"),
         )
         .unwrap();
         assert!(
@@ -5525,7 +5506,7 @@ mod tests {
         // really protecting: when no exact precomputed wire length exists, the
         // outer serializer must use the actual emitted wire rather than a stale
         // estimate.
-        constraint.packed_parser_dwa = Some(Arc::new(packed));
+        constraint.parser_dwa = crate::runtime::artifact::ParserDwaStorage::Packed(Arc::new(packed));
         let saved = constraint.save();
         let loaded = Constraint::load(&saved, &crate::public_api::constraint_vocab(&constraint)).unwrap();
         assert_eq!(loaded.start().mask(), constraint.start().mask());

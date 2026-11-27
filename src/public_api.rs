@@ -5900,8 +5900,8 @@ mod tests {
         )
         .unwrap();
 
-        let parent_dwa = parent.parser_dwa.clone();
-        let child_dwa = child.parser_dwa.clone();
+        let parent_dwa = parent.parser_dwa.for_compilation().unwrap().into_owned();
+        let child_dwa = child.parser_dwa.for_compilation().unwrap().into_owned();
         let bound = parent
             .bind_grammar_dynamic_boundary("child", child.clone())
             .unwrap();
@@ -5911,8 +5911,8 @@ mod tests {
             .expect("authoritative A+B metadata");
         assert!(bound.uses_compact_segmented_parser_runtime());
         assert_eq!(overlay.segmented_parser_components.len(), 2);
-        assert_eq!(overlay.segmented_parser_components[0].constraint.parser_dwa, parent_dwa);
-        assert_eq!(overlay.segmented_parser_components[1].constraint.parser_dwa, child_dwa);
+        assert_eq!(overlay.segmented_parser_components[0].constraint.parser_dwa.for_compilation().unwrap().as_ref(), &parent_dwa);
+        assert_eq!(overlay.segmented_parser_components[1].constraint.parser_dwa.for_compilation().unwrap().as_ref(), &child_dwa);
 
         let loaded = RuntimeConstraint::load(bound.save(), &vocab).unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
@@ -5932,8 +5932,8 @@ mod tests {
             .clone();
         loaded_parent.materialize_parser_dwa_for_compilation().unwrap();
         loaded_child.materialize_parser_dwa_for_compilation().unwrap();
-        assert_eq!(loaded_parent.parser_dwa, parent_dwa);
-        assert_eq!(loaded_child.parser_dwa, child_dwa);
+        assert_eq!(loaded_parent.parser_dwa.for_compilation().unwrap().as_ref(), &parent_dwa);
+        assert_eq!(loaded_child.parser_dwa.for_compilation().unwrap().as_ref(), &child_dwa);
         for (kind, constraint) in [("source", &bound), ("loaded", &loaded)] {
             let mut actual = constraint.start();
             let mut expected = monolithic.start();

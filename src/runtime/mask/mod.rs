@@ -2847,7 +2847,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
         if let Some(cached) = self.runtime.final_memo.get(&key) {
             return cached.clone();
         }
-        let result = self.constraint.parser_dwa().states()[dwa_state as usize]
+        let result = self.constraint.parser_dwa().expect("indexed DAG requires owned DWA").states()[dwa_state as usize]
             .final_weight
             .as_ref()
             .and_then(|weight| {
@@ -6043,7 +6043,7 @@ impl ConstraintState {
             return false;
         }
         let Some(weights) = self.constraint.non_dwa_weights.materialized() else { return false; };
-        let parser_dwa = self.constraint.parser_dwa();
+        let Some(parser_dwa) = self.constraint.parser_dwa() else { return false; };
         if self.state.is_empty() || parser_dwa.states().is_empty() {
             return false;
         }

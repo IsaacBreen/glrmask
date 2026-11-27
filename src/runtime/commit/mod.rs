@@ -9954,10 +9954,11 @@ mod tests {
         use crate::ds::weight::Weight;
 
         fn accepted_weight(constraint: &Constraint, labels: &[u32]) -> Weight {
-            let mut state = constraint.parser_dwa.start_state();
+            let parser_dwa = constraint.parser_dwa.for_compilation().unwrap();
+            let mut state = parser_dwa.start_state();
             let mut weight = Weight::all();
             for &label in labels {
-                let row = &constraint.parser_dwa.states()[state as usize];
+                let row = &parser_dwa.states()[state as usize];
                 let Some((target, edge_weight)) = row
                     .transitions
                     .get(&(label as i32))
@@ -9968,7 +9969,7 @@ mod tests {
                 weight = weight.intersection(edge_weight);
                 state = *target;
             }
-            let Some(final_weight) = constraint.parser_dwa.states()[state as usize]
+            let Some(final_weight) = parser_dwa.states()[state as usize]
                 .final_weight
                 .as_ref()
             else {
@@ -10027,10 +10028,11 @@ mod tests {
         use crate::ds::weight::Weight;
 
         fn accepted_weight(constraint: &Constraint, labels: &[u32]) -> Weight {
-            let mut state = constraint.parser_dwa.start_state();
+            let parser_dwa = constraint.parser_dwa.for_compilation().unwrap();
+            let mut state = parser_dwa.start_state();
             let mut weight = Weight::all();
             for &label in labels {
-                let row = &constraint.parser_dwa.states()[state as usize];
+                let row = &parser_dwa.states()[state as usize];
                 let Some((target, edge_weight)) = row
                     .transitions
                     .get(&(label as i32))
@@ -10039,7 +10041,7 @@ mod tests {
                 weight = weight.intersection(edge_weight);
                 state = *target;
             }
-            let Some(final_weight) = constraint.parser_dwa.states()[state as usize].final_weight.as_ref()
+            let Some(final_weight) = parser_dwa.states()[state as usize].final_weight.as_ref()
             else { return Weight::empty(); };
             weight.intersection(final_weight)
         }
@@ -10054,7 +10056,7 @@ mod tests {
         fn dump_case(constraint: &Constraint, name: &str, tokenizer_state: u32, stack: &[u32], tokens: &[u32]) {
             let reversed = stack.iter().rev().copied().collect::<Vec<_>>();
             eprintln!("SHALLOW {name} tokenizer_state={tokenizer_state} stack={stack:?} tsids={:?}", constraint.internal_tsids_for_state(tokenizer_state));
-            let start_final = constraint.parser_dwa.states()[constraint.parser_dwa.start_state() as usize]
+            let start_final = constraint.parser_dwa.for_compilation().unwrap().states()[constraint.parser_dwa.start_state() as usize]
                 .final_weight.clone().unwrap_or_else(Weight::empty);
             for &token in tokens {
                 let mut first = contains(constraint, tokenizer_state, token, &start_final).then_some(0usize);

@@ -232,6 +232,57 @@ pub(crate) struct CompositionGrammarSummary {
     pub(crate) root_nullable: bool,
 }
 
+/// The same exact parser automaton in either compiler-owned or packed form.
+/// Packed constraints never retain a second owned state graph.
+#[derive(Debug, Clone)]
+pub(crate) enum ParserDwaStorage {
+    Owned(DWA),
+    Packed(Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>),
+}
+
+impl Default for ParserDwaStorage {
+    fn default() -> Self {
+        Self::Owned(DWA::new(0, 0))
+    }
+}
+
+impl ParserDwaStorage {
+    pub(crate) fn owned(&self) -> Option<&DWA> {
+        match self {
+            Self::Owned(dwa) => Some(dwa),
+            Self::Packed(_) => None,
+        }
+    }
+
+    pub(crate) fn packed(&self) -> Option<&crate::automata::weighted::dwa::PackedRuntimeDwa> {
+        match self {
+            Self::Owned(_) => None,
+            Self::Packed(dwa) => Some(dwa),
+        }
+    }
+
+    pub(crate) fn for_compilation(&self) -> Result<std::borrow::Cow<'_, DWA>, String> {
+        match self {
+            Self::Owned(dwa) => Ok(std::borrow::Cow::Borrowed(dwa)),
+            Self::Packed(dwa) => dwa.to_dwa().map(std::borrow::Cow::Owned),
+        }
+    }
+
+    pub(crate) fn state_count(&self) -> usize {
+        match self {
+            Self::Owned(dwa) => dwa.states().len(),
+            Self::Packed(dwa) => dwa.state_count(),
+        }
+    }
+
+    pub(crate) fn start_state(&self) -> u32 {
+        match self {
+            Self::Owned(dwa) => dwa.start_state(),
+            Self::Packed(dwa) => dwa.start_state(),
+        }
+    }
+}
+
 /// Non-DWA weight relations share the final constraint TSID/token coordinate.
 /// Runtime storage changes the value representation, never the keys or order.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -9618,14 +9669,9 @@ constraint_data_schema! {
     /// Runtime-only.
     @serde(skip, default)
     pub(crate) pending_special_token_ids: Option<Vec<u32>>,
-    pub(crate) parser_dwa: DWA,
-    /// Current-format loaded constraints retain the immutable parser DWA in
-    /// its compact canonical pools instead of reconstructing RangeSet/Weight
-    /// objects. Compiler-created and legacy-loaded constraints leave this
-    /// empty and use `parser_dwa` directly.
+    /// Exact parser DWA; serialized independently in the native DWA section.
     @serde(skip, default)
-    pub(crate) packed_parser_dwa:
-        Option<Arc<crate::automata::weighted::dwa::PackedRuntimeDwa>>,
+    pub(crate) parser_dwa: ParserDwaStorage,
     /// Labeled non-DWA weights. The current core carries the same relation
     /// schema using validated pool IDs, not this runtime representation.
     @serde(skip, default)

@@ -248,7 +248,8 @@ fn build_parser_default_domain_plan(
         if domain_total == 0 {
             continue;
         }
-        for state in component.constraint.parser_dwa.states() {
+        let source = component.constraint.parser_dwa.for_compilation().expect("validated component DWA");
+        for state in source.states() {
             if !state.transitions.contains_key(&DEFAULT_LABEL) {
                 continue;
             }
@@ -1453,7 +1454,7 @@ fn component_parser_nwa(
         ));
     }
 
-    let source = &constraint.parser_dwa;
+    let source = constraint.parser_dwa.for_compilation()?;
     let mut nwa = NWA::new(0, 0);
     for _ in source.states() {
         nwa.add_state();
@@ -8094,8 +8095,7 @@ fn build_composed_constraint_unfinalized(
         late_bind_vocab: OnceLock::from(vocab.clone()),
         pending_vocab_fingerprint: None,
         pending_special_token_ids: None,
-        parser_dwa,
-        packed_parser_dwa: None,
+        parser_dwa: crate::runtime::artifact::ParserDwaStorage::Owned(parser_dwa),
         non_dwa_weights: crate::runtime::artifact::NonDwaWeightStorage::Materialized(
             crate::runtime::artifact::NonDwaWeights {
                 // Constraint composition is not allowed to rely on the legacy dynamic
@@ -10223,8 +10223,8 @@ table: &child_table,
         let mut loaded_child = Constraint::load(child.save(), &vocab).unwrap();
         loaded_parent.prepare_for_composition_internal(&vocab).unwrap();
         loaded_child.prepare_for_composition_internal(&vocab).unwrap();
-        assert!(loaded_parent.packed_parser_dwa.is_some());
-        assert!(loaded_child.packed_parser_dwa.is_some());
+        assert!(loaded_parent.parser_dwa.packed().is_some());
+        assert!(loaded_child.parser_dwa.packed().is_some());
         assert!(loaded_parent.deferred_composition_metadata_blob.is_none());
         assert!(loaded_child.deferred_composition_metadata_blob.is_none());
 

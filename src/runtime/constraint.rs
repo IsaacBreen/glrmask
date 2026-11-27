@@ -40,7 +40,8 @@ use crate::ds::u8set::U8Set;
 use crate::ds::weight::{PackedRuntimePoolTokenSetRef, PackedRuntimePoolWeightRef, Weight};
 use crate::grammar::flat::TerminalID;
 
-use super::artifact::{NonDwaWeightStorage,
+use super::artifact::{
+    NonDwaWeightStorage, ParserDwaStorage,
     dynamic_mask_vocab_layout_class, empty_dense_words, DenseAcceptanceRows,
     DirectRegularDynamicFrontierCacheEntry,
     DirectRegularDynamicHotFrontier, DirectRegularTerminalSupport,
@@ -2208,16 +2209,12 @@ impl Constraint {
 
     #[inline]
     pub(crate) fn runtime_parser_dwa_state_count(&self) -> usize {
-        self.packed_parser_dwa
-            .as_ref()
-            .map_or_else(|| self.parser_dwa.states().len(), |dwa| dwa.state_count())
+        self.parser_dwa.state_count()
     }
 
     #[inline]
     pub(crate) fn runtime_parser_dwa_start_state(&self) -> u32 {
-        self.packed_parser_dwa
-            .as_ref()
-            .map_or_else(|| self.parser_dwa.start_state(), |dwa| dwa.start_state())
+        self.parser_dwa.start_state()
     }
 
     #[inline]
@@ -2225,13 +2222,12 @@ impl Constraint {
         &self,
         dwa_state: u32,
     ) -> Option<RuntimeWeightRef<'_>> {
-        if let Some(dwa) = &self.packed_parser_dwa {
+        if let Some(dwa) = self.parser_dwa.packed() {
             return dwa
                 .final_weight(dwa_state)
                 .map(RuntimeWeightRef::PackedDwa);
         }
-        self.parser_dwa
-            .states()
+        self.parser_dwa.owned().expect("owned parser DWA").states()
             .get(dwa_state as usize)?
             .final_weight
             .as_ref()
@@ -2245,7 +2241,7 @@ impl Constraint {
         parser_state: u32,
     ) -> Option<(u32, RuntimeWeightRef<'_>)> {
         let positive = encode_positive_label(parser_state);
-        if let Some(dwa) = &self.packed_parser_dwa {
+        if let Some(dwa) = self.parser_dwa.packed() {
             return dwa
                 .transition(dwa_state, positive)
                 .or_else(|| {
@@ -2262,7 +2258,7 @@ impl Constraint {
 
     #[inline]
     pub(crate) fn runtime_parser_dwa_row_is_empty(&self, dwa_state: u32) -> bool {
-        if let Some(dwa) = &self.packed_parser_dwa {
+        if let Some(dwa) = self.parser_dwa.packed() {
             dwa.row_is_empty(dwa_state)
         } else {
             self.dwa_fast_transitions
@@ -8642,7 +8638,7 @@ impl Constraint {
         // directly from packed Weight ids. These summaries are only an
         // optimization over materialized Weight objects; rebuilding them would
         // defeat the packed-load path.
-        let Some(weights) = self.non_dwa_weights.materialized() else {
+        let Some(relations) = self.non_dwa_weights.materialized() else {
             return Vec::new();
         };
         const MIN_FRONTIER_STATES: usize = 64;
@@ -8707,15 +8703,15 @@ impl Constraint {
             let mut weights = Vec::<Weight>::new();
             for &state in &states {
                 let label = encode_positive_label(state);
-                if let Some(weight) = weights.parser_top_accept
+                if let Some(weight) = relations.parser_top_accept
                     .get(&label)
-                    .or_else(|| weights.parser_top_accept.get(&DEFAULT_LABEL))
+                    .or_else(|| relations.parser_top_accept.get(&DEFAULT_LABEL))
                 {
                     weights.push(weight.clone());
                 }
-                if let Some(parts) = weights.parser_top_accept_parts
+                if let Some(parts) = relations.parser_top_accept_parts
                     .get(&label)
-                    .or_else(|| weights.parser_top_accept_parts.get(&DEFAULT_LABEL))
+                    .or_else(|| relations.parser_top_accept_parts.get(&DEFAULT_LABEL))
                 {
                     weights.extend(parts.iter().cloned());
                 }
@@ -8728,7 +8724,7 @@ impl Constraint {
                 }
             }
             for terminal in actionable_terminals.iter_ones() {
-                if let Some(weight) = weights.direct_regular_l1_complete_by_terminal
+                if let Some(weight) = relations.direct_regular_l1_complete_by_terminal
                     .get(&(terminal as TerminalID))
                 {
                     weights.push(weight.clone());
@@ -8769,20 +8765,20 @@ impl Constraint {
         &self,
     ) -> Vec<DirectRegularParserStateAcceptance> {
         if self.has_template_parser() { return Vec::new(); }
-        let Some(weights) = self.non_dwa_weights.materialized() else {
+        let Some(relations) = self.non_dwa_weights.materialized() else {
             return Vec::new();
         };
         const MIN_L1_TERMINALS: usize = 64;
         if self.uses_dynamic_runtime()
             || self.table.num_rules != 0
-            || weights.direct_regular_l1_complete_by_terminal.is_empty()
+            || relations.direct_regular_l1_complete_by_terminal.is_empty()
         {
             return Vec::new();
         }
 
         let mut l1_terminals =
             crate::ds::bitset::BitSet::new(self.parser_terminal_count() as usize + 1);
-        for &terminal in weights.direct_regular_l1_complete_by_terminal.keys() {
+        for &terminal in relations.direct_regular_l1_complete_by_terminal.keys() {
             l1_terminals.set(terminal as usize);
         }
         let l1_count = |row: &crate::ds::bitset::BitSet| {
@@ -8812,20 +8808,20 @@ impl Constraint {
 
             let label = encode_positive_label(parser_state as u32);
             let mut weights = Vec::<Weight>::with_capacity(max_l1_terminals + 4);
-            if let Some(weight) = weights.parser_top_accept
+            if let Some(weight) = relations.parser_top_accept
                 .get(&label)
-                .or_else(|| weights.parser_top_accept.get(&DEFAULT_LABEL))
+                .or_else(|| relations.parser_top_accept.get(&DEFAULT_LABEL))
             {
                 weights.push(weight.clone());
             }
-            if let Some(parts) = weights.parser_top_accept_parts
+            if let Some(parts) = relations.parser_top_accept_parts
                 .get(&label)
-                .or_else(|| weights.parser_top_accept_parts.get(&DEFAULT_LABEL))
+                .or_else(|| relations.parser_top_accept_parts.get(&DEFAULT_LABEL))
             {
                 weights.extend(parts.iter().cloned());
             }
             for terminal in row.iter_ones() {
-                if let Some(weight) = weights.direct_regular_l1_complete_by_terminal
+                if let Some(weight) = relations.direct_regular_l1_complete_by_terminal
                     .get(&(terminal as TerminalID))
                 {
                     weights.push(weight.clone());
@@ -9169,9 +9165,9 @@ impl Constraint {
         &mut self,
         profile: bool,
     ) -> TokenMaskCacheBuildProfile {
-        let skip_load_dense_group_caches = self.packed_parser_dwa.is_some()
+        let skip_load_dense_group_caches = self.parser_dwa.packed().is_some()
             && crate::env::var_os("GLRMASK_SKIP_LOAD_DENSE_GROUP_CACHES").is_some();
-        let skip_load_sliding_dense_caches = self.packed_parser_dwa.is_some()
+        let skip_load_sliding_dense_caches = self.parser_dwa.packed().is_some()
             && crate::env::var_os("GLRMASK_SKIP_LOAD_SLIDING_DENSE_CACHES").is_some();
         let block_started_at = profile.then(std::time::Instant::now);
         let skip_small_group_caches = crate::env::var("GLRMASK_SKIP_SMALL_GROUP_MASK_CACHES")
@@ -9400,8 +9396,8 @@ impl Constraint {
     /// segmented late-binding composition path deliberately keep
     /// `packed_parser_dwa` zero-copy.
     pub(crate) fn materialize_parser_dwa_for_compilation(&mut self) -> Result<(), String> {
-        if let Some(packed) = self.packed_parser_dwa.take() {
-            self.parser_dwa = packed.to_dwa()?;
+        if let Some(packed) = self.parser_dwa.packed() {
+            self.parser_dwa = ParserDwaStorage::Owned(packed.to_dwa()?);
             self.serialized_artifact_cache = None;
             self.parser_runtime_caches_prebuilt = false;
             self.packed_dwa_token_dense_masks.clear();
@@ -9938,16 +9934,11 @@ impl Constraint {
         self.indexed_dag_dense_transitions = indexed_dag_dense_transitions;
         self.indexed_dag_dense_finals = indexed_dag_dense_finals;
         if let Some(started) = indexed_dag_dense_started_at {
-            let transitions = self
-                .parser_dwa
-                .states()
-                .iter()
-                .map(|state| state.transitions.len())
-                .sum::<usize>();
+            let transitions = self.parser_dwa.owned().map_or(0, DWA::num_transitions);
             eprintln!(
                 "[glrmask/profile][indexed_dag_dense_transitions] ms={:.3} states={} transitions={} internal_tsids={}",
                 started.elapsed().as_secs_f64() * 1000.0,
-                self.parser_dwa.states().len(),
+                self.parser_dwa.state_count(),
                 transitions,
                 self.internal_tsid_count(),
             );
@@ -10758,9 +10749,7 @@ impl Constraint {
         packed: Option<crate::automata::weighted::dwa::PackedDwaTokenSetInventory>,
     ) -> WeightTokenSetInventory {
         if self.non_dwa_weights.pooled().is_some()
-            && self
-                .packed_parser_dwa
-                .as_ref()
+            && self.parser_dwa.packed()
                 .is_some_and(|dwa| dwa.materialized_token_sets_with_word_spans().is_none())
         {
             return WeightTokenSetInventory {
@@ -10807,7 +10796,7 @@ impl Constraint {
             }
         }
 
-        let (mut inventory, transition_word_spans) = if let Some(packed_dwa) = &self.packed_parser_dwa {
+        let (mut inventory, transition_word_spans) = if let Some(packed_dwa) = self.parser_dwa.packed() {
             if let Some((sets, spans)) = packed_dwa.materialized_token_sets_with_word_spans() {
                 let mut transition_sets = FxHashMap::default();
                 let mut transition_spans = FxHashMap::default();
@@ -10839,10 +10828,9 @@ impl Constraint {
                 },
                 Some(packed.transition_word_spans),
             )
-        } else if rayon::current_num_threads() > 1 && self.parser_dwa.states().len() >= 4_096 {
+        } else if rayon::current_num_threads() > 1 && self.parser_dwa.owned().expect("owned parser DWA").states().len() >= 4_096 {
             (
-                self.parser_dwa
-                    .states()
+                self.parser_dwa.owned().expect("owned parser DWA").states()
                     .par_iter()
                     .fold(InventoryBatch::default, |mut batch, state| {
                         batch.add_state(state);
@@ -10856,7 +10844,7 @@ impl Constraint {
             )
         } else {
             let mut batch = InventoryBatch::default();
-            for state in self.parser_dwa.states() {
+            for state in self.parser_dwa.owned().expect("owned parser DWA").states() {
                 batch.add_state(state);
             }
             (batch, None)
@@ -11349,9 +11337,9 @@ impl Constraint {
     }
 
     fn compute_fast_transitions(&self) -> FastDwaTransitions {
-        if self.packed_parser_dwa.is_some() {
+        let Some(dwa) = self.parser_dwa.owned() else {
             return FastDwaTransitions::default();
-        }
+        };
         let build = |state: &crate::automata::weighted_u32::dwa::DWAState| {
             if state.transitions.is_packed() {
                 return FastDwaTransitionRow::from_packed(state.transitions.clone());
@@ -11362,21 +11350,21 @@ impl Constraint {
                 .map(|(label, target, weight)| (label, (target, weight.clone())));
             FastDwaTransitionRow::from_entries(entries)
         };
-        if !self.parser_dwa.has_shared_transition_rows()
+        if !dwa.has_shared_transition_rows()
             || crate::env::var_os("GLRMASK_EXPERIMENTAL_DISABLE_SHARED_FAST_DWA_ROWS").is_some()
         {
             let rows = if rayon::current_num_threads() == 1 {
-                self.parser_dwa.states().iter().map(build).collect()
+                dwa.states().iter().map(build).collect()
             } else {
-                self.parser_dwa.states().par_iter().map(build).collect()
+                dwa.states().par_iter().map(build).collect()
             };
             return FastDwaTransitions::direct(rows);
         }
 
         let mut row_by_ptr = FxHashMap::<usize, u32>::default();
         let mut representative_states = Vec::<usize>::new();
-        let mut state_rows = Vec::<u32>::with_capacity(self.parser_dwa.states().len());
-        for (state_index, state) in self.parser_dwa.states().iter().enumerate() {
+        let mut state_rows = Vec::<u32>::with_capacity(dwa.states().len());
+        for (state_index, state) in dwa.states().iter().enumerate() {
             let key = state.transitions.ptr_key();
             let row = if let Some(&row) = row_by_ptr.get(&key) {
                 row
@@ -11391,12 +11379,12 @@ impl Constraint {
         let rows = if rayon::current_num_threads() == 1 {
             representative_states
                 .iter()
-                .map(|&state| build(&self.parser_dwa.states()[state]))
+                .map(|&state| build(&dwa.states()[state]))
                 .collect()
         } else {
             representative_states
                 .par_iter()
-                .map(|&state| build(&self.parser_dwa.states()[state]))
+                .map(|&state| build(&dwa.states()[state]))
                 .collect()
         };
         FastDwaTransitions::shared(rows, state_rows)
@@ -11455,9 +11443,9 @@ impl Constraint {
         IndexedDagDenseTransitions,
         Vec<IndexedDagDenseTransitionMasks>,
     ) {
-        if self.packed_parser_dwa.is_some() {
+        let Some(dwa) = self.parser_dwa.owned() else {
             return (Vec::new(), Vec::new());
-        }
+        };
         // Indexed-DAG masking is opt-in. Avoid duplicating the parser DWA into
         // dense runtime tables for every ordinary constraint. Unit tests keep
         // the tables available for forced exactness checks.
@@ -11469,7 +11457,7 @@ impl Constraint {
         // most once here, then share the resulting Arc and span across all DWA
         // transitions and final weights that use it.
         let mut mask_by_token_set = FxHashMap::<usize, IndexedDagDenseMask>::default();
-        for state in self.parser_dwa.states() {
+        for state in dwa.states() {
             for (_, weight) in state.transitions.values() {
                 if weight.is_full() {
                     continue;
@@ -11520,13 +11508,11 @@ impl Constraint {
             ))
         };
         let transitions = if rayon::current_num_threads() == 1 {
-            self.parser_dwa.states().iter().map(build).collect()
+            dwa.states().iter().map(build).collect()
         } else {
-            self.parser_dwa.states().par_iter().map(build).collect()
+            dwa.states().par_iter().map(build).collect()
         };
-        let finals = self
-            .parser_dwa
-            .states()
+        let finals = dwa.states()
             .iter()
             .map(|state| match state.final_weight.as_ref() {
                 None => IndexedDagDenseTransitionMasks::from_entries(std::iter::empty()),
@@ -11672,7 +11658,7 @@ impl Constraint {
     }
 
     fn compute_packed_dwa_dense_token_masks(&self) -> PackedDwaDenseWeightMaskCache {
-        let Some(dwa) = self.packed_parser_dwa.as_ref() else {
+        let Some(dwa) = self.parser_dwa.packed() else {
             return PackedDwaDenseWeightMaskCache::default();
         };
         if self.internal_token_dense_words == 0 {
@@ -12605,8 +12591,8 @@ impl Constraint {
         self.tokenizer.compute_forced_minimized_state_count()
     }
 
-    pub(crate) fn parser_dwa(&self) -> &DWA {
-        &self.parser_dwa
+    pub(crate) fn parser_dwa(&self) -> Option<&DWA> {
+        self.parser_dwa.owned()
     }
 
     pub(crate) fn possible_matches_for_state_internal(
