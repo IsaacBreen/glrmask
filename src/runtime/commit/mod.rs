@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 
 use crate::automata::lexer::tokenizer::{Tokenizer, TokenizerExecResult, TokenizerMatch, TokenizerStateSet};
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::compiler::glr::parser::{
     ParserGSS,
     apply_guarded_stack_shifts_fast,
@@ -1150,6 +1151,17 @@ pub(crate) fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, en
     end_state_may_advance_exact(constraint, gss, end_state)
 }
 
+pub(crate) fn native_mask_end_state_may_advance(
+    constraint: &Constraint,
+    gss: &LeveledGSS<u32, ()>,
+    end_state: u32,
+) -> Option<bool> {
+    let parser = constraint.template_parser()?;
+    if runtime_tokenizer_is_reset_state(constraint, end_state) { return Some(true); }
+    let future = runtime_tokenizer_future_terminals(constraint, end_state)
+        .expect("runtime tokenizer end state must belong to its active coordinate");
+    Some(parser.admits_any(gss, future.as_ref()) || runtime_future_contains_ignore(constraint, future.as_ref()))
+}
 // `end_state_may_advance` without the reset-state shortcut: can any terminal
 // the lexer still matches from `end_state` advance the parser?
 #[inline]
@@ -1846,7 +1858,20 @@ pub(crate) fn visit_parser_reset_routes(
     constraint: &Constraint,
     mut gss: ParserGSS,
     ignored: bool,
-    mut visit: impl FnMut(u32, ParserGSS),
+    visit: impl FnMut(u32, ParserGSS),
+) -> Result<(), String> {
+    if ignored && !gss.is_empty() && constraint.uses_compact_segmented_parser_runtime() {
+        gss = constraint.close_compact_segmented_parser(&gss).unwrap_or(gss);
+    }
+    visit_closed_parser_reset_routes(constraint, gss, visit)
+}
+
+/// Route the already advanced/closed stack language to exact owning lexer
+/// leaves, without prescribing the annotation used by the caller.
+pub(crate) fn visit_closed_parser_reset_routes<A: Merge + Eq + std::hash::Hash>(
+    constraint: &Constraint,
+    gss: LeveledGSS<u32, A>,
+    mut visit: impl FnMut(u32, LeveledGSS<u32, A>),
 ) -> Result<(), String> {
     if gss.is_empty() {
         return Ok(());
@@ -1854,9 +1879,6 @@ pub(crate) fn visit_parser_reset_routes(
     if !constraint.uses_compact_segmented_parser_runtime() {
         visit(constraint.runtime_commit_initial_state(), gss);
         return Ok(());
-    }
-    if ignored {
-        gss = constraint.close_compact_segmented_parser(&gss).unwrap_or(gss);
     }
     let partitions = constraint.partition_recursive_parser_gss_by_active_leaf(&gss)
         .ok_or_else(|| "recursive parser reset routing failed".to_owned())?;

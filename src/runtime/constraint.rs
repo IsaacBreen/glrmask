@@ -36,6 +36,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     VocabPartitionDfa, classify_vocab_char_type,
 };
 use crate::ds::bitset::BitSet;
+use crate::ds::leveled_gss::{LeveledGSS, Merge};
 use crate::ds::u8set::U8Set;
 use crate::ds::weight::{PackedRuntimePoolTokenSetRef, PackedRuntimePoolWeightRef, Weight};
 use crate::grammar::flat::TerminalID;
@@ -2602,10 +2603,10 @@ impl Constraint {
     /// original lower-stack and accumulator correlations remain intact. This is
     /// the exact bridge needed when a zero-width CALL/RETURN closure changes the
     /// active lexer scope after one terminal commits.
-    pub(crate) fn partition_recursive_parser_gss_by_active_leaf(
+    pub(crate) fn partition_recursive_parser_gss_by_active_leaf<A: Merge + Eq + std::hash::Hash>(
         &self,
-        gss: &ParserGSS,
-    ) -> Option<SmallVec<[(usize, ParserGSS); 4]>> {
+        gss: &LeveledGSS<u32, A>,
+    ) -> Option<SmallVec<[(usize, LeveledGSS<u32, A>); 4]>> {
         if !self.uses_compact_segmented_parser_runtime() {
             return None;
         }
@@ -2620,7 +2621,7 @@ impl Constraint {
             // than guessing a scope.
             return None;
         }
-        let mut partitions = SmallVec::<[(usize, ParserGSS); 4]>::new();
+        let mut partitions = SmallVec::<[(usize, LeveledGSS<u32, A>); 4]>::new();
         for top in tops {
             let (leaf_index, _) = self.recursive_parser_leaf_state(top)?;
             let branch = gss.isolate(Some(top));

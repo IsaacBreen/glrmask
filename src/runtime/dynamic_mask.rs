@@ -777,8 +777,12 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
         if let Some(&cached) = self.token_boundary_cache.get(&key) {
             return cached;
         }
-        let parser_gss = self.parser_gss(parser_node, parser_cache);
-        let allowed = super::commit::end_state_may_advance(constraint, &parser_gss, lexer_state);
+        let allowed = super::commit::native_mask_end_state_may_advance(
+            constraint, &parser_cache.nodes[parser_node as usize].gss, lexer_state,
+        ).unwrap_or_else(|| {
+            let parser_gss = self.parser_gss(parser_node, parser_cache);
+            super::commit::end_state_may_advance(constraint, &parser_gss, lexer_state)
+        });
         self.token_boundary_cache.insert(key, allowed);
         allowed
     }
@@ -827,20 +831,27 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
             return cached.clone();
         }
 
-        let parser_gss = self.parser_gss(parser_node, parser_cache);
         let ignored = constraint.recursive_terminal_is_ignore(terminal);
-        let advanced = if ignored {
-            parser_gss
-        } else {
-            super::commit::advance_parser_stacks(constraint, &parser_gss, terminal)
-        };
         let mut result = SmallVec::<[(u32, u32); 4]>::new();
-        super::commit::visit_parser_reset_routes(constraint, advanced, ignored, |reset, partition| {
-            let node = parser_cache.intern_scoped_parser_stacks(partition.apply(|_| ()));
-            if !result.contains(&(reset, node)) {
-                result.push((reset, node));
-            }
-        }).expect("valid recursive mask reset routes");
+        let mut add_route = |cache: &mut FullWalkParserCache, reset, partition: ParserStacks| {
+            let node = cache.intern_scoped_parser_stacks(partition);
+            if !result.contains(&(reset, node)) { result.push((reset, node)); }
+        };
+        if let Some(provider) = constraint.template_composition_provider() {
+            let stacks = &parser_cache.nodes[parser_node as usize].gss;
+            let advanced = if ignored { provider.close_native(stacks) }
+                else { provider.advance_closed_native(stacks, terminal) };
+            super::commit::visit_closed_parser_reset_routes(constraint, advanced,
+                |reset, partition| add_route(parser_cache, reset, partition))
+                .expect("valid recursive native mask reset routes");
+        } else {
+            let parser_gss = self.parser_gss(parser_node, parser_cache);
+            let advanced = if ignored { parser_gss }
+                else { super::commit::advance_parser_stacks(constraint, &parser_gss, terminal) };
+            super::commit::visit_parser_reset_routes(constraint, advanced, ignored,
+                |reset, partition| add_route(parser_cache, reset, partition.apply(|_| ())))
+                .expect("valid recursive mask reset routes");
+        }
         self.parser_advance_cache.insert(key, result.clone());
         result
     }
