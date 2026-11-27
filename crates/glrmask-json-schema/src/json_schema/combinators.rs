@@ -757,16 +757,14 @@ impl<'a> Lowerer<'a> {
         }
         if branches.len() == 1 {
             return self.lower_schema(&branches[0]);
-        }        if let Some(merged) = merge_all_of_finite_string_literals(&branches)? {
+        }
+        if let Some(merged) = merge_all_of_finite_string_literals(&branches)? {
             return self.lower_schema(&merged);
         }
-        if let Some(merged) = merge_all_of_string_like_schema(&branches) {
+        if let Some(merged) = merge_all_of_scalar_or_array_schema(&branches) {
             return self.lower_schema(&merged);
         }
         if let Some(merged) = merge_all_of_object_like_schema(&branches) {
-            return self.lower_schema(&merged);
-        }
-        if let Some(merged) = merge_all_of_array_like_schema(&branches) {
             return self.lower_schema(&merged);
         }
         if let Some(object) = try_merge_all_of_objects(&branches) {
@@ -1582,81 +1580,121 @@ fn prune_assertion_families_to_types(assertions: &mut SchemaAssertions) {
     }
 }
 
-fn merge_all_of_string_like_schema(branches: &[Schema]) -> Option<Schema> {
-    let mut saw_string_family = false;
-    let mut string = super::ast::StringSchema::default();
-    let mut pattern: Option<String> = None;
-    let mut format: Option<String> = None;
-
-    for branch in branches {
-        let SchemaKind::Assertions(assertions) = &branch.kind else {
-            return None;
-        };
-        if assertions.const_value.is_some()
-            || assertions.enum_values.is_some()
-            || assertions.object.is_some()
-            || assertions.array.is_some()
-            || assertions.number.is_some()
-            || !assertions.any_of.is_empty()
-            || !assertions.one_of.is_empty()
-            || !assertions.all_of.is_empty()
-            || assertions.not.is_some()
-        {
-            return None;
-        }
-        // This merger emits a string-only result. Untyped and union schemas
-        // also admit nonstrings, where string assertions are vacuous.
-        if assertions.types.as_ref().is_none_or(|types| {
-            types.is_empty() || types.iter().any(|ty| *ty != SchemaType::String)
-        }) {
-            return None;
-        }
-        if let Some(branch_string) = &assertions.string {
-            saw_string_family = true;
-            string.min_length = string.min_length.max(branch_string.min_length);
-            string.max_length = match (string.max_length, branch_string.max_length) {
-                (Some(left), Some(right)) => Some(left.min(right)),
-                (Some(left), None) => Some(left),
-                (None, Some(right)) => Some(right),
-                (None, None) => None,
-            };
-            if let Some(branch_pattern) = &branch_string.pattern {
-                match &pattern {
-                    Some(existing) if existing != branch_pattern => return None,
-                    Some(_) => {}
-                    None => pattern = Some(branch_pattern.clone()),
-                }
-            }
-            if let Some(branch_format) = &branch_string.format {
-                match &format {
-                    Some(existing) if existing != branch_format => return None,
-                    Some(_) => {}
-                    None => format = Some(branch_format.clone()),
-                }
-            }
-        } else if assertions.types.as_ref()?.contains(&SchemaType::String) {
-            saw_string_family = true;
-        }
-    }
-
-    if !saw_string_family {
+/// Domain operators for homogeneous conjunctions. The family projection is
+/// justified by an explicit type guard; otherwise keyword constraints on
+/// strings/numbers/arrays do not exclude values of other JSON types.
+fn family_assertions(schema: &Schema, family: SchemaType) -> Option<&SchemaAssertions> {
+    let SchemaKind::Assertions(a) = &schema.kind else { return None; };
+    let allowed = TypeDomain::of(family);
+    if a.has_combinators() || a.const_value.is_some() || a.enum_values.is_some()
+        || a.object.is_some() && family != SchemaType::Object
+        || a.array.is_some() && family != SchemaType::Array
+        || a.string.is_some() && family != SchemaType::String
+        || a.number.is_some() && family != SchemaType::Number
+        || a.types.as_deref().is_some_and(|types| {
+            let domain = TypeDomain::from_types(types);
+            domain.is_empty() || !allowed.includes(domain)
+        })
+    {
         return None;
     }
-    if string.max_length.is_some_and(|max| max < string.min_length) {
-        return Some(Schema::never("<merged-allOf-string-like:empty-length>"));
-    }
-    string.pattern = pattern;
-    string.format = format;
-    Some(Schema::assertions(
-        "<merged-allOf-string-like>",
-        SchemaAssertions {
-            types: Some(vec![SchemaType::String]),
-            string: Some(string),
-            ..SchemaAssertions::default()
-        },
-    ))
+    Some(a)
 }
 
+fn meet_optional<T: Clone + PartialEq>(left: &mut Option<T>, right: &Option<T>) -> Option<()> {
+    match (&*left, right) {
+        (Some(a), Some(b)) if a != b => None,
+        (None, Some(b)) => { *left = Some(b.clone()); Some(()) }
+        _ => Some(()),
+    }
+}
+
+fn meet_count_bounds(min: &mut usize, max: &mut Option<usize>, other_min: usize, other_max: Option<usize>) {
+    *min = (*min).max(other_min);
+    *max = match (*max, other_max) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+}
+
+fn meet_number_endpoint(left: &mut Option<f64>, exclusive: &mut bool,
+    right: Option<f64>, right_exclusive: bool, lower: bool)
+{
+    if let Some(b) = right {
+        match *left {
+            Some(a) if a == b => *exclusive |= right_exclusive,
+            Some(a) if (lower && a > b) || (!lower && a < b) => {}
+            _ => { *left = Some(b); *exclusive = right_exclusive; }
+        }
+    }
+}
+
+fn merge_all_of_scalar_or_array_schema(branches: &[Schema]) -> Option<Schema> {
+    let domain = explicit_all_of_type_intersection(branches)?;
+    let domain = TypeDomain::from_types(&domain.into_iter().collect::<Vec<_>>());
+    let family = if domain == TypeDomain::of(SchemaType::String) {
+        SchemaType::String
+    } else if domain == TypeDomain::of(SchemaType::Array) {
+        SchemaType::Array
+    } else if domain == TypeDomain::of(SchemaType::Number) || domain == TypeDomain::of(SchemaType::Integer) {
+        SchemaType::Number
+    } else { return None; };
+    let mut merged = SchemaAssertions { types: Some(domain.declared_types()), ..SchemaAssertions::default() };
+    for branch in branches {
+        let a = family_assertions(branch, family)?;
+        match family {
+            SchemaType::String => {
+                if let Some(b) = &a.string {
+                    let current = merged.string.get_or_insert_with(Default::default);
+                    meet_count_bounds(&mut current.min_length, &mut current.max_length, b.min_length, b.max_length);
+                    meet_optional(&mut current.pattern, &b.pattern)?;
+                    meet_optional(&mut current.format, &b.format)?;
+                }
+            }
+            SchemaType::Number => {
+                if let Some(b) = &a.number {
+                    let current = merged.number.get_or_insert_with(Default::default);
+                    current.integer |= b.integer;
+                    meet_number_endpoint(&mut current.minimum, &mut current.exclusive_minimum,
+                        b.minimum, b.exclusive_minimum, true);
+                    meet_number_endpoint(&mut current.maximum, &mut current.exclusive_maximum,
+                        b.maximum, b.exclusive_maximum, false);
+                    // Unequal divisibility constraints require the general
+                    // intersection; do not approximate a rational LCM.
+                    meet_optional(&mut current.multiple_of, &b.multiple_of)?;
+                    meet_optional(&mut current.format, &b.format)?;
+                }
+            }
+            SchemaType::Array => {
+                if let Some(b) = &a.array {
+                    if let Some(current) = &mut merged.array {
+                        meet_count_bounds(&mut current.min_items, &mut current.max_items, b.min_items, b.max_items);
+                        // Each prefix position sees its own predicate or the
+                        // homogeneous tail predicate of the shorter operand.
+                        let prefix_len = current.prefix_items.len().max(b.prefix_items.len());
+                        let prefix_items = (0..prefix_len).map(|i| {
+                            let left = current.prefix_items.get(i).unwrap_or(current.items.as_ref());
+                            let right = b.prefix_items.get(i).unwrap_or(b.items.as_ref());
+                            merge_property_schemas(left.clone(), right.clone())
+                        }).collect();
+                        current.prefix_items = prefix_items;
+                        current.items = Box::new(merge_property_schemas(
+                            current.items.as_ref().clone(), b.items.as_ref().clone()));
+                    } else {
+                        merged.array = Some(b.clone());
+                    }
+                }
+            }
+            _ => unreachable!("scalar or array family"),
+        }
+    }
+    if merged.string.as_ref().is_some_and(|s| s.max_length.is_some_and(|max| max < s.min_length))
+        || merged.array.as_ref().is_some_and(|a| a.max_items.is_some_and(|max| max < a.min_items))
+    {
+        return Some(Schema::never("<empty-family-intersection>"));
+    }
+    Some(Schema::assertions("<merged-allOf-family>", merged))
+}
 /// Borrowed exact string-domain operands. A finite operand proves that
 /// every JSON value in its language is a string; a filter may also admit
 /// nonstrings and is used only after a finite conjunct establishes the type.
@@ -2891,28 +2929,8 @@ pub fn try_merge_all_of_objects(branches: &[Schema]) -> Option<ObjectSchema> {
 }
 
 fn plain_object_schema(schema: &Schema) -> Option<&ObjectSchema> {
-    let SchemaKind::Assertions(assertions) = &schema.kind else {
-        return None;
-    };
-    if assertions.const_value.is_some()
-        || assertions.enum_values.is_some()
-        || assertions.array.is_some()
-        || assertions.string.is_some()
-        || assertions.number.is_some()
-        || assertions.not.is_some()
-        || !assertions.any_of.is_empty()
-        || !assertions.one_of.is_empty()
-        || !assertions.all_of.is_empty()
-    {
-        return None;
-    }
-    if let Some(types) = &assertions.types
-        && !types.iter().all(|schema_type| *schema_type == SchemaType::Object) {
-            return None;
-        }
-    assertions.object.as_ref()
+    family_assertions(schema, SchemaType::Object)?.object.as_ref()
 }
-
 #[derive(Clone, Copy)]
 enum ChoiceKind {
     AnyOf,
@@ -3342,84 +3360,7 @@ fn object_like_schema(schema: &Schema) -> Option<Schema> {
     merge_all_of_object_like_schema(&assertions.all_of)
 }
 
-fn merge_all_of_array_like_schema(branches: &[Schema]) -> Option<Schema> {
-    let mut merged = None;
-    let mut pending_bounds = None;
-    let mut saw_array_shape = false;
-
-    for branch in branches {
-        let (array, constrains_to_array) = plain_array_schema(branch)?;
-        if array_is_bounds_only(array) {
-            if let Some(existing) = &mut pending_bounds {
-                merge_array_bounds(existing, array);
-            } else {
-                pending_bounds = Some(array.clone());
-            }
-            continue;
-        }
-
-        if !constrains_to_array || saw_array_shape {
-            return None;
-        }
-        merged = Some(array.clone());
-        saw_array_shape = true;
-    }
-
-    if let (Some(array), Some(bounds)) = (&mut merged, &pending_bounds) {
-        merge_array_bounds(array, bounds);
-    }
-
-    saw_array_shape.then(|| {
-        Schema::assertions(
-            "<merged-allOf-array-like>",
-            SchemaAssertions {
-                types: Some(vec![SchemaType::Array]),
-                array: merged,
-                ..SchemaAssertions::default()
-            },
-        )
-    })
-}
-
-fn plain_array_schema(schema: &Schema) -> Option<(&ArraySchema, bool)> {
-    let SchemaKind::Assertions(assertions) = &schema.kind else {
-        return None;
-    };
-    if assertions.const_value.is_some()
-        || assertions.enum_values.is_some()
-        || assertions.object.is_some()
-        || assertions.string.is_some()
-        || assertions.number.is_some()
-        || !assertions.any_of.is_empty()
-        || !assertions.one_of.is_empty()
-        || !assertions.all_of.is_empty()
-    {
-        return None;
-    }
-    let constrains_to_array = match &assertions.types {
-        Some(types) if types.iter().all(|schema_type| *schema_type == SchemaType::Array) => true,
-        Some(_) => return None,
-        None => false,
-    };
-    Some((assertions.array.as_ref()?, constrains_to_array))
-}
-
-fn array_is_bounds_only(array: &ArraySchema) -> bool {
-    schemas_shape_equivalent(&array.items, &Schema::any("<implicit-array-items>"))
-        && array.prefix_items.is_empty()
-}
-
-fn merge_array_bounds(left: &mut ArraySchema, right: &ArraySchema) {
-    left.min_items = left.min_items.max(right.min_items);
-    left.max_items = match (left.max_items, right.max_items) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(max), None) | (None, Some(max)) => Some(max),
-        (None, None) => None,
-    };
-}
-
-
-pub 
++pub 
 fn closed_object_required_conflict(left: &ObjectSchema, right: &ObjectSchema) -> bool {
     let Some(left_allowed) = closed_object_allowed_properties(left) else {
         return false;
@@ -3443,12 +3384,7 @@ fn closed_object_allowed_properties(object: &ObjectSchema) -> Option<BTreeSet<St
 
 pub fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSchema {
     let mut merged = left.clone();
-    merged.min_properties = merged.min_properties.max(right.min_properties);
-    merged.max_properties = match (merged.max_properties, right.max_properties) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(max), None) | (None, Some(max)) => Some(max),
-        (None, None) => None,
-    };
+    meet_count_bounds(&mut merged.min_properties, &mut merged.max_properties, right.min_properties, right.max_properties);
 
     for required in &right.required_order {
         if !merged.required_order.contains(required) {
@@ -3486,6 +3422,12 @@ pub fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSch
     }
 
     merged.pattern_properties.extend(right.pattern_properties.clone());
+    if let Some(right_names) = &right.property_names {
+        merged.property_names = Some(match merged.property_names.take() {
+            Some(left_names) => merge_property_schemas(left_names, right_names.clone()),
+            None => right_names.clone(),
+        });
+    }
     let additional_properties = merge_additional_properties(
         &merged.additional_properties,
         &right.additional_properties,
@@ -3495,9 +3437,9 @@ pub fn merge_two_objects(left: &ObjectSchema, right: &ObjectSchema) -> ObjectSch
 }
 
 fn merge_property_schemas(left: Schema, right: Schema) -> Schema {
-    if is_vacuous_json_value_schema(&left) {
+    if matches!(left.kind, SchemaKind::Any) {
         right
-    } else if is_vacuous_json_value_schema(&right) {
+    } else if matches!(right.kind, SchemaKind::Any) || schemas_shape_equivalent(&left, &right) {
         left
     } else {
         all_of_schema(left, right)
@@ -3571,7 +3513,7 @@ pub fn all_of_schema(left: Schema, right: Schema) -> Schema {
     Schema::assertions(
         "<merged-allOf-property>",
         SchemaAssertions {
-            all_of: vec![left, right],
+            all_of: flatten_conjuncts(vec![left, right]),
             ..SchemaAssertions::default()
         },
     )
