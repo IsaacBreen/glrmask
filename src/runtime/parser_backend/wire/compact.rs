@@ -112,7 +112,7 @@ pub(super) fn encode(parser: &TemplateParser) -> Vec<u8> {
         count(&mut out, embedding.entries.len());
         for &terminal in &embedding.entries { put(&mut out, terminal); }
         put(&mut out, embedding.finish_view.symbols);
-        program(&mut out, &embedding.finish, embedding.finish_view.symbols);
+        program(&mut out, &embedding.finish_view.source, embedding.finish_view.symbols);
     }
     put(&mut out, u32::from(parser.link_grammar.is_some()));
     if let Some(grammar) = &parser.link_grammar {

@@ -152,11 +152,8 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     let control_start = u32::try_from(exact_views.len()).map_err(|_| fail("too many scoped terminals"))?;
     exact_views.extend(control_views);
     let parent_parser = components[0].template_parser().unwrap();
-    let completion = if let Some(composition) = parent_parser.composition() {
-        composition.completion_view.clone()
-    } else { ScopedProgram { source: Arc::clone(parent_parser.completion_template()),
-        domain: Arc::clone(parent_parser.completion_domain()), fast: None, offset: 0,
-        symbols: parent_parser.state_count, guard_owner: true, append_push: None } };
+    let mut completion = ScopedProgram::completion(&components[0]);
+    if parent_parser.composition().is_none() { completion.guard_owner = true; }
     let mut parser = TemplateParser::from_composition(state_count, terminal_count,
         TemplateComposition::from_views(state_count, control_start, outer_views, exact_views, completion)?)?;
     let initial = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
@@ -175,7 +172,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     if nullable && !parent_embedding.nullable {
         embedding = TemplateEmbedding::new(nullable, parent_embedding.return_pop,
             remaining_entries,
-            Arc::new(with_nullable_return(&parent_embedding.finish)?), parent_embedding.finish_view.symbols)
+            Arc::new(with_nullable_return(&parent_embedding.finish_view.source)?), parent_embedding.finish_view.symbols)
             .map_err(fail)?;
     }
     parser.embedding = Some(Arc::new(embedding));

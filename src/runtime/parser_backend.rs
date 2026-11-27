@@ -40,6 +40,7 @@ use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
 use super::{CommitTemplateDfas, Constraint};
 
 use prepare::top_certificate_rows;
+pub(crate) use prepare::PreparedRelation;
 
 /// Internal representation choice for the shared dynamic compiler. Ordinary
 /// Dynamic retains LR by default; O2 selects Native explicitly. Resolve the
@@ -161,9 +162,8 @@ enum TemplateAdmission {
 
 #[derive(Debug, Clone)]
 struct LocalAdmission {
-    programs: Vec<Arc<prepare::Program>>,
-    completion_template: Arc<CommitTemplateDfas>,
-    completion: Arc<TemplateDomain>,
+    programs: Vec<Arc<PreparedRelation>>,
+    completion: Arc<PreparedRelation>,
     possible: Vec<BitSet>,
     unconditional: Vec<BitSet>,
 }
@@ -292,14 +292,14 @@ impl TemplateParser {
 
     pub(crate) fn completion_template(&self) -> &Arc<CommitTemplateDfas> {
         match &self.admission {
-            TemplateAdmission::Local(local) => &local.completion_template,
+            TemplateAdmission::Local(local) => &local.completion.source,
             TemplateAdmission::Linked(linked) => &linked.completion_view.source,
         }
     }
 
     pub(crate) fn completion_domain(&self) -> &Arc<TemplateDomain> {
         match &self.admission {
-            TemplateAdmission::Local(local) => &local.completion,
+            TemplateAdmission::Local(local) => &local.completion.domain,
             TemplateAdmission::Linked(linked) => &linked.completion_view.domain,
         }
     }
@@ -368,7 +368,7 @@ impl TemplateParser {
         }
         let local = self.local_admission().expect("local admission");
         let (bit, domain) = if terminal == EOF {
-            (self.terminal_count as usize, &local.completion)
+            (self.terminal_count as usize, &local.completion.domain)
         } else {
             let Some(domain) = local.programs.get(terminal as usize).map(|p| &p.domain) else { return false; };
             (terminal as usize, domain)
@@ -412,7 +412,7 @@ impl TemplateParser {
             }
             return intersecting_bits(possible, candidates).any(|bit| {
                 let domain = if bit == self.terminal_count as usize {
-                    Some(&local.completion)
+                    Some(&local.completion.domain)
                 } else {
                     local.programs.get(bit).map(|p| &p.domain)
                 };
@@ -477,7 +477,7 @@ impl TemplateParser {
                 let bit = word_index * 64 + remaining.trailing_zeros() as usize;
                 remaining &= remaining - 1;
                 let domain = if bit == self.terminal_count as usize {
-                    Some(&local.completion)
+                    Some(&local.completion.domain)
                 } else {
                     local.programs.get(bit).map(|p| &p.domain)
                 };
@@ -532,7 +532,7 @@ impl TemplateParser {
         if let Some(possible) = top.and_then(|top| local.possible.get(top as usize)) {
             return intersecting_bits(possible, candidates).any(|bit| {
                 let domain = if bit == self.terminal_count as usize {
-                    Some(&local.completion)
+                    Some(&local.completion.domain)
                 } else {
                     local.programs.get(bit).map(|p| &p.domain)
                 };
@@ -548,7 +548,7 @@ impl TemplateParser {
                 continue;
             }
             let domain = if bit == self.terminal_count as usize {
-                Some(&local.completion)
+                Some(&local.completion.domain)
             } else {
                 local.programs.get(bit).map(|p| &p.domain)
             };
@@ -568,24 +568,20 @@ impl TemplateParser {
                 .expect("validated finite completion relation"),
             link_program::nullable_return(0),
         ]).expect("nullable completion must remain finite");
-        let source = Arc::new(completion);
-        let domain = Arc::new(
-            compile_domain(&source).expect("validated nullable completion domain")
-        );
+        let relation = Arc::new(PreparedRelation::prepare(
+            Arc::new(completion), self.state_count, false,
+        ).expect("validated nullable completion relation"));
         match &mut self.admission {
             TemplateAdmission::Local(local) => {
-                local.completion = domain;
-                local.completion_template = source;
-                (local.possible, local.unconditional) =
-                    top_certificate_rows(self.state_count, &local.programs.iter().map(|p| Arc::clone(&p.domain)).collect::<Vec<_>>(), &local.completion);
+                local.completion = relation;
+                (local.possible, local.unconditional) = top_certificate_rows(
+                    self.state_count,
+                    &local.programs.iter().map(|p| Arc::clone(&p.domain)).collect::<Vec<_>>(),
+                    &local.completion.domain,
+                );
             }
             TemplateAdmission::Linked(linked) => {
-                // The root completion is the authoritative linked relation.
-                // Keep its coordinate/guard semantics, update the program itself.
-                let view = &mut Arc::make_mut(linked).completion_view;
-                view.source = source;
-                view.domain = domain;
-                view.fast = None;
+                Arc::make_mut(linked).completion_view.relation = relation;
             }
         }
     }

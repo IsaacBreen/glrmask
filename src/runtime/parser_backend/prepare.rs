@@ -33,14 +33,14 @@ use crate::runtime::artifact::FastTemplateDfasByTerminal;
 use super::{CommitTemplateDfas, PreparedTemplateParser, TemplateParser};
 
 #[derive(Debug)]
-pub(super) struct Program {
-    pub(super) source: Arc<CommitTemplateDfas>,
-    pub(super) domain: Arc<TemplateDomain>,
-    pub(super) fast: Option<Arc<FastCommitTemplateDfas>>,
+pub(crate) struct PreparedRelation {
+    pub(crate) source: Arc<CommitTemplateDfas>,
+    pub(crate) domain: Arc<TemplateDomain>,
+    pub(crate) fast: Option<Arc<FastCommitTemplateDfas>>,
 }
 
-impl Program {
-    fn prepare(
+impl PreparedRelation {
+    pub(crate) fn prepare(
         source: Arc<CommitTemplateDfas>,
         symbols: u32,
         runtime: bool,
@@ -64,7 +64,7 @@ struct DomainGroup {
 }
 
 struct Inventory {
-    programs: Vec<Arc<Program>>,
+    programs: Vec<Arc<PreparedRelation>>,
     groups: Vec<DomainGroup>,
 }
 
@@ -84,7 +84,7 @@ fn joined<A: Send, B: Send>(
 }
 
 fn inventory(
-    mut groups: Vec<CompiledGroup<Program>>,
+    mut groups: Vec<CompiledGroup<PreparedRelation>>,
     terminals: usize,
 ) -> crate::Result<Inventory> {
     let invalid = || crate::Error::Compilation(
@@ -151,12 +151,12 @@ fn shared_inventory(
         }
     }
 
-    let build = |members: &Vec<usize>| -> crate::Result<CompiledGroup<Program>> {
+    let build = |members: &Vec<usize>| -> crate::Result<CompiledGroup<PreparedRelation>> {
         let terminal = members[0];
         let source = templates[terminal].as_ref().ok_or_else(|| {
             crate::Error::Compilation(format!("missing template for terminal {terminal}"))
         })?;
-        let program = Program::prepare(Arc::clone(source), symbols, runtime)
+        let program = PreparedRelation::prepare(Arc::clone(source), symbols, runtime)
             .map_err(crate::Error::Compilation)?;
         Ok(CompiledGroup {
             terminals: members.iter().map(|&terminal| terminal as u32).collect(),
@@ -295,7 +295,7 @@ fn assemble(
     terminals: u32,
     skips: BTreeSet<TerminalID>,
     inventory: Inventory,
-    completion: Program,
+    completion: PreparedRelation,
 ) -> TemplateParser {
     let (possible, unconditional) = grouped_top_rows(
         symbols, terminals as usize, &inventory.groups, &completion.domain,
@@ -305,9 +305,8 @@ fn assemble(
         terminal_count: terminals,
         skip_terminals: skips,
         admission: super::TemplateAdmission::Local(super::LocalAdmission {
-            completion_template: completion.source,
             programs: inventory.programs,
-            completion: completion.domain,
+            completion: Arc::new(completion),
             possible,
             unconditional,
         }),
@@ -341,7 +340,7 @@ pub(super) fn compile_parser(
     }).fold(0usize, usize::saturating_add);
     let work = || {
         let inventory = shared_inventory(templates, symbols, runtime, states >= 4_096)?;
-        let completion = Program::prepare(Arc::new(completion), symbols, false)
+        let completion = PreparedRelation::prepare(Arc::new(completion), symbols, false)
             .map_err(crate::Error::Compilation)?;
         Ok(assemble(symbols, terminals, skips, inventory, completion))
     };
@@ -462,7 +461,7 @@ pub(super) fn from_compiler_parts(
                 let (selected_result, retained_results) = joined(
                     || index.compile_selected(|characterization| {
                         let source = Arc::new(compiler.compile(characterization)?);
-                        Program::prepare(source, table.num_states, true)
+                        PreparedRelation::prepare(source, table.num_states, true)
                     }),
                     || {
                         let inputs = retained.iter().enumerate()
@@ -473,7 +472,7 @@ pub(super) fn from_compiler_parts(
                         let build = |&(terminal, raw): &(u32, &DFA)| {
                             compiler.compile_raw(raw)
                                 .and_then(|source| {
-                                    Program::prepare(Arc::new(source), table.num_states, true)
+                                    PreparedRelation::prepare(Arc::new(source), table.num_states, true)
                                 })
                                 .map(|program| CompiledGroup {
                                     terminals: vec![terminal],
@@ -517,7 +516,7 @@ pub(super) fn from_compiler_parts(
                 || {
                     let characterization = index.completion()?;
                     let source = compiler.compile(&characterization)?;
-                    Program::prepare(Arc::new(source), table.num_states, false)
+                    PreparedRelation::prepare(Arc::new(source), table.num_states, false)
                 },
                 || metadata(&index, &compiler, ignore),
             ),

@@ -2,15 +2,12 @@
 //! domain/runtime data remain immutable and shared across every link.
 use crate::ErrorExt as _;
 use std::{ops::ControlFlow, sync::Arc};
-use super::{CommitTemplateDfas, Constraint, TemplateDomain, TopAdmission, DomainProbe};
+use super::{CommitTemplateDfas, Constraint, PreparedRelation, TopAdmission, DomainProbe};
 use crate::compiler::glr::{labels::DEFAULT_LABEL, parser::ParserGSS};
-use crate::runtime::FastCommitTemplateDfas;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ScopedProgram {
-    pub(crate) source: Arc<CommitTemplateDfas>,
-    pub(crate) domain: Arc<TemplateDomain>,
-    pub(crate) fast: Option<Arc<FastCommitTemplateDfas>>,
+    pub(crate) relation: Arc<PreparedRelation>,
     pub(crate) offset: u32,
     pub(crate) symbols: u32,
     pub(crate) guard_owner: bool,
@@ -18,23 +15,24 @@ pub(crate) struct ScopedProgram {
     pub(crate) append_push: Option<u32>,
 }
 
+impl std::ops::Deref for ScopedProgram {
+    type Target = PreparedRelation;
+    fn deref(&self) -> &Self::Target { &self.relation }
+}
+
 impl ScopedProgram {
     pub(crate) fn prepare(source: Arc<CommitTemplateDfas>, symbols: u32) -> crate::Result<Self> {
-        let validated = crate::runtime::commit::template_prepare::TemplatePreparation::new(&source)
-            .map_err(crate::Error::Compilation)?;
-        validated.validate_alphabet(symbols).map_err(crate::Error::Compilation)?;
-        let domain = Arc::new(TemplateDomain::from_validated(&validated)
+        let relation = Arc::new(PreparedRelation::prepare(source, symbols, true)
             .map_err(crate::Error::Compilation)?);
-        let fast = Some(Arc::new(FastCommitTemplateDfas::from_prepared(&validated)));
-        Ok(Self { source, domain, fast, offset: 0, symbols, guard_owner: true, append_push: None })
+        Ok(Self { relation, offset: 0, symbols, guard_owner: true, append_push: None })
     }
 
     pub(crate) fn terminal(component: &Constraint, terminal: usize) -> Self {
         let parser = component.template_parser().expect("native component");
-        Self { source: Arc::clone(parser.terminal_source(terminal).unwrap()),
-            domain: Arc::clone(parser.local_domain(terminal).expect("local domain")),
-            fast: parser.local_fast(terminal).cloned(),
-            offset: 0, symbols: parser.state_count, guard_owner: true, append_push: None }
+        let relation = Arc::clone(&parser.local_admission()
+            .expect("local component").programs[terminal]);
+        Self { relation, offset: 0, symbols: parser.state_count,
+            guard_owner: true, append_push: None }
     }
 
     pub(crate) fn completion(component: &Constraint) -> Self {
@@ -42,9 +40,8 @@ impl ScopedProgram {
         if let Some(composition) = parser.composition() {
             return composition.completion_view.clone();
         }
-        Self { source: Arc::clone(parser.completion_template()),
-            domain: Arc::clone(parser.completion_domain()), fast: None, offset: 0,
-            symbols: parser.state_count, guard_owner: false, append_push: None }
+        Self { relation: Arc::clone(&parser.local_admission().expect("local component").completion),
+            offset: 0, symbols: parser.state_count, guard_owner: false, append_push: None }
     }
 
     pub(crate) fn relocated(&self, offset: u32) -> crate::Result<Self> {

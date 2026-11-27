@@ -20,7 +20,6 @@ pub(crate) struct TemplateEmbedding {
     pub(crate) nullable: bool,
     pub(crate) return_pop: u32,
     pub(crate) entries: BTreeSet<u32>,
-    pub(crate) finish: Arc<CommitTemplateDfas>,
     pub(crate) finish_view: super::scoped_program::ScopedProgram,
 }
 
@@ -33,9 +32,9 @@ impl TemplateEmbedding {
         symbols: u32,
     ) -> Result<Self, String> {
         let finish_view = super::scoped_program::ScopedProgram::prepare(
-            Arc::clone(&finish), symbols,
+            finish, symbols,
         ).map_err(|error| error.to_string())?;
-        Ok(Self { nullable, return_pop, entries, finish, finish_view })
+        Ok(Self { nullable, return_pop, entries, finish_view })
     }
 
     /// Only for the built-in depth-one regular frontend: its generated EOF

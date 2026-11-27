@@ -2096,13 +2096,13 @@ impl Constraint {
         if let Some(embedding) = parser.embedding.as_mut() {
             let embedding = Arc::make_mut(embedding);
             if nullable && !embedding.nullable {
-                embedding.finish = Arc::new(crate::runtime::parser_backend::link_program::compile(&[
-                    crate::runtime::parser_backend::link_program::action_nfa(&embedding.finish)
+                let finish = Arc::new(crate::runtime::parser_backend::link_program::compile(&[
+                    crate::runtime::parser_backend::link_program::action_nfa(&embedding.finish_view.source)
                         .expect("validated finite finish relation"),
                     crate::runtime::parser_backend::link_program::nullable_return(0),
                 ]).expect("nullable return must remain finite"));
                 embedding.finish_view = crate::runtime::parser_backend::scoped_program::ScopedProgram::prepare(
-                    Arc::clone(&embedding.finish), embedding.finish_view.symbols)
+                    finish, embedding.finish_view.symbols)
                     .expect("nullable FINISH must remain within its component");
             }
             embedding.nullable = nullable;

@@ -157,8 +157,7 @@ impl ParserSeed {
             &programs, self.completion,
         ).map_err(|error| error.to_string())? };
         if let Some(embedding) = self.embedding {
-            validate_alphabet(&embedding.finish, self.state_count)?;
-            super::compile_domain(&embedding.finish).map_err(|error| error.to_string())?;
+            validate_alphabet(&embedding.finish_view.source, self.state_count)?;
             parser.embedding = Some(Arc::new(embedding));
         }
         if let Some(grammar) = self.link_grammar {
