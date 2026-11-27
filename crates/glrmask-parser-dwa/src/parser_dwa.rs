@@ -4914,27 +4914,195 @@ fn fast_boundary_possible_outgoing_ids_reference(
         .collect()
 }
 
-fn fast_boundary_default_step(
-    state: &FastBoundaryDwaState,
-    parser_state: u32,
-    shared_target: &mut Option<u32>,
-    default_weight: &mut FastBoundaryWeightId,
-    interner: &mut FastBoundaryWeightInterner,
-) -> bool {
-    let Some((_, target, weight)) = state
-        .transitions
-        .iter()
-        .find(|(label, _, _)| *label == parser_state as i32)
-        .copied()
-    else {
-        return false;
-    };
-    if shared_target.is_some_and(|existing| existing != target) {
-        return false;
+/// The DEFAULT fixed point is independent of how weights and rows are
+/// represented. Its only domain assumption is the explicit full-alphabet
+/// certificate for synthesis; lifting additionally needs nonempty LR stacks.
+trait DefaultWeightOps {
+    type Value: Clone + PartialEq;
+    fn all(&self) -> Self::Value;
+    fn empty(&self, value: &Self::Value) -> bool;
+    fn meet(&mut self, left: &Self::Value, right: &Self::Value) -> Self::Value;
+    fn join(&mut self, left: &Self::Value, right: &Self::Value) -> Self::Value;
+    fn subtract(&mut self, left: &Self::Value, right: &Self::Value) -> Self::Value;
+}
+
+struct GenericDefaultWeights;
+
+impl DefaultWeightOps for GenericDefaultWeights {
+    type Value = Weight;
+    fn all(&self) -> Weight { Weight::all() }
+    fn empty(&self, value: &Weight) -> bool { value.is_empty() }
+    fn meet(&mut self, a: &Weight, b: &Weight) -> Weight { a.intersection(b) }
+    fn join(&mut self, a: &Weight, b: &Weight) -> Weight { a.union(b) }
+    fn subtract(&mut self, a: &Weight, b: &Weight) -> Weight { a.difference(b) }
+}
+
+impl DefaultWeightOps for FastBoundaryWeightInterner {
+    type Value = u32;
+    fn all(&self) -> u32 { self.all_id() }
+    fn empty(&self, value: &u32) -> bool { *value == 0 }
+    fn meet(&mut self, a: &u32, b: &u32) -> u32 { self.intersection(*a, *b) }
+    fn join(&mut self, a: &u32, b: &u32) -> u32 { self.union(*a, *b) }
+    fn subtract(&mut self, a: &u32, b: &u32) -> u32 { self.difference(*a, *b) }
+}
+
+trait DefaultRow {
+    type Value: Clone + PartialEq;
+    fn edge(&self, label: i32) -> Option<(u32, Self::Value)>;
+    fn visit(&self, f: impl FnMut(i32, u32, &Self::Value));
+    fn final_weight(&self) -> Option<Self::Value>;
+    fn prune_unrelated_empty_edges(&self) -> bool;
+    fn set_final(&mut self, value: Self::Value);
+    fn set_default(&mut self, target: u32, value: Self::Value);
+    fn retain_edges(&mut self, f: impl FnMut(i32, u32, &mut Self::Value) -> bool);
+}
+
+impl DefaultRow for DWAState {
+    type Value = Weight;
+    fn edge(&self, label: i32) -> Option<(u32, Weight)> {
+        self.transitions.get_entry(&label).map(|(target, weight)| (target, weight.clone()))
     }
-    *shared_target = Some(target);
-    *default_weight = interner.intersection(*default_weight, weight);
-    *default_weight != 0
+    fn visit(&self, mut f: impl FnMut(i32, u32, &Weight)) {
+        for (label, target, weight) in self.transitions.entries() {
+            f(label, target, weight);
+        }
+    }
+    fn final_weight(&self) -> Option<Weight> { self.final_weight.clone() }
+    fn prune_unrelated_empty_edges(&self) -> bool { false }
+    fn set_final(&mut self, value: Weight) { self.final_weight = Some(value); }
+    fn set_default(&mut self, target: u32, value: Weight) {
+        self.transitions.insert(DEFAULT_LABEL, (target, value));
+    }
+    fn retain_edges(&mut self, mut f: impl FnMut(i32, u32, &mut Weight) -> bool) {
+        self.transitions.retain(|&label, (target, weight)| f(label, *target, weight));
+    }
+}
+
+impl DefaultRow for FastBoundaryDwaState {
+    type Value = u32;
+    fn edge(&self, label: i32) -> Option<(u32, u32)> {
+        self.transitions.iter().find(|(l, _, _)| *l == label)
+            .map(|&(_, target, weight)| (target, weight))
+    }
+    fn visit(&self, mut f: impl FnMut(i32, u32, &u32)) {
+        for (label, target, weight) in &self.transitions {
+            f(*label, *target, weight);
+        }
+    }
+    fn prune_unrelated_empty_edges(&self) -> bool { true }
+    fn final_weight(&self) -> Option<u32> {
+        (self.final_weight != 0).then_some(self.final_weight)
+    }
+    fn set_final(&mut self, value: u32) { self.final_weight = value; }
+    fn set_default(&mut self, target: u32, value: u32) {
+        if let Some(edge) = self.transitions.iter_mut().find(|(l, _, _)| *l == DEFAULT_LABEL) {
+            *edge = (DEFAULT_LABEL, target, value);
+        } else {
+            self.transitions.push((DEFAULT_LABEL, target, value));
+        }
+    }
+    fn retain_edges(&mut self, mut f: impl FnMut(i32, u32, &mut u32) -> bool) {
+        self.transitions.retain_mut(|(label, target, weight)| f(*label, *target, weight));
+    }
+}
+
+fn common_default<R: DefaultRow, O: DefaultWeightOps<Value = R::Value>>(
+    row: &R, alphabet: u32, ops: &mut O,
+) -> Option<(u32, R::Value)> {
+    if alphabet < 2 { return None; }
+    let mut seen = BitSet::new(alphabet as usize);
+    let mut target = None;
+    let mut common = ops.all();
+    let mut valid = true;
+    row.visit(|label, next, weight| {
+        let Some(symbol) = parser_state_label(label, alphabet) else { return; };
+        if !valid { return; }
+        if seen.get(symbol as usize) || target.is_some_and(|old| old != next) {
+            valid = false;
+            return;
+        }
+        seen.set(symbol as usize);
+        target = Some(next);
+        common = ops.meet(&common, weight);
+        valid = !ops.empty(&common);
+    });
+    if valid && seen.count_ones() == alphabet as usize {
+        Some((target?, common))
+    } else {
+        None
+    }
+}
+
+fn optimize_default_rows<R: DefaultRow, O: DefaultWeightOps<Value = R::Value>>(
+    states: &mut [R], alphabet: u32, full_domain: impl Fn(usize) -> bool,
+    lift_acceptance: bool, ops: &mut O,
+) {
+    loop {
+        let mut changed = false;
+        // A support set is not necessarily the complete runtime domain.
+        // Synthesis requires both certified full support and every concrete
+        // label in the row sharing a target and a nonempty weight meet.
+        for (state_id, row) in states.iter_mut().enumerate() {
+            if !full_domain(state_id) { continue; }
+            let Some((target, common)) = common_default(row, alphabet, ops) else { continue; };
+            match row.edge(DEFAULT_LABEL) {
+                Some((old_target, old)) if old_target == target => {
+                    let joined = ops.join(&old, &common);
+                    if joined != old {
+                        row.set_default(target, joined);
+                        changed = true;
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    row.set_default(target, common);
+                    changed = true;
+                }
+            }
+        }
+
+        if lift_acceptance {
+            for source in 0..states.len() {
+                let Some((target, weight)) = states[source].edge(DEFAULT_LABEL) else { continue; };
+                let Some(final_weight) = states.get(target as usize).and_then(DefaultRow::final_weight)
+                    else { continue; };
+                let lifted = ops.meet(&weight, &final_weight);
+                if ops.empty(&lifted) { continue; }
+                let row = &mut states[source];
+                let old = row.final_weight();
+                let joined = match &old {
+                    Some(old) => ops.join(old, &lifted),
+                    None => lifted.clone(),
+                };
+                if old.as_ref() != Some(&joined) {
+                    row.set_final(joined);
+                    changed = true;
+                }
+                row.retain_edges(|_, _, weight| {
+                    let next = ops.subtract(weight, &lifted);
+                    changed |= next != *weight;
+                    *weight = next;
+                    !ops.empty(weight)
+                });
+            }
+        }
+
+        for row in states.iter_mut() {
+            let Some((default_target, default_weight)) = row.edge(DEFAULT_LABEL) else { continue; };
+            let prune_unrelated = row.prune_unrelated_empty_edges();
+            row.retain_edges(|label, target, weight| {
+                if label != DEFAULT_LABEL && target == default_target {
+                    let next = ops.subtract(weight, &default_weight);
+                    changed |= next != *weight;
+                    *weight = next;
+                    !ops.empty(weight)
+                } else {
+                    !prune_unrelated || !ops.empty(weight)
+                }
+            });
+        }
+        if !changed { break; }
+    }
 }
 
 fn optimize_fast_boundary_defaults(
@@ -4943,99 +5111,12 @@ fn optimize_fast_boundary_defaults(
     num_parser_states: u32,
     interner: &mut FastBoundaryWeightInterner,
 ) {
-    loop {
-        let mut changed = false;
-        for (state_id, possible) in possible_by_state.iter().enumerate() {
-            // As in the generic normalizer, accepted-row support is not an
-            // exhaustive runtime input domain. Only the complete alphabet can
-            // justify a newly synthesized unconditional DEFAULT edge.
-            // Cached singleton supports may encode the complete set as
-            // Small/Shared rather than All. Their IDs are unique and in range.
-            if possible.count(num_parser_states) != num_parser_states as usize {
-                continue;
-            }
-            let possible_count = possible.count(num_parser_states);
-            if possible_count < 2 {
-                continue;
-            }
-            let actual_positive = states[state_id]
-                .transitions
-                .iter()
-                .filter(|(label, _, _)| parser_state_label(*label, num_parser_states).is_some())
-                .count();
-            if actual_positive != possible_count {
-                continue;
-            }
-            let mut shared_target = None::<u32>;
-            let mut default_weight = interner.all_id();
-            let mut valid = !matches!(possible, FastPossibleOutgoingIds::Empty);
-            if valid {
-                possible.for_each(num_parser_states, |parser_state| {
-                    if valid
-                        && !fast_boundary_default_step(
-                            &states[state_id],
-                            parser_state,
-                            &mut shared_target,
-                            &mut default_weight,
-                            interner,
-                        )
-                    {
-                        valid = false;
-                    }
-                });
-            }
-            let Some(target) = shared_target else { continue; };
-            if !valid || default_weight == 0 {
-                continue;
-            }
-            if let Some((_, existing_target, existing_weight)) = states[state_id]
-                .transitions.iter_mut().find(|(label, _, _)| *label == DEFAULT_LABEL)
-            {
-                if *existing_target == target {
-                    let updated = interner.union(*existing_weight, default_weight);
-                    changed |= updated != *existing_weight;
-                    *existing_weight = updated;
-                }
-            } else {
-                states[state_id].transitions.push((DEFAULT_LABEL, target, default_weight));
-                changed = true;
-            }
-        }
-
-        for state_id in 0..states.len() {
-            let Some((_, default_target, default_weight)) = states[state_id]
-                .transitions.iter().find(|(label, _, _)| *label == DEFAULT_LABEL).copied()
-            else { continue; };
-            let target_final = states.get(default_target as usize).map_or(0, |state| state.final_weight);
-            let lifted = interner.intersection(default_weight, target_final);
-            if lifted == 0 { continue; }
-            let updated_final = interner.union(states[state_id].final_weight, lifted);
-            changed |= updated_final != states[state_id].final_weight;
-            states[state_id].final_weight = updated_final;
-            for (_, _, weight) in &mut states[state_id].transitions {
-                let updated = interner.difference(*weight, lifted);
-                changed |= updated != *weight;
-                *weight = updated;
-            }
-            states[state_id].transitions.retain(|(_, _, weight)| *weight != 0);
-        }
-
-        for state in states.iter_mut() {
-            let Some((_, default_target, default_weight)) = state
-                .transitions.iter().find(|(label, _, _)| *label == DEFAULT_LABEL).copied()
-            else { continue; };
-            for (label, target, weight) in &mut state.transitions {
-                if *label == DEFAULT_LABEL || *target != default_target { continue; }
-                let updated = interner.difference(*weight, default_weight);
-                changed |= updated != *weight;
-                *weight = updated;
-            }
-            state.transitions.retain(|(_, _, weight)| *weight != 0);
-        }
-        if !changed { break; }
-    }
+    optimize_default_rows(
+        states, num_parser_states,
+        |id| possible_by_state[id].count(num_parser_states) == num_parser_states as usize,
+        true, interner,
+    );
 }
-
 
 fn fast_boundary_add_target(
     contribs: &mut FastBoundaryContribs,
@@ -7212,203 +7293,11 @@ fn optimize_parser_dwa_defaults_mode(
     num_parser_states: u32,
     lift_default_acceptance: bool,
 ) {
-    loop {
-        let mut changed = false;
-
-        for (state_id, possible_ids) in possible_by_state.iter().enumerate() {
-            // NWA support lists the labels on which this predicate can succeed,
-            // not every stack symbol that the runtime may supply. Turning a
-            // proper subset into DEFAULT (and then lifting its final weight)
-            // accepts unrelated parser states. Only a complete finite alphabet
-            // certifies that a newly synthesized DEFAULT is unconditional.
-            // Keep partial rows explicit; this is compile-time work only.
-            if !matches!(possible_ids, PossibleOutgoingIds::All) {
-                continue;
-            }
-            let possible_count = match possible_ids {
-                PossibleOutgoingIds::Empty => 0,
-                PossibleOutgoingIds::All => num_parser_states as usize,
-                PossibleOutgoingIds::Some(ids) => ids.count_ones(),
-            };
-            if possible_count < 2 {
-                continue;
-            }
-
-            let state = &dwa.states()[state_id];
-
-            let mut actual_positive = BitSet::new(num_parser_states as usize);
-            for &label in state.transitions.keys() {
-                if let Some(ps) = parser_state_label(label, num_parser_states) {
-                    actual_positive.set(ps as usize);
-                }
-            }
-            match possible_ids {
-                PossibleOutgoingIds::Empty => continue,
-                PossibleOutgoingIds::All => {
-                    if actual_positive.count_ones() != num_parser_states as usize {
-                        continue;
-                    }
-                }
-                PossibleOutgoingIds::Some(ids) => {
-                    if actual_positive != *ids {
-                        continue;
-                    }
-                }
-            }
-
-            let mut shared_target: Option<u32> = None;
-            let mut default_weight: Option<Weight> = None;
-            let mut valid = true;
-
-            match possible_ids {
-                PossibleOutgoingIds::Empty => continue,
-                PossibleOutgoingIds::All => {
-                    for ps in 0..num_parser_states {
-                        let label = ps as i32;
-                        let Some((target, weight)) = state.transitions.get(&label) else {
-                            valid = false;
-                            break;
-                        };
-                        match shared_target {
-                            Some(existing) if existing != *target => {
-                                valid = false;
-                                break;
-                            }
-                            None => shared_target = Some(*target),
-                            _ => {}
-                        }
-                        default_weight = Some(match default_weight {
-                            Some(existing) => existing.intersection(weight),
-                            None => weight.clone(),
-                        });
-                    }
-                }
-                PossibleOutgoingIds::Some(ids) => {
-                    for ps in ids.iter_ones() {
-                        let label = ps as i32;
-                        let Some((target, weight)) = state.transitions.get(&label) else {
-                            valid = false;
-                            break;
-                        };
-                        match shared_target {
-                            Some(existing) if existing != *target => {
-                                valid = false;
-                                break;
-                            }
-                            None => shared_target = Some(*target),
-                            _ => {}
-                        }
-                        default_weight = Some(match default_weight {
-                            Some(existing) => existing.intersection(weight),
-                            None => weight.clone(),
-                        });
-                    }
-                }
-            }
-
-            let Some(target) = shared_target else { continue };
-            let Some(default_weight) = default_weight else { continue };
-            if !valid || default_weight.is_empty() {
-                continue;
-            }
-
-            let state = &mut dwa.states_mut()[state_id];
-            let entry = state.transitions.entry(DEFAULT_LABEL);
-            match entry {
-                std::collections::btree_map::Entry::Occupied(mut occ) => {
-                    let (existing_target, existing_weight) = occ.get_mut();
-                    if *existing_target == target {
-                        let updated = existing_weight.union(&default_weight);
-                        if updated != *existing_weight {
-                            *existing_weight = updated;
-                            changed = true;
-                        }
-                    }
-                }
-                std::collections::btree_map::Entry::Vacant(vac) => {
-                    vac.insert((target, default_weight));
-                    changed = true;
-                }
-            }
-        }
-
-        // A default transition still consumes a concrete stack symbol. LR
-        // reachable-stack compilation historically promotes its target's
-        // acceptance under a nonempty-prefix invariant. A user-supplied stack
-        // relation has no such invariant: it can pop the final concrete symbol.
-        // In that domain, retain the consuming edge even when every symbol
-        // shares the same target. Merely compressing rows remains exact.
-        let lift_states = if lift_default_acceptance { dwa.states().len() } else { 0 };
-        for state_id in 0..lift_states {
-            let Some((default_target, default_weight)) =
-                dwa.states()[state_id].transitions.get(&DEFAULT_LABEL).cloned()
-            else {
-                continue;
-            };
-
-            let target_final = dwa.states()[default_target as usize].final_weight.clone();
-            let Some(target_final) = target_final else { continue };
-            let lifted = default_weight.intersection(&target_final);
-            if lifted.is_empty() {
-                continue;
-            }
-
-            if union_final_weight(&mut dwa.states_mut()[state_id].final_weight, lifted.clone()) {
-                changed = true;
-            }
-
-            let state = &mut dwa.states_mut()[state_id];
-            let mut to_remove = Vec::new();
-            for (&label, (_, weight)) in state.transitions.iter_mut() {
-                let new_weight = weight.difference(&lifted);
-                if new_weight != *weight {
-                    *weight = new_weight;
-                    changed = true;
-                }
-                if weight.is_empty() {
-                    to_remove.push(label);
-                }
-            }
-            for label in to_remove {
-                state.transitions.remove(&label);
-            }
-        }
-
-        for state_id in 0..dwa.states().len() {
-            let Some(&(default_target, ref default_weight)) =
-                dwa.states()[state_id].transitions.get(&DEFAULT_LABEL)
-            else {
-                continue;
-            };
-            let default_weight = default_weight.clone();
-
-            let state = &mut dwa.states_mut()[state_id];
-            let mut to_remove = Vec::new();
-            for (&label, (target, weight)) in state.transitions.iter_mut() {
-                if label == DEFAULT_LABEL {
-                    continue;
-                }
-                if *target != default_target {
-                    continue;
-                }
-                let new_weight = weight.difference(&default_weight);
-                if new_weight != *weight {
-                    *weight = new_weight;
-                    changed = true;
-                }
-                if weight.is_empty() {
-                    to_remove.push(label);
-                }
-            }
-            for label in to_remove {
-                state.transitions.remove(&label);
-            }
-        }
-
-        if !changed {
-            break;
-        }
-    }
+    optimize_default_rows(
+        dwa.states_mut(), num_parser_states,
+        |id| matches!(possible_by_state[id], PossibleOutgoingIds::All),
+        lift_default_acceptance, &mut GenericDefaultWeights,
+    );
 }
 
 fn subtract_final_weights_from_outgoing_dwa_impl(dwa: &mut DWA, parallel: bool) {
