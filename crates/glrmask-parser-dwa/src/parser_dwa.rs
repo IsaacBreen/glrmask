@@ -5914,11 +5914,7 @@ fn determinize_preconverted_small_boundary_output_with_parallel_policy(
         eprintln!("[glrmask/profile][native_parallel_rows] determinize_ms={determinize_ms:.4} profile={parallel_profile:?}");
     }
     let compact_post_started_at = Instant::now();
-    let compact_fallback = finite_output
-        || std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_COMPACT_FALLBACK").is_some();
-    if compact_fallback
-        || std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_COMPACT_POST").is_some()
-    {
+    if finite_output {
         let possible_started_at = Instant::now();
         let possible = fast_boundary_possible_outgoing_ids(fast_nwa, &supports, dense_positive_label_limit);
         if std::env::var_os("GLRMASK_VALIDATE_FAST_BOUNDARY_SPARSE_POSSIBLE").is_some() {
@@ -5964,19 +5960,15 @@ fn determinize_preconverted_small_boundary_output_with_parallel_policy(
         }
         let possible_ms = elapsed_ms(possible_started_at);
         let default_started_at = Instant::now();
-        if !finite_output || std::env::var_os("GLRMASK_EXPERIMENT_LAZY_DIRECT_DISABLE_DEFAULT_OPT").is_none() {
-            optimize_fast_boundary_defaults(&mut out_states, &possible, dense_positive_label_limit, interner);
-        }
+        optimize_fast_boundary_defaults(&mut out_states, &possible, dense_positive_label_limit, interner);
         let default_ms = elapsed_ms(default_started_at);
         let subtract_started_at = Instant::now();
         subtract_fast_boundary_finals(&mut out_states, interner);
         let subtract_ms = elapsed_ms(subtract_started_at);
         let fallback_started_at = Instant::now();
-        if compact_fallback {
-            out_states = determinize_fast_boundary_with_fallbacks(
-                &out_states, &possible, dense_positive_label_limit, interner,
-            );
-        }
+        out_states = determinize_fast_boundary_with_fallbacks(
+            &out_states, &possible, dense_positive_label_limit, interner,
+        );
         let fallback_ms = elapsed_ms(fallback_started_at);
         if compile_profile_enabled() {
             eprintln!(
@@ -6019,106 +6011,36 @@ fn determinize_preconverted_small_boundary_output_with_parallel_policy(
     }
 
     let materialize_started_at = Instant::now();
-    let parallel_materialize = std::env::var_os(
-        "GLRMASK_EXPERIMENT_SMALL_BOUNDARY_PARALLEL_MATERIALIZE",
-    )
-    .is_some()
-        && rayon::current_num_threads() > 1;
-    let dwa = if parallel_materialize {
-        use rayon::prelude::*;
-        let mut used_weight = vec![false; interner.values.len()];
-        for state in &out_states {
-            if state.final_weight != 0 {
-                used_weight[state.final_weight as usize] = true;
-            }
-            for &(_, _, weight) in &state.transitions {
-                if weight != 0 {
-                    used_weight[weight as usize] = true;
-                }
-            }
+    let mut weight_cache = vec![None::<Weight>; interner.values.len()];
+    weight_cache[0] = Some(Weight::empty());
+    if weight_cache.len() > 1 {
+        weight_cache[1] = Some(Weight::all());
+    }
+    let mut materialized_weight = |id: FastBoundaryWeightId| {
+        if let Some(weight) = weight_cache[id as usize].as_ref() {
+            return weight.clone();
         }
-        let used_ids = used_weight
-            .iter()
-            .enumerate()
-            .filter_map(|(id, &used)| used.then_some(id))
-            .collect::<Vec<_>>();
-        let converted = used_ids
-            .par_iter()
-            .map(|&id| (id, interner.to_weight(id as FastBoundaryWeightId)))
-            .collect::<Vec<_>>();
-        let mut weights = vec![None::<Weight>; interner.values.len()];
-        for (id, weight) in converted {
-            weights[id] = Some(weight);
+        let weight = interner.to_weight(id);
+        weight_cache[id as usize] = Some(weight.clone());
+        weight
+    };
+    let mut dwa = DWA::new(0, 0);
+    for _ in 1..out_states.len() {
+        dwa.add_state();
+    }
+    for (state_id, state) in out_states.into_iter().enumerate() {
+        if state.final_weight != 0 {
+            dwa.set_final_weight(state_id as u32, materialized_weight(state.final_weight));
         }
-        let states = out_states
-            .into_par_iter()
-            .map(|state| DWAState {
-                transitions: state
-                    .transitions
-                    .into_iter()
-                    .filter(|(_, _, weight)| *weight != 0)
-                    .map(|(label, target, weight)| {
-                        (
-                            label,
-                            (
-                                target,
-                                weights[weight as usize]
-                                    .as_ref()
-                                    .expect("used boundary edge weight was not materialized")
-                                    .clone(),
-                            ),
-                        )
-                    })
-                    .collect(),
-                final_weight: (state.final_weight != 0).then(|| {
-                    weights[state.final_weight as usize]
-                        .as_ref()
-                        .expect("used boundary final weight was not materialized")
-                        .clone()
-                }),
-            })
-            .collect::<Vec<_>>();
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][small_boundary_materialize_used_weights] used={} interned={}",
-                used_ids.len(),
-                interner.values.len(),
+        for (label, target, edge_weight) in state.transitions {
+            dwa.add_transition(
+                state_id as u32,
+                label,
+                target,
+                materialized_weight(edge_weight),
             );
         }
-        DWA::from_parts(states, 0)
-    } else {
-        let mut weight_cache = vec![None::<Weight>; interner.values.len()];
-        weight_cache[0] = Some(Weight::empty());
-        if weight_cache.len() > 1 {
-            weight_cache[1] = Some(Weight::all());
-        }
-        let mut materialized_weight = |id: FastBoundaryWeightId| {
-            if let Some(weight) = weight_cache[id as usize].as_ref() {
-                return weight.clone();
-            }
-            let weight = interner.to_weight(id);
-            weight_cache[id as usize] = Some(weight.clone());
-            weight
-        };
-        let mut dwa = DWA::new(0, 0);
-        for _ in 1..out_states.len() {
-            dwa.add_state();
-        }
-        for (state_id, state) in out_states.into_iter().enumerate() {
-            if state.final_weight != 0 {
-                dwa.set_final_weight(state_id as u32, materialized_weight(state.final_weight));
-            }
-            for (label, target, edge_weight) in state.transitions {
-                dwa.add_transition(
-                    state_id as u32,
-                    label,
-                    target,
-                    materialized_weight(edge_weight),
-                );
-            }
-        }
-        dwa
-    };
+    }
     let materialize_ms = elapsed_ms(materialize_started_at);
     if compile_profile_enabled() {
         eprintln!(
@@ -6481,23 +6403,6 @@ pub fn normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_stat
     )?;
     let determinize_ms = elapsed_ms(determinize_started);
     let mut parser_dwa = determinized.dwa;
-    let compact_post = std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_COMPACT_FALLBACK").is_some()
-        || std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_COMPACT_POST").is_some();
-    if compact_post {
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][small_boundary_signed_fused] signed_states={} positive_states={} source_weights={} fast_weights={} convert_ms={convert_ms:.3} resolve_ms={resolve_ms:.3} hashcons_ms={hashcons_ms:.3} compact_publication=true output_states={} output_transitions={} total_ms={:.3}",
-                signed_nwa.states().len(),
-                fast_nwa.len(),
-                source_weight_ids.len(),
-                interner.values.len(),
-                parser_dwa.num_states(),
-                parser_dwa.num_transitions(),
-                elapsed_ms(total_started),
-            );
-        }
-        return Some(parser_dwa);
-    }
 
     let possible_started = Instant::now();
     let possible_by_state = build_possible_outgoing_ids_by_fast_boundary_state(
@@ -9378,8 +9283,6 @@ fn normalize_weighted_parser_stack_nwa_mode(
         .unwrap_or_else(|| determinize_with_supports(parser_nwa, Some(num_parser_states)));
     let determinize_ms = elapsed_ms(determinize_started_at);
     let mut parser_dwa = determinized.dwa;
-    let compact_fallback = small_boundary_coordinate.is_some()
-        && std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_COMPACT_FALLBACK").is_some();
     let possible_started_at = Instant::now();
     let possible_by_state = if !lift_default_acceptance {
         // Exact general predicates cannot assume that an input symbol belongs
@@ -9388,37 +9291,24 @@ fn normalize_weighted_parser_stack_nwa_mode(
         // may be covered by a DEFAULT shortcut. The full finite alphabet is
         // the only sound context without an additional provider certificate.
         (0..parser_dwa.num_states()).map(|_| PossibleOutgoingIds::All).collect()
-    } else if compact_fallback {
-        Vec::new()
     } else {
         build_possible_outgoing_ids_by_state(parser_nwa, &determinized.supports, num_parser_states)
     };
     let possible_ms = elapsed_ms(possible_started_at);
-    let compact_post = small_boundary_coordinate.is_some()
-        && (compact_fallback
-            || std::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_COMPACT_POST").is_some());
     let default_started_at = Instant::now();
-    if !compact_post
-        && std::env::var_os("GLRMASK_EXPERIMENT_LAZY_DIRECT_DISABLE_DEFAULT_OPT").is_none()
-    {
-        optimize_parser_dwa_defaults_mode(
-            &mut parser_dwa, &possible_by_state, num_parser_states, lift_default_acceptance,
-        );
-    }
+    optimize_parser_dwa_defaults_mode(
+        &mut parser_dwa, &possible_by_state, num_parser_states, lift_default_acceptance,
+    );
     let default_ms = elapsed_ms(default_started_at);
     let subtract_started_at = Instant::now();
-    if !compact_post {
-        subtract_final_weights_from_outgoing_dwa(&mut parser_dwa);
-    }
+    subtract_final_weights_from_outgoing_dwa(&mut parser_dwa);
     let subtract_ms = elapsed_ms(subtract_started_at);
     let fallback_started_at = Instant::now();
-    if !compact_fallback {
-        parser_dwa = determinize_parser_dwa_with_fallbacks(
-            &parser_dwa,
-            &possible_by_state,
-            num_parser_states,
-        );
-    }
+    parser_dwa = determinize_parser_dwa_with_fallbacks(
+        &parser_dwa,
+        &possible_by_state,
+        num_parser_states,
+    );
     let fallback_ms = elapsed_ms(fallback_started_at);
     let minimize_started_at = Instant::now();
     let pre_minimize_states = parser_dwa.num_states();
