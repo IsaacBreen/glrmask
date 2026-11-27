@@ -8408,6 +8408,7 @@ impl Constraint {
         self.weight_token_masks = dense_masks;
         self.packed_dwa_token_dense_masks = self.compute_packed_dwa_dense_token_masks();
         self.build_weight_token_outputs(prebuilt_sparse);
+        self.dwa_fast_transitions = fast_transitions;
         self.parser_runtime_caches_prebuilt = true;
     }
 
@@ -8416,7 +8417,7 @@ impl Constraint {
         preserve_packed_dwa_dense_masks: bool,
     ) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
-        if !self.has_template_parser() { self.table.rebuild_unconditional_advance_rows(); }
+        if let Some(table) = self.table.as_lr_mut() { table.rebuild_unconditional_advance_rows(); }
         let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
         let total_started_at = profile.then(std::time::Instant::now);
@@ -8728,7 +8729,8 @@ impl Constraint {
                 direct_wide_dense_ms, direct_parser_dense_ms, weight_buf_ms,
                 seed_ms, tokenizer_closures_ms, total_started_at.elapsed().as_secs_f64() * 1000.0,
                 output_counts,
-            );        }
+            );
+        }
     }
 
     fn compute_tokenizer_fast_transitions(&self) -> FastTokenizerTransitions {
@@ -9138,7 +9140,6 @@ impl Constraint {
         }
         let n_internal = self.internal_token_count();
         let mut any = false;
-        let mut stats_entries = 0u64;
         token_set.for_each_range(|start, end| {
             let start = start as usize;
             let end = (end as usize).min(n_internal.saturating_sub(1));
@@ -9150,7 +9151,7 @@ impl Constraint {
                     .get(token / 64)
                     .is_some_and(|word| word & (1u64 << (token % 64)) != 0)
                 {
-                    self.or_internal_token_to_buf_fast::<false>(token, buf, &mut stats_entries);
+                    self.apply_projection_token::<false>(token, buf);
                     any = true;
                 }
             }
@@ -11090,6 +11091,15 @@ impl Constraint {
         cost
     }
 
+    #[inline]
+    fn apply_projection_token<const REMOVE: bool>(&self, token: usize, buf: &mut [u32]) {
+        if let Some(mask) = self.token_projection.heavy(token) {
+            if REMOVE { andnot_dense_buf(buf, mask); } else { or_dense_buf(buf, mask); }
+        } else if let Some((start, end)) = self.token_projection.row_bounds(token) {
+            self.apply_internal_token_buf_range::<REMOVE>(start, end, buf);
+        }
+    }
+
     fn replay_projection<const PROFILE: bool, const REMOVE: bool>(
         &self,
         words: usize,
@@ -11113,17 +11123,7 @@ impl Constraint {
                             stats.normal_sparse_entries += cost;
                         }
                     }
-                    if let Some(mask) = self.token_projection.heavy(token) {
-                        if REMOVE { andnot_dense_buf(buf, mask); } else { or_dense_buf(buf, mask); }
-                    } else {
-                        let start = self.token_projection.offsets[token] as usize;
-                        let end = self.token_projection.offsets[token + 1] as usize;
-                        if REMOVE {
-                            self.apply_internal_token_buf_range::<true>(start, end, buf);
-                        } else {
-                            self.apply_internal_token_buf_range::<false>(start, end, buf);
-                        }
-                    }
+                    self.apply_projection_token::<REMOVE>(token, buf);
                 }
                 ProjectionStep::SparseGroup(group) => {
                     if PROFILE {

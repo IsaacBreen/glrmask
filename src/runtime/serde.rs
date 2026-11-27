@@ -5083,7 +5083,7 @@ mod tests {
             .as_ref()
             .expect("owned current load should retain artifact backing");
         let prefix = loaded
-            .word_group_prefix_buf_masks
+            .token_projection.prefix().expect("prepared projection")
             .as_contiguous()
             .expect("current token-mask prefix matrix should be contiguous");
         assert!(!prefix.is_empty());

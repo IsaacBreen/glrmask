@@ -709,7 +709,8 @@ impl Constraint {
         if internal_count == 0 { return Some(true); }
         if !self.token_projection.has_rows(internal_count) {
             return None;
-        }		for &internal_tsid in self.internal_tsids_for_state(tokenizer_state) {
+        }
+		for &internal_tsid in self.internal_tsids_for_state(tokenizer_state) {
 			let Some(tokens) = weight.token_set_for_tsid(internal_tsid) else {
 				continue;
 			};
@@ -726,7 +727,8 @@ impl Constraint {
 				if start > end {
 					return;
 				}
-                has_public = (start..=end).any(|internal| self.token_projection.row_len(internal) != 0);			});
+                has_public = (start..=end).any(|internal| self.token_projection.row_len(internal) != 0);
+			});
 			if has_public {
 				return Some(false);
 			}
