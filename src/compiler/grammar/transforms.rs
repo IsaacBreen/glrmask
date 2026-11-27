@@ -626,12 +626,11 @@ pub(crate) fn inline_single_use_nonterminals(
         if inline_candidates.is_empty() {
             break;
         }
-        remove_cyclic_inline_candidates(&mut inline_candidates);
-        if inline_candidates.is_empty() {
+        let dependency_order = remove_cyclic_inline_candidates(&mut inline_candidates);
+        if dependency_order.is_empty() {
             break;
         }
-
-        expand_inline_candidates(&mut inline_candidates);
+        expand_inline_candidates_in_order(&mut inline_candidates, dependency_order);
 
         let remove_indexes: BTreeSet<usize> =
             inline_candidates.values().map(|(index, _)| *index).collect();
@@ -669,19 +668,16 @@ pub(crate) fn inline_single_use_nonterminals(
 
 fn remove_cyclic_inline_candidates(
     inline_candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
-) {
-    if crate::env::var_os("GLRMASK_DISABLE_INLINE_CANDIDATE_SCC").is_some() {
-        remove_cyclic_inline_candidates_by_reachability(inline_candidates);
-        return;
-    }
+) -> Vec<NonterminalID> {
     let mut reference = crate::env::var_os("GLRMASK_VALIDATE_INLINE_CANDIDATE_SCC")
         .is_some()
         .then(|| inline_candidates.clone());
-    remove_cyclic_inline_candidates_scc(inline_candidates);
+    let order = remove_cyclic_inline_candidates_scc(inline_candidates);
     if let Some(reference) = reference.as_mut() {
         remove_cyclic_inline_candidates_by_reachability(reference);
         assert_eq!(inline_candidates, reference, "SCC pruning changed exact inline candidates");
     }
+    order
 }
 
 /// A candidate is cyclic iff it belongs to a nontrivial strongly connected
@@ -693,10 +689,10 @@ fn remove_cyclic_inline_candidates(
 /// and noncandidate references remain unchanged in the original ordered map.
 fn remove_cyclic_inline_candidates_scc(
     inline_candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
-) {
+) -> Vec<NonterminalID> {
     let ids: Vec<NonterminalID> = inline_candidates.keys().copied().collect();
     if ids.is_empty() {
-        return;
+        return Vec::new();
     }
     let index: FxHashMap<NonterminalID, usize> = ids.iter().copied().enumerate()
         .map(|(index, id)| (id, index)).collect();
@@ -761,9 +757,13 @@ fn remove_cyclic_inline_candidates_scc(
             }
         }
     }
+    // Every surviving acyclic dependency precedes its user in DFS
+    // finishing order; removing cyclic SCCs cannot invalidate this order.
+    finished.into_iter().map(|i| ids[i])
+        .filter(|id| inline_candidates.contains_key(id)).collect()
 }
 
-// Retain the exact previous algorithm for same-binary enable/disable evidence
+// Retain the exact previous algorithm for diagnostic comparison
 // and diagnostic equality checks. Never enable the equality check in quiet
 // timing runs: both complete computations are deliberately charged there.
 fn remove_cyclic_inline_candidates_by_reachability(
@@ -834,116 +834,35 @@ fn remove_cyclic_inline_candidates_by_reachability(
 }
 
 
-/// Expand acyclic inline candidates bottom-up.
-///
-/// Candidate cycles are removed before this runs.  The old implementation
-/// repeatedly cloned every candidate map snapshot until no replacement was
-/// possible.  Scheduling candidates after their dependencies computes the same
-/// transitive substitutions once per candidate, without recursive traversal.
-fn expand_inline_candidates(
-    inline_candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
+/// Apply each substitution once using the already computed finishing order.
+fn expand_inline_candidates_in_order(
+    candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
+    order: Vec<NonterminalID>,
 ) {
-    if inline_candidates.is_empty() {
-        return;
-    }
-
-    let candidate_ids: Vec<NonterminalID> = inline_candidates.keys().copied().collect();
-    let max_nonterminal = candidate_ids.last().copied().unwrap_or(0) as usize;
-    let mut candidate_index_by_nonterminal = vec![usize::MAX; max_nonterminal + 1];
-    for (candidate_index, &nonterminal) in candidate_ids.iter().enumerate() {
-        candidate_index_by_nonterminal[nonterminal as usize] = candidate_index;
-    }
-
-    let mut remaining_dependencies = vec![0usize; candidate_ids.len()];
-    let mut dependents = vec![Vec::<usize>::new(); candidate_ids.len()];
-    for (candidate_index, &nonterminal) in candidate_ids.iter().enumerate() {
-        let (_, rhs) = inline_candidates
-            .get(&nonterminal)
-            .expect("candidate id must be present");
-        let mut dependencies = Vec::new();
-        for symbol in rhs {
-            let Symbol::Nonterminal(child) = symbol else {
-                continue;
-            };
-            let child_index = candidate_index_by_nonterminal
-                .get(*child as usize)
-                .copied()
-                .unwrap_or(usize::MAX);
-            // Self references are intentionally left untouched, matching the
-            // legacy loop. They should already have been removed as cycles.
-            if child_index != usize::MAX
-                && child_index != candidate_index
-                && !dependencies.contains(&child_index)
-            {
-                dependencies.push(child_index);
-            }
-        }
-        remaining_dependencies[candidate_index] = dependencies.len();
-        for dependency in dependencies {
-            dependents[dependency].push(candidate_index);
-        }
-    }
-
-    let mut ready: Vec<usize> = remaining_dependencies
-        .iter()
-        .enumerate()
-        .filter_map(|(candidate_index, &count)| (count == 0).then_some(candidate_index))
-        .collect();
-    let mut expanded_rhs: Vec<Option<Vec<Symbol>>> = vec![None; candidate_ids.len()];
-    let mut expanded_count = 0usize;
-
-    while let Some(candidate_index) = ready.pop() {
-        let nonterminal = candidate_ids[candidate_index];
-        let (_, rhs) = inline_candidates
-            .get(&nonterminal)
-            .expect("candidate id must be present");
+    debug_assert_eq!(candidates.len(), order.len());
+    for id in order {
+        let (index, rhs) = candidates.remove(&id).expect("scheduled inline candidate");
         let mut expanded = Vec::with_capacity(rhs.len());
         for symbol in rhs {
-            let replacement_index = match symbol {
-                Symbol::Nonterminal(child) => candidate_index_by_nonterminal
-                    .get(*child as usize)
-                    .copied()
-                    .filter(|&index| index != usize::MAX && index != candidate_index),
-                Symbol::Terminal(_) => None,
-            };
-            if let Some(replacement_index) = replacement_index {
-                let replacement = expanded_rhs[replacement_index]
-                    .as_ref()
-                    .expect("dependency must be expanded before its dependent");
+            if let Symbol::Nonterminal(child) = &symbol
+                && let Some((_, replacement)) = candidates.get(child)
+            {
                 expanded.extend(replacement.iter().cloned());
             } else {
-                expanded.push(symbol.clone());
+                expanded.push(symbol);
             }
         }
-        expanded_rhs[candidate_index] = Some(expanded);
-        expanded_count += 1;
-
-        for &dependent in &dependents[candidate_index] {
-            remaining_dependencies[dependent] -= 1;
-            if remaining_dependencies[dependent] == 0 {
-                ready.push(dependent);
-            }
-        }
-    }
-
-    if expanded_count != candidate_ids.len() {
-        // `remove_cyclic_inline_candidates` should make this unreachable. Keep
-        // the legacy iterative algorithm as an exact fallback if a malformed
-        // candidate graph somehow violates that invariant.
-        expand_inline_candidates_iteratively(inline_candidates);
-        return;
-    }
-
-    for (candidate_index, nonterminal) in candidate_ids.into_iter().enumerate() {
-        inline_candidates
-            .get_mut(&nonterminal)
-            .expect("candidate id must be present")
-            .1 = expanded_rhs[candidate_index]
-            .take()
-            .expect("all candidates must have expanded RHS");
+        candidates.insert(id, (index, expanded));
     }
 }
 
+#[cfg(test)]
+fn expand_inline_candidates(candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>) {
+    let order = remove_cyclic_inline_candidates_scc(candidates);
+    expand_inline_candidates_in_order(candidates, order);
+}
+
+#[cfg(test)]
 fn expand_inline_candidates_iteratively(
     inline_candidates: &mut BTreeMap<NonterminalID, (usize, Vec<Symbol>)>,
 ) {
@@ -1272,7 +1191,6 @@ pub(crate) fn prepare_dynamic_glr_transforms_only_lr(grammar: GrammarDef) -> Gra
 
 fn prepare_dynamic_glr_transforms_impl(mut grammar: GrammarDef, use_lr_normalizer: bool) -> GrammarDef {
     discard_reflexive_unit_rules(&mut grammar.rules);
-    let profiling = compile_profile_enabled();
     let nullable_terminals = nullable_terminals_for_grammar(&grammar);
     let mut normalized = grammar;
     expand_nullable_terminals(
@@ -1281,44 +1199,7 @@ fn prepare_dynamic_glr_transforms_impl(mut grammar: GrammarDef, use_lr_normalize
         &nullable_terminals,
     );
 
-    let started = profiling.then(Instant::now);
-    let before = normalized.rules.len();
-    if use_lr_normalizer {
-        normalize_dynamic_glr_grammar(&mut normalized.rules, normalized.start);
-    } else {
-        normalize_grammar(&mut normalized.rules, normalized.start);
-    }
-    // Epsilon elimination can turn `X -> N X` with nullable N into `X -> X`.
-    // That identity rule derives nothing new, but the GLR runtime would
-    // reduce it back into the same state forever.
-    discard_reflexive_unit_rules(&mut normalized.rules);
-    if let Some(started) = started {
-        emit_grammar_transform_profile(
-            if use_lr_normalizer { "normalize_dynamic_glr_grammar" } else { "normalize_grammar" },
-            elapsed_ms(started),
-            before,
-            normalized.rules.len(),
-            "",
-        );
-    }
-
-    let protected_nonterminals = collect_protected_nonterminals(&normalized);
-    inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals, normalized.start);
-    let max_reduction_len = crate::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(MAX_RUNTIME_REDUCTION_LEN);
-    bound_runtime_reduction_length(&mut normalized, max_reduction_len);
-    inline_post_bound_single_use_nonterminals(
-        &mut normalized.rules,
-        &protected_nonterminals,
-        max_reduction_len,
-        normalized.start,
-    );
-    // Inlining can also produce identity rules.
-    discard_reflexive_unit_rules(&mut normalized.rules);
-    compact_unused_terminals(&mut normalized);
-    normalized
+    prepare_dynamic_parser_after_terminal_domain_impl(normalized, use_lr_normalizer).0
 }
 
 /// Dynamic-compile shared prefix: perform only the work needed to establish a
@@ -1353,6 +1234,8 @@ fn prepare_dynamic_parser_after_terminal_domain_impl(
     mut normalized: GrammarDef,
     use_lr_normalizer: bool,
 ) -> (GrammarDef, bool) {
+    let started = compile_profile_enabled().then(Instant::now);
+    let before = normalized.rules.len();
     discard_reflexive_unit_rules(&mut normalized.rules);
     if use_lr_normalizer {
         normalize_dynamic_glr_grammar(&mut normalized.rules, normalized.start);
@@ -1363,6 +1246,12 @@ fn prepare_dynamic_parser_after_terminal_domain_impl(
     // That identity rule derives nothing new, but the GLR runtime would
     // reduce it back into the same state forever.
     discard_reflexive_unit_rules(&mut normalized.rules);
+    if let Some(started) = started {
+        emit_grammar_transform_profile(
+            if use_lr_normalizer { "normalize_dynamic_glr_grammar" } else { "normalize_grammar" },
+            elapsed_ms(started), before, normalized.rules.len(), "",
+        );
+    }
     let protected_nonterminals = collect_protected_nonterminals(&normalized);
     inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals, normalized.start);
     let max_reduction_len = crate::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")

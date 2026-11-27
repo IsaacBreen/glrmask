@@ -5014,7 +5014,7 @@ fn optimize_fast_boundary_defaults(
 ) {
     optimize_default_rows(
         states, num_parser_states,
-        |id| possible_by_state[id].count(num_parser_states) == num_parser_states as usize,
+        |id| possible_by_state.get(id).is_some_and(|support| support.count(num_parser_states) == num_parser_states as usize),
         true, interner,
     );
 }
@@ -7174,7 +7174,7 @@ fn optimize_parser_dwa_defaults_mode(
 ) {
     optimize_default_rows(
         dwa.states_mut(), num_parser_states,
-        |id| matches!(possible_by_state[id], PossibleOutgoingIds::All),
+        |id| matches!(possible_by_state.get(id), Some(PossibleOutgoingIds::All)),
         lift_default_acceptance, &mut GenericDefaultWeights,
     );
 }
