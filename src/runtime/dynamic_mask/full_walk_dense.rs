@@ -971,381 +971,6 @@ impl FullWalkTransitionTable for FullWalkLazyUnion<'_> {
     }
 }
 
-struct FullWalkSubset16<'a> {
-    base_transitions: &'a [u16],
-    base_state_count: u32,
-    rows: Vec<[u32; 256]>,
-    finalizer_code: Vec<u32>,
-    single_finalizer_continues: Vec<u8>,
-    matched: Vec<BitSet>,
-    futures: Vec<BitSet>,
-}
-
-impl<'a> FullWalkSubset16<'a> {
-    const MAX_EXTENSION_STATES: usize = 4096;
-
-    fn build(
-        tokenizer: &Tokenizer,
-        base_transitions: &'a [u16],
-        root_states: &[u32],
-        horizon: usize,
-    ) -> Option<(Self, u32, Vec<SmallVec<[u32; 8]>>)> {
-        let base_state_count = tokenizer.num_states();
-        let mut table = Self {
-            base_transitions,
-            base_state_count,
-            rows: Vec::new(),
-            finalizer_code: Vec::new(),
-            single_finalizer_continues: Vec::new(),
-            matched: Vec::new(),
-            futures: Vec::new(),
-        };
-        let mut state_by_subset = FxHashMap::<SmallVec<[u32; 8]>, u32>::default();
-        let mut subsets = Vec::<SmallVec<[u32; 8]>>::new();
-        let mut depths = Vec::<usize>::new();
-
-        fn intern(
-            table: &mut FullWalkSubset16<'_>,
-            tokenizer: &Tokenizer,
-            state_by_subset: &mut FxHashMap<SmallVec<[u32; 8]>, u32>,
-            subsets: &mut Vec<SmallVec<[u32; 8]>>,
-            depths: &mut Vec<usize>,
-            depth: usize,
-            mut states: SmallVec<[u32; 8]>,
-        ) -> Option<u32> {
-            states.sort_unstable();
-            states.dedup();
-            match states.as_slice() {
-                [] => return None,
-                [state] => return Some(*state),
-                _ => {}
-            }
-            if let Some(&state) = state_by_subset.get(&states) {
-                return Some(state);
-            }
-            if subsets.len() >= FullWalkSubset16::MAX_EXTENSION_STATES {
-                return None;
-            }
-            if states.iter().any(|&state| state >= table.base_state_count) {
-                return None;
-            }
-            let id = table.base_state_count + subsets.len() as u32;
-            let mut matched = BitSet::new(tokenizer.num_terminals() as usize);
-            let mut futures = BitSet::new(tokenizer.num_terminals() as usize);
-            for &state in &states {
-                matched.union_with(tokenizer.matched_terminal_bitset(state));
-                futures.union_with(tokenizer.possible_future_terminals(state));
-            }
-            let (first, second) = {
-                let mut matched_iter = matched.iter_ones().map(|terminal| terminal as TerminalID);
-                (matched_iter.next(), matched_iter.next())
-            };
-            let code = match (first, second) {
-                (None, _) => u32::MAX,
-                (Some(terminal), None) => terminal,
-                _ => u32::MAX - 1,
-            };
-            let continues = first
-                .filter(|_| second.is_none())
-                .is_some_and(|terminal| futures.contains(terminal as usize));
-            state_by_subset.insert(states.clone(), id);
-            subsets.push(states);
-            depths.push(depth);
-            table.rows.push([u32::MAX; 256]);
-            table.finalizer_code.push(code);
-            table.single_finalizer_continues.push(u8::from(continues));
-            table.matched.push(matched);
-            table.futures.push(futures);
-            Some(id)
-        }
-
-        let root = intern(
-            &mut table,
-            tokenizer,
-            &mut state_by_subset,
-            &mut subsets,
-            &mut depths,
-            0,
-            SmallVec::from_slice(root_states),
-        )?;
-        if root < base_state_count {
-            return Some((table, root, subsets));
-        }
-
-        let mut build_index = 0usize;
-        while build_index < subsets.len() {
-            let depth = depths[build_index];
-            if depth >= horizon {
-                build_index += 1;
-                continue;
-            }
-            let members = subsets[build_index].clone();
-            let mut row = [u32::MAX; 256];
-            for byte in 0..=u8::MAX {
-                let mut targets = SmallVec::<[u32; 8]>::new();
-                for &state in members.iter() {
-                    let cell = unsafe {
-                        *base_transitions
-                            .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
-                    };
-                    if cell != u16::MAX {
-                        targets.push(u32::from(cell & 0x7fff));
-                    }
-                }
-                if targets.is_empty() {
-                    continue;
-                }
-                let target = intern(
-                    &mut table,
-                    tokenizer,
-                    &mut state_by_subset,
-                    &mut subsets,
-                    &mut depths,
-                    depth + 1,
-                    targets,
-                )?;
-                let has_finalizer = if target < base_state_count {
-                    !tokenizer.matched_terminal_bitset(target).is_empty()
-                } else {
-                    !table.matched[(target - base_state_count) as usize].is_empty()
-                };
-                row[byte as usize] = target | if has_finalizer { 0x8000_0000 } else { 0 };
-            }
-            table.rows[build_index] = row;
-            build_index += 1;
-        }
-        Some((table, root, subsets))
-    }
-
-    fn into_owned(self, root_state: u32, subsets: Vec<SmallVec<[u32; 8]>>) -> DynamicDenseSubset16 {
-        DynamicDenseSubset16 {
-            root_state,
-            base_state_count: self.base_state_count,
-            rows: self.rows,
-            finalizer_code: self.finalizer_code,
-            single_finalizer_continues: self.single_finalizer_continues,
-            matched: self.matched,
-            futures: self.futures,
-            subsets,
-        }
-    }
-
-    #[inline(always)]
-    fn extension_index(&self, state: u32) -> usize {
-        (state - self.base_state_count) as usize
-    }
-}
-
-impl FullWalkTransitionTable for FullWalkSubset16<'_> {
-    type Cell = u32;
-
-    #[inline(always)]
-    fn cell(&self, state: u32, byte: u8) -> u32 {
-        if state < self.base_state_count {
-            let cell = unsafe {
-                *self
-                    .base_transitions
-                    .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
-            };
-            if cell == u16::MAX {
-                u32::MAX
-            } else {
-                u32::from(cell & 0x7fff)
-                    | if cell & 0x8000 != 0 { 0x8000_0000 } else { 0 }
-            }
-        } else {
-            unsafe {
-                *self
-                    .rows
-                    .get_unchecked(self.extension_index(state))
-                    .get_unchecked(byte as usize)
-            }
-        }
-    }
-
-    #[inline(always)]
-    fn cell_is_dead(cell: u32) -> bool { cell == u32::MAX }
-
-    #[inline(always)]
-    fn cell_has_finalizer(cell: u32) -> bool { cell & 0x8000_0000 != 0 }
-
-    #[inline(always)]
-    fn cell_target(cell: u32) -> u32 { cell & 0x7fff_ffff }
-
-    #[inline(always)]
-    fn state_count(&self, _tokenizer: &Tokenizer) -> usize {
-        self.base_state_count as usize + self.rows.len()
-    }
-
-    #[inline(always)]
-    fn finalizer_code(&self, state: u32, base: &[u32]) -> u32 {
-        if state < self.base_state_count {
-            unsafe { *base.get_unchecked(state as usize) }
-        } else {
-            unsafe { *self.finalizer_code.get_unchecked(self.extension_index(state)) }
-        }
-    }
-
-    #[inline(always)]
-    fn single_finalizer_continues(&self, state: u32, base: &[u8]) -> bool {
-        if state < self.base_state_count {
-            unsafe { *base.get_unchecked(state as usize) != 0 }
-        } else {
-            unsafe { *self.single_finalizer_continues.get_unchecked(self.extension_index(state)) != 0 }
-        }
-    }
-
-    #[inline]
-    fn matched_terminals(&self, tokenizer: &Tokenizer, state: u32) -> SmallVec<[TerminalID; 4]> {
-        if state < self.base_state_count {
-            tokenizer.matched_terminals_slice(state).iter().copied().collect()
-        } else {
-            self.matched[self.extension_index(state)]
-                .iter_ones()
-                .map(|terminal| terminal as TerminalID)
-                .collect()
-        }
-    }
-
-
-    #[inline(always)]
-    fn future_contains(&self, tokenizer: &Tokenizer, state: u32, terminal: TerminalID) -> bool {
-        if state < self.base_state_count {
-            tokenizer.possible_future_terminals(state).contains(terminal as usize)
-        } else {
-            self.futures[self.extension_index(state)].contains(terminal as usize)
-        }
-    }
-
-    #[inline(always)]
-    fn future_intersects(&self, tokenizer: &Tokenizer, state: u32, terminals: &BitSet) -> bool {
-        if state < self.base_state_count {
-            lexer_parser_rows_intersect(terminals, tokenizer.possible_future_terminals(state))
-        } else {
-            lexer_parser_rows_intersect(terminals, &self.futures[self.extension_index(state)])
-        }
-    }
-
-    #[inline]
-    fn sole_live_terminal(&self, tokenizer: &Tokenizer, state: u32) -> Option<TerminalID> {
-        if state < self.base_state_count {
-            return physical_sole_live_terminal(tokenizer, state);
-        }
-        let index = self.extension_index(state);
-        bitset_sole_live_terminal(&self.matched[index], &self.futures[index])
-    }
-}
-
-
-struct FullWalkCachedSubset16<'a> {
-    base_transitions: &'a [u16],
-    extension: Arc<DynamicDenseSubset16>,
-}
-
-impl FullWalkCachedSubset16<'_> {
-    #[inline(always)]
-    fn extension_index(&self, state: u32) -> usize {
-        (state - self.extension.base_state_count) as usize
-    }
-}
-
-impl FullWalkTransitionTable for FullWalkCachedSubset16<'_> {
-    type Cell = u32;
-
-    #[inline(always)]
-    fn cell(&self, state: u32, byte: u8) -> u32 {
-        if state < self.extension.base_state_count {
-            let cell = unsafe {
-                *self.base_transitions
-                    .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
-            };
-            if cell == u16::MAX {
-                u32::MAX
-            } else {
-                u32::from(cell & 0x7fff)
-                    | if cell & 0x8000 != 0 { 0x8000_0000 } else { 0 }
-            }
-        } else {
-            unsafe {
-                *self.extension.rows
-                    .get_unchecked(self.extension_index(state))
-                    .get_unchecked(byte as usize)
-            }
-        }
-    }
-
-    #[inline(always)]
-    fn cell_is_dead(cell: u32) -> bool { cell == u32::MAX }
-    #[inline(always)]
-    fn cell_has_finalizer(cell: u32) -> bool { cell & 0x8000_0000 != 0 }
-    #[inline(always)]
-    fn cell_target(cell: u32) -> u32 { cell & 0x7fff_ffff }
-
-    #[inline(always)]
-    fn state_count(&self, _tokenizer: &Tokenizer) -> usize {
-        self.extension.base_state_count as usize + self.extension.rows.len()
-    }
-
-    #[inline(always)]
-    fn finalizer_code(&self, state: u32, base: &[u32]) -> u32 {
-        if state < self.extension.base_state_count {
-            unsafe { *base.get_unchecked(state as usize) }
-        } else {
-            unsafe { *self.extension.finalizer_code.get_unchecked(self.extension_index(state)) }
-        }
-    }
-
-    #[inline(always)]
-    fn single_finalizer_continues(&self, state: u32, base: &[u8]) -> bool {
-        if state < self.extension.base_state_count {
-            unsafe { *base.get_unchecked(state as usize) != 0 }
-        } else {
-            unsafe { *self.extension.single_finalizer_continues.get_unchecked(self.extension_index(state)) != 0 }
-        }
-    }
-
-    #[inline]
-    fn matched_terminals(&self, tokenizer: &Tokenizer, state: u32) -> SmallVec<[TerminalID; 4]> {
-        if state < self.extension.base_state_count {
-            tokenizer.matched_terminals_slice(state).iter().copied().collect()
-        } else {
-            self.extension.matched[self.extension_index(state)]
-                .iter_ones().map(|terminal| terminal as TerminalID).collect()
-        }
-    }
-
-
-    #[inline(always)]
-    fn future_contains(&self, tokenizer: &Tokenizer, state: u32, terminal: TerminalID) -> bool {
-        if state < self.extension.base_state_count {
-            tokenizer.possible_future_terminals(state).contains(terminal as usize)
-        } else {
-            self.extension.futures[self.extension_index(state)].contains(terminal as usize)
-        }
-    }
-
-    #[inline(always)]
-    fn future_intersects(&self, tokenizer: &Tokenizer, state: u32, terminals: &BitSet) -> bool {
-        if state < self.extension.base_state_count {
-            lexer_parser_rows_intersect(terminals, tokenizer.possible_future_terminals(state))
-        } else {
-            lexer_parser_rows_intersect(terminals, &self.extension.futures[self.extension_index(state)])
-        }
-    }
-
-    #[inline]
-    fn sole_live_terminal(&self, tokenizer: &Tokenizer, state: u32) -> Option<TerminalID> {
-        if state < self.extension.base_state_count {
-            return physical_sole_live_terminal(tokenizer, state);
-        }
-        let index = self.extension_index(state);
-        bitset_sole_live_terminal(
-            &self.extension.matched[index],
-            &self.extension.futures[index],
-        )
-    }
-}
-
 #[derive(Clone, Copy)]
 struct FullWalkFlat32<'a> {
     transitions: &'a [u32],
@@ -2016,134 +1641,28 @@ pub(super) fn try_scalar_dispatch(
     let Some(reset_states) = tokenizer.sorted_deterministic_dispatch_roots() else {
         return Ok(false);
     };
-    let extension = if transitions16.is_some()
-        && let Some(cached) = vocab.cached_dense_subset16(&reset_states)
-    {
-        if profile {
-            eprintln!(
-                "[glrmask/profile][scalar_dispatch] cache=hit roots={} rows={}",
-                reset_states.len(),
-                cached.rows.len(),
-            );
-        }
-        cached
-    } else {
-        // Do not speculatively determinize the complete dispatcher subset
-        // graph here. The vocabulary walk observes only a small portion of
-        // that graph, while full construction can cost many milliseconds or
-        // exceed the dense extension reserve. The exact lazy table below
-        // materializes only derivatives actually requested by trie edges.
-        let Some(subset_cache) = vocab.try_lock_lazy_union_cache() else {
-            return Ok(false);
-        };
-        let overflowed = std::cell::Cell::new(false);
-        let use_pair_map = !std::ptr::eq(tokenizer, state.constraint.tokenizer.as_ref());
-        let Some((lazy_transitions, initial_lexer_state)) = FullWalkLazyUnion::new(
-            tokenizer,
-            transitions16,
-            transitions32,
-            subset_cache,
-            &reset_states,
-            &overflowed,
-            use_pair_map,
-        ) else {
-            return Ok(false);
-        };
-
-        let mut physical = SmallVec::<[u32; 8]>::new();
-        let mut transformed = DynamicBranches::new();
-        for branch in root_branches {
-            lexer_scan_cache.physical_states_for_config(branch.tokenizer_config, &mut physical)?;
-            physical.retain(|tokenizer_state| {
-                let tokenizer_state = *tokenizer_state;
-                if !tokenizer.state_has_epsilon_transitions(tokenizer_state) {
-                    return true;
-                }
-                debug_assert!(tokenizer.transitions_from(tokenizer_state).next().is_none());
-                false
-            });
-            physical.sort_unstable();
-            physical.dedup();
-            if physical.is_empty() {
-                continue;
-            }
-            let tokenizer_config = match physical.as_slice() {
-                [single] => *single,
-                _ => {
-                    let Some(state) = lazy_transitions.union_states(&physical) else {
-                        return Ok(false);
-                    };
-                    state
-                }
-            };
-            transformed.push(DynamicBranch {
-                tokenizer_config,
-                exact_tokenizer_state: branch.exact_tokenizer_state,
-                parser_filtered_root: branch.parser_filtered_root,
-                parser_filtered_transparent: branch.parser_filtered_transparent,
-                residual_continuation_terminal: branch.residual_continuation_terminal,
-                gss: branch.gss.clone(),
-                shared_root_admission: branch.shared_root_admission.clone(),
-                initial_prune_guard: branch.initial_prune_guard.clone(),
-            });
-        }
-        if transformed.is_empty() {
-            return Ok(false);
-        }
-
-        let mut scratch = vec![0u32; buf.len()];
-        let result = if transformed.len() == 1 {
-            try_full_walk_mask_with_table_from_initial_in_output_scope::<_, true>(
-                state,
-                vocab,
-                trie,
-                precollapse_master_decision,
-                &transformed,
-                lexer_scan_cache,
-                &mut scratch,
-                lazy_transitions,
-                finalizer_code.unwrap_or(&[]),
-                single_finalizer_continues.unwrap_or(&[]),
-                initial_lexer_state,
-                ignored_output,
-            )
-        } else {
-            try_full_walk_mask_with_table_from_initial_in_output_scope::<_, false>(
-                state,
-                vocab,
-                trie,
-                precollapse_master_decision,
-                &transformed,
-                lexer_scan_cache,
-                &mut scratch,
-                lazy_transitions,
-                finalizer_code.unwrap_or(&[]),
-                single_finalizer_continues.unwrap_or(&[]),
-                initial_lexer_state,
-                ignored_output,
-            )
-        }?;
-        if overflowed.get() {
-            let mut cache = vocab.lock_lazy_union_cache();
-            FullWalkLazyUnion::clear_cache(&mut cache);
-            return Ok(false);
-        }
-        if !result {
-            return Ok(false);
-        }
-        if profile {
-            eprintln!("[glrmask/profile][scalar_dispatch] cache=lazy_walk_success");
-        }
-        buf.copy_from_slice(&scratch);
-        return Ok(true);
+    // Do not speculatively determinize the complete dispatcher subset
+    // graph here. The vocabulary walk observes only a small portion of
+    // that graph, while full construction can cost many milliseconds or
+    // exceed the dense extension reserve. The exact lazy table below
+    // materializes only derivatives actually requested by trie edges.
+    let Some(subset_cache) = vocab.try_lock_lazy_union_cache() else {
+        return Ok(false);
     };
-    let initial_lexer_state = extension.root_state;
-    let table = FullWalkCachedSubset16 {
-        base_transitions: transitions16.expect("dense subset cache requires Flat16 base transitions"),
-        extension: Arc::clone(&extension),
+    let overflowed = std::cell::Cell::new(false);
+    let use_pair_map = !std::ptr::eq(tokenizer, state.constraint.tokenizer.as_ref());
+    let Some((lazy_transitions, initial_lexer_state)) = FullWalkLazyUnion::new(
+        tokenizer,
+        transitions16,
+        transitions32,
+        subset_cache,
+        &reset_states,
+        &overflowed,
+        use_pair_map,
+    ) else {
+        return Ok(false);
     };
 
-    let transform_started = profile.then(std::time::Instant::now);
     let mut physical = SmallVec::<[u32; 8]>::new();
     let mut transformed = DynamicBranches::new();
     for branch in root_branches {
@@ -2153,10 +1672,6 @@ pub(super) fn try_scalar_dispatch(
             if !tokenizer.state_has_epsilon_transitions(tokenizer_state) {
                 return true;
             }
-            // Under `has_scalar_deterministic_dispatch`, the only byte-live
-            // epsilon source reachable from reset is the dispatcher itself,
-            // and it has no consuming row. Its closure members are already in
-            // this config, so retaining it would add no byte-language behavior.
             debug_assert!(tokenizer.transitions_from(tokenizer_state).next().is_none());
             false
         });
@@ -2168,20 +1683,10 @@ pub(super) fn try_scalar_dispatch(
         let tokenizer_config = match physical.as_slice() {
             [single] => *single,
             _ => {
-                let Some(index) = extension
-                    .subsets
-                    .iter()
-                    .position(|subset| subset.as_slice() == physical.as_slice())
-                else {
-                    if dynamic_mask_profile_enabled(state.generation) {
-                        eprintln!(
-                            "[glrmask/profile][scalar_dispatch] missing_root_subset size={}",
-                            physical.len(),
-                        );
-                    }
+                let Some(state) = lazy_transitions.union_states(&physical) else {
                     return Ok(false);
                 };
-                extension.base_state_count + index as u32
+                state
             }
         };
         transformed.push(DynamicBranch {
@@ -2198,17 +1703,7 @@ pub(super) fn try_scalar_dispatch(
     if transformed.is_empty() {
         return Ok(false);
     }
-    if let Some(started) = transform_started {
-        eprintln!(
-            "[glrmask/profile][scalar_dispatch_transform] branches={} elapsed_ms={:.3}",
-            transformed.len(),
-            started.elapsed().as_secs_f64() * 1e3,
-        );
-    }
 
-    // Run into scratch so an unexpected structural decline can still fall back
-    // to the ordinary NFA walker without exposing a partial mask.
-    let walk_started = profile.then(std::time::Instant::now);
     let mut scratch = vec![0u32; buf.len()];
     let result = if transformed.len() == 1 {
         try_full_walk_mask_with_table_from_initial_in_output_scope::<_, true>(
@@ -2219,10 +1714,9 @@ pub(super) fn try_scalar_dispatch(
             &transformed,
             lexer_scan_cache,
             &mut scratch,
-            table,
-            finalizer_code.expect("dense subset cache requires Flat16 finalizer metadata"),
-            single_finalizer_continues
-                .expect("dense subset cache requires Flat16 continuation metadata"),
+            lazy_transitions,
+            finalizer_code.unwrap_or(&[]),
+            single_finalizer_continues.unwrap_or(&[]),
             initial_lexer_state,
             ignored_output,
         )
@@ -2235,28 +1729,23 @@ pub(super) fn try_scalar_dispatch(
             &transformed,
             lexer_scan_cache,
             &mut scratch,
-            table,
-            finalizer_code.expect("dense subset cache requires Flat16 finalizer metadata"),
-            single_finalizer_continues
-                .expect("dense subset cache requires Flat16 continuation metadata"),
+            lazy_transitions,
+            finalizer_code.unwrap_or(&[]),
+            single_finalizer_continues.unwrap_or(&[]),
             initial_lexer_state,
             ignored_output,
         )
     }?;
-    if let Some(started) = walk_started {
-        eprintln!(
-            "[glrmask/profile][scalar_dispatch_inner_walk] elapsed_ms={:.3}",
-            started.elapsed().as_secs_f64() * 1e3,
-        );
+    if overflowed.get() {
+        let mut cache = vocab.lock_lazy_union_cache();
+        FullWalkLazyUnion::clear_cache(&mut cache);
+        return Ok(false);
     }
     if !result {
-        if dynamic_mask_profile_enabled(state.generation) {
-            eprintln!("[glrmask/profile][scalar_dispatch] walk_declined");
-        }
         return Ok(false);
     }
     if profile {
-        eprintln!("[glrmask/profile][scalar_dispatch] walk=success");
+        eprintln!("[glrmask/profile][scalar_dispatch] cache=lazy_walk_success");
     }
     buf.copy_from_slice(&scratch);
     Ok(true)
@@ -2383,24 +1872,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
             .collect::<Vec<_>>();
         root_states.sort_unstable();
         root_states.dedup();
-        if let Some((extension, root_state)) = vocab.cached_dense_subset16_state_for_subset(&root_states) {
-            let subset_transitions = FullWalkCachedSubset16 { base_transitions: transitions, extension };
-            let mut collapsed = DynamicBranches::new();
-            collapsed.push(DynamicBranch {
-                tokenizer_config: root_state,
-                exact_tokenizer_state: None,
-                parser_filtered_root: false,
-                parser_filtered_transparent: false,
-                residual_continuation_terminal: None,
-                gss: root_branches[0].gss.clone(),
-                shared_root_admission: root_branches[0].shared_root_admission.clone(),
-                initial_prune_guard: InitialPruneGuard::Passed,
-            });
-            return try_full_walk_mask_with_table::<_, true>(
-                state, vocab, trie, precollapse_master_decision, &collapsed, lexer_scan_cache, buf, subset_transitions, finalizer_code, single_finalizer_continues,
-            );
-        }
-        if (2..=4).contains(&root_states.len()) {
+        if root_states.len() >= 2 {
             let Some(subset_cache) = vocab.try_lock_lazy_union_cache() else {
                 // The persistent lazy-subset cache is shared by all sequences
                 // using this constraint. Never serialize concurrent mask fills
@@ -2481,63 +1953,6 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
                     single_finalizer_continues,
                 );
             }
-        }
-        let extension = if let Some(cached) = vocab.cached_dense_subset16(&root_states) {
-            Some(cached)
-        } else {
-            {
-                let started = std::time::Instant::now();
-                let built = FullWalkSubset16::build(
-                    lexer_scan_cache.tokenizer(),
-                    transitions,
-                    &root_states,
-                    vocab.max_token_byte_len(),
-                );
-                if dynamic_mask_profile_enabled(state.generation) {
-                    eprintln!(
-                        "[glrmask/profile][dense_subset16_build] roots={} rows={} elapsed_ms={:.3}",
-                        root_states.len(),
-                        built.as_ref().map_or(0, |(table, _, _)| table.rows.len()),
-                        started.elapsed().as_secs_f64() * 1e3,
-                    );
-                }
-                built.map(|(built, root_state, subsets)| {
-                    vocab.cache_dense_subset16(
-                        root_states.clone(),
-                        built.into_owned(root_state, subsets),
-                    )
-                })
-            }
-        };
-        if let Some(extension) = extension {
-            let root_state = extension.root_state;
-            let subset_transitions = FullWalkCachedSubset16 {
-                base_transitions: transitions,
-                extension,
-            };
-            let mut collapsed = DynamicBranches::new();
-            collapsed.push(DynamicBranch {
-                tokenizer_config: root_state,
-                exact_tokenizer_state: None,
-                parser_filtered_root: false,
-                parser_filtered_transparent: false,
-                residual_continuation_terminal: None,
-                gss: root_branches[0].gss.clone(),
-                shared_root_admission: root_branches[0].shared_root_admission.clone(),
-                initial_prune_guard: InitialPruneGuard::Passed,
-            });
-            return try_full_walk_mask_with_table::<_, true>(
-                state,
-                vocab,
-                trie,
-                None,
-                &collapsed,
-                lexer_scan_cache,
-                buf,
-                subset_transitions,
-                finalizer_code,
-                single_finalizer_continues,
-            );
         }
     }
     let walk_started = profile_flat16.then(std::time::Instant::now);

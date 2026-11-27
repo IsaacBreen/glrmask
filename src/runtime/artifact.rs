@@ -3613,22 +3613,6 @@ pub(crate) struct DynamicLazyUnionCache {
     pub(crate) dense_output_hints: FxHashMap<u32, u8>,
 }
 
-/// Runtime-only exact deterministic extension for a parser-filtered union of
-/// Flat16 mask-tokenizer states. IDs in `rows` start at `base_state_count`;
-/// this object is derived, never serialized, and may be reused for every mask
-/// whose canonical lexer-root subset matches its cache key.
-#[derive(Debug)]
-pub(crate) struct DynamicDenseSubset16 {
-    pub(crate) root_state: u32,
-    pub(crate) base_state_count: u32,
-    pub(crate) rows: Vec<[u32; 256]>,
-    pub(crate) finalizer_code: Vec<u32>,
-    pub(crate) single_finalizer_continues: Vec<u8>,
-    pub(crate) matched: Vec<BitSet>,
-    pub(crate) futures: Vec<BitSet>,
-    pub(crate) subsets: Vec<SmallVec<[u32; 8]>>,
-}
-
 /// One overlapping runtime slice language and the residual vocabulary trie
 /// to walk after that language has been proved contained. The slice language
 /// itself is not a compiler partition and may overlap/nest with other slices.
@@ -3790,7 +3774,6 @@ pub(crate) struct DynamicMaskVocab {
     /// unset; compiler-created O2 quotients carry it into transfer metadata.
     source_vocab_digest: Option<[u8; 32]>,
     mask_cache: Arc<Mutex<DynamicMaskCache>>,
-    dense_subset16_cache: Arc<Mutex<FxHashMap<Vec<u32>, Arc<DynamicDenseSubset16>>>>,
     lazy_union_cache: Arc<Mutex<DynamicLazyUnionCache>>,
     direct_regular_frontier_cache:
         Arc<Mutex<FxHashMap<usize, DirectRegularDynamicFrontierCacheEntry>>>,
@@ -4164,7 +4147,6 @@ impl DynamicMaskVocab {
             grammar_quotiented: false,
             source_vocab_digest: None,
             mask_cache: Arc::new(Mutex::new(DynamicMaskCache::default())),
-            dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
             lazy_union_cache: Arc::new(Mutex::new(DynamicLazyUnionCache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
@@ -4259,7 +4241,6 @@ impl DynamicMaskVocab {
             grammar_quotiented: self.grammar_quotiented,
             source_vocab_digest: self.source_vocab_digest,
             mask_cache: Arc::new(Mutex::new(DynamicMaskCache::default())),
-            dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
             lazy_union_cache: Arc::new(Mutex::new(DynamicLazyUnionCache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(
@@ -4399,7 +4380,6 @@ impl DynamicMaskVocab {
             grammar_quotiented: false,
             source_vocab_digest: None,
             mask_cache: Arc::new(Mutex::new(DynamicMaskCache::default())),
-            dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
             lazy_union_cache: Arc::new(Mutex::new(DynamicLazyUnionCache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
@@ -8007,51 +7987,6 @@ impl DynamicMaskVocab {
         }
     }
 
-    pub(crate) fn cached_dense_subset16(
-        &self,
-        root_states: &[u32],
-    ) -> Option<Arc<DynamicDenseSubset16>> {
-        self.dense_subset16_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(root_states)
-            .cloned()
-    }
-
-    pub(crate) fn cached_dense_subset16_state_for_subset(
-        &self,
-        root_states: &[u32],
-    ) -> Option<(Arc<DynamicDenseSubset16>, u32)> {
-        let cache = self.dense_subset16_cache.lock().unwrap_or_else(|p| p.into_inner());
-        for extension in cache.values() {
-            if let Some(index) = extension.subsets.iter().position(|subset| subset.as_slice() == root_states) {
-                return Some((Arc::clone(extension), extension.base_state_count + index as u32));
-            }
-        }
-        None
-    }
-
-    pub(crate) fn cache_dense_subset16(
-        &self,
-        root_states: Vec<u32>,
-        extension: DynamicDenseSubset16,
-    ) -> Arc<DynamicDenseSubset16> {
-        const MAX_DENSE_SUBSET16_CACHE_ENTRIES: usize = 256;
-        let mut cache = self
-            .dense_subset16_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) = cache.get(root_states.as_slice()) {
-            return Arc::clone(existing);
-        }
-        if cache.len() >= MAX_DENSE_SUBSET16_CACHE_ENTRIES {
-            cache.clear();
-        }
-        let extension = Arc::new(extension);
-        cache.insert(root_states, Arc::clone(&extension));
-        extension
-    }
-
     pub(crate) fn copy_cached_mask(
         &self,
         state: &DynamicMaskStateKey,
@@ -8685,7 +8620,6 @@ impl Default for DynamicMaskVocab {
             grammar_quotiented: false,
             source_vocab_digest: None,
             mask_cache: Arc::new(Mutex::new(DynamicMaskCache::default())),
-            dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
             lazy_union_cache: Arc::new(Mutex::new(DynamicLazyUnionCache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),

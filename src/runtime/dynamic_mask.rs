@@ -23,7 +23,7 @@ use crate::ds::u8set::U8Set;
 use crate::grammar::flat::TerminalID;
 
 use super::artifact::{
-    Constraint, DynamicDenseSubset16, DynamicLazyUnionCache, DynamicLazyUnionMetadata, DynamicMaskLexerStateKey,
+    Constraint, DynamicLazyUnionCache, DynamicLazyUnionMetadata, DynamicMaskLexerStateKey,
     DynamicMaskStateKey, DynamicMaskTrie, DynamicMaskTrieFullWalkOp, DynamicMaskVocab,
     FastTokenizerTransitions, dynamic_mask_llg_master_is_whitespace,
     dynamic_mask_llg_master_safe_chars,
