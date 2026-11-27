@@ -8363,41 +8363,64 @@ mod tests {
     }
 
     #[test]
-    fn in_place_action_target_remap_matches_copy_remap() {
-        let mapping = vec![3, 0, 2, 1, 4, 5];
-        let actions = vec![
-            Action::Shift(1, false),
-            Action::Reduce(7, 2),
-            Action::Split {
-                shift: Some((3, true)),
-                reduces: vec![(4, 1), (5, 2)],
-                accept: false,
-            },
-            Action::StackShifts(vec![
-                StackShift {
-                    pop: 1,
-                    pushes: vec![0, 3],
+    fn action_target_remap_preserves_variant_and_normalizes_only_published_alternatives() {
+        let mapping = vec![3, 0, 2, 1, 0, 5];
+        let shifts = Action::StackShifts(vec![
+            StackShift { pop: 1, pushes: vec![0, 3] },
+            StackShift { pop: 1, pushes: vec![0, 1] },
+            StackShift { pop: 1, pushes: vec![0, 4] },
+        ]);
+        let partition_shifts = Action::StackShifts(vec![
+            StackShift { pop: 1, pushes: vec![3, 1] },
+            StackShift { pop: 1, pushes: vec![3, 0] },
+            StackShift { pop: 1, pushes: vec![3, 0] },
+        ]);
+        assert_eq!(remap_action_to_partition(&shifts, &mapping), partition_shifts);
+        let cases = [
+            (Action::Shift(1, false), Action::Shift(0, false)),
+            (Action::Reduce(7, 2), Action::Reduce(7, 2)),
+            (
+                Action::Split {
+                    shift: Some((3, true)),
+                    reduces: vec![(4, 1), (5, 2)],
+                    accept: false,
                 },
-                StackShift {
-                    pop: 1,
-                    pushes: vec![0, 1],
+                Action::Split {
+                    shift: Some((1, true)),
+                    reduces: vec![(4, 1), (5, 2)],
+                    accept: false,
                 },
-            ]),
-            Action::GuardedStackShifts(vec![GuardedStackShift {
-                guards: vec![StackShiftGuard {
-                    pop: 1,
-                    states: vec![0, 3],
-                }],
-                pop: 2,
-                pushes: vec![1, 4],
-            }]),
-            Action::Accept,
+            ),
+            (
+                shifts,
+                Action::StackShifts(vec![
+                    StackShift { pop: 1, pushes: vec![3, 0] },
+                    StackShift { pop: 1, pushes: vec![3, 1] },
+                ]),
+            ),
+            (
+                Action::GuardedStackShifts(vec![GuardedStackShift {
+                    guards: vec![StackShiftGuard { pop: 1, states: vec![0, 3, 1, 4] }],
+                    pop: 2,
+                    pushes: vec![1, 4],
+                }]),
+                Action::GuardedStackShifts(vec![GuardedStackShift {
+                    guards: vec![StackShiftGuard { pop: 1, states: vec![0, 1, 3] }],
+                    pop: 2,
+                    pushes: vec![0, 0],
+                }]),
+            ),
+            (
+                Action::ReplaceShifts(vec![0, 1, 4].into()),
+                Action::ReplaceShifts(vec![0, 3].into()),
+            ),
+            (Action::Accept, Action::Accept),
+            (Action::Skip, Action::Skip),
         ];
-        for action in actions {
-            let expected = remap_action_targets(&action, &mapping);
-            let mut actual = action;
-            remap_action_targets_in_place(&mut actual, &mapping);
-            assert_eq!(actual, expected);
+        for (mut action, expected) in cases {
+            assert_eq!(remap_action_targets(&action, &mapping), expected);
+            remap_action_targets_in_place(&mut action, &mapping);
+            assert_eq!(action, expected);
         }
     }
 
@@ -9231,6 +9254,16 @@ fn remap_action_row_targets_in_place(action_row: &mut ActionRow, mapping: &[u32]
 /// exact normalization performed by `remap_action_targets` for actions whose
 /// target IDs can collide after a merge.
 fn remap_action_targets_in_place(action: &mut Action, mapping: &[u32]) {
+    remap_action_state_references(action, mapping, true);
+}
+
+/// Partition refinement deliberately preserves the order and multiplicity of
+/// stack-shift alternatives. Published quotient rows normalize them instead.
+fn remap_action_state_references(
+    action: &mut Action,
+    mapping: &[u32],
+    normalize_stack_alternatives: bool,
+) {
     match action {
         Action::Shift(target, _) => {
             *target = mapping[*target as usize];
@@ -9250,7 +9283,9 @@ fn remap_action_targets_in_place(action: &mut Action, mapping: &[u32]) {
                     *target = mapping[*target as usize];
                 }
             }
-            normalize_stack_shifts(shifts);
+            if normalize_stack_alternatives {
+                normalize_stack_shifts(shifts);
+            }
         }
         Action::GuardedStackShifts(shifts) => {
             for shift in shifts.iter_mut() {
@@ -9282,155 +9317,22 @@ fn remap_goto_row_targets_in_place(goto_row: &mut GotoRow, mapping: &[u32]) {
 }
 
 fn remap_action_targets(action: &Action, mapping: &[u32]) -> Action {
-    match action {
-        Action::Shift(target, replace) => Action::Shift(mapping[*target as usize], *replace),
-        Action::ReplaceShifts(targets) => {
-            let mut targets = targets
-                .iter()
-                .map(|&target| mapping[target as usize])
-                .collect::<Vec<_>>();
-            targets.sort_unstable();
-            targets.dedup();
-            Action::ReplaceShifts(targets.into())
-        }
-        Action::StackShifts(shifts) => {
-            let mut remapped = shifts
-                .iter()
-                .map(|shift| StackShift {
-                    pop: shift.pop,
-                    pushes: shift.pushes.iter().map(|&state| mapping[state as usize]).collect(),
-                })
-                .collect();
-            normalize_stack_shifts(&mut remapped);
-            Action::StackShifts(remapped)
-        }
-        Action::GuardedStackShifts(shifts) => Action::GuardedStackShifts(
-            shifts
-                .iter()
-                .map(|shift| GuardedStackShift {
-                    guards: shift
-                        .guards
-                        .iter()
-                        .map(|guard| {
-                            let mut states: Vec<u32> = guard
-                                .states
-                                .iter()
-                                .map(|&state| mapping[state as usize])
-                                .collect();
-                            states.sort_unstable();
-                            states.dedup();
-                            StackShiftGuard {
-                                pop: guard.pop,
-                                states,
-                            }
-                        })
-                        .collect(),
-                    pop: shift.pop,
-                    pushes: shift.pushes.iter().map(|&state| mapping[state as usize]).collect(),
-                })
-                .collect(),
-        ),
-        Action::Reduce(nt, len) => Action::Reduce(*nt, *len),
-        Action::Split {
-            shift,
-            reduces,
-            accept,
-        } => Action::Split {
-            shift: shift.map(|(target, replace)| (mapping[target as usize], replace)),
-            reduces: reduces.clone(),
-            accept: *accept,
-        },
-        Action::Accept => Action::Accept,
-        Action::Skip => Action::Skip,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum ActionSig {
-    Shift(u32, bool),
-    ReplaceShifts(Vec<u32>),
-    StackShifts(Vec<(u32, Vec<u32>)>),
-    GuardedStackShifts(Vec<(Vec<(u32, Vec<u32>)>, u32, Vec<u32>)>),
-    Reduce(NonterminalID, u32),
-    Split {
-        shift: Option<(u32, bool)>,
-        reduces: Vec<(NonterminalID, u32)>,
-        accept: bool,
-    },
-    Accept,
-    Skip,
+    let mut action = action.clone();
+    remap_action_targets_in_place(&mut action, mapping);
+    action
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RowSignature {
     core_class: u32,
-    action: Vec<(TerminalID, ActionSig)>,
+    action: Vec<(TerminalID, Action)>,
     goto: Vec<(NonterminalID, (u32, bool))>,
 }
 
-fn remap_action_to_partition(action: &Action, partition: &[u32]) -> ActionSig {
-    match action {
-        Action::Shift(target, replace) => ActionSig::Shift(partition[*target as usize], *replace),
-        Action::ReplaceShifts(targets) => {
-            let mut targets = targets
-                .iter()
-                .map(|&target| partition[target as usize])
-                .collect::<Vec<_>>();
-            targets.sort_unstable();
-            targets.dedup();
-            ActionSig::ReplaceShifts(targets)
-        }
-        Action::StackShifts(shifts) => ActionSig::StackShifts(
-            shifts
-                .iter()
-                .map(|shift| {
-                    (
-                        shift.pop,
-                        shift.pushes.iter().map(|&state| partition[state as usize]).collect(),
-                    )
-                })
-                .collect(),
-        ),
-        Action::GuardedStackShifts(shifts) => ActionSig::GuardedStackShifts(
-            shifts
-                .iter()
-                .map(|shift| {
-                    let guards = shift
-                        .guards
-                        .iter()
-                        .map(|guard| {
-                            let mut states: Vec<u32> = guard
-                                .states
-                                .iter()
-                                .map(|&state| partition[state as usize])
-                                .collect();
-                            states.sort_unstable();
-                            states.dedup();
-                            (guard.pop, states)
-                        })
-                        .collect();
-                    let pushes = shift
-                        .pushes
-                        .iter()
-                        .map(|&state| partition[state as usize])
-                        .collect();
-                    (guards, shift.pop, pushes)
-                })
-                .collect(),
-        ),
-        Action::Reduce(nt, len) => ActionSig::Reduce(*nt, *len),
-        Action::Split {
-            shift,
-            reduces,
-            accept,
-        } => ActionSig::Split {
-            shift: shift.map(|(target, replace)| (partition[target as usize], replace)),
-            reduces: reduces.clone(),
-            accept: *accept,
-        },
-        Action::Accept => ActionSig::Accept,
-        Action::Skip => ActionSig::Skip,
-    }
+fn remap_action_to_partition(action: &Action, partition: &[u32]) -> Action {
+    let mut action = action.clone();
+    remap_action_state_references(&mut action, partition, false);
+    action
 }
 
 fn core_classes(core_keys: &[Vec<Item>]) -> Vec<u32> {
