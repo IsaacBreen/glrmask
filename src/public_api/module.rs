@@ -1,5 +1,4 @@
 //! Owned assembly snapshots. Local compilation is independent of occurrence bindings.
-use glrmask_vocab::__private::TokenSetExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 use super::*;
