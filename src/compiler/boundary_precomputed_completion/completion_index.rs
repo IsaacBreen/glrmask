@@ -144,7 +144,6 @@ pub struct CertifiedCompletionIndex<'a> {
     transitions: Vec<Vec<(u8, u32)>>,
     covered_words: Vec<Vec<u8>>,
     data: Data,
-    members: Vec<Vec<u32>>,
 }
 
 impl UntrustedCompletionIndex {
@@ -158,13 +157,11 @@ impl UntrustedCompletionIndex {
         // Do not trust serialized class numbers, observation IDs, or a hash.
         let expected = Data::derive(&certified)?;
         if self.data != expected { return Err(Error::CertificateMismatch); }
-        let mut members = vec![Vec::new(); self.data.signatures.len()];
-        for (q, &c) in self.data.raw_to_class.iter().enumerate() { members[c as usize].push(q as u32); }
         Ok(CertifiedCompletionIndex {
             source,
             transitions: certified.observer().states.iter().map(|s| s.transitions.clone()).collect(),
             covered_words: certified.observer().covered_words.clone(),
-            data: self.data, members,
+            data: self.data,
         })
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -224,19 +221,19 @@ impl UntrustedCompletionIndex {
 
 impl CertifiedCompletionIndex<'_> {
     pub fn raw_states(&self) -> usize { self.data.raw_to_class.len() }
-    pub fn class_count(&self) -> usize { self.members.len() }
+    pub fn class_count(&self) -> usize { self.data.signatures.len() }
     pub fn column_count(&self) -> usize { self.data.columns }
     pub fn source(&self) -> &Tokenizer { self.source }
     /// This is an observation equivalence, not a mask admission decision.
     /// Caller must preserve crossing-only/owner-local first-role eligibility
     /// and lift every result to original IDs while leaving resets unchanged.
     pub fn query(&self, seeds: &[bool], words: &[Vec<u8>]) -> Result<Vec<(u32, Vec<u32>)>> {
-        query_data(&self.data, &self.members, &self.transitions, &self.covered_words, seeds, words)
+        query_data(&self.data, &self.transitions, &self.covered_words, seeds, words)
     }
     /// Exact positive-byte prefix-completion support, not token admission.
     /// Entry-only nullable matches are excluded. Resets are never traversed.
     pub fn prefix_support(&self, seeds: &[bool], words: &[Vec<u8>]) -> Result<Vec<bool>> {
-        prefix_support_data(&self.data,&self.members,&self.transitions,&self.covered_words,seeds,words)
+        prefix_support_data(&self.data,&self.transitions,&self.covered_words,seeds,words)
     }
 
 
@@ -250,104 +247,163 @@ pub struct CompletionContext {
     transitions: Vec<Vec<(u8, u32)>>,
     covered_words: Vec<Vec<u8>>,
     data: Data,
-    members: Vec<Vec<u32>>,
 }
 impl CompletionContext {
     pub fn load(source: Arc<Tokenizer>, bytes: &[u8]) -> Result<Self> {
         let decoded = UntrustedCompletionIndex::from_bytes(bytes)?;
         let certified = decoded.certify(source.as_ref())?;
-        let CertifiedCompletionIndex { transitions, covered_words, data, members, .. } = certified;
-        Ok(Self { source, transitions, covered_words, data, members })
+        let CertifiedCompletionIndex { transitions, covered_words, data, .. } = certified;
+        Ok(Self { source, transitions, covered_words, data })
     }
     pub fn source(&self) -> &Tokenizer { self.source.as_ref() }
     pub fn raw_states(&self) -> usize { self.data.raw_to_class.len() }
-    pub fn class_count(&self) -> usize { self.members.len() }
+    pub fn class_count(&self) -> usize { self.data.signatures.len() }
     pub fn query(&self, seeds: &[bool], words: &[Vec<u8>]) -> Result<Vec<(u32, Vec<u32>)>> {
-        query_data(&self.data, &self.members, &self.transitions, &self.covered_words, seeds, words)
+        query_data(&self.data, &self.transitions, &self.covered_words, seeds, words)
     }
     /// Exact positive-byte prefix-completion support, not token admission.
     /// Entry-only nullable matches are excluded. Resets are never traversed.
     pub fn prefix_support(&self, seeds: &[bool], words: &[Vec<u8>]) -> Result<Vec<bool>> {
-        prefix_support_data(&self.data,&self.members,&self.transitions,&self.covered_words,seeds,words)
+        prefix_support_data(&self.data,&self.transitions,&self.covered_words,seeds,words)
     }
 
 }
 
-fn prefix_support_data(data:&Data,members:&[Vec<u32>],transitions:&[Vec<(u8,u32)>],covered_words:&[Vec<u8>],seeds:&[bool],words:&[Vec<u8>])->Result<Vec<bool>> {
-    if seeds.len()!=data.raw_to_class.len(){return Err(Error::Malformed);}
-    if words.len()>131_072||words.iter().try_fold(0usize,|n,w|n.checked_add(w.len())).ok_or(Error::ResourceLimit)?>262_144{return Err(Error::ResourceLimit);}
-    let mut selected=vec![false;data.columns];
+/// A selection of exact certified columns. Only the cut solver needs the
+/// sequence along each requested word; ordinary projection uses the union.
+struct PrefixSelection {
+    columns: Vec<usize>,
+    paths: Vec<Vec<usize>>,
+}
+
+fn select_prefixes<W: AsRef<[u8]>>(
+    transitions: &[Vec<(u8, u32)>],
+    covered_words: &[Vec<u8>],
+    words: &[W],
+    include_entry: bool,
+    retain_paths: bool,
+) -> Result<PrefixSelection> {
+    if words.len() > 131_072
+        || words.iter().try_fold(0usize, |n, word| n.checked_add(word.as_ref().len()))
+            .ok_or(Error::ResourceLimit)? > 262_144
+    {
+        return Err(Error::ResourceLimit);
+    }
+    let mut selected = vec![false; transitions.len()];
+    selected[0] = include_entry;
+    let mut paths = if retain_paths { Vec::with_capacity(words.len()) } else { Vec::new() };
     for word in words {
-        if covered_words.binary_search(word).is_err(){return Err(Error::QueryOutsideCoverage);}
-        let mut state=0;
-        for &byte in word {
-            let row=&transitions[state];
-            state=row[row.binary_search_by_key(&byte,|&(b,_)|b).map_err(|_|Error::QueryOutsideCoverage)?].1 as usize;
-            // Include state0 if a NONEMPTY prefix has this exact transformation.
-            selected[state]=true;
+        let word = word.as_ref();
+        if covered_words.binary_search_by(|candidate| candidate.as_slice().cmp(word)).is_err() {
+            return Err(Error::QueryOutsideCoverage);
         }
+        let mut state = 0usize;
+        let mut path = if retain_paths {
+            let mut path = Vec::with_capacity(word.len() + 1);
+            path.push(0);
+            path
+        } else {
+            Vec::new()
+        };
+        for &byte in word {
+            let row = &transitions[state];
+            let edge = row.binary_search_by_key(&byte, |&(label, _)| label)
+                .map_err(|_| Error::QueryOutsideCoverage)?;
+            state = row[edge].1 as usize;
+            // A positive byte prefix can revisit the entry transformation.
+            selected[state] = true;
+            if retain_paths { path.push(state); }
+        }
+        if retain_paths { paths.push(path); }
     }
-    let columns=selected.iter().enumerate().filter_map(|(i,x)|x.then_some(i)).collect::<Vec<_>>();
-    let mut result=vec![false;seeds.len()];let mut work=0usize;
-    for (class,group)in members.iter().enumerate(){
-        if !group.iter().any(|q|seeds[*q as usize]){continue;}
-        work=work.checked_add(columns.len()).ok_or(Error::ResourceLimit)?;if work>MAX_CELLS{return Err(Error::ResourceLimit);}
-        let observations=&data.signatures[class];
-        if columns.iter().any(|c|observations[*c]!=0){for &q in group{result[q as usize]=seeds[q as usize];}}
-    }
-    Ok(result)
+    let columns = selected.into_iter().enumerate()
+        .filter_map(|(column, keep)| keep.then_some(column)).collect();
+    Ok(PrefixSelection { columns, paths })
 }
 
-fn query_data(data: &Data, members: &[Vec<u32>], transitions: &[Vec<(u8,u32)>], covered_words: &[Vec<u8>],
-    seeds: &[bool], words: &[Vec<u8>]) -> Result<Vec<(u32, Vec<u32>)>> {
-        if seeds.len() != data.raw_to_class.len() { return Err(Error::Malformed); }
-        if words.len() > 131_072 || words.iter().try_fold(0usize, |n, w| n.checked_add(w.len())).ok_or(Error::ResourceLimit)? > 262_144 {
-            return Err(Error::ResourceLimit);
-        }
-        let mut selected = vec![false; data.columns]; selected[0] = true;
-        for word in words {
-            if covered_words.binary_search(word).is_err() { return Err(Error::QueryOutsideCoverage); }
-            let mut state = 0;
-            for &byte in word {
-                let row = &transitions[state];
-                state = row[row.binary_search_by_key(&byte, |&(b, _)| b).map_err(|_| Error::QueryOutsideCoverage)?].1 as usize;
-                selected[state] = true;
+impl Data {
+    fn active_classes(&self, seeds: &[bool]) -> Result<Vec<u64>> {
+        if seeds.len() != self.raw_to_class.len() { return Err(Error::Malformed); }
+        let mut active = vec![0u64; self.signatures.len().div_ceil(64)];
+        for (&class, &selected) in self.raw_to_class.iter().zip(seeds) {
+            if selected {
+                active[class as usize / 64] |= 1u64 << (class % 64);
             }
         }
-        let columns = selected.iter().enumerate().filter_map(|(i, &keep)| keep.then_some(i)).collect::<Vec<_>>();
-        let mut groups: Vec<Vec<u32>> = Vec::new();
-        let mut source_classes = Vec::<usize>::new();
-        let mut buckets = FxHashMap::<u64, Vec<usize>>::default();
-        let mut work = 0usize;
-        for (class, members) in members.iter().enumerate() {
-            if !members.iter().any(|&q| seeds[q as usize]) { continue; }
-            work = work.checked_add(columns.len()).ok_or(Error::ResourceLimit)?;
-            if work > MAX_CELLS { return Err(Error::ResourceLimit); }
-            let row = &data.signatures[class];
-            let mut hash = FxHasher::default();
-            for &column in &columns { row[column].hash(&mut hash); }
-            let fingerprint = hash.finish();
-            let mut found = None;
-            if let Some(candidates) = buckets.get(&fingerprint) {
-                for &candidate in candidates {
-                    // Fingerprints only choose a bucket; every equality decision
-                    // checks the complete selected observation columns.
-                    work = work.checked_add(columns.len()).ok_or(Error::ResourceLimit)?;
-                    if work > MAX_CELLS { return Err(Error::ResourceLimit); }
-                    let reference = &data.signatures[source_classes[candidate]];
-                    if columns.iter().all(|&j| row[j] == reference[j]) { found = Some(candidate); break; }
+        Ok(active)
+    }
+}
+
+#[inline]
+fn class_active(active: &[u64], class: usize) -> bool {
+    active[class / 64] & (1u64 << (class % 64)) != 0
+}
+
+fn prefix_support_data(
+    data: &Data, transitions: &[Vec<(u8, u32)>], covered_words: &[Vec<u8>],
+    seeds: &[bool], words: &[Vec<u8>],
+) -> Result<Vec<bool>> {
+    let active = data.active_classes(seeds)?;
+    let columns = select_prefixes(transitions, covered_words, words, false, false)?.columns;
+    let mut support = vec![false; data.signatures.len()];
+    let mut work = 0usize;
+    for (class, row) in data.signatures.iter().enumerate() {
+        if !class_active(&active, class) { continue; }
+        work = work.checked_add(columns.len()).ok_or(Error::ResourceLimit)?;
+        if work > MAX_CELLS { return Err(Error::ResourceLimit); }
+        support[class] = columns.iter().any(|&column| row[column] != 0);
+    }
+    Ok(data.raw_to_class.iter().zip(seeds)
+        .map(|(&class, &seed)| seed && support[class as usize]).collect())
+}
+
+fn query_data(
+    data: &Data, transitions: &[Vec<(u8, u32)>], covered_words: &[Vec<u8>],
+    seeds: &[bool], words: &[Vec<u8>],
+) -> Result<Vec<(u32, Vec<u32>)>> {
+    let active = data.active_classes(seeds)?;
+    let columns = select_prefixes(transitions, covered_words, words, true, false)?.columns;
+    let mut groups = Vec::<Vec<u32>>::new();
+    let mut source_classes = Vec::<usize>::new();
+    let mut buckets = FxHashMap::<u64, Vec<usize>>::default();
+    let mut class_to_group = vec![usize::MAX; data.signatures.len()];
+    let mut work = 0usize;
+    for (class, row) in data.signatures.iter().enumerate() {
+        if !class_active(&active, class) { continue; }
+        work = work.checked_add(columns.len()).ok_or(Error::ResourceLimit)?;
+        if work > MAX_CELLS { return Err(Error::ResourceLimit); }
+        let mut hash = FxHasher::default();
+        for &column in &columns { row[column].hash(&mut hash); }
+        let fingerprint = hash.finish();
+        let mut found = None;
+        if let Some(candidates) = buckets.get(&fingerprint) {
+            for &candidate in candidates {
+                work = work.checked_add(columns.len()).ok_or(Error::ResourceLimit)?;
+                if work > MAX_CELLS { return Err(Error::ResourceLimit); }
+                let reference = &data.signatures[source_classes[candidate]];
+                if columns.iter().all(|&j| row[j] == reference[j]) {
+                    found = Some(candidate);
+                    break;
                 }
             }
-            let id = found.unwrap_or_else(|| {
-                let id = groups.len(); groups.push(Vec::new()); source_classes.push(class);
-                buckets.entry(fingerprint).or_default().push(id); id
-            });
-            groups[id].extend(members.iter().copied().filter(|&q| seeds[q as usize]));
         }
-        for row in &mut groups { row.sort_unstable(); }
-        groups.sort_unstable_by_key(|row| row[0]);
-        Ok(groups.into_iter().map(|row| (row[0], row)).collect())
+        let id = found.unwrap_or_else(|| {
+            let id = groups.len();
+            groups.push(Vec::new());
+            source_classes.push(class);
+            buckets.entry(fingerprint).or_default().push(id);
+            id
+        });
+        class_to_group[class] = id;
     }
+    // The sole original-to-class coordinate is enough to lift the answer.
+    // This also produces sorted members without a second sort per class.
+    for (raw, (&class, &selected)) in data.raw_to_class.iter().zip(seeds).enumerate() {
+        if selected { groups[class_to_group[class as usize]].push(raw as u32); }
+    }
+    groups.sort_unstable_by_key(|row| row[0]);
+    Ok(groups.into_iter().map(|row| (row[0], row)).collect())
+}
 
 #[cfg(test)]
 mod tests {
@@ -484,33 +540,18 @@ pub(crate) struct PrefixUnions {
     pub columns: Vec<Vec<u32>>,
     pub word_columns: Vec<Vec<usize>>,
 }
-fn query_columns(transitions:&[Vec<(u8,u32)>],covered:&[Vec<u8>],words:&[Vec<u8>])
- ->Result<(Vec<Vec<usize>>,Vec<usize>)>{
-    if words.len()>131_072||words.iter().try_fold(0usize,|n,w|n.checked_add(w.len())).ok_or(Error::ResourceLimit)?>262_144{return Err(Error::ResourceLimit)}
-    let mut selected=vec![false;transitions.len()];selected[0]=true;
-    let mut paths=Vec::with_capacity(words.len());
-    for word in words{
-        if covered.binary_search(word).is_err(){return Err(Error::QueryOutsideCoverage)}
-        let mut q=0;let mut path=vec![q];
-        for &b in word{let row=&transitions[q];q=row[row.binary_search_by_key(&b,|&(b,_)|b).map_err(|_|Error::QueryOutsideCoverage)?].1 as usize;selected[q]=true;path.push(q);}
-        paths.push(path);
-    }
-    Ok((paths,selected.iter().enumerate().filter_map(|(i,&yes)|yes.then_some(i)).collect()))
-}
-
 /// Transpose immutable component observations once. Each group is the exact
 /// class support of one nonempty completion observation at a prefix column.
 /// This is independent of future seeds, vocabulary subset and composition.
 pub(crate) struct FirstUnionIndex{
     context:Arc<CompletionContext>,
     groups:Vec<Vec<(usize,Vec<u64>)>>,
-    paths:Vec<Vec<usize>>,
     pub groups_count:usize,
     pub cells:usize,
 }
 impl FirstUnionIndex{
     pub fn prepare(context:Arc<CompletionContext>)->Result<Self>{
-        let words=context.members.len().div_ceil(64);let mut groups=Vec::with_capacity(context.data.columns);let mut cells=0usize;let mut groups_count=0;
+        let words=context.data.signatures.len().div_ceil(64);let mut groups=Vec::with_capacity(context.data.columns);let mut cells=0usize;let mut groups_count=0;
         for col in 0..context.data.columns{
             let mut index=FxHashMap::<usize,usize>::default();let mut entries=Vec::<(usize,Vec<u64>)>::new();
             for(class,sig)in context.data.signatures.iter().enumerate(){let observation=sig[col]as usize;if context.data.observations[observation].is_empty(){continue}
@@ -521,27 +562,20 @@ impl FirstUnionIndex{
             }
             groups_count+=entries.len();groups.push(entries);
         }
-        let mut paths=Vec::with_capacity(context.covered_words.len());let mut path_cells=0usize;
-        for word in &context.covered_words{
-            path_cells=path_cells.checked_add(word.len()).and_then(|n|n.checked_add(1)).ok_or(Error::ResourceLimit)?;
-            if path_cells>8_000_000{return Err(Error::ResourceLimit)}
-            let mut q=0usize;let mut path=vec![q];for &b in word{let row=&context.transitions[q];let i=row.binary_search_by_key(&b,|&(b,_)|b).map_err(|_|Error::CertificateMismatch)?;q=row[i].1 as usize;path.push(q);}paths.push(path);
-        }
++
++    pub fn source(&self)    }
         Ok(Self{context,groups,paths,groups_count,cells})
     }
     pub fn source(&self)->&Tokenizer{self.context.source()}
     pub fn query(&self,seeds:&[bool],words:&[Vec<u8>])->Result<PrefixUnions>{
         let result=self.query_borrowed(seeds,&words.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
-        Ok(PrefixUnions{columns:result.columns,word_columns:result.word_columns.into_iter().map(|p|p.to_vec()).collect()})
+        Ok(result)
     }
-    pub fn query_borrowed<'s>(&'s self,seeds:&[bool],words:&[&[u8]])->Result<PrefixUnionViews<'s>>{
-        let ctx=self.context.as_ref();if seeds.len()!=ctx.data.raw_to_class.len(){return Err(Error::Malformed)}
-        if words.len()>131072||words.iter().try_fold(0usize,|n,w|n.checked_add(w.len())).ok_or(Error::ResourceLimit)?>262144{return Err(Error::ResourceLimit)}
-        let mut selected=vec![false;ctx.data.columns];selected[0]=true;let mut word_columns=Vec::with_capacity(words.len());
-        for &word in words{let index=ctx.covered_words.binary_search_by(|x|x.as_slice().cmp(word)).map_err(|_|Error::QueryOutsideCoverage)?;let path=self.paths[index].as_slice();for &c in path{selected[c]=true}word_columns.push(path);}
-        let selected=selected.iter().enumerate().filter_map(|(i,&yes)|yes.then_some(i)).collect::<Vec<_>>();
-        let mut active=vec![0u64;ctx.members.len().div_ceil(64)];
-        for(raw,&yes)in seeds.iter().enumerate(){if yes{let c=ctx.data.raw_to_class[raw]as usize;active[c/64]|=1u64<<(c%64);}}
+    pub fn query_borrowed(&self,seeds:&[bool],words:&[&[u8]])->Result<PrefixUnions>{
+        let ctx = self.context.as_ref();
+        let active = ctx.data.active_classes(seeds)?;
+        let PrefixSelection { columns: selected, paths: word_columns } =
+            select_prefixes(&ctx.transitions, &ctx.covered_words, words, true, true)?;
         let mut seen=vec![0u32;ctx.source.num_terminals()as usize];let mut columns=vec![Vec::new();ctx.data.columns];
         for(generation,&col)in selected.iter().enumerate(){let epoch=generation as u32+1;
             for (observation,classes)in &self.groups[col]{if !active.iter().zip(classes).any(|(&a,&b)|a&b!=0){continue}
@@ -549,8 +583,7 @@ impl FirstUnionIndex{
             }
             columns[col].sort_unstable();
         }
-        Ok(PrefixUnionViews{columns,word_columns})
+        Ok(PrefixUnions{columns,word_columns})
     }
 }
 
-pub(crate) struct PrefixUnionViews<'a>{pub columns:Vec<Vec<u32>>,pub word_columns:Vec<&'a[usize]>}
