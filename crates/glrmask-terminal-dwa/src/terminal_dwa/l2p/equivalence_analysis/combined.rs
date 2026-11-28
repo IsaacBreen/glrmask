@@ -27,7 +27,6 @@ use super::compat::FlatDfa;
 use super::disallowed_follows::normalize_disallowed_follows;
 use super::shared::{
     TokenDedup, VocabLexicalEntryOrder,
-    expand_vocab_classes,
     hash_byte_class_seq,
     representative_tokens_for_vocab_classes,
     tokenizer_group_count,
@@ -406,208 +405,101 @@ fn representative_byte_mask(
     representative_bytes
 }
 
-fn build_state_map(
-    state_classes: &BTreeSet<BTreeSet<usize>>,
-    num_dfa_states: usize,
+/// Publish the exact state equivalence directly from its representative
+/// relation. Class IDs follow the smallest queried state, as in the old
+/// ordered-set conversion; a prequotient is lifted once to the raw domain.
+fn publish_state_map(
+    states: &[usize], representatives: &[usize], raw_count: usize,
+    initial: Option<&ManyToOneIdMap>,
 ) -> ManyToOneIdMap {
-    let mut original_to_internal = vec![u32::MAX; num_dfa_states];
-    let mut internal_to_originals = Vec::new();
-    let mut representative_original_ids = Vec::new();
-
-    for class in state_classes {
-        let internal_id = internal_to_originals.len() as u32;
-        let originals: Vec<u32> = class.iter().map(|&state| state as u32).collect();
-        for &state in &originals {
-            original_to_internal[state as usize] = internal_id;
-        }
-        representative_original_ids
-            .push(*originals.first().expect("state class must be non-empty"));
-        internal_to_originals.push(originals);
+    assert_eq!(states.len(), representatives.len());
+    let mut representative_by_state = vec![usize::MAX; raw_count];
+    for (&state, &representative) in states.iter().zip(representatives) {
+        representative_by_state[state] = representative;
     }
+    let mut class_by_representative = vec![u32::MAX; raw_count];
+    let mut query_to_class = vec![u32::MAX; raw_count];
+    let mut count = 0u32;
+    for (state, &representative) in representative_by_state.iter().enumerate() {
+        if representative == usize::MAX { continue; }
+        let class = &mut class_by_representative[representative];
+        if *class == u32::MAX {
+            *class = count;
+            count += 1;
+        }
+        query_to_class[state] = *class;
+    }
+    if let Some(initial) = initial {
+        let mut raw_to_class = vec![u32::MAX; raw_count];
+        let mut reps = vec![u32::MAX; count as usize];
+        for (raw, &old_class) in initial.original_to_internal.iter().enumerate() {
+            let Some(&query) = initial.representative_original_ids.get(old_class as usize) else { continue; };
+            let class = query_to_class[query as usize];
+            if class == u32::MAX { continue; }
+            raw_to_class[raw] = class;
+            if reps[class as usize] == u32::MAX { reps[class as usize] = query; }
+        }
+        ManyToOneIdMap::from_original_to_internal_with_representatives(raw_to_class, count, reps)
+    } else {
+        ManyToOneIdMap::from_original_to_internal_allowing_unmapped(query_to_class, count)
+    }
+}
 
+/// One publication boundary for token partitions. Sparse callers request
+/// only member lists; dense callers also materialize the forward index.
+fn publish_token_groups(mut groups: Vec<Vec<u32>>, max_token_id: Option<u32>) -> ManyToOneIdMap {
+    groups.retain(|group| !group.is_empty());
+    for group in &mut groups { group.sort_unstable(); }
+    groups.sort_unstable_by_key(|group| group[0]);
+    let representatives = groups.iter().map(|group| group[0]).collect();
+    let original_to_internal = if let Some(max) = max_token_id {
+        let mut forward = vec![u32::MAX; max as usize + 1];
+        for (class, group) in groups.iter().enumerate() {
+            for &id in group { forward[id as usize] = class as u32; }
+        }
+        forward
+    } else {
+        Vec::new()
+    };
     ManyToOneIdMap {
         original_to_internal,
-        internal_to_originals,
-        representative_original_ids,
+        internal_to_originals: groups,
+        representative_original_ids: representatives,
     }
 }
 
-fn build_state_map_composed(
-    state_classes: &BTreeSet<BTreeSet<usize>>,
-    num_dfa_states: usize,
-    initial_state_map: &ManyToOneIdMap,
+fn publish_vocab_classes(
+    classes: &vocab_equivalence_analysis::VocabEquivalenceResult,
+    token_ids: &[u32], dedup: Option<&TokenDedup<'_>>, max_token_id: Option<u32>,
 ) -> ManyToOneIdMap {
-    let mut rep_to_new_internal = vec![u32::MAX; num_dfa_states];
-    let mut new_internal_to_originals: Vec<Vec<u32>> = Vec::new();
-    for class in state_classes {
-        let internal_id = new_internal_to_originals.len() as u32;
-        let originals: Vec<u32> = class.iter().map(|&state| state as u32).collect();
-        for &state in &originals {
-            rep_to_new_internal[state as usize] = internal_id;
+    let groups = if let Some(dedup) = dedup {
+        let mut class_by_rep = vec![usize::MAX; dedup.representative_token_bytes.len()];
+        for (class, members) in classes.iter().enumerate() {
+            for &rep in members { class_by_rep[rep] = class; }
         }
-        new_internal_to_originals.push(originals);
-    }
-
-    let mut composed_original_to_internal = vec![u32::MAX; num_dfa_states];
-    let mut composed_internal_to_originals = vec![Vec::new(); new_internal_to_originals.len()];
-    let mut composed_reps = vec![u32::MAX; new_internal_to_originals.len()];
-
-    for (orig_state, &init_internal) in initial_state_map.original_to_internal.iter().enumerate() {
-        if init_internal == u32::MAX
-            || (init_internal as usize) >= initial_state_map.representative_original_ids.len()
-        {
-            continue;
+        let mut groups = vec![Vec::new(); classes.len()];
+        for (&id, &rep) in token_ids.iter().zip(&dedup.original_to_repr) {
+            groups[class_by_rep[rep]].push(id);
         }
-        let init_rep = initial_state_map.representative_original_ids[init_internal as usize] as usize;
-        let new_internal = rep_to_new_internal[init_rep];
-        if new_internal != u32::MAX {
-            composed_original_to_internal[orig_state] = new_internal;
-            let bucket = &mut composed_internal_to_originals[new_internal as usize];
-            if bucket.is_empty() {
-                composed_reps[new_internal as usize] = init_rep as u32;
-            }
-            bucket.push(orig_state as u32);
-        }
-    }
-
-    ManyToOneIdMap {
-        original_to_internal: composed_original_to_internal,
-        internal_to_originals: composed_internal_to_originals,
-        representative_original_ids: composed_reps,
-    }
+        groups
+    } else {
+        classes.iter().map(|members| members.iter().map(|&i| token_ids[i]).collect()).collect()
+    };
+    publish_token_groups(groups, max_token_id)
 }
 
-fn build_vocab_map(
-    vocab_classes: &BTreeSet<Vec<usize>>,
-    token_ids: &[u32],
-    max_token_id: u32,
-) -> ManyToOneIdMap {
-    let mut ordered_vocab_classes: Vec<(u32, Vec<u32>)> = vocab_classes
-        .iter()
-        .map(|class| {
-            let mut min_tid = u32::MAX;
-            let mut originals: Vec<u32> = Vec::with_capacity(class.len());
-            for &idx in class {
-                let tid = token_ids[idx];
-                originals.push(tid);
-                if tid < min_tid {
-                    min_tid = tid;
-                }
-            }
-            (min_tid, originals)
-        })
-        .collect();
-    ordered_vocab_classes.sort_unstable_by_key(|(rep_tid, _)| *rep_tid);
-
-    let mut original_to_internal = vec![u32::MAX; (max_token_id + 1) as usize];
-    let mut internal_to_originals = Vec::with_capacity(ordered_vocab_classes.len());
-    let mut representative_original_ids = Vec::with_capacity(ordered_vocab_classes.len());
-
-    for (internal_id, (rep_tid, originals)) in ordered_vocab_classes.into_iter().enumerate() {
-        for &token_id in &originals {
-            original_to_internal[token_id as usize] = internal_id as u32;
-        }
-        representative_original_ids.push(rep_tid);
-        internal_to_originals.push(originals);
-    }
-
-    ManyToOneIdMap {
-        original_to_internal,
-        internal_to_originals,
-        representative_original_ids,
-    }
-}
-
-fn build_vocab_group_map(
-    vocab_classes: &BTreeSet<Vec<usize>>,
-    token_ids: &[u32],
-) -> ManyToOneIdMap {
-    let mut ordered_vocab_classes: Vec<(u32, Vec<u32>)> = vocab_classes
-        .iter()
-        .map(|class| {
-            let mut min_tid = u32::MAX;
-            let mut originals = Vec::with_capacity(class.len());
-            for &idx in class {
-                let tid = token_ids[idx];
-                originals.push(tid);
-                min_tid = min_tid.min(tid);
-            }
-            originals.sort_unstable();
-            (min_tid, originals)
-        })
-        .collect();
-    ordered_vocab_classes.sort_unstable_by_key(|(rep_tid, _)| *rep_tid);
-    ManyToOneIdMap {
-        original_to_internal: Vec::new(),
-        representative_original_ids: ordered_vocab_classes
-            .iter()
-            .map(|(representative, _)| *representative)
-            .collect(),
-        internal_to_originals: ordered_vocab_classes
-            .into_iter()
-            .map(|(_, originals)| originals)
-            .collect(),
-    }
-}
-
-/// An identity map is an exact conservative token quotient. It is useful for
-/// small structural partitions where vocab equivalence has no materialization
-/// benefit, while its analysis cost dominates the enclosing partition wall.
 fn build_identity_vocab_map(token_ids: &[u32], max_token_id: u32) -> ManyToOneIdMap {
-    let mut token_ids = token_ids.to_vec();
-    token_ids.sort_unstable();
-    token_ids.dedup();
-
-    let mut original_to_internal = vec![u32::MAX; max_token_id as usize + 1];
-    let mut internal_to_originals = Vec::with_capacity(token_ids.len());
-    let mut representatives = Vec::with_capacity(token_ids.len());
-    for (internal, token_id) in token_ids.into_iter().enumerate() {
-        original_to_internal[token_id as usize] = internal as u32;
-        internal_to_originals.push(vec![token_id]);
-        representatives.push(token_id);
-    }
-    ManyToOneIdMap {
-        original_to_internal,
-        internal_to_originals,
-        representative_original_ids: representatives,
-    }
+    publish_token_groups(token_ids.iter().map(|&id| vec![id]).collect(), Some(max_token_id))
 }
 
-/// Conservative vocabulary quotient for epsilon tokenizers: only byte-for-byte
-/// aliases are merged. They necessarily have identical lexer behaviour, and
-/// merging them is required because the vocabulary prefix tree has one leaf
-/// per byte string. The final mask mapping expands the class back to every
-/// original token id.
-fn build_exact_byte_vocab_map(
-    token_ids: &[u32],
-    token_bytes: &[&[u8]],
-    max_token_id: u32,
-) -> ManyToOneIdMap {
+/// Byte-for-byte aliases necessarily share all lexer observations.
+fn build_exact_byte_vocab_map(token_ids: &[u32], token_bytes: &[&[u8]], max_token_id: u32) -> ManyToOneIdMap {
     debug_assert_eq!(token_ids.len(), token_bytes.len());
-    let mut classes = BTreeMap::<Vec<u8>, Vec<u32>>::new();
-    for (&token_id, &bytes) in token_ids.iter().zip(token_bytes) {
-        classes.entry(bytes.to_vec()).or_default().push(token_id);
+    let mut groups = BTreeMap::<&[u8], Vec<u32>>::new();
+    for (&id, &bytes) in token_ids.iter().zip(token_bytes) {
+        groups.entry(bytes).or_default().push(id);
     }
-
-    let mut ordered = classes.into_values().collect::<Vec<_>>();
-    for class in &mut ordered {
-        class.sort_unstable();
-    }
-    ordered.sort_unstable_by_key(|class| class[0]);
-
-    let mut original_to_internal = vec![u32::MAX; max_token_id as usize + 1];
-    let mut representatives = Vec::with_capacity(ordered.len());
-    for (internal, class) in ordered.iter().enumerate() {
-        representatives.push(class[0]);
-        for &original in class {
-            original_to_internal[original as usize] = internal as u32;
-        }
-    }
-    ManyToOneIdMap {
-        original_to_internal,
-        internal_to_originals: ordered,
-        representative_original_ids: representatives,
-    }
+    publish_token_groups(groups.into_values().collect(), Some(max_token_id))
 }
 
 struct PreparedEquivalenceInputs<'a> {
@@ -652,11 +544,6 @@ fn prepare_equivalence_inputs<'a>(
     }
 }
 
-
-struct CombinedEquivalenceResult {
-    vocab_classes: BTreeSet<Vec<usize>>,
-    state_classes: BTreeSet<BTreeSet<usize>>,
-}
 
 #[derive(Debug, Clone)]
 pub struct CombinedEquivalenceProfile {
@@ -1051,26 +938,6 @@ fn compose_raw_quotient_state_map_impl(
     }
 }
 
-fn build_internal_id_map_from_combined_result(
-    tokenizer: &Tokenizer,
-    initial_state_map: Option<&ManyToOneIdMap>,
-    prepared: &PreparedEquivalenceInputs<'_>,
-    result: &CombinedEquivalenceResult,
-) -> InternalIdMap {
-    let num_dfa_states = tokenizer.num_states() as usize;
-    let state_map = match initial_state_map {
-        Some(init_map) => build_state_map_composed(&result.state_classes, num_dfa_states, init_map),
-        None => build_state_map(&result.state_classes, num_dfa_states),
-    };
-    let vocab_map = build_vocab_map(&result.vocab_classes, &prepared.token_ids, prepared.max_token_id);
-
-    InternalIdMap {
-        tokenizer_states: state_map,
-        vocab_tokens: vocab_map,
-        deferred_vocab_singleton_original_ids: None,
-    }
-}
-
 fn try_analyze_equivalences_with_token_position_partition(
     partition_label: &str,
     tokenizer: &Tokenizer,
@@ -1373,17 +1240,13 @@ fn try_analyze_equivalences_with_token_position_partition(
             Some(&local_vocab_dfa_cache),
             Some(&local_analysis_dfa_cache),
         );
-    let vocab_classes = expand_vocab_classes(
-        dedup_vocab_classes,
-        &dedup.original_to_repr,
-        dedup.representative_token_bytes.len(),
-    );
+    let vocab_tokens = publish_vocab_classes(&dedup_vocab_classes, &prepared.token_ids, Some(&dedup), Some(prepared.max_token_id));
     let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let finalize_started_at = Instant::now();
     let internal_id_map = InternalIdMap {
         tokenizer_states,
-        vocab_tokens: build_vocab_map(&vocab_classes, &prepared.token_ids, prepared.max_token_id),
+        vocab_tokens,
         deferred_vocab_singleton_original_ids: None,
     };
     let id_map_finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1946,11 +1809,7 @@ fn try_analyze_equivalences_with_raw_quotient(
         };
 
     let id_map_finalize_started_at = Instant::now();
-    let vocab_classes = expand_vocab_classes(
-        dedup_vocab_classes,
-        &dedup.original_to_repr,
-        dedup.representative_token_bytes.len(),
-    );
+    let vocab_tokens = publish_vocab_classes(&dedup_vocab_classes, &prepared.token_ids, Some(&dedup), Some(prepared.max_token_id));
     let tokenizer_states = compose_raw_quotient_state_map(
         &pre_state_map,
         &reduced_state_reps_for_pre_reduced,
@@ -1958,7 +1817,7 @@ fn try_analyze_equivalences_with_raw_quotient(
     let exact_reps = tokenizer_states.num_internal_ids() as usize;
     let internal_id_map = InternalIdMap {
         tokenizer_states,
-        vocab_tokens: build_vocab_map(&vocab_classes, &prepared.token_ids, prepared.max_token_id),
+        vocab_tokens,
         deferred_vocab_singleton_original_ids: None,
     };
     let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -2205,7 +2064,7 @@ fn analyze_vocab_first_transition_prepartition(
     let vocab_equiv_ms = vocab_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let finalize_started_at = Instant::now();
-    let vocab_tokens = build_vocab_map(&vocab_classes, &prepared.token_ids, prepared.max_token_id);
+    let vocab_tokens = publish_vocab_classes(&vocab_classes, &prepared.token_ids, None, Some(prepared.max_token_id));
     let tokenizer_states = initial_state_map.cloned().unwrap_or_else(|| {
         let count = tokenizer.num_states();
         ManyToOneIdMap::from_original_to_internal_allowing_unmapped((0..count).collect(), count)
@@ -3143,12 +3002,7 @@ fn analyze_equivalences_impl(
             let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
             if vocab_only {
                 let id_map_finalize_started_at = Instant::now();
-                let vocab_classes = expand_vocab_classes(
-                    precomputed_vocab.0,
-                    &dedup.original_to_repr,
-                    dedup.representative_token_bytes.len(),
-                );
-                let vocab_tokens = build_vocab_group_map(&vocab_classes, &prepared.token_ids);
+                let vocab_tokens = publish_vocab_classes(&precomputed_vocab.0, &prepared.token_ids, Some(&dedup), None);
                 let exact_reps = tokenizer_states.num_internal_ids() as usize;
                 let id_map_finalize_ms =
                     id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -3317,16 +3171,7 @@ fn analyze_equivalences_impl(
         }
 
         let id_map_finalize_started_at = Instant::now();
-        let vocab_classes = expand_vocab_classes(
-            dedup_vocab_classes,
-            &dedup.original_to_repr,
-            dedup.representative_token_bytes.len(),
-        );
-        let vocab_tokens = build_vocab_map(
-            &vocab_classes,
-            &prepared.token_ids,
-            prepared.max_token_id,
-        );
+        let vocab_tokens = publish_vocab_classes(&dedup_vocab_classes, &prepared.token_ids, Some(&dedup), Some(prepared.max_token_id));
         let id_map = InternalIdMap {
             tokenizer_states,
             vocab_tokens,
@@ -3567,12 +3412,7 @@ fn analyze_equivalences_impl(
         let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
         if vocab_only {
             let id_map_finalize_started_at = Instant::now();
-            let vocab_classes = expand_vocab_classes(
-                dedup_vocab_classes,
-                &dedup.original_to_repr,
-                dedup.representative_token_bytes.len(),
-            );
-            let vocab_tokens = build_vocab_group_map(&vocab_classes, &prepared.token_ids);
+            let vocab_tokens = publish_vocab_classes(&dedup_vocab_classes, &prepared.token_ids, Some(&dedup), None);
             let tokenizer_states = pre_state_map.clone();
             let exact_reps = tokenizer_states.num_internal_ids() as usize;
             let internal_id_map = InternalIdMap {
@@ -3730,20 +3570,14 @@ fn analyze_equivalences_impl(
             .collect::<Vec<_>>()
     };
     let id_map_finalize_started_at = Instant::now();
-    let vocab_classes = expand_vocab_classes(
-        dedup_vocab_classes,
-        &dedup.original_to_repr,
-        dedup.representative_token_bytes.len(),
+    let vocab_tokens = publish_vocab_classes(&dedup_vocab_classes, &prepared.token_ids, Some(&dedup), Some(prepared.max_token_id));
+    let tokenizer_states = publish_state_map(
+        &prepared.initial_states, &representative_states, tokenizer.num_states() as usize, initial_state_map,
     );
-    let state_classes =
-        state_equivalence_analysis::mapping_to_equivalence_classes(&prepared.initial_states, &representative_states);
-    let exact_reps = state_classes.len();
-    let result = CombinedEquivalenceResult {
-        vocab_classes,
-        state_classes,
+    let exact_reps = tokenizer_states.num_internal_ids() as usize;
+    let internal_id_map = InternalIdMap {
+        tokenizer_states, vocab_tokens, deferred_vocab_singleton_original_ids: None,
     };
-    let internal_id_map =
-        build_internal_id_map_from_combined_result(tokenizer, initial_state_map, &prepared, &result);
     let id_map_finalize_ms = id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
 
     (

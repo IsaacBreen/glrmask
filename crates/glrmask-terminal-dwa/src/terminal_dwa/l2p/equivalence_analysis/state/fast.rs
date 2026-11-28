@@ -13,7 +13,6 @@ use super::super::vocab::fast::SharedVocabDfaBase;
 use crate::ds::bitset::BitSet;
 
 /// The result of state equivalence analysis: sets of state IDs that behave identically.
-pub type StateEquivalenceResult = BTreeSet<BTreeSet<usize>>;
 
 #[derive(Clone, Copy)]
 struct WalkFrame {
@@ -1660,21 +1659,6 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
 
     mapping
 }
-
-/// Convert a state-to-representative mapping to `StateEquivalenceResult` format.
-pub fn mapping_to_equivalence_classes(
-    states: &[usize],
-    mapping: &[usize],
-) -> StateEquivalenceResult {
-    let mut rep_to_class: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
-
-    for (i, &rep) in mapping.iter().enumerate() {
-        rep_to_class.entry(rep).or_default().insert(states[i]);
-    }
-
-    rep_to_class.into_values().collect()
-}
-
 
 #[cfg(test)]
 mod state_batch_scratch_pool_tests {

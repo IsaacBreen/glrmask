@@ -34,33 +34,6 @@ pub fn hash_byte_class_seq(bytes: &[u8], byte_to_class: &[u8; 256]) -> u128 {
     hash
 }
 
-pub fn expand_vocab_classes(
-    dedup_classes: VocabEquivalenceResult,
-    original_to_repr: &[usize],
-    num_representatives: usize,
-) -> VocabEquivalenceResult {
-    let mut repr_to_class = vec![usize::MAX; num_representatives];
-    let mut original_classes: Vec<Vec<usize>> = Vec::with_capacity(dedup_classes.len());
-
-    for (class_idx, dedup_class) in dedup_classes.iter().enumerate() {
-        for &repr_idx in dedup_class {
-            repr_to_class[repr_idx] = class_idx;
-        }
-        original_classes.push(Vec::new());
-    }
-
-    for (original_idx, &repr_idx) in original_to_repr.iter().enumerate() {
-        let class_idx = repr_to_class[repr_idx];
-        debug_assert!(class_idx != usize::MAX);
-        original_classes[class_idx].push(original_idx);
-    }
-
-    original_classes
-        .into_iter()
-        .filter(|class| !class.is_empty())
-        .collect()
-}
-
 pub fn representative_tokens_for_vocab_classes<'a>(
     dedup_vocab_classes: &VocabEquivalenceResult,
     representative_token_bytes: &'a [&'a [u8]],
