@@ -1,4 +1,6 @@
 @PACKAGE_INIT@
+# Full SemVer; find_package compatibility uses the numeric project version.
+set(GLRMASK_VERSION_STRING "@GLRMASK_VERSION_STRING@")
 if(TARGET glrmask::glrmask)
   return()
 endif()

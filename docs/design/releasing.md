@@ -16,18 +16,16 @@ opening a PR, or creating a tag does **not** publish anything. The tag must poin
 to a commit already on main. Mark RC releases as prereleases, and stable releases
 as non-prereleases. The verifier checks the Rust root and Python crate versions
 and exact Python dependency pin against the tag, and the canonical Python package
-version (e.g. `1.0.0rc1` for `v1.0.0-rc.1`). On stable tags it additionally
-checks all native crate versions, npm versions and platform dependency pins, and
-the CMake project version. Native publication and recovery require stable tags.
+version (e.g. `1.0.0rc1` for `v1.0.0-rc.1`). For every tag it also checks native crate versions, npm versions and platform dependency pins, the CMake numeric version, and the full C/C++ version string.
 
 The published GitHub Release automatically builds and publishes **only Rust (crates.io) and Python (PyPI)**.
-Node and C/C++ are separate, explicit releases on the same stable tag. For each, open
+Node and C/C++ are separate, explicit releases on the same stable or RC tag. For each, open
 Actions → Trusted releases (npm, PyPI, crates.io, C++) → Run workflow; choose the
 already-published tag (e.g. `v1.0.0`), enter version `1.0.0`, select
 `native_target: npm` or `native_target: cpp`, leave recovery IDs empty and
 `verify_crates_trust` unchecked. Each dispatch verifies the published release and
 tag on main, builds/tests native artifacts at that exact tag, and publishes only
-the selected channel. A dispatch without a target or recovery input publishes nothing.
+the selected channel. npm publishes RCs under `next`, never `latest`; stable versions use `latest`. C/C++ assets attach to the corresponding GitHub prerelease or stable release. A dispatch without a target or recovery input publishes nothing.
 
 The available channels are:
 
@@ -122,7 +120,7 @@ GitHub Actions environment **`release`** for all three OIDC services.
    Conan Center, or vcpkg registry account is assumed or silently used.
 
 Create/keep the GitHub environment named **`release`** and limit its eligible refs to
-stable release tags (`v*`). This restricts the OIDC job identity. We do *not* store
+release tags (`v*`). This restricts the OIDC job identity. We do *not* store
 npm, PyPI, crates.io, or GitHub personal publishing credentials in Actions secrets.
 A published GitHub Release is the human decision to publish.
 
@@ -130,7 +128,7 @@ A published GitHub Release is the human decision to publish.
 
 1. Update all four versions (Rust, Python, npm, C++ CMake), documentation and
    changelog on `main`. The C++ CMake project version in
-   `bindings/cpp/CMakeLists.txt` must match the `bindings/cpp` crate version.
+   `bindings/cpp/CMakeLists.txt` must match the numeric portion of the `bindings/cpp` crate version; `GLRMASK_VERSION_STRING` in CMake and the C header must match the full version.
    Check that the new version is not already published on any registry. Do not
    repurpose the existing `v0.3.0` tag: it predates the merged native bindings.
 2. If an internal Rust crate changed, bump its version. `python3 scripts/publish-crates.py`

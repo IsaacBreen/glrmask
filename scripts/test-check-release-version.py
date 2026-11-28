@@ -35,29 +35,38 @@ class Versions(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
 
-    def fixture(self, rust, python, native="1.0.0"):
+    def fixture(self, rust, python, native=None):
+        native = rust if native is None else native
         self.write("Cargo.toml", f'[package]\nversion="{rust}"\n')
         self.write("python/Cargo.toml", f'[package]\nversion="{rust}"\n[dependencies]\nglrmask={{version="={rust}"}}\n')
         self.write("python/pyproject.toml", f'[project]\nversion="{python}"\n')
-        self.write("bindings/cpp/CMakeLists.txt", f"project(glrmask VERSION {native})\n")
+        self.write("bindings/cpp/CMakeLists.txt", f'project(glrmask VERSION {native.split("-")[0]})\nset(GLRMASK_VERSION_STRING "{native}")\n')
         self.write("bindings/node/package.json", json.dumps({
             "name": "@glrmask/node", "version": native,
             "optionalDependencies": {"@glrmask/node-linux-x64-gnu": native},
+        }))
+        self.write("bindings/cpp/include/glrmask.h", f'#define GLRMASK_VERSION_STRING "{native}"\n')
+        self.write("bindings/node/package-lock.json", json.dumps({
+            "version": native, "packages": {
+                "": {"version": native, "optionalDependencies": {"@glrmask/node-linux-x64-gnu": native}},
+                "node_modules/@glrmask/node-linux-x64-gnu": {"version": native},
+            },
         }))
         for part in ("core", "cpp", "node"):
             self.write(f"bindings/{part}/Cargo.toml", f'[package]\nversion="{native}"\n')
 
     def test_stable(self):
         self.fixture("1.0.0", "1.0.0")
-        self.assertEqual(release.verify("v1.0.0", check_ancestry=False, stable_only=True), "1.0.0")
+        self.assertEqual(release.verify("v1.0.0", check_ancestry=False), "1.0.0")
         self.assertEqual(release.versions_for_tag("v1.0.0"), ("1.0.0", "1.0.0", False))
 
     def test_rc(self):
-        self.fixture("1.0.0-rc.1", "1.0.0rc1", "0.3.1")
+        self.fixture("1.0.0-rc.1", "1.0.0rc1")
         self.assertEqual(release.verify("v1.0.0-rc.1", check_ancestry=False), "1.0.0-rc.1")
         self.assertEqual(release.versions_for_tag("v1.0.0-rc.1"), ("1.0.0-rc.1", "1.0.0rc1", True))
+        self.fixture("1.0.0-rc.1", "1.0.0rc1", "1.0.0")
         with self.assertRaises(ValueError):
-            release.verify("v1.0.0-rc.1", check_ancestry=False, stable_only=True)
+            release.verify("v1.0.0-rc.1", check_ancestry=False)
 
     def test_bad_tags(self):
         for tag in ("1.0.0", "v01.0.0", "v1.0.0-rc.01", "v1.0.0-rc1", "v1.0.0rc1",
@@ -80,6 +89,19 @@ class Versions(unittest.TestCase):
         self.write("python/Cargo.toml", '[package]\nversion="1.0.0-rc.1"\n[dependencies]\nglrmask={version="=1.0.0"}\n')
         with self.assertRaises(ValueError):
             release.verify("v1.0.0-rc.1", check_ancestry=False)
+
+    def test_rc_native_mismatches(self):
+        for path, old, new in (
+            ("bindings/cpp/CMakeLists.txt", "VERSION 1.0.0", "VERSION 2.0.0"),
+            ("bindings/cpp/include/glrmask.h", "1.0.0-rc.1", "1.0.0"),
+            ("bindings/node/package-lock.json", "1.0.0-rc.1", "1.0.0-rc.2"),
+            ("bindings/node/package.json", "1.0.0-rc.1", "1.0.0"),
+            ("bindings/cpp/Cargo.toml", "1.0.0-rc.1", "1.0.0"),
+        ):
+            self.fixture("1.0.0-rc.1", "1.0.0rc1")
+            self.write(path, (self.root / path).read_text().replace(old, new))
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                release.verify("v1.0.0-rc.1", check_ancestry=False)
 
     def test_ancestry_not_bypassed_for_rc(self):
         self.fixture("1.0.0-rc.1", "1.0.0rc1")

@@ -1,6 +1,8 @@
 #ifndef GLRMASK_H
 #define GLRMASK_H
 
+#define GLRMASK_VERSION_STRING "1.0.0-rc.1"
+
 /* GLRMask C API, ABI revision 9.
  *
  * Lengths count elements, except where a name says bytes. Text is UTF-8 and

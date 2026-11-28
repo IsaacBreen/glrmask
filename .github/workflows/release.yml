@@ -1,7 +1,7 @@
 name: Trusted releases (npm, PyPI, crates.io, C++)
 
 on:
-  # Later native releases are explicit, on the exact already-published stable tag.
+  # Later native releases are explicit, on the exact already-published release tag.
   # Existing validated-artifact recovery and crates trust checks remain opt-in.
   workflow_dispatch:
     inputs:
@@ -96,9 +96,7 @@ jobs:
           test "$GITHUB_REF_TYPE" = tag
           test "$GITHUB_REF_NAME" = "$RELEASE_TAG"
           test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
-          stable_only=()
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then stable_only=(--stable-only); fi
-          python scripts/check-release-version.py --tag "$RELEASE_TAG" --github-output "${stable_only[@]}"
+          python scripts/check-release-version.py --tag "$RELEASE_TAG" --github-output
           prerelease=false
           if [[ "$RELEASE_TAG" == *-rc.* ]]; then prerelease=true; fi
           gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" |
@@ -199,11 +197,13 @@ jobs:
         run: |
           set -euo pipefail
           printf 'registry=https://registry.npmjs.org/\n' > "$NPM_CONFIG_USERCONFIG"
+          npm_tag=latest
+          if [[ "$RELEASE_VERSION" == *-rc.* ]]; then npm_tag=next; fi
           publish_with_retry() {
             local tgz="$1" attempts=0
             while [ "$attempts" -lt 3 ]; do
               attempts=$((attempts + 1))
-              if npm publish "$tgz" --access public --registry=https://registry.npmjs.org/; then
+              if npm publish "$tgz" --tag "$npm_tag" --access public --registry=https://registry.npmjs.org/; then
                 return 0
               fi
               echo "Publish attempt $attempts failed for $tgz; retrying in 30s" >&2
@@ -421,9 +421,13 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF_TYPE" = tag
           [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]+$ ]]
-          python scripts/check-release-version.py --tag "v${RELEASE_VERSION}" --skip-ancestry --stable-only
+          test "$GITHUB_REF_NAME" = "v${RELEASE_VERSION}"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/v${RELEASE_VERSION}^{commit}")"
+          python scripts/check-release-version.py --tag "v${RELEASE_VERSION}" --skip-ancestry
           RELEASE_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${RELEASE_VERSION}")"
-          printf '%s' "$RELEASE_JSON" | jq -e '.draft == false and .prerelease == false' > /dev/null
+          prerelease=false
+          if [[ "$RELEASE_VERSION" == *-rc.* ]]; then prerelease=true; fi
+          printf '%s' "$RELEASE_JSON" | jq -e --arg tag "v${RELEASE_VERSION}" --argjson prerelease "$prerelease" '.tag_name == $tag and .draft == false and .prerelease == $prerelease' > /dev/null
           RELEASE_COMMIT="$(printf '%s' "$RELEASE_JSON" | jq -r .target_commitish)"
           TAG_COMMIT="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${RELEASE_VERSION}" --jq .object.sha)"
           test "$RELEASE_COMMIT" = "$TAG_COMMIT"
@@ -480,11 +484,13 @@ jobs:
         run: |
           set -euo pipefail
           printf 'registry=https://registry.npmjs.org/\n' > "$NPM_CONFIG_USERCONFIG"
+          npm_tag=latest
+          if [[ "$RELEASE_VERSION" == *-rc.* ]]; then npm_tag=next; fi
           publish_with_retry() {
             local tgz="$1" attempts=0
             while [ "$attempts" -lt 3 ]; do
               attempts=$((attempts + 1))
-              if npm publish "$tgz" --access public --registry=https://registry.npmjs.org/; then
+              if npm publish "$tgz" --tag "$npm_tag" --access public --registry=https://registry.npmjs.org/; then
                 return 0
               fi
               echo "Publish attempt $attempts failed for $tgz; retrying in 30s" >&2

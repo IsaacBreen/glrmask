@@ -85,9 +85,7 @@ def main() -> None:
     parser.add_argument('--platform')
     args=parser.parse_args()
     root=Path(__file__).resolve().parents[2]
-    root_version=tomllib.loads((root/'Cargo.toml').read_text(encoding='utf-8'))['package']['version']
-    # Native releases remain stable-only; RC builds validate the matching stable native package.
-    version=re.sub(r'-rc\.[1-9][0-9]*$', '', root_version)
+    version=tomllib.loads((root/"Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
     for name in ['core','cpp','node']:
         manifest=tomllib.loads((root/f'bindings/{name}/Cargo.toml').read_text(encoding='utf-8'))
         assert manifest['package']['version']==version,name

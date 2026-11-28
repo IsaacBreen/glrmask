@@ -570,14 +570,14 @@ dependencies = [
 
 [[package]]
 name = "glrmask-binding-core"
-version = "1.0.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "glrmask",
 ]
 
 [[package]]
 name = "glrmask-c"
-version = "1.0.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "glrmask-binding-core",
 ]
@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-node"
-version = "1.0.0"
+version = "1.0.0-rc.1"
 dependencies = [
  "glrmask-binding-core",
  "napi",
