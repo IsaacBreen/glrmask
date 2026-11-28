@@ -367,32 +367,55 @@ fn vocab_suffix_trie(vocab: &Vocab) -> Arc<VocabSuffixTrie> {
         return cached;
     }
     let split_index = vocab_adjacent_pair_index(vocab);
-    let mut parents = vec![0u32];
-    let mut incoming_bytes = vec![0u8];
-    let mut split_nodes = vec![0u32; split_index.total_splits()];
-    let mut child_by_edge = FxHashMap::<(u32, u8), u32>::default();
-
-    for (entry_index, bytes) in split_index.lexical.ordered_token_bytes.iter().enumerate() {
-        let split_base = split_index.lexical.split_offsets()[entry_index];
-        for split_after in 0..bytes.len().saturating_sub(1) {
-            let mut node = 0u32;
-            for &byte in &bytes[split_after + 1..] {
-                let key = (node, byte);
-                node = if let Some(&existing) = child_by_edge.get(&key) {
-                    existing
-                } else {
-                    let child = u32::try_from(parents.len())
-                        .expect("vocabulary suffix trie exceeds u32 node space");
-                    parents.push(node);
-                    incoming_bytes.push(byte);
-                    child_by_edge.insert(key, child);
-                    child
-                };
+    let lexical = &split_index.lexical;
+    let suffixes = lexical.suffix_index();
+    // Deduplicate whole suffixes in the existing reverse identity space,
+    // without materializing the common-atom random-cut position index.
+    let mut node_by_suffix = vec![u32::MAX; suffixes.parents.len()];
+    let mut distinct = Vec::<(u32, &[u8])>::new();
+    for (entry, bytes) in lexical.ordered_token_bytes.iter().enumerate() {
+        let mut suffix = suffixes.token_nodes[entry];
+        for cut in 1..bytes.len() {
+            suffix = suffixes.parents[suffix as usize];
+            let slot = &mut node_by_suffix[suffix as usize];
+            if *slot == u32::MAX {
+                *slot = 0;
+                distinct.push((suffix, &bytes[cut..]));
             }
-            split_nodes[split_base + split_after] = node;
         }
     }
-
+    // The forward reset action is not the reverse prepend action. Its
+    // prefix topology is still required, but each distinct spelling enters
+    // it once, with shared prefixes recovered by lexical LCP rather than
+    // repeated edge hash lookups for every occurrence.
+    distinct.sort_unstable_by(|a, b| a.1.cmp(b.1));
+    let mut parents = vec![0u32];
+    let mut incoming_bytes = vec![0u8];
+    let mut path = vec![0u32];
+    let mut previous: &[u8] = &[];
+    for (suffix, bytes) in distinct {
+        let common = previous.iter().zip(bytes).take_while(|(a, b)| a == b).count();
+        path.truncate(common + 1);
+        for &byte in &bytes[common..] {
+            let child = u32::try_from(parents.len())
+                .expect("vocabulary suffix trie exceeds u32 node space");
+            parents.push(*path.last().unwrap());
+            incoming_bytes.push(byte);
+            path.push(child);
+        }
+        node_by_suffix[suffix as usize] = *path.last().unwrap();
+        previous = bytes;
+    }
+    // Publish the flat hot-path projection; the temporary reverse-to-forward
+    // map is discarded. No additional per-split lookup in grammar compilation.
+    let mut split_nodes = Vec::with_capacity(split_index.total_splits());
+    for (entry, bytes) in lexical.ordered_token_bytes.iter().enumerate() {
+        let mut suffix = suffixes.token_nodes[entry];
+        for _ in 1..bytes.len() {
+            suffix = suffixes.parents[suffix as usize];
+            split_nodes.push(node_by_suffix[suffix as usize]);
+        }
+    }
     let trie = Arc::new(VocabSuffixTrie {
         parents: parents.into_boxed_slice(),
         incoming_bytes: incoming_bytes.into_boxed_slice(),
