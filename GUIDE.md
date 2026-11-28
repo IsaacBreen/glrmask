@@ -225,7 +225,7 @@ See the quickstart above for the sampling loop and unpacking the packed mask.
 
 
 Masks indicate which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`.
-Python `mask_bit_len` (a method in Rust and C++, `maskBitLength` in Node) is the mask's length in bits (the largest token ID in the constraint, including special and end tokens, plus one, or zero if there are no token IDs), including gaps.
+Python `mask_bit_len` (a method in Rust and C++, `maskBitLength` in Node) is the mask's length in bits: the largest token ID in the constraint plus one.
 Allocate `(c.mask_bit_len + 31) // 32` words for `fill_mask`, which writes into reusable storage and zeros surplus words.
 Python `mask()` returns packed uint32 words. Use `mask().view(np.int32)` for signed packed words without copying.
 The constraint and each state have the same constant mask bit length.

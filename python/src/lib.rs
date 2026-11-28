@@ -718,7 +718,7 @@ impl PyConstraint {
         })
     }
 
-    /// The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs.
+    /// The mask's length in bits: the largest token ID in the constraint plus one.
     #[getter]
     fn mask_bit_len(&self) -> usize {
         self.mask_bit_len
@@ -1036,7 +1036,7 @@ impl PyConstraintState {
         Ok(copy)
     }
 
-    /// The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs.
+    /// The mask's length in bits: the largest token ID in the constraint plus one.
     #[getter]
     fn mask_bit_len(&self) -> usize {
         self.mask_bit_len
