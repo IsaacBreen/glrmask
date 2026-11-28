@@ -300,29 +300,6 @@ pub fn build_relevant_powerset_analysis_view(
     }
 }
 
-enum RepresentativeClosure {
-    Singleton(u32),
-    Multi(Box<[u32]>),
-}
-
-impl RepresentativeClosure {
-    #[inline]
-    fn singleton(&self) -> Option<u32> {
-        match self {
-            Self::Singleton(state) => Some(*state),
-            Self::Multi(_) => None,
-        }
-    }
-
-    #[inline]
-    fn as_slice(&self) -> &[u32] {
-        match self {
-            Self::Singleton(state) => std::slice::from_ref(state),
-            Self::Multi(states) => states,
-        }
-    }
-}
-
 pub fn raw_active_language_states(
     tokenizer: &Tokenizer,
     active_groups: Option<&[bool]>,
@@ -376,23 +353,6 @@ fn mapped_class_active_language(
             })
             .collect()
     })
-}
-
-fn mapped_target_config(
-    targets: &[u32],
-    state_map: &ManyToOneIdMap,
-    class_active_language: Option<&[bool]>,
-) -> Vec<u32> {
-    let mut target_config = targets
-        .iter()
-        .map(|&raw_state| state_map.original_to_internal[raw_state as usize])
-        .filter(|&class| {
-            class_active_language.is_none_or(|active| active[class as usize])
-        })
-        .collect::<Vec<_>>();
-    target_config.sort_unstable();
-    target_config.dedup();
-    target_config
 }
 
 impl BoundedAnalysisView {
@@ -497,387 +457,228 @@ fn try_build_relevant_powerset_view(
         mapped_class_active_language(state_map, raw_active_language.as_deref())
     });
 
-    let (mut configs, raw_start_to_view, mut worklist, mut queued) =
-        if let Some(state_map) = state_map {
-            let class_count = state_map.representative_original_ids.len();
-            let mut configs = ConfigInterner::default();
-            let mut class_to_view = vec![u32::MAX; class_count];
-            let mut worklist = VecDeque::<u32>::new();
-            let mut queued = Vec::<bool>::new();
-            for class in 0..class_count as u32 {
-                let config = if class_active_language
-                    .as_deref()
-                    .is_none_or(|active| active[class as usize])
-                {
-                    vec![class]
+    // All singleton starts are seeded before expansion. Every new configuration
+    // is appended in discovery order, so the interner itself is the queue.
+    let mut configs = ConfigInterner::default();
+    let class_to_view = state_map.map(|map| {
+        (0..map.representative_original_ids.len() as u32)
+            .map(|class| {
+                if class_active_language.as_deref().is_none_or(|a| a[class as usize]) {
+                    configs.intern_slice(&[class])
                 } else {
-                    Vec::new()
-                };
-                let state = configs.intern(config);
-                class_to_view[class as usize] = state;
-                if queued.len() < configs.len() {
-                    queued.resize(configs.len(), false);
-                }
-                if !queued[state as usize] {
-                    queued[state as usize] = true;
-                    worklist.push_back(state);
-                }
-            }
-            let raw_start_to_view = state_map
-                .original_to_internal
-                .iter()
-                .map(|&class| class_to_view[class as usize])
-                .collect::<Vec<_>>();
-            (
-                configs,
-                raw_start_to_view,
-                worklist,
-                queued,
-            )
-        } else {
-            let mut configs = ConfigInterner::default();
-            let mut raw_start_to_view = vec![u32::MAX; raw_state_count];
-            let mut worklist = VecDeque::<u32>::new();
-            let mut queued = Vec::<bool>::new();
-            for raw_state in 0..raw_state_count {
-                let closure = project_raw_config(
-                    tokenizer
-                        .execute_from_state_end_only(&[], raw_state as u32)
-                        .to_vec(),
-                    raw_active_language.as_deref(),
-                );
-                let state = configs.intern(closure);
-                raw_start_to_view[raw_state] = state;
-                if queued.len() < configs.len() {
-                    queued.resize(configs.len(), false);
-                }
-                if !queued[state as usize] {
-                    queued[state as usize] = true;
-                    worklist.push_back(state);
-                }
-            }
-            (
-                configs,
-                raw_start_to_view,
-                worklist,
-                queued,
-            )
-        };
-    check_budget(configs.len(), 0, budget)?;
-
-    let start_state = raw_start_to_view[tokenizer.initial_state_id() as usize] as usize;
-    let bytes = relevant_bytes
-        .iter()
-        .enumerate()
-        .filter_map(|(byte, &relevant)| relevant.then_some(byte as u8))
-        .collect::<Vec<_>>();
-    let closure_by_class = state_map.map(|state_map| {
-        state_map
-            .representative_original_ids
-            .iter()
-            .map(|&representative| {
-                let closure = tokenizer.execute_from_state_end_only(&[], representative);
-                if closure.len() == 1 {
-                    RepresentativeClosure::Singleton(closure[0])
-                } else {
-                    RepresentativeClosure::Multi(closure.to_vec().into_boxed_slice())
+                    configs.intern_slice(&[])
                 }
             })
             .collect::<Vec<_>>()
     });
-    // For a mapped powerset, the one-byte NFA successor of a configuration is
-    // the union of the one-byte successors of its member classes. Cache those
-    // exact class/byte successor class-sets once. The old inner loop rebuilt a
-    // raw representative vector, re-ran epsilon closure, remapped raw targets,
-    // sorted, and deduplicated for every configuration × byte pair.
-    let mapped_targets_by_class_byte = state_map.map(|state_map| {
-        let closure_by_class = closure_by_class
-            .as_ref()
-            .expect("mapped powerset must retain representative closures");
-        let class_count = state_map.representative_original_ids.len();
-        let byte_count = bytes.len();
-        let mut byte_slot = [usize::MAX; 256];
-        for (slot, &byte) in bytes.iter().enumerate() {
-            byte_slot[byte as usize] = slot;
-        }
-        let mut targets = (0..class_count.saturating_mul(byte_count))
-            .map(|_| Box::<[u32]>::default())
-            .collect::<Vec<_>>();
-        for class in 0..class_count {
-            if let Some(raw_source) = closure_by_class[class].singleton() {
-                for (byte, raw_target) in tokenizer.transitions_from(raw_source) {
-                    let slot = byte_slot[byte as usize];
-                    if slot == usize::MAX {
-                        continue;
-                    }
-                    let raw_targets = tokenizer.execute_from_state_end_only(&[], raw_target);
-                    let mapped = mapped_target_config(
-                        &raw_targets,
-                        state_map,
-                        class_active_language.as_deref(),
-                    );
-                    targets[class * byte_count + slot] = mapped.into_boxed_slice();
-                }
-            } else {
-                let representative = state_map.representative_original_ids[class];
-                for (slot, &byte) in bytes.iter().enumerate() {
-                    let raw_targets = tokenizer.step_all(&[representative], byte);
-                    if raw_targets.is_empty() {
-                        continue;
-                    }
-                    let mapped = mapped_target_config(
-                        &raw_targets,
-                        state_map,
-                        class_active_language.as_deref(),
-                    );
-                    targets[class * byte_count + slot] = mapped.into_boxed_slice();
-                }
-            }
-        }
-        targets
+    let raw_start_to_view = if let (Some(map), Some(class_to_view)) = (state_map, &class_to_view) {
+        map.original_to_internal.iter().map(|&c| class_to_view[c as usize]).collect::<Vec<_>>()
+    } else {
+        (0..raw_state_count)
+            .map(|state| {
+                let closure = tokenizer.execute_from_state_end_only(&[], state as u32);
+                configs.intern(project_raw_config(closure.to_vec(), raw_active_language.as_deref()))
+            })
+            .collect::<Vec<_>>()
+    };
+    check_budget(configs.len(), 0, budget)?;
+
+    let start_state = raw_start_to_view[tokenizer.initial_state_id() as usize] as usize;
+    let bytes = relevant_bytes.iter().enumerate()
+        .filter_map(|(byte, &relevant)| relevant.then_some(byte as u8))
+        .collect::<Vec<_>>();
+    let closure_by_class = state_map.map(|map| {
+        map.representative_original_ids.iter()
+            .map(|&r| tokenizer.execute_from_state_end_only(&[], r))
+            .collect::<Vec<_>>()
     });
+
+    // A mapped singleton is a representative's epsilon image. Once its
+    // sparse row exists, all larger mapped subsets are unions of those
+    // already-built rows. No separate class x byte table is necessary.
+    // Raw closed subsets instead union the preseeded raw target closures.
+    // Large raw domains keep the low-memory two-pass scan.
+    let one_pass = state_map.is_some()
+        || (raw_target_mode == RawPowersetTargetMode::Direct && raw_state_count <= 65_536);
+    let mut buckets = one_pass.then(|| std::array::from_fn::<_, 256, _>(|_| Vec::<u32>::new()));
+    let mut candidate_bytes = Vec::<u8>::new();
+    let mut byte_seen = [false; 256];
+    let target_domain = state_map.map_or(raw_state_count, |map| map.representative_original_ids.len());
+    let mut target_marks = (raw_target_mode == RawPowersetTargetMode::Direct || state_map.is_some())
+        .then(|| vec![0u32; target_domain]);
+    let mut target_epoch = 0u32;
+    let mut target_scratch = Vec::<u32>::new();
     let mut edge_offsets = Vec::<u32>::with_capacity(configs.len() + 1);
     let mut edges = Vec::<(u8, u32)>::new();
     edge_offsets.push(0);
-    if let Some(state_map) = state_map {
-        let closure_by_class = closure_by_class
-            .as_ref()
-            .expect("mapped powerset must retain representative closures");
-        let mapped_targets_by_class_byte = mapped_targets_by_class_byte
-            .as_ref()
-            .expect("mapped powerset must retain cached class transitions");
-        let class_count = state_map.representative_original_ids.len();
-        let byte_count = bytes.len();
-        let mut target_marks = vec![0u32; class_count];
-        let mut target_epoch = 0u32;
-        while let Some(state) = worklist.pop_front() {
-            assert_eq!(
-                state as usize + 1,
-                edge_offsets.len(),
-                "powerset states must be processed in interning order",
-            );
-            let config_index = state as usize;
-            let singleton_class = match configs[config_index].as_ref() {
-                [class] => Some(*class),
-                _ => None,
-            };
-            if let Some(class) = singleton_class
-                && let Some(raw_source) = closure_by_class[class as usize].singleton()
-            {
-                for (byte, raw_target) in tokenizer.transitions_from(raw_source) {
-                    if !relevant_bytes[byte as usize] {
-                        continue;
-                    }
-                    let targets = tokenizer.execute_from_state_end_only(&[], raw_target);
-                    debug_assert!(!targets.is_empty());
-                    let target = configs.intern(mapped_target_config(&targets, state_map, class_active_language.as_deref()));
-                    if queued.len() < configs.len() {
-                        queued.resize(configs.len(), false);
-                    }
-                    // The canonical empty projected configuration is the
-                    // implicit dead target, exactly like an absent edge.
-                    if configs[target as usize].is_empty() {
-                        continue;
-                    }
-                    edges.push((byte, target));
-                    check_budget(configs.len(), edges.len(), budget)?;
-                    if !queued[target as usize] {
-                        queued[target as usize] = true;
-                        worklist.push_back(target);
-                    }
-                }
-            } else {
-                for (byte_slot, &byte) in bytes.iter().enumerate() {
-                    target_epoch = target_epoch.wrapping_add(1);
-                    if target_epoch == 0 {
-                        target_marks.fill(0);
-                        target_epoch = 1;
-                    }
-                    let mut target_config = Vec::<u32>::new();
-                    for &class in configs[config_index].iter() {
-                        for &target_class in
-                            &mapped_targets_by_class_byte[class as usize * byte_count + byte_slot]
-                        {
-                            let mark = &mut target_marks[target_class as usize];
-                            if *mark != target_epoch {
-                                *mark = target_epoch;
-                                target_config.push(target_class);
-                            }
-                        }
-                    }
-                    if target_config.is_empty() {
-                        continue;
-                    }
-                    target_config.sort_unstable();
-                    let target = configs.intern(target_config);
-                    if queued.len() < configs.len() {
-                        queued.resize(configs.len(), false);
-                    }
-                    if configs[target as usize].is_empty() {
-                        continue;
-                    }
-                    edges.push((byte, target));
-                    check_budget(configs.len(), edges.len(), budget)?;
-                    if !queued[target as usize] {
-                        queued[target as usize] = true;
-                        worklist.push_back(target);
-                    }
-                }
-            }
-            edge_offsets.push(edges.len() as u32);
-        }
-    } else {
-        let direct_raw_target_views = raw_target_mode == RawPowersetTargetMode::Direct;
-        // Moderate raw-NFA domains benefit from aggregating sparse transitions
-        // directly into byte buckets. On very large bounded tokenizers the
-        // powerset is usually dominated by preseeded singleton closures, and
-        // retaining the old two-pass path avoids adding allocation/cache
-        // pressure to the P100 compile path for little useful work.
-        const ONE_PASS_RAW_TARGET_MAX_STATES: usize = 65_536;
-        let one_pass_raw_targets =
-            direct_raw_target_views && raw_state_count <= ONE_PASS_RAW_TARGET_MAX_STATES;
-        let mut byte_marks = [0u32; 256];
-        let mut byte_epoch = 0u32;
-        let mut candidate_bytes = Vec::<u8>::new();
-        let mut target_marks = (direct_raw_target_views && !one_pass_raw_targets)
-            .then(|| vec![0u32; raw_state_count]);
-        let mut target_epoch = 0u32;
-        // In the one-pass lane, keep one reusable target bucket per byte. The
-        // previous path first scanned every source row to discover candidate
-        // bytes, then rescanned every source once per candidate byte via
-        // `tokenizer.step`.
-        let mut direct_target_buckets = one_pass_raw_targets.then(|| {
-            (0..256).map(|_| Vec::<u32>::new()).collect::<Vec<_>>()
-        });
-        while let Some(state) = worklist.pop_front() {
-            assert_eq!(
-                state as usize + 1,
-                edge_offsets.len(),
-                "powerset states must be processed in interning order",
-            );
-            let config_index = state as usize;
-            let singleton_source = match configs[config_index].as_ref() {
-                [source] => Some(*source),
-                _ => None,
-            };
-            if let Some(source) = singleton_source {
-                // Raw starts were all seeded before traversal, so the exact
-                // projected epsilon closure of every direct byte target is
-                // already interned in `raw_start_to_view`.
-                for (byte, raw_target) in tokenizer.transitions_from(source) {
-                    if !relevant_bytes[byte as usize] {
-                        continue;
-                    }
-                    let target = raw_start_to_view[raw_target as usize];
-                    debug_assert_ne!(target, u32::MAX);
-                    if configs[target as usize].is_empty() {
-                        continue;
-                    }
-                    edges.push((byte, target));
-                    check_budget(configs.len(), edges.len(), budget)?;
-                    if !queued[target as usize] {
-                        queued[target as usize] = true;
-                        worklist.push_back(target);
-                    }
-                }
-                edge_offsets.push(edges.len() as u32);
-                continue;
-            }
-
-            byte_epoch = byte_epoch.wrapping_add(1);
-            if byte_epoch == 0 {
-                byte_marks.fill(0);
-                byte_epoch = 1;
-            }
-            candidate_bytes.clear();
-            if one_pass_raw_targets {
-                let target_buckets = direct_target_buckets
-                    .as_mut()
-                    .expect("one-pass raw targets must retain target buckets");
-                for &source in configs[config_index].iter() {
-                    for (byte, raw_target) in tokenizer.transitions_from(source) {
-                        let byte_index = byte as usize;
-                        if !relevant_bytes[byte_index] {
-                            continue;
-                        }
-                        if byte_marks[byte_index] != byte_epoch {
-                            byte_marks[byte_index] = byte_epoch;
-                            candidate_bytes.push(byte);
-                        }
-                        let target_view = raw_start_to_view[raw_target as usize];
-                        target_buckets[byte_index]
-                            .extend_from_slice(configs[target_view as usize].as_ref());
-                    }
-                }
-            } else {
-                for &source in configs[config_index].iter() {
-                    for (byte, _) in tokenizer.transitions_from(source) {
-                        let byte_index = byte as usize;
-                        if relevant_bytes[byte_index] && byte_marks[byte_index] != byte_epoch {
-                            byte_marks[byte_index] = byte_epoch;
-                            candidate_bytes.push(byte);
-                        }
-                    }
-                }
-            }
-            candidate_bytes.sort_unstable();
-            for &byte in &candidate_bytes {
-                let projected = if one_pass_raw_targets {
-                    let target_buckets = direct_target_buckets
-                        .as_mut()
-                        .expect("one-pass raw targets must retain target buckets");
-                    let mut projected = std::mem::take(&mut target_buckets[byte as usize]);
-                    projected.sort_unstable();
-                    projected.dedup();
-                    projected
-                } else if direct_raw_target_views {
-                    target_epoch = target_epoch.wrapping_add(1);
-                    let target_marks = target_marks
-                        .as_mut()
-                        .expect("two-pass raw targets must retain target marks");
-                    if target_epoch == 0 {
-                        target_marks.fill(0);
-                        target_epoch = 1;
-                    }
-                    let mut projected = Vec::<u32>::new();
-                    for &source in configs[config_index].iter() {
-                        let Some(raw_target) = tokenizer.step(source, byte) else {
-                            continue;
-                        };
-                        let target_view = raw_start_to_view[raw_target as usize];
-                        for &target_state in configs[target_view as usize].iter() {
-                            let mark = &mut target_marks[target_state as usize];
-                            if *mark != target_epoch {
-                                *mark = target_epoch;
-                                projected.push(target_state);
-                            }
-                        }
-                    }
-                    projected.sort_unstable();
-                    projected
-                } else {
-                    let targets = tokenizer.step_all(&configs[config_index], byte);
-                    if targets.is_empty() {
-                        continue;
-                    }
-                    project_raw_config(targets.to_vec(), raw_active_language.as_deref())
-                };
-                if projected.is_empty() {
-                    continue;
-                }
-                let target = configs.intern(projected);
-                if queued.len() < configs.len() {
-                    queued.resize(configs.len(), false);
-                }
+    while edge_offsets.len() <= configs.len() {
+        let state = edge_offsets.len() - 1;
+        // Singleton raw states have exactly the original sparse byte row;
+        // direct targets already have a canonical projected closure ID.
+        if state_map.is_none() && let [source] = configs[state].as_ref() {
+            let source = *source;
+            for (byte, raw_target) in tokenizer.transitions_from(source) {
+                if !relevant_bytes[byte as usize] { continue; }
+                let target = raw_start_to_view[raw_target as usize];
+                if configs[target as usize].is_empty() { continue; }
                 edges.push((byte, target));
                 check_budget(configs.len(), edges.len(), budget)?;
-                if !queued[target as usize] {
-                    queued[target as usize] = true;
-                    worklist.push_back(target);
-                }
             }
             edge_offsets.push(edges.len() as u32);
+            continue;
         }
+
+        candidate_bytes.clear();
+        byte_seen.fill(false);
+        let mapped_singleton = state_map.is_some() && configs[state].len() == 1;
+        if let (Some(map), Some(closures), Some(singletons)) =
+            (state_map, &closure_by_class, &class_to_view)
+        {
+            let buckets = buckets.as_mut().expect("mapped image scratch");
+            if let [class] = configs[state].as_ref() {
+                let closure = &closures[*class as usize];
+                // The common singleton-closure case can publish each edge
+                // directly, without constructing any per-byte buckets.
+                if let [source] = closure.as_slice() {
+                    for (byte, raw_target) in tokenizer.transitions_from(*source) {
+                        if !relevant_bytes[byte as usize] { continue; }
+                        let raw_targets = tokenizer.execute_from_state_end_only(&[], raw_target);
+                        target_scratch.clear();
+                        target_scratch.extend(raw_targets.iter()
+                            .map(|&raw| map.original_to_internal[raw as usize])
+                            .filter(|&c| class_active_language.as_deref().is_none_or(|a| a[c as usize])));
+                        target_scratch.sort_unstable();
+                        target_scratch.dedup();
+                        let target = match target_scratch.as_slice() {
+                            [] => continue,
+                            [class] => singletons[*class as usize],
+                            classes => configs.intern_slice(classes),
+                        };
+                        edges.push((byte, target));
+                        check_budget(configs.len(), edges.len(), budget)?;
+                    }
+                    edge_offsets.push(edges.len() as u32);
+                    continue;
+                }
+                for &source in closure {
+                    for (byte, raw_target) in tokenizer.transitions_from(source) {
+                        let slot = byte as usize;
+                        if !relevant_bytes[slot] { continue; }
+                        if !byte_seen[slot] {
+                            byte_seen[slot] = true;
+                            candidate_bytes.push(byte);
+                        }
+                        buckets[slot].push(raw_target);
+                    }
+                }
+            } else {
+                for &class in configs[state].iter() {
+                    let source = singletons[class as usize] as usize;
+                    // All singleton class IDs were interned before the first
+                    // non-singleton target could be discovered.
+                    debug_assert!(source < state);
+                    for &(byte, target) in &edges[edge_offsets[source] as usize..edge_offsets[source+1] as usize] {
+                        let slot = byte as usize;
+                        if !byte_seen[slot] {
+                            byte_seen[slot] = true;
+                            candidate_bytes.push(byte);
+                        }
+                        buckets[slot].push(target);
+                    }
+                }
+            }
+        } else {
+            for &source in configs[state].iter() {
+                for (byte, raw_target) in tokenizer.transitions_from(source) {
+                    let slot = byte as usize;
+                    if !relevant_bytes[slot] { continue; }
+                    if !byte_seen[slot] {
+                        byte_seen[slot] = true;
+                        candidate_bytes.push(byte);
+                    }
+                    if let Some(buckets) = &mut buckets {
+                        buckets[slot].push(raw_start_to_view[raw_target as usize]);
+                    }
+                }
+            }
+        }
+
+        candidate_bytes.sort_unstable();
+        for &byte in &candidate_bytes {
+            if let Some(buckets) = &mut buckets {
+                let bucket = &mut buckets[byte as usize];
+                bucket.sort_unstable();
+                bucket.dedup();
+                if !mapped_singleton && let [target] = bucket.as_slice() {
+                    let target = *target;
+                    if !configs[target as usize].is_empty() {
+                        edges.push((byte, target));
+                        check_budget(configs.len(), edges.len(), budget)?;
+                    }
+                    bucket.clear();
+                    continue;
+                }
+            }
+            let projected = if let Some(marks) = &mut target_marks {
+                target_epoch = target_epoch.wrapping_add(1);
+                if target_epoch == 0 {
+                    marks.fill(0);
+                    target_epoch = 1;
+                }
+                target_scratch.clear();
+                let mut insert = |target: u32| {
+                    let mark = &mut marks[target as usize];
+                    if *mark != target_epoch {
+                        *mark = target_epoch;
+                        target_scratch.push(target);
+                    }
+                };
+                if let Some(buckets) = &mut buckets {
+                    let bucket = &mut buckets[byte as usize];
+                    if mapped_singleton {
+                        let map = state_map.expect("mapped singleton coordinate");
+                        for &raw_target in bucket.iter() {
+                            let closure = tokenizer.execute_from_state_end_only(&[], raw_target);
+                            for &raw in &closure {
+                                let class = map.original_to_internal[raw as usize];
+                                if class_active_language.as_deref().is_none_or(|a| a[class as usize]) {
+                                    insert(class);
+                                }
+                            }
+                        }
+                    } else {
+                        for &view in bucket.iter() {
+                            for &target in configs[view as usize].iter() {
+                                insert(target);
+                            }
+                        }
+                    }
+                    bucket.clear();
+                } else {
+                    for &source in configs[state].iter() {
+                        let Some(raw_target) = tokenizer.step(source, byte) else { continue; };
+                        for &target in configs[raw_start_to_view[raw_target as usize] as usize].iter() {
+                            insert(target);
+                        }
+                    }
+                }
+                target_scratch.sort_unstable();
+                target_scratch.as_slice()
+            } else {
+                // Independent scalar closure oracle.
+                target_scratch = project_raw_config(
+                    tokenizer.step_all(&configs[state], byte).to_vec(),
+                    raw_active_language.as_deref(),
+                );
+                target_scratch.as_slice()
+            };
+            if !projected.is_empty() {
+                let target = configs.intern_slice(projected);
+                edges.push((byte, target));
+                check_budget(configs.len(), edges.len(), budget)?;
+            }
+        }
+        edge_offsets.push(edges.len() as u32);
     }
 
     let states = if let Some(state_map) = state_map {
