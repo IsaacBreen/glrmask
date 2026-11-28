@@ -152,8 +152,6 @@ pub(in crate::terminal_dwa) fn validate(
         assert_eq!(a.internal_to_originals, b.internal_to_originals);
         assert_eq!(a.representative_original_ids, b.representative_original_ids);
     }
-    assert_eq!(candidate.id_map.deferred_vocab_singleton_original_ids,
-        reference.id_map.deferred_vocab_singleton_original_ids);
     native_pipeline::graph_isomorphism(&candidate.dwa, &reference.dwa)
         .expect("direct identity changed the ordinary terminal graph");
 }

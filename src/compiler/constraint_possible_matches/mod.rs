@@ -2314,7 +2314,6 @@ fn empty_possible_matches_computation(
             vec![u32::MAX; original_token_count],
             0,
         ),
-        deferred_vocab_singleton_original_ids: None,
     };
     ConstraintPossibleMatchesComputation {
         mapped_possible_matches: MappedArtifact::new(
@@ -2342,7 +2341,6 @@ fn complete_empty_possible_matches_computation(
             vec![u32::MAX; original_token_count],
             0,
         ),
-        deferred_vocab_singleton_original_ids: None,
     };
     ConstraintPossibleMatchesComputation {
         mapped_possible_matches: MappedArtifact::new(
@@ -2705,7 +2703,6 @@ fn compute_constraint_possible_matches_with_artifacts(
             state_class_count,
         ),
         vocab_tokens: possible_match_vocab,
-        deferred_vocab_singleton_original_ids: None,
     };
 
     if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some() || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {

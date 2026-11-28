@@ -3149,7 +3149,6 @@ mod tests {
         let id_map = InternalIdMap {
             tokenizer_states: singleton.clone(),
             vocab_tokens: singleton,
-            deferred_vocab_singleton_original_ids: None,
         };
 
         let mut emitted = vec![false; num_terminals as usize];

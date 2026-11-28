@@ -60,7 +60,6 @@ fn complete_possible_match_coordinate(
     Ok(InternalIdMap {
         tokenizer_states: complete(states, 0..tokenizer_states as usize)?,
         vocab_tokens: complete(tokens, vocab.entries_map().keys().map(|&id| id as usize))?,
-        deferred_vocab_singleton_original_ids: None,
     })
 }
 
@@ -388,7 +387,6 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
             let target = InternalIdMap {
                 tokenizer_states: common.tokenizer_states.clone(),
                 vocab_tokens: id_map.vocab_tokens.clone(),
-                deferred_vocab_singleton_original_ids: id_map.deferred_vocab_singleton_original_ids.clone(),
             };
             output.parser_dwa = MappedArtifact::new(output.parser_dwa, id_map)
                 .remap_into_existing_common(&target).into_artifact();

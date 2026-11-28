@@ -12,7 +12,6 @@ fn id_map(states:u32,tokens:usize)->InternalIdMap {
     InternalIdMap {
         tokenizer_states:ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(states.clone(),states),
         vocab_tokens:ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(tokens.clone(),tokens),
-        deferred_vocab_singleton_original_ids:None,
     }
 }
 

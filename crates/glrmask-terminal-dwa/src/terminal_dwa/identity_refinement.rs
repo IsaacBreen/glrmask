@@ -167,7 +167,6 @@ fn build_identity_common(
     let map_ms = started.elapsed().as_secs_f64() * 1000.0;
     let id_map = InternalIdMap {
         tokenizer_states: states, vocab_tokens: tokens,
-        deferred_vocab_singleton_original_ids: None,
     };
     let options = l2p::L2pShardBuildOptions {
         identity_map: Some(&id_map), skip_ti_discovery: true,

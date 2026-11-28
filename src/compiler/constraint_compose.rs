@@ -887,7 +887,7 @@ pub(super) fn prepared_leaf_possible_matches(
         .map(|(local_to_global_tsids,local_to_global_tokens)|DirectComponentCoordinateMaps {
             local_to_global_tsids,local_to_global_tokens,
         }).collect::<Vec<_>>();
-    let id_map=InternalIdMap {tokenizer_states,vocab_tokens,deferred_vocab_singleton_original_ids:None};
+    let id_map=InternalIdMap {tokenizer_states,vocab_tokens,};
     let coordinate_ms=started.elapsed().as_secs_f64()*1000.0;
     let remap_started=Instant::now();
     let mut possible=PossibleMatches::new();

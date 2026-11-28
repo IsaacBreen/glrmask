@@ -270,8 +270,7 @@ impl DynamicConstraint {
             complete,
             profile: _,
         } = computation;
-        let (possible_matches, mut id_map) = mapped_possible_matches.into_parts();
-        id_map.materialize_deferred_vocab_singletons();
+        let (possible_matches, id_map) = mapped_possible_matches.into_parts();
         let mut result = Self::from_parts_with_dynamic_vocab(
             table, terminal_display_names, tokenizer, None, ignore_terminal,
             special_token_terminals, vocab, runtime_dynamic_vocab.vocab,

@@ -67,7 +67,6 @@ fn token_domains_disjoint<'a>(
 ) -> bool {
     let mut occupied = vec![false; original_token_count];
     for map in maps {
-        if map.deferred_vocab_singleton_original_ids.is_some() { return false; }
         for &original in map.vocab_tokens.internal_to_originals.iter().flatten() {
             let Some(slot) = occupied.get_mut(original as usize) else { return false };
             if std::mem::replace(slot, true) {
@@ -1501,7 +1500,7 @@ fn build_merge_coordinates(
         &state_maps, num_tokenizer_states, false, !matches!(order, StateClassOrder::FirstSeen),
     );
     Some((InternalIdMap {
-        tokenizer_states, vocab_tokens, deferred_vocab_singleton_original_ids: None,
+        tokenizer_states, vocab_tokens,
     }, token_maps))
 }
 
@@ -1520,7 +1519,6 @@ fn build_disjoint_token_classes(
     let mut direct_local_to_global_token_maps = Vec::with_capacity(inputs.len());
 
     for input in inputs {
-        assert!(input.deferred_vocab_singleton_original_ids.is_none(), "terminal merge requires materialized token coordinates");
         let mut local_to_global = vec![u32::MAX; input.num_internal_tokens() as usize];
         for (local_class, originals) in input.vocab_tokens.internal_to_originals.iter().enumerate() {
             if originals.is_empty() {
@@ -1840,7 +1838,6 @@ mod tests {
         let id_map = InternalIdMap {
             tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(vec![0], 1),
             vocab_tokens: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(vec![0, 1], 2),
-            deferred_vocab_singleton_original_ids: None,
         };
         let expected = parser_fallback_eval(&left, &[7, 8])
             .union(&parser_fallback_eval(&right, &[7, 8]));
@@ -1911,7 +1908,6 @@ mod tests {
         let identity = InternalIdMap {
             tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(vec![0], 1),
             vocab_tokens: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(vec![0, 1, 2], 3),
-            deferred_vocab_singleton_original_ids: None,
         };
         let mut dwas = Vec::new();
         for token in 0..3 {
@@ -1974,7 +1970,6 @@ mod tests {
                 Vec::new(),
                 0,
             ),
-            deferred_vocab_singleton_original_ids: None,
         }
     }
 
@@ -2015,7 +2010,6 @@ mod tests {
                 original_to_internal,
                 num_classes,
             ),
-            deferred_vocab_singleton_original_ids: None,
         }
     }
 
@@ -2208,7 +2202,6 @@ mod tests {
         let common = InternalIdMap {
             tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(vec![0, 1, 2], 3),
             vocab_tokens: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(vec![0, 1, 2, 3], 4),
-            deferred_vocab_singleton_original_ids: None,
         };
         let tsids = [vec![0, 2], vec![1]];
         let tokens = [vec![], vec![1], vec![3]];

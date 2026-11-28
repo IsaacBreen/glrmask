@@ -298,7 +298,6 @@ pub(super) fn finish_compacted(
         let id_map = InternalIdMap {
             tokenizer_states,
             vocab_tokens,
-            deferred_vocab_singleton_original_ids: None,
         };
         return Some(Finished {
             artifact: LocalIdMapTerminalDwa {
@@ -362,7 +361,6 @@ pub(super) fn finish_compacted(
             id_map: InternalIdMap {
                 tokenizer_states,
                 vocab_tokens,
-                deferred_vocab_singleton_original_ids: None,
             },
             dwa,
             profile: TerminalDwaPhaseProfile {
@@ -458,7 +456,6 @@ pub(super) fn finish_sparse_terminal_rows(
         let id_map = InternalIdMap {
             tokenizer_states,
             vocab_tokens,
-            deferred_vocab_singleton_original_ids: None,
         };
         return Some(Finished {
             artifact: LocalIdMapTerminalDwa {
@@ -530,7 +527,6 @@ pub(super) fn finish_sparse_terminal_rows(
             id_map: InternalIdMap {
                 tokenizer_states,
                 vocab_tokens,
-                deferred_vocab_singleton_original_ids: None,
             },
             dwa,
             profile: TerminalDwaPhaseProfile {

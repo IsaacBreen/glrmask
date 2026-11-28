@@ -625,8 +625,7 @@ mod support_finalize_gate {
 
     #[test]
     fn summary_order_and_root_absence_match_independent_complete_scan() {
-        let map = InternalIdMap { tokenizer_states:identity(4), vocab_tokens:identity(16),
-            deferred_vocab_singleton_original_ids:None };
+        let map = InternalIdMap { tokenizer_states:identity(4), vocab_tokens:identity(16) };
         let weights = [Weight::empty(), Weight::all(), weight(0,0,3), weight(1,2,5),
             weight(2,7,9), weight(0,0,3).union(&weight(3,8,12))];
         let mut random = 581344u64;
@@ -1297,8 +1296,7 @@ where
         }
         if let Some(directory) = crate::env::var_os("GLRMASK_DUMP_BOUNDARY_INPUTS") {
             let directory = std::path::PathBuf::from(directory);
-            let mut id_map = output.id_map.clone();
-            id_map.materialize_deferred_vocab_singletons();
+            let id_map = &output.id_map;
             let t = &id_map.tokenizer_states;
             let v = &id_map.vocab_tokens;
             let bytes = bincode::serialize(&(&output.dwa,

@@ -474,7 +474,6 @@ mod tests {
                 internal_to_originals: vec![vec![0]],
                 representative_original_ids: vec![0],
             },
-            deferred_vocab_singleton_original_ids: None,
         }
     }
 
