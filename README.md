@@ -16,8 +16,8 @@ Time between masks. Lower is better.
 
 <p align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-json-2026-10-19-dark.svg">
-  <img src="docs/assets/benchmark-tbm-json-2026-10-19.svg" alt="JSON Schema time between masks: measured GLRMask, llguidance 1.9.1 and XGrammar 0.2.8 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-json-2026-10-19-dark.svg?v=f35571b99009">
+  <img src="docs/assets/benchmark-tbm-json-2026-10-19.svg?v=ef49163deb02" alt="JSON Schema time between masks: measured GLRMask, llguidance 1.9.1 and XGrammar 0.2.8 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480">
 </picture>
 </p>
 
@@ -49,8 +49,8 @@ Time between masks. Lower is better.
 
 <p align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-javascript-2026-10-19-dark.svg?v=ed2532131009">
-  <img src="docs/assets/benchmark-tbm-javascript-2026-10-19.svg?v=71990d522281" alt="JavaScript time between masks: measured GLRMask, llguidance 1.9.1 and XGrammar 0.2.8 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-javascript-2026-10-19-dark.svg?v=b816a8c9ed27">
+  <img src="docs/assets/benchmark-tbm-javascript-2026-10-19.svg?v=34912ef48c0f" alt="JavaScript time between masks: measured GLRMask, llguidance 1.9.1 and XGrammar 0.2.8 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480">
 </picture>
 </p>
 
