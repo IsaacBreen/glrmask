@@ -607,6 +607,12 @@ impl Vocab {
         Arc::clone(self.0.lexical.get_or_init(|| Arc::new(LexicalVocabulary::build(self.entries_map()))))
     }
 
+    /// Borrow a prepared spelling order without initiating cold construction.
+    #[doc(hidden)]
+    pub fn cached_lexical_vocabulary(&self) -> Option<Arc<LexicalVocabulary>> {
+        self.0.lexical.get().cloned()
+    }
+
     fn vocab_derived_cache_get_internal<T: VocabDerivedArtifact>(&self) -> Option<Arc<T>> {
         self.0.artifacts
             .lock()

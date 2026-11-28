@@ -84,7 +84,7 @@ pub fn prepared_l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrd
 /// Reuse an already-prepared parent order without forcing a full-vocabulary
 /// sort solely to accelerate a much smaller subset build.
 pub(crate) fn cached_l1_identity_vocab_order(vocab: &Vocab) -> Option<Arc<L1IdentityVocabOrder>> {
-    vocab.vocab_derived_cache_get::<L1IdentityVocabOrder>()
+    vocab.cached_lexical_vocabulary()
 }
 
 /// Resolve exact token-byte groups from the already-prepared identity order.
@@ -96,7 +96,7 @@ pub fn cached_l1_exact_token_groups(
     vocab: &Vocab,
     byte_strings: &[Vec<u8>],
 ) -> Option<Vec<Vec<u32>>> {
-    let order = vocab.vocab_derived_cache_get::<L1IdentityVocabOrder>()?;
+    let order = vocab.cached_lexical_vocabulary()?;
     Some(byte_strings.iter().map(|bytes| {
         order.ordered_token_bytes.binary_search_by(|word| word.as_ref().cmp(bytes.as_slice()))
             .ok().map(|index| order.ordered_to_originals[index].clone()).unwrap_or_default()
@@ -108,7 +108,7 @@ pub(crate) fn inherit_l2p_lexical_entry_order(
     child_vocab: &Vocab,
     child_token_ids_in_entry_order: &[u32],
 ) {
-    let Some(parent_order) = parent_vocab.vocab_derived_cache_get::<L1IdentityVocabOrder>() else {
+    let Some(parent_order) = parent_vocab.cached_lexical_vocabulary() else {
         return;
     };
     debug_assert_eq!(child_token_ids_in_entry_order.len(), child_vocab.len());
