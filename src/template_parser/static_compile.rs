@@ -343,7 +343,107 @@ fn boundary_action_program(nfa: NFA, budget: &mut ExpansionBudget) -> TemplateTo
     TemplateTopology::from_nfa(&nfa)
 }
 
-+#[cfg(test)]
+/// The construction inventory shared by all lexical shards. Ordinary
+/// transfers and endpoint predicates have distinct dispatch maps, but
+/// borrow the same compact graph storage in the dense class coordinate.
+pub(crate) struct ClassedPrograms {
+    pub(crate) classes: PopLabelClasses,
+    pub(crate) graphs: Vec<TemplateTopology>,
+    pub(crate) ordinary: BTreeMap<u32, usize>,
+    pub(crate) admissions: Option<BTreeMap<u32, usize>>,
+}
+
+impl ClassedPrograms {
+    pub(crate) fn new(classes: PopLabelClasses, admissions: bool) -> Self {
+        Self {
+            classes,
+            graphs: Vec::new(),
+            ordinary: BTreeMap::new(),
+            admissions: admissions.then(BTreeMap::new),
+        }
+    }
+
+    pub(crate) fn insert_graph(&mut self, mut graph: TemplateTopology) -> Result<usize> {
+        let symbols = self.classes.symbol_count() as i32;
+        graph.remap_labels(|label| {
+            if label < symbols {
+                return Some(label);
+            }
+            let index = DEFAULT_LABEL.checked_sub(1)?.checked_sub(label)?;
+            if index < 0 || index as usize >= self.classes.len() {
+                return None;
+            }
+            symbols.checked_add(index)
+        }).ok_or_else(|| Error::Compilation("invalid classed stack program label".into()))?;
+        let id = self.graphs.len();
+        self.graphs.push(graph);
+        Ok(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn weighted_reference(&self, terminal: u32) -> NWA {
+        let mut graph = self.graphs[self.ordinary[&terminal]].clone();
+        let symbols = self.classes.symbol_count() as i32;
+        graph.remap_labels(|label| Some(if label < symbols {
+            label
+        } else {
+            DEFAULT_LABEL - 1 - (label - symbols)
+        })).unwrap();
+        graph.to_weighted_skeleton()
+    }
+}
+
+pub(crate) fn prepare_scoped_boundary_programs(
+    programs: &[crate::runtime::parser_backend::scoped_program::ScopedProgram],
+    symbol_count: u32,
+    selected: &BTreeSet<u32>,
+    ending_selected: Option<&BTreeSet<u32>>,
+) -> Result<ClassedPrograms> {
+    let mut budget = ExpansionBudget::default();
+    let classes = PopLabelClasses::new(symbol_count).map_err(Error::Compilation)?;
+    let mut result = ClassedPrograms::new(classes, ending_selected.is_some());
+    // Source identities remain alive throughout preparation. Relocation and
+    // appended CALL output are part of the relation, not terminal identity.
+    let mut ordinary_ids = FxHashMap::default();
+    for &terminal in selected {
+        let view = programs.get(terminal as usize).ok_or_else(||
+            Error::Compilation(format!("missing scoped relation {terminal}")))?;
+        view.validate_coordinate(symbol_count)?;
+        let key = (Arc::as_ptr(&view.source), view.symbols, view.offset, view.guard_owner, view.append_push);
+        let id = if let Some(&id) = ordinary_ids.get(&key) {
+            id
+        } else {
+            let nfa = action_nfa(&view.source, symbol_count, &mut budget, Some(&mut result.classes), Some(view))?;
+            let id = result.insert_graph(boundary_action_program(nfa, &mut budget))?;
+            ordinary_ids.insert(key, id);
+            id
+        };
+        result.ordinary.insert(terminal, id);
+    }
+    if let Some(ending) = ending_selected {
+        let mut admission_ids = FxHashMap::default();
+        for &terminal in ending {
+            let view = programs.get(terminal as usize).ok_or_else(||
+                Error::Compilation(format!("missing scoped admission relation {terminal}")))?;
+            view.validate_coordinate(symbol_count)?;
+            // Successful output pushes cannot change input executability.
+            let key = (Arc::as_ptr(&view.domain), view.symbols, view.offset, view.guard_owner);
+            let id = if let Some(&id) = admission_ids.get(&key) {
+                id
+            } else {
+                let graph = view.domain.scoped_prefix_program(view.offset, view.symbols,
+                    view.guard_owner, &mut result.classes).map_err(Error::Compilation)?;
+                let id = result.insert_graph(TemplateTopology::from_nfa(&graph))?;
+                admission_ids.insert(key, id);
+                id
+            };
+            result.admissions.as_mut().expect("ending inventory").insert(terminal, id);
+        }
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
 mod selected_inventory_tests {
     use super::*;
 

@@ -115,7 +115,6 @@ fn compile_inventory(
     let started=Instant::now();let depths=match max_controls {Some(depth)=>depth.checked_add(1)? as usize,None=>2};
     if max_controls.is_some() && depths>16 {return None;}
     let ports=lexical.states().len().checked_mul(depths)?;
-    let alphabet=programs.classes.symbol_count().checked_add(programs.classes.len() as u32)?;
     let classes = &programs.classes;
     let admissions = programs.admissions.as_ref();
     let dense_templates = &programs.graphs;
@@ -318,7 +317,20 @@ fn assemble_impl(
     Ok((arena, ordinary_states, control_states))
 }
 
-+#[cfg(test)]
+pub(crate) fn compile_classed(
+    programs: &ClassedPrograms,
+    controls: &[u32],
+    certificate: Option<&ClosureCertificate>,
+    lexical: &DWA,
+    read_context: Option<&crate::compiler::stages::parser_dwa::FiniteParserReadSupport>,
+) -> Result<SignedShardOutput, String> {
+    assert!(lexical.is_acyclic(), "shared template constructor requires an acyclic lexical query");
+    let depth = certificate.map(|c| c.max_controls_per_gap).or_else(|| controls.is_empty().then_some(0));
+    compile_inventory(programs, controls, depth, lexical, read_context)
+        .ok_or_else(|| format!("{} resource budget exceeded", crate::compiler::template_boundary::TEMPLATE_DECLINE_PREFIX))
+}
+
+#[cfg(test)]
 mod budget_decline_tests {
     use super::*;
     use glrmask_parser_dwa::__private::pop_classes::PopLabelClasses;
