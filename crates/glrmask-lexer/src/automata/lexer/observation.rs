@@ -344,7 +344,7 @@ impl ByteRows {
 /// Exact interning of canonical state configurations. The hash index owns
 /// only candidate IDs; a configuration has one allocation, and collisions
 /// are resolved by equality of its complete state sequence.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct ConfigInterner {
     ids_by_hash: rustc_hash::FxHashMap<u64, smallvec::SmallVec<[u32; 1]>>,
     configs: Vec<Box<[u32]>>,
