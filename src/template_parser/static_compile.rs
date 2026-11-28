@@ -21,7 +21,9 @@ use crate::ds::bitset::BitSet;
 use crate::runtime::ConstraintRuntimeBackend;
 use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa;
 use glrmask_parser_dwa::__private::pop_classes::PopLabelClasses;
-use crate::automata::weighted::nwa::{NWA, NWAState};
+#[cfg(test)]
+use crate::automata::weighted::nwa::NWA;
+use crate::compiler::stages::parser_dwa::TemplateTopology;
 use crate::compiler::glr::labels::negative_to_positive_label;
 use rustc_hash::FxHashMap;
 use std::collections::VecDeque;
@@ -314,7 +316,7 @@ pub(crate) fn prepare_static_templates_for_terminals(
     Ok(Templates::from_terminal_dfas(terminal_templates))
 }
 
-fn boundary_action_program(nfa: NFA, budget: &mut ExpansionBudget) -> NWA {
+fn boundary_action_program(nfa: NFA, budget: &mut ExpansionBudget) -> Arc<TemplateTopology> {
     // Reuse the ordinary action-word constructor before instantiation. Class
     // labels are distinct consuming symbols here; replacing them with their
     // finite local languages later preserves this exact subset construction.
@@ -327,66 +329,15 @@ fn boundary_action_program(nfa: NFA, budget: &mut ExpansionBudget) -> NWA {
         // the ordinary constructor removes a dead literal branch.
         let dfa = crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic(&dfa);
         *budget = candidate_budget;
-        let states = dfa.states.into_iter().map(|state| NWAState {
-            final_weight: state.is_accepting.then(crate::ds::weight::Weight::all),
-            transitions: state.transitions.into_iter().map(|(label, target)|
-                (label, vec![(target, crate::ds::weight::Weight::all())])).collect(),
-            epsilons: Vec::new(),
-        }).collect();
-        return NWA::from_parts(states, vec![dfa.start_state]);
+        return Arc::new(TemplateTopology::from_dfa(&dfa));
     }
-    let states = nfa.states.into_iter().map(|state| NWAState {
-        final_weight: state.is_accepting.then(crate::ds::weight::Weight::all),
-        transitions: state.transitions.into_iter().map(|(label, targets)|
-            (label, targets.into_iter().map(|target|
-                (target, crate::ds::weight::Weight::all())).collect())).collect(),
-        epsilons: state.epsilons.into_iter().map(|target|
-            (target, crate::ds::weight::Weight::all())).collect(),
-    }).collect();
-    NWA::from_parts(states, nfa.start_states)
-}
-
-/// Bounded ordinary action-word programs for a boundary query. POP complements stay
-/// symbolic until the common cancellation solver knows which concrete PUSH
-/// symbols reach them. Neither a template DFA nor the global stack alphabet is
-/// eagerly expanded merely to build a construction-only intermediate graph.
-pub(crate) fn prepare_classed_boundary_programs(
-    programs: &[Option<Arc<CommitTemplateDfas>>], symbol_count: u32,
-    selected: &BTreeSet<u32>,
-) -> Result<(BTreeMap<u32, NWA>, PopLabelClasses)> {
-    if crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
-        let mut states = 0usize;
-        let mut edges = 0usize;
-        let mut largest = (0usize, 0u32);
-        for &id in selected {
-            if let Some(program) = programs.get(id as usize).and_then(Option::as_deref) {
-                let n = program.pop.states.len() + program.read.states.len() + program.push.states.len();
-                states += n;
-                edges += [&program.pop, &program.read, &program.push].iter()
-                    .flat_map(|graph| &graph.states).map(|row| row.transitions.len()).sum::<usize>();
-                largest = largest.max((n, id));
-            }
-        }
-        eprintln!("[glrmask/profile][classed_template_inventory] templates={} source_states={states} source_edges={edges} largest_states={} largest_terminal={}",
-            selected.len(), largest.0, largest.1);
-    }
-    let mut budget = ExpansionBudget::default();
-    let mut classes = PopLabelClasses::new(symbol_count).map_err(Error::Compilation)?;
-    let mut result = BTreeMap::new();
-    for &terminal in selected {
-        let split = programs.get(terminal as usize).and_then(Option::as_deref)
-            .ok_or_else(|| Error::Compilation(format!("missing selected terminal relation {terminal}")))?;
-        let nfa = action_nfa(split, symbol_count, &mut budget, Some(&mut classes), None)
-            .map_err(|error| Error::Compilation(format!("terminal {terminal}: {error}")))?;
-        result.insert(terminal, boundary_action_program(nfa, &mut budget));
-    }
-    Ok((result, classes))
+    Arc::new(TemplateTopology::from_nfa(&nfa))
 }
 
 pub(crate) fn prepare_scoped_boundary_programs(
     programs: &[crate::runtime::parser_backend::scoped_program::ScopedProgram], symbol_count: u32,
     selected: &BTreeSet<u32>,
-) -> Result<(BTreeMap<u32, NWA>, PopLabelClasses)> {
+) -> Result<(BTreeMap<u32, Arc<TemplateTopology>>, PopLabelClasses)> {
     let mut budget = ExpansionBudget::default();
     let mut classes = PopLabelClasses::new(symbol_count).map_err(Error::Compilation)?;
     let mut result = BTreeMap::new();
@@ -403,14 +354,14 @@ pub(crate) fn prepare_scoped_boundary_programs(
 pub(crate) fn prepare_scoped_boundary_admissions(
     programs:&[crate::runtime::parser_backend::scoped_program::ScopedProgram],
     selected:&BTreeSet<u32>,classes:&mut PopLabelClasses,
-)->Result<BTreeMap<u32,NWA>> {
+)->Result<BTreeMap<u32,Arc<TemplateTopology>>> {
     selected.iter().map(|&terminal| {
         let view=programs.get(terminal as usize).ok_or_else(||
             Error::Compilation(format!("missing scoped admission relation {terminal}")))?;
         view.validate_coordinate(classes.symbol_count())?;
         let graph=view.domain.scoped_prefix_program(view.offset,view.symbols,view.guard_owner,classes)
             .map_err(Error::Compilation)?;
-        Ok((terminal,graph))
+        Ok((terminal,Arc::new(TemplateTopology::from_nfa(&graph))))
     }).collect()
 }
 
@@ -470,10 +421,10 @@ mod selected_inventory_tests {
             view.append_push=Some(7);
             let mut classes=PopLabelClasses::new(8).unwrap();
             let raw=action_nfa(&view.source,8,&mut ExpansionBudget::default(),Some(&mut classes),Some(&view)).unwrap();
-            let mut full=boundary_action_program(raw,&mut ExpansionBudget{work:33_554_432,..Default::default()});
+            let mut full=boundary_action_program(raw,&mut ExpansionBudget{work:33_554_432,..Default::default()}).to_weighted_skeleton();
             glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa_with_pop_classes(&mut full,&classes).unwrap();
             let reference=classes.compile_positive(full,10000).unwrap();
-            let checker=view.domain.scoped_prefix_program(view.offset,view.symbols,view.guard_owner,&mut classes).unwrap();
+            let checker=TemplateTopology::from_nfa(&view.domain.scoped_prefix_program(view.offset,view.symbols,view.guard_owner,&mut classes).unwrap()).to_weighted_skeleton();
             assert!(!checker.states().iter().any(|row|row.transitions.keys().any(|&label|label<0)));
             let candidate=classes.compile_positive(checker,10000).unwrap();
             let comparison=glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
@@ -508,11 +459,11 @@ mod selected_inventory_tests {
         let mut classes = PopLabelClasses::new(8).unwrap();
         let nfa = action_nfa(&view.source, 8, &mut ExpansionBudget::default(),
             Some(&mut classes), Some(&view)).unwrap();
-        let normalized = boundary_action_program(nfa.clone(), &mut ExpansionBudget::default());
+        let normalized = boundary_action_program(nfa.clone(), &mut ExpansionBudget::default()).to_weighted_skeleton();
         // Refuse the subset budget deliberately: the fallback must retain
         // every original phase state, epsilon, final and concrete/class key.
         let mut refused = ExpansionBudget { work: 33_554_432, ..Default::default() };
-        let raw = boundary_action_program(nfa.clone(), &mut refused);
+        let raw = boundary_action_program(nfa.clone(), &mut refused).to_weighted_skeleton();
         assert_eq!(raw.states().len(), nfa.states.len());
         assert_eq!(refused.work, 33_554_432);
         assert!(normalized.states().iter().all(|row| row.epsilons.is_empty()));

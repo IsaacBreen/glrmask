@@ -6,6 +6,7 @@
 //! by identity epsilons. It is the same operation as the ordinary builder,
 //! without first allocating an expanded range-weight NWA.
 use super::*;
+use super::finite_signed_graph::TemplateTopology;
 use std::ops::Range;
 
 #[derive(Clone, Debug)]
@@ -17,7 +18,7 @@ pub struct FiniteTemplateInstance {
 }
 
 pub struct FiniteTemplateProgram<'a> {
-    pub templates: &'a [&'a NWA],
+    pub templates: &'a [&'a TemplateTopology],
     /// Already certified, globally faithful finite-coordinate coefficients.
     pub coefficients: &'a [Weight],
     pub port_finals: &'a [Option<usize>],
@@ -68,24 +69,10 @@ pub(super) fn build(
     { return None; }
     let mut template_sizes = Vec::with_capacity(program.templates.len());
     for template in program.templates {
-        let n = template.states().len();
-        if n == 0 || n > limits.states || template.start_states().iter().any(|&q| q as usize >= n)
-        { return None; }
-        let mut edges = 0usize;
-        for row in template.states() {
-            edges = edges.checked_add(row.epsilons.len())?
-                .checked_add(usize::from(row.final_weight.is_some()))?;
-            if row.epsilons.iter().any(|&(q, _)| q as usize >= n) { return None; }
-            for (&label, branches) in &row.transitions {
-                let valid = label == DEFAULT_LABEL || (0..alphabet as i32).contains(&label)
-                    || (is_negative_label(label)
-                        && (0..alphabet as i32).contains(&negative_to_positive_label(label)));
-                if !valid || branches.iter().any(|&(q, _)| q as usize >= n) { return None; }
-                edges = edges.checked_add(branches.len())?;
-            }
-            if edges > limits.edges { return None; }
-        }
-        template_sizes.push((n, edges));
+        let n = template.state_count();
+        if n == 0 || n > limits.states || !template.valid_alphabet(alphabet)
+            || template.logical_edges() > limits.edges { return None; }
+        template_sizes.push((n, template.logical_edges()));
     }
     let mut total_states = ports;
     let mut total_edges = 0usize;
@@ -114,13 +101,14 @@ pub(super) fn build(
         let template = program.templates[instance.template];
         let offset = states.len() as u32;
         let weight = coefficients[instance.coefficient];
-        for row in template.states() {
-            let mut epsilons = Vec::with_capacity(row.epsilons.len() + usize::from(row.final_weight.is_some()));
-            epsilons.extend(row.epsilons.iter().map(|&(q, _)| (offset + q, weight)));
-            if row.final_weight.is_some() { epsilons.push((instance.continuation, weight)); }
-            let transitions = row.transitions.iter().map(|(&label, branches)| {
+        for q in 0..template.state_count() {
+            let row = template.row(q);
+            let mut epsilons = Vec::with_capacity(row.epsilons.len() + usize::from(row.present_final));
+            epsilons.extend(row.epsilons.iter().map(|&q| (offset + q, weight)));
+            if row.present_final { epsilons.push((instance.continuation, weight)); }
+            let transitions = row.edges().map(|(label, branches)| {
                 let mut result = SmallVec::with_capacity(branches.len());
-                if weight != 0 { result.extend(branches.iter().map(|&(q, _)| (offset + q, weight))); }
+                if weight != 0 { result.extend(branches.iter().map(|&q| (offset + q, weight))); }
                 // Match the ordinary signed-native conversion's zero-edge
                 // marker convention; empty original keys remain distinct.
                 if result.is_empty() && !branches.is_empty() { result.push((0, 0)); }
@@ -228,44 +216,26 @@ pub fn normalize_control_star_template_program_with_pop_classes(
         let source=*program.templates.get(instance.template).ok_or("template program instance template is missing")?;
         let weight=program.coefficients.get(instance.coefficient).ok_or("template program instance coefficient is missing")?;
         if instance.continuation as usize>=ports || instance.entries.start>instance.entries.end
-            || instance.entries.end as usize>ports || source.states().is_empty()
-            || source.start_states().iter().any(|&q|q as usize>=source.states().len()) {
+            || instance.entries.end as usize>ports || source.state_count() == 0
+            || source.start_states().iter().any(|&q|q as usize>=source.state_count()) {
             return Err("invalid template program instance coordinate".into());
         }
-        let next=graph.states().len().checked_add(source.states().len()).ok_or("template program state overflow")?;
+        let next=graph.states().len().checked_add(source.state_count()).ok_or("template program state overflow")?;
         if next>limits.states {return Err("template program exceeds its shared state budget".into());}
-        let body_edges=source.states().iter().try_fold(0usize,|count,row| {
-            count.checked_add(row.epsilons.len())?.checked_add(usize::from(row.final_weight.is_some()))?
-                .checked_add(row.transitions.values().map(Vec::len).sum::<usize>())
-        }).ok_or("template program edge overflow")?;
-        let entry_edges=(instance.entries.end-instance.entries.start) as usize;
-        let next_edges=edges.checked_add(body_edges).and_then(|count|
+        let body_edges = source.logical_edges();
+        let entry_edges = (instance.entries.end - instance.entries.start) as usize;
+        let next_edges = edges.checked_add(body_edges).and_then(|count|
             entry_edges.checked_mul(source.start_states().len()).and_then(|n|count.checked_add(n)))
             .ok_or("template program edge overflow")?;
-        if next_edges>limits.edges {return Err("template program exceeds its shared edge budget".into());}
-        let offset=graph.states().len() as u32;
-        for _ in source.states() {graph.add_state();}
-        for (q,row) in source.states().iter().enumerate() {
-            let from=offset+q as u32;
-            for &(target,_) in &row.epsilons {
-                if target as usize>=source.states().len() {return Err("template epsilon leaves its graph".into());}
-                graph.add_epsilon(from,offset+target,weight.clone());
-            }
-            if row.final_weight.is_some() {graph.add_epsilon(from,instance.continuation,weight.clone());}
-            for (&label,branches) in &row.transitions {
-                let mapped=if (classes.symbol_count() as i32..alphabet as i32).contains(&label) {
-                    DEFAULT_LABEL-1-(label-classes.symbol_count() as i32)
-                } else {label};
-                if branches.is_empty() {graph.states_mut()[from as usize].transitions.entry(mapped).or_default();}
-                for &(target,_) in branches {
-                    if target as usize>=source.states().len() {return Err("template transition leaves its graph".into());}
-                    graph.add_transition(from,mapped,offset+target,weight.clone());
-                }
-            }
+        if next_edges > limits.edges { return Err("template program exceeds its shared edge budget".into()); }
+        let body = source.append_mapped(&mut graph, weight, Some(instance.continuation), |label| {
+            if (classes.symbol_count() as i32..alphabet as i32).contains(&label) {
+                DEFAULT_LABEL - 1 - (label - classes.symbol_count() as i32)
+            } else { label }
+        })?;
+        for port in instance.entries.clone() {
+            for &entry in &body.start_states { graph.add_epsilon(port, entry, Weight::all()); }
         }
-        for port in instance.entries.clone() {for &entry in source.start_states() {
-            graph.add_epsilon(port,offset+entry,Weight::all());
-        }}
         edges=next_edges;
     }
     let mut profile=FiniteTemplateProgramProfile{input_states:graph.states().len(),input_edges:edges,
@@ -419,6 +389,7 @@ fn normalize_finite_template_program_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+use super::finite_signed_graph::TemplateTopology;
 
     #[test]
     fn classed_compact_finite_program_keeps_every_pop_and_certified_context() {
@@ -426,7 +397,7 @@ mod tests {
         let class=classes.intern_scoped_complement(2..5,[3]).unwrap().unwrap();
         let mut template=NWA::from_parts(vec![Default::default();2],vec![0]);
         template.add_transition(0,8,1,Weight::all());template.set_final_weight(1,Weight::all());
-        let refs=[&template];
+        let topology=TemplateTopology::from_weighted_skeleton(&template);let refs=[&topology];
         let coefficient=Weight::from_uniform(0..=0,std::iter::once(0u32).collect());
         let coefficients=[Weight::all(),coefficient];
         let mut finals=vec![None;4098];finals[4097]=Some(1);
@@ -482,7 +453,7 @@ mod tests {
             let template = program.templates[instance.template];
             let weight = &program.coefficients[instance.coefficient];
             let offset = result.states().len();
-            let body = result.append_with_body(template);
+            let body = result.append_with_body(&template.to_weighted_skeleton());
             for q in offset..result.states().len() {
                 let row = &mut result.states_mut()[q];
                 for (_, w) in row.epsilons.iter_mut().chain(row.transitions.values_mut().flatten()) { *w = weight.clone(); }
@@ -515,7 +486,8 @@ mod tests {
                 }
                 templates.push(t);
             }
-            let refs = templates.iter().collect::<Vec<_>>();
+            let topologies = templates.iter().map(TemplateTopology::from_weighted_skeleton).collect::<Vec<_>>();
+            let refs = topologies.iter().collect::<Vec<_>>();
             let coefficients = [Weight::all(), Weight::from_token_set_for_tsid(0, [1,3,7].into_iter().collect())];
             let finals = [None, None, Some(1)];
             let instances = [FiniteTemplateInstance { template: 0, coefficient: 1, continuation: 1, entries: 0..1 },
@@ -538,7 +510,7 @@ mod tests {
     #[test]
     fn direct_template_program_declines_cycles_bad_ports_and_limits() {
         let mut t = NWA::new(0, 0); t.add_state(); t.set_start_states(vec![0]); t.set_final_weight(0, Weight::all());
-        let coefficients = [Weight::all()]; let refs = [&t]; let finals = [None];
+        let topology = TemplateTopology::from_weighted_skeleton(&t); let coefficients = [Weight::all()]; let refs = [&topology]; let finals = [None];
         let instances = [FiniteTemplateInstance { template: 0, coefficient: 0, continuation: 0, entries: 0..1 }];
         let p = FiniteTemplateProgram { templates: &refs, coefficients: &coefficients, port_finals: &finals,
             starts: &[0], instances: &instances };

@@ -18,7 +18,7 @@ pub(super) fn compile(
     if ports > 200_000 { return None; }
     let template_ids = library.templates.keys().enumerate()
         .map(|(i, &t)| (t, i)).collect::<BTreeMap<_, _>>();
-    let templates = library.templates.values().collect::<Vec<_>>();
+    let templates = library.templates.values().map(std::sync::Arc::as_ref).collect::<Vec<_>>();
     let mut coefficients = vec![Weight::all()];
     let mut indices = rustc_hash::FxHashMap::default(); indices.insert(coefficients[0].ptr_key(), 0);
     let mut weight_id = |weight: &Weight| -> usize {
@@ -36,7 +36,7 @@ pub(super) fn compile(
             if label < 0 || target as usize >= lexical.states().len() { return None; }
             if weight.is_empty() { continue; }
             let template = *template_ids.get(&(label as u32))?;
-            estimated_states = estimated_states.checked_add(templates[template].states().len())?;
+            estimated_states = estimated_states.checked_add(templates[template].state_count())?;
             instances.push(FiniteTemplateInstance {
                 template, coefficient: weight_id(weight), continuation: target * depths as u32,
                 entries: (q * depths) as u32..((q + 1) * depths) as u32,
@@ -48,7 +48,7 @@ pub(super) fn compile(
             for link in 0..context.links.len() {
                 for key in [library.entry_keys[link], library.finish_keys[link]] {
                     let template = *template_ids.get(&key)?;
-                    estimated_states = estimated_states.checked_add(templates[template].states().len())?;
+                    estimated_states = estimated_states.checked_add(templates[template].state_count())?;
                     let source = (q * depths + depth) as u32;
                     instances.push(FiniteTemplateInstance { template, coefficient: 0,
                         continuation: source + 1, entries: source..source + 1 });
@@ -70,9 +70,8 @@ pub(super) fn compile(
             let kind = if library.entry_keys.contains(&key) { "entry" }
                 else if library.finish_keys.contains(&key) { "finish" } else { "ordinary" };
             let template = templates[id];
-            let states = template.states().len();
-            let edges = template.states().iter().map(|row|
-                row.epsilons.len() + row.transitions.values().map(Vec::len).sum::<usize>()).sum::<usize>();
+            let states = template.state_count();
+            let edges = template.edge_count();
             let copies = counts[id];
             let group = groups.entry(kind).or_default();
             group.0 += usize::from(copies != 0);
@@ -105,7 +104,7 @@ pub(super) fn compile(
                 let original=library.templates.get(&key)?;
                 let reduced=library.diagnostic_dfas.as_ref().and_then(|dfas| dfas.get(&key))
                     .and_then(|dfa|admission::project(dfa,context.total_scoped_states));
-                let before=original.states().len();
+                let before=original.state_count();
                 let after=reduced.as_ref().map_or(before,|dfa|dfa.states.len());
                 originals+=before*copies;projected+=after*copies;
                 records.push(((before.saturating_sub(after))*copies,key,copies,before,after,reduced.is_some()));

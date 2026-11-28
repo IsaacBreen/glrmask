@@ -203,7 +203,7 @@ mod tests {
         let view = view();
         let (mut queries, classes) = crate::template_parser::static_compile::prepare_scoped_boundary_programs(
             std::slice::from_ref(&view), 104, &std::collections::BTreeSet::from([0])).unwrap();
-        let mut query = queries.remove(&0).unwrap();
+        let mut query = queries.remove(&0).unwrap().to_weighted_skeleton();
         glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa_with_pop_classes(
             &mut query, &classes).unwrap();
         let predicate = classes.compile_positive(query, 65536).unwrap();

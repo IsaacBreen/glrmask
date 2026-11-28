@@ -203,12 +203,195 @@ pub(super) fn topological_order<G:SignedGraph+?Sized>(graph:&G)->Option<Vec<u32>
     (order.len()==n).then_some(order)
 }
 
-struct TemplateRow {epsilons:Range<usize>,transitions:Range<usize>,present_final:bool}
-struct TemplateTransition {label:i32,targets:Range<usize>}
-struct TemplateTopology {
-    rows:Vec<TemplateRow>,epsilons:Vec<u32>,transitions:Vec<TemplateTransition>,targets:Vec<u32>,
-    starts:Vec<u32>,logical_edges:usize,
+#[derive(Clone, Debug)]
+struct TemplateRow {
+    epsilons: Range<usize>,
+    transitions: Range<usize>,
+    present_final: bool,
 }
+
+#[derive(Clone, Debug)]
+pub(super) struct TemplateTransition {
+    label: i32,
+    targets: Range<usize>,
+}
+
+/// A reusable signed action-word topology. Coefficients belong to instances,
+/// not to its edges; an accepting state denotes a continuation port.
+#[derive(Clone, Debug)]
+pub struct TemplateTopology {
+    rows: Vec<TemplateRow>,
+    epsilons: Vec<u32>,
+    transitions: Vec<TemplateTransition>,
+    targets: Vec<u32>,
+    starts: Vec<u32>,
+    logical_edges: usize,
+}
+
+pub(super) struct TemplateRowRef<'a> {
+    pub epsilons: &'a [u32],
+    pub transitions: &'a [TemplateTransition],
+    targets: &'a [u32],
+    pub present_final: bool,
+}
+
+impl TemplateRowRef<'_> {
+    pub fn edges(&self) -> impl Iterator<Item = (i32, &[u32])> + '_ {
+        self.transitions.iter().map(|edge| (edge.label, &self.targets[edge.targets.clone()]))
+    }
+}
+
+impl TemplateTopology {
+    fn new(starts: Vec<u32>, rows: usize) -> Self {
+        Self { rows: Vec::with_capacity(rows), epsilons: Vec::new(), transitions: Vec::new(),
+            targets: Vec::new(), starts, logical_edges: 0 }
+    }
+
+    fn push_row<I, J>(&mut self, final_state: bool, epsilons: impl IntoIterator<Item = u32>, edges: I)
+    where I: IntoIterator<Item = (i32, J)>, J: IntoIterator<Item = u32> {
+        let eps = self.epsilons.len();
+        self.epsilons.extend(epsilons);
+        let transitions = self.transitions.len();
+        let branches = self.targets.len();
+        for (label, targets) in edges {
+            let start = self.targets.len();
+            self.targets.extend(targets);
+            self.transitions.push(TemplateTransition { label, targets: start..self.targets.len() });
+        }
+        self.logical_edges += self.epsilons.len() - eps + self.targets.len() - branches
+            + usize::from(final_state);
+        self.rows.push(TemplateRow { epsilons: eps..self.epsilons.len(),
+            transitions: transitions..self.transitions.len(), present_final: final_state });
+    }
+
+    pub fn from_dfa(source: &UnweightedDfa) -> Self {
+        let mut graph = Self::new(vec![source.start_state], source.states.len());
+        for row in &source.states {
+            graph.push_row(row.is_accepting, std::iter::empty(), row.transitions.iter()
+                .map(|(&label, &target)| (label, std::iter::once(target))));
+        }
+        graph
+    }
+
+    pub fn from_nfa(source: &crate::automata::unweighted_u32::nfa::NFA) -> Self {
+        let mut graph = Self::new(source.start_states.clone(), source.states.len());
+        for row in &source.states {
+            graph.push_row(row.is_accepting, row.epsilons.iter().copied(), row.transitions.iter()
+                .map(|(&label, targets)| (label, targets.iter().copied())));
+        }
+        graph
+    }
+
+    /// Compatibility with expanded reference fixtures: all edge weights and
+    /// final values are intentionally ignored, but empty label keys remain.
+    pub fn from_weighted_skeleton(source: &NWA) -> Self {
+        let mut graph = Self::new(source.start_states().to_vec(), source.states().len());
+        for row in source.states() {
+            graph.push_row(row.final_weight.is_some(), row.epsilons.iter().map(|&(q, _)| q),
+                row.transitions.iter().map(|(&label, edges)| (label, edges.iter().map(|&(q, _)| q))));
+        }
+        graph
+    }
+
+    #[inline]
+    pub fn state_count(&self) -> usize { self.rows.len() }
+    pub fn edge_count(&self) -> usize { self.epsilons.len() + self.targets.len() }
+    pub fn start_states(&self) -> &[u32] { &self.starts }
+    pub(super) fn logical_edges(&self) -> usize { self.logical_edges }
+
+    pub(super) fn row(&self, index: usize) -> TemplateRowRef<'_> {
+        let row = &self.rows[index];
+        TemplateRowRef { epsilons: &self.epsilons[row.epsilons.clone()],
+            transitions: &self.transitions[row.transitions.clone()], targets: &self.targets,
+            present_final: row.present_final }
+    }
+
+    fn valid_coordinates(&self) -> bool {
+        let n = self.state_count();
+        self.starts.iter().chain(&self.epsilons).chain(&self.targets).all(|&q| (q as usize) < n)
+    }
+
+    pub(super) fn valid_alphabet(&self, alphabet: u32) -> bool {
+        self.valid_coordinates() && self.transitions.iter().all(|edge| {
+            let label = edge.label;
+            label == DEFAULT_LABEL || (0..alphabet as i32).contains(&label)
+                || (is_negative_label(label) && (0..alphabet as i32).contains(&negative_to_positive_label(label)))
+        })
+    }
+
+    pub fn is_acyclic(&self) -> bool {
+        if !self.valid_coordinates() { return false; }
+        let mut indegree = vec![0usize; self.state_count()];
+        for &target in self.epsilons.iter().chain(&self.targets) {
+            indegree[target as usize] += 1;
+        }
+        let mut queue = indegree.iter().enumerate().filter(|(_, degree)| **degree == 0)
+            .map(|(q, _)| q).collect::<VecDeque<_>>();
+        let mut visited = 0;
+        while let Some(q) = queue.pop_front() {
+            visited += 1;
+            let row = self.row(q);
+            for &target in row.epsilons.iter().chain(row.edges().flat_map(|(_, targets)| targets.iter())) {
+                indegree[target as usize] -= 1;
+                if indegree[target as usize] == 0 { queue.push_back(target as usize); }
+            }
+        }
+        visited == self.state_count()
+    }
+
+    /// An injective change of label coordinate, not an alphabet quotient.
+    pub fn remap_labels(&mut self, mut map: impl FnMut(i32) -> Option<i32>) -> Option<()> {
+        for row in &self.rows {
+            let edges = &mut self.transitions[row.transitions.clone()];
+            for edge in edges.iter_mut() { edge.label = map(edge.label)?; }
+            edges.sort_unstable_by_key(|edge| edge.label);
+            if edges.windows(2).any(|pair| pair[0].label == pair[1].label) { return None; }
+        }
+        Some(())
+    }
+
+    pub(super) fn append_mapped(&self, arena: &mut NWA, weight: &Weight, continuation: Option<u32>,
+        mut map: impl FnMut(i32) -> i32) -> Result<NwaBody, String> {
+        let offset = arena.states().len();
+        if offset.checked_add(self.state_count()).is_none_or(|n| n > u32::MAX as usize)
+            || continuation.is_some_and(|q| q as usize >= offset)
+            || !self.valid_coordinates() {
+            return Err("invalid or overflowing signed template coordinate".into());
+        }
+        let offset = offset as u32;
+        let states = arena.states_mut();
+        states.reserve(self.state_count());
+        for q in 0..self.state_count() {
+            let row = self.row(q);
+            let mut epsilons = row.epsilons.iter().map(|&q| (offset + q, weight.clone())).collect::<Vec<_>>();
+            let final_weight = if row.present_final {
+                if let Some(target) = continuation {
+                    epsilons.push((target, weight.clone()));
+                    None
+                } else { Some(weight.clone()) }
+            } else { None };
+            let transitions = row.edges().map(|(label, targets)| (map(label),
+                targets.iter().map(|&q| (offset + q, weight.clone())).collect())).collect();
+            states.push(NWAState { epsilons, transitions, final_weight });
+        }
+        Ok(NwaBody { start_states: self.starts.iter().map(|&q| offset + q).collect() })
+    }
+
+    /// Expand only at the range-weight fallback/reference boundary.
+    pub fn append_weighted(&self, arena: &mut NWA, weight: &Weight, continuation: u32)
+        -> Result<NwaBody, String> {
+        self.append_mapped(arena, weight, Some(continuation), |label| label)
+    }
+
+    pub fn to_weighted_skeleton(&self) -> NWA {
+        let mut graph = NWA::new(0, 0);
+        let body = self.append_mapped(&mut graph, &Weight::all(), None, |label| label)
+            .expect("valid template topology");
+        graph.set_start_states(body.start_states);
+        graph
+    }
+}
+
 struct Instance {template:usize,base:u32,coefficient:u32,continuation:u32}
 
 #[derive(Debug,Default)]
@@ -242,9 +425,9 @@ pub(super) struct PositiveMaterialization {
     pub profile:VirtualResolveProfile,
 }
 
-pub(super) struct VirtualSignedGraph {
+pub(super) struct VirtualSignedGraph<'a> {
     alphabet:u32,
-    templates:Vec<TemplateTopology>,instances:Vec<Instance>,ports:Vec<FastBoundaryNwaState>,
+    templates:&'a [&'a TemplateTopology],instances:Vec<Instance>,ports:Vec<FastBoundaryNwaState>,
     node_instance:Vec<u32>,
     pop_classes:Option<crate::pop_classes::PopLabelClasses>,
     class_reads:Vec<i32>,
@@ -299,8 +482,8 @@ impl SignedRow for VirtualRow<'_> {
     }
 }
 
-impl SignedGraph for VirtualSignedGraph {
-    type Row<'a>=VirtualRow<'a>;
+impl SignedGraph for VirtualSignedGraph<'_> {
+    type Row<'a>=VirtualRow<'a> where Self:'a;
     #[inline] fn len(&self)->usize {self.node_instance.len()}
     fn class_read_labels(&self)->&[i32] { &self.class_reads }
     fn class_read_matches(&self,label:i32,symbol:i32)->bool {
@@ -323,76 +506,41 @@ impl SignedGraph for VirtualSignedGraph {
     }
 }
 
-impl VirtualSignedGraph {
-    pub fn build_with_pop_classes(program:&FiniteTemplateProgram<'_>,alphabet:u32,
+impl<'a> VirtualSignedGraph<'a> {
+    pub fn build_with_pop_classes(program:&FiniteTemplateProgram<'a>,alphabet:u32,
         pool:&mut FastBoundaryWeightInterner,limits:FiniteCompileLimits,
         classes:&crate::pop_classes::PopLabelClasses,
     )->Option<(Self,Vec<u32>)> {
         if classes.symbol_count().checked_add(classes.len() as u32)? != alphabet {return None;}
         // PUSH is always a concrete stack symbol, never an opaque class.
-        if program.templates.iter().flat_map(|graph| graph.states()).any(|row|
-            row.transitions.keys().any(|&label| is_negative_label(label)
-                && negative_to_positive_label(label) as u32 >= classes.symbol_count())) {return None;}
+        if program.templates.iter().flat_map(|graph| &graph.transitions).any(|edge|
+            is_negative_label(edge.label)
+                && negative_to_positive_label(edge.label) as u32 >= classes.symbol_count()) {return None;}
         let(mut graph,order)=Self::build(program,alphabet,pool,limits)?;
         graph.class_reads=(classes.symbol_count()..alphabet).map(|label|label as i32).collect();
         graph.pop_classes=Some(classes.clone());
         Some((graph,order))
     }
 
-    pub fn build(program:&FiniteTemplateProgram<'_>,alphabet:u32,
+    pub fn build(program:&FiniteTemplateProgram<'a>,alphabet:u32,
         pool:&mut FastBoundaryWeightInterner,limits:FiniteCompileLimits,
     )->Option<(Self,Vec<u32>)> {
         let ports=program.port_finals.len();
         if ports==0 || ports>limits.states || alphabet==0 || alphabet as usize>limits.states
             || alphabet>=DEFAULT_LABEL as u32 || program.starts.iter().any(|&q|q as usize>=ports)
             || program.coefficients.len()>limits.weights {return None;}
-        let mut templates=Vec::with_capacity(program.templates.len());
-        // Also bound topology retained for unused templates. The instantiated
-        // graph budget alone does not bound this additional private storage.
-        let mut stored_rows=0usize;
-        let mut stored_entries=0usize;
-        for source in program.templates {
-            let n=source.states().len();
-            if n==0 || n>limits.states || source.start_states().iter().any(|&q|q as usize>=n){return None;}
-            stored_rows=stored_rows.checked_add(n)?;
-            if stored_rows>limits.states{return None;}
-            let mut template=TemplateTopology{rows:Vec::with_capacity(n),epsilons:Vec::new(),transitions:Vec::new(),
-                targets:Vec::new(),starts:source.start_states().to_vec(),logical_edges:0};
-            for row in source.states() {
-                let row_entries=row.epsilons.len().checked_add(row.transitions.len())?
-                    .checked_add(usize::from(row.final_weight.is_some()))?;
-                stored_entries=stored_entries.checked_add(row_entries)?;
-                for branches in row.transitions.values(){
-                    stored_entries=stored_entries.checked_add(branches.len())?;
-                }
-                if stored_entries>limits.edges{return None;}
-                let eps=template.epsilons.len();
-                for &(target,_) in &row.epsilons {
-                    if target as usize>=n{return None;}
-                    template.epsilons.push(target);
-                }
-                let transitions=template.transitions.len();
-                let mut prior=None;
-                for (&label,branches) in &row.transitions {
-                    let valid=label==DEFAULT_LABEL || (0..alphabet as i32).contains(&label)
-                        || (is_negative_label(label) && (0..alphabet as i32).contains(&negative_to_positive_label(label)));
-                    if !valid || prior.is_some_and(|p|p>=label){return None;}
-                    prior=Some(label);
-                    let start=template.targets.len();
-                    for &(target,_) in branches {
-                        if target as usize>=n{return None;}
-                        template.targets.push(target);
-                    }
-                    template.transitions.push(TemplateTransition{label,targets:start..template.targets.len()});
-                }
-                template.logical_edges=template.logical_edges.checked_add(row.epsilons.len())?
-                    .checked_add(usize::from(row.final_weight.is_some()))?
-                    .checked_add(row.transitions.values().map(|branches|branches.len()).sum::<usize>())?;
-                if template.logical_edges>limits.edges{return None;}
-                template.rows.push(TemplateRow{epsilons:eps..template.epsilons.len(),
-                    transitions:transitions..template.transitions.len(),present_final:row.final_weight.is_some()});
-            }
-            templates.push(template);
+        let templates = program.templates;
+        // Validate even unused topology. Borrow immutable rows instead of
+        // recoding each template for every lexical shard.
+        let mut stored_rows = 0usize;
+        let mut stored_entries = 0usize;
+        for source in templates {
+            let n = source.state_count();
+            if n == 0 || n > limits.states || !source.valid_alphabet(alphabet) { return None; }
+            stored_rows = stored_rows.checked_add(n)?;
+            stored_entries = stored_entries.checked_add(source.logical_edges)?
+                .checked_add(source.transitions.len())?;
+            if stored_rows > limits.states || stored_entries > limits.edges { return None; }
         }
         let mut total_states=ports;let mut total_edges=0usize;
         for instance in program.instances {
@@ -766,7 +914,7 @@ mod tests {
                     (label,edges)
                 }).collect();
             }
-            let refs=[&dense];let coefficients=[Weight::all()];let finals=[None,Some(0)];
+            let topology=TemplateTopology::from_weighted_skeleton(&dense);let refs=[&topology];let coefficients=[Weight::all()];let finals=[None,Some(0)];
             let instances=[FiniteTemplateInstance{template:0,coefficient:0,continuation:1,entries:0..1}];
             let program=FiniteTemplateProgram{templates:&refs,coefficients:&coefficients,port_finals:&finals,
                 starts:&[0],instances:&instances};
@@ -822,7 +970,8 @@ mod tests {
                 }
                 templates.push(t);
             }
-            let refs=templates.iter().collect::<Vec<_>>();
+            let topologies=templates.iter().map(TemplateTopology::from_weighted_skeleton).collect::<Vec<_>>();
+            let refs=topologies.iter().collect::<Vec<_>>();
             let coefficients=[Weight::all(),Weight::from_token_set_for_tsid(0,[1,3,7].into_iter().collect()),Weight::empty()];
             let finals=[None,None,Some(1)];
             let instances=(0..3).map(|i|FiniteTemplateInstance{template:i,coefficient:(case+i)%3,
@@ -954,7 +1103,7 @@ mod tests {
     #[test]
     fn virtual_graph_rejects_cycles_bad_ports_and_budgets() {
         let mut t=NWA::new(0,0);t.add_state();t.set_start_states(vec![0]);t.set_final_weight(0,Weight::all());
-        let coefficients=[Weight::all()];let refs=[&t];let finals=[None];
+        let topology=TemplateTopology::from_weighted_skeleton(&t);let coefficients=[Weight::all()];let refs=[&topology];let finals=[None];
         let instances=[FiniteTemplateInstance{template:0,coefficient:0,continuation:0,entries:0..1}];
         let p=FiniteTemplateProgram{templates:&refs,coefficients:&coefficients,port_finals:&finals,starts:&[0],instances:&instances};
         let mut pool=FastBoundaryWeightInterner::new(1,64).unwrap();
@@ -976,7 +1125,7 @@ mod tests {
         template.add_transition(1,1,2,Weight::all());
         template.add_transition(2,0,3,Weight::all());
         template.states_mut()[1].transitions.entry(2).or_default();
-        let refs=[&template];
+        let template=TemplateTopology::from_weighted_skeleton(&template);let refs=[&template];
         let coefficients=[Weight::empty(),Weight::from_token_set_for_tsid(0,[2,5].into_iter().collect())];
         let finals=[None,None,Some(1)];
         let instances=(0..3).map(|i|FiniteTemplateInstance{template:0,coefficient:i%2,

@@ -734,34 +734,33 @@ impl CompactDomain {
     /// already existentially eliminated by domain preparation.
     pub fn scoped_prefix_program(&self,offset:u32,symbols:u32,guard_owner:bool,
         classes:&mut crate::pop_classes::PopLabelClasses,
-    )->Result<crate::automata::weighted::nwa::NWA,String> {
-        use crate::automata::weighted::nwa::{NWA,NWAState};
-        use crate::ds::weight::Weight;
+    )->Result<crate::automata::unweighted_u32::nfa::NFA,String> {
+        use crate::automata::unweighted_u32::nfa::{NFA,NFAState};
         let end=offset.checked_add(symbols).filter(|&end|end<=classes.symbol_count())
             .ok_or("admission program component range overflow")?;
         let dead=u32::try_from(self.states.len()).map_err(|_|"admission graph too large")?;
         let target=|q:u32| if q==REJECT {dead} else {q};
-        let mut states=vec![NWAState::default();self.states.len()+1];
+        let mut states=vec![NFAState::default();self.states.len()+1];
         for (q,row) in self.states.iter().enumerate() {
-            if row.accepting() {states[q].final_weight=Some(Weight::all());continue;}
+            if row.accepting() {states[q].is_accepting=true;continue;}
             let edges=DomainState::edges(&self.states,&self.edges,q);
             for &(label,next) in edges {
                 if label>=symbols {return Err("admission literal outside its component".into());}
-                states[q].transitions.insert((offset+label) as i32,vec![(target(next),Weight::all())]);
+                states[q].transitions.insert((offset+label) as i32,vec![target(next)]);
             }
             if row.default_target!=REJECT
                 && let Some(label)=classes.intern_scoped_complement(offset..end,
                     edges.iter().map(|&(label,_)|offset+label))? {
-                    states[q].transitions.insert(label,vec![(target(row.default_target),Weight::all())]);
+                    states[q].transitions.insert(label,vec![target(row.default_target)]);
                 }
         }
-        let mut graph=NWA::from_parts(states,vec![target(self.start)]);
+        let mut graph=NFA { states, start_states: vec![target(self.start)] };
         if guard_owner && self.start()==DomainProbe::Accept {
             let start=graph.add_state();
             if let Some(label)=classes.intern_scoped_complement(offset..end,[])? {
-                graph.add_transition(start,label,target(self.start),Weight::all());
+                graph.add_transition(start,label,target(self.start));
             }
-            graph.set_start_states(vec![start]);
+            graph.start_states=vec![start];
         }
         Ok(graph)
     }
@@ -987,7 +986,7 @@ impl TemplateDomain {
     /// build it at that boundary, not for every native runtime terminal.
     pub fn scoped_prefix_program(&self, offset: u32, symbols: u32, guard_owner: bool,
         classes: &mut crate::pop_classes::PopLabelClasses,
-    ) -> Result<crate::automata::weighted::nwa::NWA, String> {
+    ) -> Result<crate::automata::unweighted_u32::nfa::NFA, String> {
         match &self.0 {
             DomainRepresentation::Compact(domain) => domain.scoped_prefix_program(offset, symbols, guard_owner, classes),
             DomainRepresentation::Source(root) => CompactDomain::compile(&root.source)?

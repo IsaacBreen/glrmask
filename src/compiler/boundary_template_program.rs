@@ -4,6 +4,8 @@
 //! weights. A bounded control certificate supplies the zero-width gap depth.
 //! No LR table, parser action row, or grammar production is consulted here.
 use super::*;
+use std::sync::Arc;
+type TemplateInventory = BTreeMap<u32, Arc<TemplateTopology>>;
 
 fn minimize_symbolic_class_boundary(graph: DWA) -> DWA {
     if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_FINITE_ATOM_MINIMIZE")
@@ -66,7 +68,7 @@ fn restore_finite_pop_defaults(
 
 #[cfg(test)]
 fn compile_compact_classed(
-    templates:&BTreeMap<u32,NWA>,admissions:Option<&BTreeMap<u32,NWA>>,controls:&[u32],
+    templates:&TemplateInventory,admissions:Option<&TemplateInventory>,controls:&[u32],
     max_controls:u32,lexical:&DWA,classes:&glrmask_parser_dwa::__private::pop_classes::PopLabelClasses,
     context:Option<&crate::compiler::stages::parser_dwa::FiniteParserReadSupport>,
 )->Option<SignedShardOutput> {
@@ -77,40 +79,41 @@ fn compile_compact_classed(
 /// shards of one link. It contains no coefficients or assembled parser query.
 pub(crate) struct PreparedClassedPrograms {
     ids: BTreeMap<(bool,u32),usize>,
-    templates: Vec<NWA>,
+    templates: Vec<Arc<TemplateTopology>>,
 }
 
 pub(crate) fn prepare_classed_programs(
-    templates:&BTreeMap<u32,NWA>,admissions:Option<&BTreeMap<u32,NWA>>,
+    templates:&TemplateInventory,admissions:Option<&TemplateInventory>,
     classes:&glrmask_parser_dwa::__private::pop_classes::PopLabelClasses,
 )->Option<PreparedClassedPrograms> {
-    use crate::automata::weighted_u32::nwa::NWAState;
-    let mut ids=BTreeMap::new(); let mut dense_templates=Vec::new();
-    for (admission,inventory) in std::iter::once((false,templates)).chain(admissions.map(|a|(true,a))) {
-        for (&terminal,source) in inventory {
-            let mut states=Vec::with_capacity(source.states().len());
-            for row in source.states() {
-                let mut mapped=BTreeMap::new();
-                for (&label,edges) in &row.transitions {
-                    let label=if label>=classes.symbol_count() as i32 {
-                        let index=crate::compiler::glr::labels::DEFAULT_LABEL.checked_sub(1)?.checked_sub(label)?;
-                        if index<0 || index as usize>=classes.len() {return None;}
-                        classes.symbol_count() as i32+index
-                    } else {label};
-                    mapped.insert(label,edges.clone());
-                }
-                states.push(NWAState { final_weight:row.final_weight.clone(),
-                    transitions:mapped,epsilons:row.epsilons.clone() });
-            }
-            let dense=NWA::from_parts(states,source.start_states().to_vec());
-            ids.insert((admission,terminal),dense_templates.len()); dense_templates.push(dense);
+    let mut ids = BTreeMap::new();
+    let mut dense_templates = Vec::<Arc<TemplateTopology>>::new();
+    let mut by_source = rustc_hash::FxHashMap::<usize, usize>::default();
+    for (admission, inventory) in std::iter::once((false, templates)).chain(admissions.map(|a| (true, a))) {
+        for (&terminal, source) in inventory {
+            let identity = Arc::as_ptr(source) as usize;
+            let index = if let Some(&index) = by_source.get(&identity) { index } else {
+                let mut dense = (**source).clone();
+                dense.remap_labels(|label| {
+                    if label >= classes.symbol_count() as i32 {
+                        let index = crate::compiler::glr::labels::DEFAULT_LABEL.checked_sub(1)?.checked_sub(label)?;
+                        if index < 0 || index as usize >= classes.len() { return None; }
+                        Some(classes.symbol_count() as i32 + index)
+                    } else { Some(label) }
+                })?;
+                let index = dense_templates.len();
+                dense_templates.push(Arc::new(dense));
+                by_source.insert(identity, index);
+                index
+            };
+            ids.insert((admission, terminal), index);
         }
     }
     Some(PreparedClassedPrograms { ids,templates:dense_templates })
 }
 
 fn compile_shared_classed(
-    templates:&BTreeMap<u32,NWA>,admissions:Option<&BTreeMap<u32,NWA>>,controls:&[u32],
+    templates:&TemplateInventory,admissions:Option<&TemplateInventory>,controls:&[u32],
     max_controls:Option<u32>,lexical:&DWA,classes:&glrmask_parser_dwa::__private::pop_classes::PopLabelClasses,
     context:Option<&crate::compiler::stages::parser_dwa::FiniteParserReadSupport>,
 )->Option<SignedShardOutput> {
@@ -118,7 +121,7 @@ fn compile_shared_classed(
 }
 
 fn compile_shared_classed_prepared(
-    templates:&BTreeMap<u32,NWA>,admissions:Option<&BTreeMap<u32,NWA>>,controls:&[u32],
+    templates:&TemplateInventory,admissions:Option<&TemplateInventory>,controls:&[u32],
     max_controls:Option<u32>,lexical:&DWA,classes:&glrmask_parser_dwa::__private::pop_classes::PopLabelClasses,
     context:Option<&crate::compiler::stages::parser_dwa::FiniteParserReadSupport>,
     prepared:Option<&PreparedClassedPrograms>,
@@ -151,8 +154,8 @@ fn compile_shared_classed_prepared(
     if admissions.is_some() {finals[ports]=Some(weight_id(&domain));}
     let mut instances=Vec::new();let mut estimated_states=finals.len();let mut estimated_edges=0usize;
     let mut add=|template:usize,coefficient:usize,continuation:u32,entries:std::ops::Range<u32>|->Option<()> {
-        estimated_states=estimated_states.checked_add(dense_templates[template].states().len())?;
-        estimated_edges=estimated_edges.checked_add(dense_templates[template].num_transitions())?;
+        estimated_states=estimated_states.checked_add(dense_templates[template].state_count())?;
+        estimated_edges=estimated_edges.checked_add(dense_templates[template].edge_count())?;
         instances.push(FiniteTemplateInstance{template,coefficient,continuation,entries});Some(())
     };
     for (q,row) in lexical.states().iter().enumerate() {
@@ -184,7 +187,7 @@ fn compile_shared_classed_prepared(
         if profiling {eprintln!("[glrmask/profile][native_compact_template_program] selected=false stage=instance_budget");} return None;
     }
     if max_controls.is_none() {
-        let refs=dense_templates.iter().collect::<Vec<_>>();let starts=[lexical.start_state()*depths as u32];
+        let refs=dense_templates.iter().map(Arc::as_ref).collect::<Vec<_>>();let starts=[lexical.start_state()*depths as u32];
         let program=FiniteTemplateProgram{templates:&refs,coefficients:&coefficients,port_finals:&finals,
             starts:&starts,instances:&instances};
         let prepare_ms=started.elapsed().as_secs_f64()*1000.0;
@@ -203,7 +206,7 @@ fn compile_shared_classed_prepared(
         if profiling {eprintln!("[glrmask/profile][native_compact_template_program] selected=false stage=atom_decoder");}None
     })?;
     let encoded=coefficients.iter().map(|weight|quotient.encode(weight)).collect::<Option<Vec<_>>>()?;
-    let refs=dense_templates.iter().collect::<Vec<_>>();let starts=[lexical.start_state()*depths as u32];
+    let refs=dense_templates.iter().map(Arc::as_ref).collect::<Vec<_>>();let starts=[lexical.start_state()*depths as u32];
     let program=FiniteTemplateProgram{templates:&refs,coefficients:&encoded,port_finals:&finals,
         starts:&starts,instances:&instances};
     let prepare_ms=started.elapsed().as_secs_f64()*1000.0;
@@ -226,7 +229,7 @@ fn compile_shared_classed_prepared(
 }
 
 pub(super) fn assemble(
-    templates: &BTreeMap<u32, NWA>,
+    templates: &TemplateInventory,
     controls: &[u32],
     max_controls_per_gap: u32,
     lexical: &DWA,
@@ -236,12 +239,12 @@ pub(super) fn assemble(
 }
 
 fn assemble_impl(
-    templates: &BTreeMap<u32, NWA>,
+    templates: &TemplateInventory,
     controls: &[u32],
     bounded_depth: Option<u32>,
     lexical: &DWA,
     state_budget: Option<usize>,
-    admissions: Option<&BTreeMap<u32,NWA>>,
+    admissions: Option<&TemplateInventory>,
 ) -> Result<(NWA, usize, usize), String> {
     let depths = match bounded_depth {
         Some(depth) => usize::try_from(depth).ok().and_then(|n| n.checked_add(1))
@@ -291,9 +294,9 @@ fn assemble_impl(
                     .is_some_and(|final_weight|weight.is_subset(final_weight)) {
                     let template=admissions.get(&(terminal as u32))
                         .ok_or_else(||format!("static query has no admission for terminal {terminal}"))?;
-                    check_growth(arena.states().len(),template.states().len())?;
-                    let body=append_weighted_fragment(&mut arena,template,weight,sink)?;
-                    ordinary_states+=template.states().len();
+                    check_growth(arena.states().len(),template.state_count())?;
+                    let body=template.append_weighted(&mut arena,weight,sink)?;
+                    ordinary_states+=template.state_count();
                     for depth in 0..depths {for &entry in &body.start_states {
                         arena.add_epsilon(ports[index*depths+depth],entry,Weight::all());
                     }}
@@ -303,9 +306,9 @@ fn assemble_impl(
                 .ok_or_else(|| format!("static query has no template for terminal {terminal}"))?;
             let continuation = *ports.get(target as usize * depths)
                 .ok_or("static lexical query edge leaves its graph")?;
-            check_growth(arena.states().len(), template.states().len())?;
-            let body = append_weighted_fragment(&mut arena, template, weight, continuation)?;
-            ordinary_states += template.states().len();
+            check_growth(arena.states().len(), template.state_count())?;
+            let body = template.append_weighted(&mut arena, weight, continuation)?;
+            ordinary_states += template.state_count();
             for depth in 0..depths {
                 for &entry in &body.start_states {
                     arena.add_epsilon(ports[index * depths + depth], entry, Weight::all());
@@ -319,10 +322,10 @@ fn assemble_impl(
             for &control in controls {
                 let template = templates.get(&control)
                     .ok_or_else(|| format!("static query has no template for control {control}"))?;
-                check_growth(arena.states().len(), template.states().len())?;
-                let body = append_weighted_fragment(&mut arena, template, &Weight::all(),
+                check_growth(arena.states().len(), template.state_count())?;
+                let body = template.append_weighted(&mut arena, &Weight::all(),
                     ports[index * depths + depth + 1])?;
-                control_states += template.states().len();
+                control_states += template.state_count();
                 for &entry in &body.start_states {
                     arena.add_epsilon(ports[index * depths + depth], entry, Weight::all());
                     if bounded_depth.is_none() {
@@ -335,31 +338,8 @@ fn assemble_impl(
     Ok((arena, ordinary_states, control_states))
 }
 
-/// Retired native expanded-builder entry. Every production native caller
-/// must use the shared template-program constructor below.
-pub(crate) fn compile(
-    _templates: &Templates,
-    _controls: &[u32],
-    _certificate: &ClosureCertificate,
-    _lexical: &DWA,
-    _symbol_count: u32,
-) -> Result<SignedShardOutput, String> {
-    panic!("obsolete expanded native parser-DWA builder; use the shared template-program constructor");
-}
-
-/// Retired native control-star builder entry. Cyclic controls use the exact
-/// fixed-point mode of the shared template-program constructor below.
-pub(crate) fn compile_saturated(
-    _templates: &Templates,
-    _controls: &[u32],
-    _lexical: &DWA,
-    _symbol_count: u32,
-) -> Result<SignedShardOutput, String> {
-    panic!("obsolete expanded native control-star builder; use the shared template-program constructor");
-}
-
 pub(crate) fn compile_classed(
-    templates: &BTreeMap<u32, NWA>,
+    templates: &TemplateInventory,
     controls: &[u32],
     certificate: Option<&ClosureCertificate>,
     lexical: &DWA,
@@ -372,7 +352,7 @@ pub(crate) fn compile_classed(
 }
 
 pub(crate) fn compile_classed_with_admissions(
-    templates:&BTreeMap<u32,NWA>,admissions:&BTreeMap<u32,NWA>,controls:&[u32],
+    templates:&TemplateInventory,admissions:&TemplateInventory,controls:&[u32],
     certificate:Option<&ClosureCertificate>,lexical:&DWA,
     classes:&glrmask_parser_dwa::__private::pop_classes::PopLabelClasses,
     read_context:Option<&crate::compiler::stages::parser_dwa::FiniteParserReadSupport>,
@@ -387,6 +367,8 @@ pub(crate) fn compile_classed_with_admissions(
 #[cfg(test)]
 mod budget_decline_tests {
     use super::*;
+use std::sync::Arc;
+type TemplateInventory = BTreeMap<u32, Arc<TemplateTopology>>;
     use glrmask_parser_dwa::__private::pop_classes::PopLabelClasses;
 
     #[test]
@@ -408,6 +390,12 @@ mod budget_decline_tests {
 #[cfg(test)]
 mod symbolic_class_tests {
     use super::*;
+use std::sync::Arc;
+type TemplateInventory = BTreeMap<u32, Arc<TemplateTopology>>;
+
+    fn topology(nwa: NWA) -> Arc<TemplateTopology> {
+        Arc::new(TemplateTopology::from_weighted_skeleton(&nwa))
+    }
 
     fn token_weight(tokens: &[u32]) -> Weight {
         Weight::from_uniform(0..=0,tokens.iter().copied().collect())
@@ -465,8 +453,8 @@ mod symbolic_class_tests {
         full.set_final_weight(2,Weight::all());
         let mut checker=NWA::from_parts(vec![Default::default();2],vec![0]);
         checker.add_transition(0,2,1,Weight::all());checker.set_final_weight(1,Weight::all());
-        let admissions=BTreeMap::from([(0,checker)]);
-        let templates=BTreeMap::from([(0,full)]);
+        let admissions=BTreeMap::from([(0,topology(checker))]);
+        let templates=BTreeMap::from([(0,topology(full))]);
         let (mixed,ordinary,_) = assemble_impl(&templates,&[],Some(0),&lexical,None,Some(&admissions)).unwrap();
         assert_eq!(ordinary,3,"partial overlap must instantiate exactly one full transfer");
         assert!(mixed.states().iter().any(|row|row.transitions.keys().any(|&label|label<0)));
@@ -496,7 +484,7 @@ mod symbolic_class_tests {
         checker.add_transition(0,1,1,Weight::all());checker.set_final_weight(1,Weight::all());
         let weight=token_weight(&[0]);let mut lexical=DWA::new(1,0);let end=lexical.add_state();
         lexical.add_transition(0,0,end,weight);lexical.set_final_weight(end,Weight::all());
-        let admissions=BTreeMap::from([(0,checker)]);
+        let admissions=BTreeMap::from([(0,topology(checker))]);
         let output=compile_compact_classed(&BTreeMap::new(),Some(&admissions),&[],0,&lexical,&classes,None)
             .expect("small class-aware programs use the same shared constructor");
         let (raw,_,_)=assemble_impl(&BTreeMap::new(),&[],Some(0),&lexical,None,Some(&admissions)).unwrap();
@@ -516,7 +504,7 @@ mod symbolic_class_tests {
         for q in 0..4096 {template.add_transition(q,class,q+1,Weight::all());}
         template.add_transition(4096,crate::compiler::glr::labels::encode_negative_label(3),4097,Weight::all());
         template.set_final_weight(4097,Weight::all());
-        let templates=BTreeMap::from([(0,template)]);
+        let templates=BTreeMap::from([(0,topology(template))]);
         let weight=token_weight(&[0]);let mut lexical=DWA::new(1,0);let end=lexical.add_state();
         lexical.add_transition(0,0,end,weight.clone());lexical.set_final_weight(end,weight);
         let candidate=compile_compact_classed(&templates,None,&[],0,&lexical,&classes,None)
@@ -544,7 +532,7 @@ mod symbolic_class_tests {
         terminal.set_final_weight(2,Weight::all());
         let mut checker=NWA::from_parts(vec![Default::default();2],vec![0]);
         checker.add_transition(0,1,1,Weight::all());checker.set_final_weight(1,Weight::all());
-        let templates=BTreeMap::from([(0,terminal),(1,control)]);let admissions=BTreeMap::from([(0,checker)]);
+        let templates=BTreeMap::from([(0,topology(terminal)),(1,topology(control))]);let admissions=BTreeMap::from([(0,topology(checker))]);
         let mut lexical=DWA::new(1,0);let end=lexical.add_state();
         lexical.add_transition(0,0,end,token_weight(&[0]));lexical.set_final_weight(end,Weight::all());
         let candidate=compile_shared_classed(&templates,Some(&admissions),&[1],None,&lexical,&classes,None).unwrap();
@@ -586,10 +574,12 @@ mod symbolic_class_tests {
         template.set_final_weight(2,Weight::all());
         let mut admission=NWA::from_parts(vec![Default::default();2],vec![0]);
         admission.add_transition(0,class,1,Weight::all()); admission.set_final_weight(1,Weight::all());
-        let templates=BTreeMap::from([(0,template)]); let admissions=BTreeMap::from([(0,admission)]);
+        let templates=BTreeMap::from([(0,topology(template))]); let admissions=BTreeMap::from([(0,topology(admission))]);
         let prepared=prepare_classed_programs(&templates,Some(&admissions),&classes).unwrap();
-        let snapshot=||prepared.templates.iter().map(|graph|
-            (graph.start_states().to_vec(),graph.states().to_vec())).collect::<Vec<_>>();
+        let snapshot=||prepared.templates.iter().map(|graph| {
+            let graph=graph.to_weighted_skeleton();
+            (graph.start_states().to_vec(),graph.states().to_vec())
+        }).collect::<Vec<_>>();
         let inventory_before=snapshot();
         for tokens in [&[0][..],&[1][..],&[0,1][..]] {
             let weight=token_weight(tokens); let mut lexical=DWA::new(1,0);

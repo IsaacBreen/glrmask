@@ -3722,6 +3722,7 @@ mod finite_weight_support;
 #[path="finite_requotient.rs"]
 mod finite_requotient;
 #[cfg(feature = "internal-api")]
+pub use finite_signed_graph::TemplateTopology;
 pub use finite_template_program::{FiniteTemplateInstance, FiniteTemplateProgram,
     FiniteTemplateProgramProfile, normalize_finite_template_program, normalize_finite_template_program_with_pop_classes,
     normalize_control_star_template_program_with_pop_classes};

@@ -51,7 +51,8 @@ use crate::automata::weighted_u32::minimize::reverse_hashcons_owned;
 use crate::automata::weighted_u32::minimize_acyclic::{
     PointwiseClassOrder, minimize_acyclic_owned_with_pointwise_class_order,
 };
-use crate::automata::weighted_u32::nwa::{NWA, NwaBody};
+use crate::automata::weighted_u32::nwa::NWA;
+use crate::compiler::stages::parser_dwa::TemplateTopology;
 use crate::compiler::constraint_compose::{
     BoundaryShardMetadata, BoundaryTsidLayout, CompiledSubgrammarInput, PublishedStaticBoundaryShard,
     WalkShardPublishProfile, build_segmented_parser_links, publish_signed_boundary_shard_work,
@@ -860,7 +861,7 @@ fn empty_transfer() -> TerminalCharacterization {
 /// lexical DWA, never confused with real terminals).
 #[derive(Clone)]
 pub(crate) struct FragmentLibrary {
-    pub templates: BTreeMap<TerminalID, NWA>,
+    pub templates: BTreeMap<TerminalID, std::sync::Arc<TemplateTopology>>,
     pub diagnostic_dfas: Option<BTreeMap<TerminalID, std::sync::Arc<UnweightedDfa>>>,
     /// Synthetic fragment key per link index for Entry / Finish exports.
     pub entry_keys: Vec<TerminalID>,
@@ -869,20 +870,23 @@ pub(crate) struct FragmentLibrary {
     pub templates_ms: f64,
 }
 
-/// Only this boundary backend consumes weighted skeletons. Release the raw
-/// template inventory after conversion unless an opt-in diagnostic needs it.
+/// Convert each distinct raw graph once, with no weights or per-state maps.
+/// Keep raw DFAs only for the optional leaf-projection diagnostic.
 fn boundary_template_inventory(
     templates: Templates,
-) -> (BTreeMap<TerminalID, NWA>, Option<BTreeMap<TerminalID, std::sync::Arc<UnweightedDfa>>>) {
-    use glrmask_parser_dwa::__private::templates::compile_dfa::dfa_to_nwa_skeleton;
+) -> (BTreeMap<TerminalID, std::sync::Arc<TemplateTopology>>, Option<BTreeMap<TerminalID, std::sync::Arc<UnweightedDfa>>>) {
+    use std::sync::Arc;
     let diagnostics = crate::env::var_os("GLRMASK_PROFILE_BOUNDARY_LEAF_TEMPLATES").is_some();
-    let mut skeletons = BTreeMap::new();
+    let mut topologies = BTreeMap::new();
+    let mut by_source = rustc_hash::FxHashMap::<usize, Arc<TemplateTopology>>::default();
     let mut diagnostic_dfas = diagnostics.then(BTreeMap::new);
-    for (terminal, dfa) in templates.by_terminal {
-        skeletons.insert(terminal, dfa_to_nwa_skeleton(&dfa));
-        if let Some(dfas) = &mut diagnostic_dfas { dfas.insert(terminal, dfa); }
+    for (&terminal, dfa) in &templates.by_terminal {
+        let id = Arc::as_ptr(dfa) as usize;
+        let graph = by_source.entry(id).or_insert_with(|| Arc::new(TemplateTopology::from_dfa(dfa)));
+        topologies.insert(terminal, Arc::clone(graph));
+        if let Some(dfas) = &mut diagnostic_dfas { dfas.insert(terminal, Arc::clone(dfa)); }
     }
-    (skeletons, diagnostic_dfas)
+    (topologies, diagnostic_dfas)
 }
 
 /// Link-scoped exact transfer cache prepared for the union of terminals
@@ -1550,50 +1554,6 @@ pub(crate) fn build_fragment_library_cached(
         ordinary_terms,
         templates_ms,
     })
-}
-
-/// Clone a template fragment into the arena, stamp every edge/epsilon with
-/// `weight`, and redirect accepting finals to `continuation`. Mirrors the
-/// established bundle-substitution primitive exactly (same weight stamping,
-/// same final redirection); the only difference is the caller chooses
-/// Ready-port endpoints instead of a table-driven bundle walk.
-fn append_weighted_fragment(
-    arena: &mut NWA,
-    template: &NWA,
-    weight: &Weight,
-    continuation: u32,
-) -> Result<NwaBody, String> {
-    let offset = u32::try_from(arena.states().len())
-        .map_err(|_| "signed parser NWA arena overflow".to_string())?;
-    let body = arena.append_with_body(template);
-    let appended_len = template.states().len();
-    for state_id in offset as usize..offset as usize + appended_len {
-        let state = arena
-            .states_mut()
-            .get_mut(state_id)
-            .ok_or_else(|| "signed parser NWA fragment range overflow".to_string())?;
-        for targets in state.transitions.values_mut() {
-            for (_, edge_weight) in targets {
-                *edge_weight = weight.clone();
-            }
-        }
-        for (_, epsilon_weight) in &mut state.epsilons {
-            *epsilon_weight = weight.clone();
-        }
-    }
-    for state_id in offset as usize..offset as usize + appended_len {
-        let takes_final = arena
-            .states_mut()
-            .get_mut(state_id)
-            .ok_or_else(|| "signed parser NWA fragment range overflow".to_string())?
-            .final_weight
-            .take()
-            .is_some();
-        if takes_final {
-            arena.add_epsilon(state_id as u32, continuation, weight.clone());
-        }
-    }
-    Ok(body)
 }
 
 /// Output of one signed-shard compilation.
