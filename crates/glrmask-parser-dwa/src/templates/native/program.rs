@@ -271,7 +271,7 @@ impl<'a> Builder<'a> {
     }
 }
 
-fn compact_nfa(c: &TerminalCharacterization) -> Result<NFA, String> {
+pub(crate) fn compact_nfa(c: &TerminalCharacterization) -> Result<NFA, String> {
     let mut nfa = NFA::new();
     let mut nts = BTreeMap::new();
     for &nt in &c.all_nts {
@@ -304,6 +304,16 @@ fn compact_nfa(c: &TerminalCharacterization) -> Result<NFA, String> {
             nts.get(&reduce.target_nonterminal),
         ) {
             builder.pop_path(source, &reduce.pop, target)?;
+        }
+    }
+    // Suffix sharing can make identical incoming edges meet; canonicalize
+    // those rows before either determinization consumes the graph.
+    for state in &mut builder.nfa.states {
+        state.epsilons.sort_unstable();
+        state.epsilons.dedup();
+        for targets in state.transitions.values_mut() {
+            targets.sort_unstable();
+            targets.dedup();
         }
     }
     Ok(builder.nfa)

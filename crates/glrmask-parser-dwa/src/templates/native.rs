@@ -14,6 +14,7 @@
 //! is the sole authority for sharing.
 
 mod program;
+pub(super) use program::compact_nfa;
 #[cfg(feature = "internal-api")]
 pub use program::ProgramCompiler;
 

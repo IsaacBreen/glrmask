@@ -1121,19 +1121,26 @@ fn compile_template_with_profile_and_minimize(
     (dfa, skeleton, sample)
 }
 
+pub fn compile_signed_template(
+    characterization: &TerminalCharacterization,
+) -> Result<UnweightedDfa, String> {
+    try_compile_template_dfa_with_profile(characterization, skip_template_minimization_enabled())
+        .map(|(dfa, _)| dfa)
+}
+
 fn try_compile_template_dfa_with_profile(
     characterization: &TerminalCharacterization,
     skip_minimize: bool,
 ) -> Result<(UnweightedDfa, TemplateCompilationSample), String> {
     let build_nfa_started_at = Instant::now();
-    let nfa = build_template_nfa(characterization);
+    let nfa = super::native::compact_nfa(characterization)?;
     let build_nfa_ms = elapsed_ms(build_nfa_started_at);
     let (nfa_states, nfa_transitions) = nfa_size(&nfa);
 
     let determinize_started_at = Instant::now();
     let determinized = determinize(&nfa);
     if template_quotient_validation_enabled()
-        && let Some(witness) = find_nfa_dfa_language_mismatch(&nfa, &determinized)
+        && let Some(witness) = find_nfa_dfa_language_mismatch(&build_template_nfa(characterization), &determinized)
     {
         panic!("template determinization changed the NFA language; witness: {witness:?}");
     }
@@ -2186,7 +2193,7 @@ mod tests {
             let mut grouped = BTreeMap::<&TerminalCharacterization, Vec<u32>>::new();
             for (&terminal, characterization) in &input {
                 grouped.entry(characterization).or_default().push(terminal);
-                let nfa = build_template_nfa(characterization);
+                let nfa = super::native::compact_nfa(characterization)?;
                 assert_eq!(find_nfa_dfa_language_mismatch(&nfa, &dfa_only.by_terminal[&terminal]), None);
             }
             let groups = grouped.into_iter().collect::<Vec<_>>();
