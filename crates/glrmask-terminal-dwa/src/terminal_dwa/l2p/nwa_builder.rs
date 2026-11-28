@@ -5,7 +5,7 @@
 
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::observation::{ConfigActionCache, LexicalStateAction};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -25,7 +25,7 @@ use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::ds::weight::Weight;
 
 use crate::compiler::stages::id_map_and_terminal_dwa::types::{
-    ColorId, TerminalColoring, TerminalDwaBuildProfile, TerminalPathLength,
+    ColorId, TerminalColoring, TerminalDwaBuildProfile,
 };
 
 /// NWA state identifier (index into `NWA.states`).
@@ -348,15 +348,145 @@ impl IntoIterator for NodesByTokenizerState {
     }
 }
 
-pub struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
+/// Every trie event has a uniform TSID domain; only seed edges have a
+/// nonuniform selector. Choose coefficient storage and graph publication
+/// independently of the lexical recurrence. Native bounds remain enforced
+/// by its sink and compact-buffer admission checks.
+trait EventCoefficient: Clone + PartialEq + std::fmt::Debug {
+    fn empty() -> Self;
+    fn is_empty(&self) -> bool;
+    fn union(&self, other: &Self) -> Self;
+    fn from_uniform(rows: std::ops::RangeInclusive<u32>, tokens: RangeSetBlaze<u32>) -> Self;
+    fn from_reachable(num_tsids: u32, tokens: &RangeSetBlaze<usize>) -> Self;
+    fn from_leaf_tokens(num_tsids: u32, tokens: &[u32]) -> Self;
+    fn without_token(&self, num_tsids: u32, token: u32) -> Option<Self>;
+}
+
+trait LeafIdsBuffer: Default {
+    fn slot(&mut self, source: u32, terminal: TerminalID) -> &mut LeafTokenIds;
+    fn len(&self) -> usize;
+    fn into_entries(self) -> impl Iterator<Item = (u32, TerminalID, LeafTokenIds)>;
+}
+
+impl LeafIdsBuffer for Vec<Vec<LeafTokenIds>> {
+    fn slot(&mut self, source: u32, terminal: TerminalID) -> &mut LeafTokenIds {
+        let source = source as usize;
+        let terminal = terminal as usize;
+        if source >= self.len() {
+            self.resize_with(source + 1, Vec::new);
+        }
+        let labels = &mut self[source];
+        if terminal >= labels.len() {
+            labels.resize_with(terminal + 1, SmallVec::new);
+        }
+        &mut labels[terminal]
+    }
+
+    fn len(&self) -> usize { Vec::len(self) }
+
+    fn into_entries(self) -> impl Iterator<Item = (u32, TerminalID, LeafTokenIds)> {
+        self.into_iter().enumerate().flat_map(|(source, labels)| {
+            labels.into_iter().enumerate().map(move |(label, tokens)| {
+                (source as u32, label as TerminalID, tokens)
+            })
+        })
+    }
+}
+
+impl LeafIdsBuffer for FxHashMap<(u32, TerminalID), LeafTokenIds> {
+    fn slot(&mut self, source: u32, terminal: TerminalID) -> &mut LeafTokenIds {
+        self.entry((source, terminal)).or_default()
+    }
+
+    fn len(&self) -> usize { std::collections::HashMap::len(self) }
+
+    fn into_entries(self) -> impl Iterator<Item = (u32, TerminalID, LeafTokenIds)> {
+        self.into_iter().map(|((source, label), tokens)| (source, label, tokens))
+    }
+}
+
+trait EventSink {
+    type Coefficient: EventCoefficient;
+    type LeafIds: LeafIdsBuffer;
+    const NATIVE: bool;
+    fn states_len(&self) -> usize;
+    fn add_state(&mut self) -> u32;
+    fn emit_epsilon(&mut self, from: u32, to: u32, weight: Self::Coefficient);
+    fn emit_transition(&mut self, from: u32, label: i32, to: u32, weight: Self::Coefficient);
+    fn emit_leaf_transitions(&mut self, from: u32, leaf: u32, entries: Vec<(i32, Self::Coefficient)>) {
+        for (label, weight) in entries {
+            self.emit_transition(from, label, leaf, weight);
+        }
+    }
+}
+
+impl EventCoefficient for Weight {
+    fn empty() -> Self { Weight::empty() }
+    fn is_empty(&self) -> bool { Weight::is_empty(self) }
+    fn union(&self, other: &Self) -> Self { Weight::union(self, other) }
+
+    fn from_uniform(rows: std::ops::RangeInclusive<u32>, tokens: RangeSetBlaze<u32>) -> Self {
+        Weight::from_uniform(rows, tokens)
+    }
+
+    fn from_reachable(num_tsids: u32, tokens: &RangeSetBlaze<usize>) -> Self {
+        if num_tsids == 0 || tokens.is_empty() {
+            return Weight::empty();
+        }
+        Weight::from_uniform(0..=num_tsids - 1, tokens.ranges()
+            .map(|range| (*range.start() as u32)..=(*range.end() as u32)).collect())
+    }
+
+    fn from_leaf_tokens(num_tsids: u32, tokens: &[u32]) -> Self {
+        if num_tsids == 0 { return Weight::empty(); }
+        Weight::from_uniform(0..=num_tsids - 1, RangeSetBlaze::from_iter(
+            tokens.iter().copied().map(|id| id..=id)))
+    }
+
+    fn without_token(&self, num_tsids: u32, token: u32) -> Option<Self> {
+        Some(self.difference(&Self::from_leaf_tokens(num_tsids, &[token])))
+    }
+}
+
+impl EventSink for NWA {
+    type Coefficient = Weight;
+    type LeafIds = Vec<Vec<LeafTokenIds>>;
+    const NATIVE: bool = false;
+
+    fn states_len(&self) -> usize { self.states().len() }
+    fn add_state(&mut self) -> u32 { NWA::add_state(self) }
+
+    fn emit_epsilon(&mut self, from: u32, to: u32, weight: Weight) {
+        self.states_mut().get_mut(from as usize)
+            .expect("buffered epsilon source state must exist").epsilons.push((to, weight));
+    }
+
+    fn emit_transition(&mut self, from: u32, label: i32, to: u32, weight: Weight) {
+        self.states_mut().get_mut(from as usize)
+            .expect("buffered transition source state must exist")
+            .transitions.entry(label).or_default().push((to, weight));
+    }
+    fn emit_leaf_transitions(&mut self, from: u32, leaf: u32, entries: Vec<(i32, Weight)>) {
+        let state = self.states_mut().get_mut(from as usize)
+            .expect("buffered leaf transition source state must exist");
+        for (label, weight) in entries {
+            state.transitions.entry(label).or_default().push((leaf, weight));
+        }
+    }
+}
+
+struct TerminalNwaBuilder<'tok, 'pm, 'nwa, S: EventSink = NWA> {
     tokenizer: &'tok Tokenizer,
+    borrowed_map:Option<BorrowedObservation<'tok>>,
+    borrowed_cursor:Option<native_borrowed_cursor::BorrowedScalarCache<'tok>>,
+    mapping_failed:bool,
     terminal_coloring: TerminalColoring,
     possible_future_terminals: FxHashMap<TokenizerState, Vec<TerminalID>>,
     future_terminal_color_groups: FxHashMap<TokenizerState, FutureTerminalColorGroups>,
     future_terminal_colors: FxHashMap<TokenizerState, SmallVec<[ColorId; 8]>>,
     ignore_terminal_possible: FxHashMap<TokenizerState, bool>,
     possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
-    nwa: &'nwa mut NWA,
+    nwa: &'nwa mut S,
     num_tsids: u32,
     leaf_state: u32,
     ignore_terminal: Option<TerminalID>,
@@ -367,18 +497,18 @@ pub struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     /// labelled so the parser DWA can account for it with the ignore template.
     initial_source_states: Vec<bool>,
     use_terminal_coloring: bool,
-    terminal_path_lengths: Option<Vec<TerminalPathLength>>,
     active_terminals: Option<Vec<bool>>,
     self_loop_bytes: FxHashMap<TokenizerState, U8Set>,
-    leaf_token_ids_buffer: Vec<Vec<LeafTokenIds>>,
-    future_leaf_buffer: FxHashMap<(u32, TokenizerState, ColorId), BufferedLeafTransition>,
+    leaf_token_ids_buffer: S::LeafIds,
+    future_leaf_buffer: FxHashMap<(u32, TokenizerState, ColorId), BufferedLeafTransition<S::Coefficient>>,
     deferred_uncolored_future_leaf_buffer: DeferredUncoloredFutureLeafBuffer,
     defer_uncolored_future_leaves: bool,
-    reachable_weight_cache: FxHashMap<usize, Weight>,
-    pruned_weight_cache: FxHashMap<(usize, usize, u32, TerminalID), Weight>,
-    leaf_weight_cache: FxHashMap<LeafTokenIds, Weight>,
-    transition_buffer: FxHashMap<(u32, i32, u32), Weight>,
-    epsilon_buffer: FxHashMap<(u32, u32), Weight>,
+    reachable_weight_cache: FxHashMap<usize, S::Coefficient>,
+    pruned_weight_cache: FxHashMap<(usize, usize, u32, TerminalID), S::Coefficient>,
+    leaf_weight_cache: FxHashMap<LeafTokenIds, S::Coefficient>,
+    transition_buffer: FxHashMap<(u32, i32, u32), S::Coefficient>,
+    compact_buffer: Option<native_compact_buffer::CompactBuffer<S::Coefficient>>,
+    epsilon_buffer: FxHashMap<(u32, u32), S::Coefficient>,
     pub profile: TerminalDwaBuildProfile,
     flat_transitions: Vec<Option<Box<[u32; 256]>>>,
     nfa_scan_cache: Option<NfaTrieScanCache<'tok>>,
@@ -387,13 +517,27 @@ pub struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     profile_timing: bool,
     has_epsilon_transitions: bool,
     scalar_deterministic_dispatch: bool,
+    scalar_cursor:bool,
+    lean_frontiers:bool,
+    prove_future_absence:bool,
+    validate_future_absence:bool,
+    future_absence_hits:usize,
+    cached_reset_roots:Vec<u32>,
+    batch_leaf_flush:bool,
+    leaf_flush_failed:bool,
+    validate_scalar_cursor:bool,
     dfa_scan_strict_reference: bool,
 }
 
-#[derive(Default)]
-struct BufferedLeafTransition {
+struct BufferedLeafTransition<C = Weight> {
     token_ids: LeafTokenIds,
-    weight: Option<Weight>,
+    weight: Option<C>,
+}
+
+impl<C> Default for BufferedLeafTransition<C> {
+    fn default() -> Self {
+        Self { token_ids: LeafTokenIds::new(), weight: None }
+    }
 }
 
 fn deferred_future_token_ids_for(
@@ -416,18 +560,17 @@ fn deferred_future_token_ids_for(
     &mut groups.last_mut().expect("just pushed deferred future group").1
 }
 
-impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
+impl<'tok, 'pm, 'nwa, S: EventSink> TerminalNwaBuilder<'tok, 'pm, 'nwa, S> {
     pub fn new(
         tokenizer: &'tok Tokenizer,
         terminal_coloring: TerminalColoring,
         possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
-        nwa: &'nwa mut NWA,
+        nwa: &'nwa mut S,
         num_tsids: u32,
         leaf_state: u32,
         ignore_terminal: Option<TerminalID>,
         initial_source_states: Vec<bool>,
         use_terminal_coloring: bool,
-        terminal_path_lengths: Option<Vec<TerminalPathLength>>,
         active_terminals: Option<Vec<bool>>,
         num_tokenizer_states: usize,
         shared_flat_transitions: Option<&'tok [u32]>,
@@ -438,6 +581,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             .then(|| NfaTrieScanCache::new(tokenizer, active_terminals.clone()));
         Self {
             tokenizer,
+            borrowed_map:None,
+            borrowed_cursor:None,
+            mapping_failed:false,
             terminal_coloring,
             possible_future_terminals: FxHashMap::default(),
             future_terminal_color_groups: FxHashMap::default(),
@@ -450,10 +596,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             ignore_terminal,
             initial_source_states,
             use_terminal_coloring,
-            terminal_path_lengths,
             active_terminals,
             self_loop_bytes: FxHashMap::default(),
-            leaf_token_ids_buffer: Vec::new(),
+            leaf_token_ids_buffer: S::LeafIds::default(),
             future_leaf_buffer: FxHashMap::default(),
             deferred_uncolored_future_leaf_buffer: Vec::new(),
             defer_uncolored_future_leaves: std::env::var_os(
@@ -464,6 +609,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             pruned_weight_cache: FxHashMap::default(),
             leaf_weight_cache: FxHashMap::default(),
             transition_buffer: FxHashMap::default(),
+            compact_buffer:(S::NATIVE && crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_COMPACT_EVENT_BUFFER")).then(native_compact_buffer::CompactBuffer::default),
             epsilon_buffer: FxHashMap::default(),
             profile: TerminalDwaBuildProfile::default(),
             flat_transitions: vec![None; num_tokenizer_states],
@@ -477,10 +623,34 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             profile_timing: std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some(),
             has_epsilon_transitions,
             scalar_deterministic_dispatch,
+            scalar_cursor:S::NATIVE && crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_SCALAR_CURSOR"),
+            lean_frontiers:S::NATIVE && crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_FRONTIER_LIFETIME"),
+            prove_future_absence:S::NATIVE && crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_FUTURE_ABSENCE")
+                && !tokenizer.has_virtual_residual_runtime(),
+            validate_future_absence:S::NATIVE && std::env::var_os("GLRMASK_VALIDATE_NATIVE_FUTURE_ABSENCE").is_some(),
+            future_absence_hits:0,
+            batch_leaf_flush:S::NATIVE && crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_FACTORED_LEAF_FLUSH"),
+            leaf_flush_failed:false,
+            cached_reset_roots:if S::NATIVE && crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_FRONTIER_LIFETIME"){tokenizer.deterministic_reset_states().into_vec()}else{Vec::new()},
+            validate_scalar_cursor:S::NATIVE && std::env::var_os("GLRMASK_VALIDATE_NATIVE_SCALAR_CURSOR").is_some(),
             dfa_scan_strict_reference: std::env::var_os(
                 "GLRMASK_L2P_NWA_DFA_SCAN_STRICT_REFERENCE",
             )
             .is_some(),
+        }
+    }
+
+    #[inline]
+    fn original_state(&self, state: u32) -> u32 {
+        if S::NATIVE { self.borrowed_map.map_or(state, |map| map.original(state)) } else { state }
+    }
+
+    fn reset_roots(&self) -> SmallVec<[u32; 1]> {
+        let roots = self.tokenizer.deterministic_reset_states();
+        if let Some(map) = self.borrowed_map {
+            roots.into_iter().filter_map(|state| map.logical(state)).collect()
+        } else {
+            roots
         }
     }
 
@@ -489,25 +659,22 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     fn fast_step(&mut self, state: u32, byte: u8) -> Option<u32> {
         let state_idx = state as usize;
         if self.flat_transitions[state_idx].is_none() {
-            self.flat_transitions[state_idx] = Some(self.tokenizer.transition_row(state));
+            let mut row = self.tokenizer.transition_row(self.original_state(state));
+            if let Some(map) = self.borrowed_map {
+                for target in row.iter_mut() {
+                    if *target != u32::MAX {
+                        *target = map.logical(*target).unwrap_or(u32::MAX);
+                    }
+                }
+            }
+            self.flat_transitions[state_idx] = Some(row);
         }
         let next = self.flat_transitions[state_idx].as_ref().unwrap()[byte as usize];
-        if next == u32::MAX { None } else { Some(next) }
+        (next != u32::MAX).then_some(next)
     }
 
-    fn leaf_token_ids_for(&mut self, source: u32, label: TerminalID) -> &mut LeafTokenIds {
-        let source_idx = source as usize;
-        if source_idx >= self.leaf_token_ids_buffer.len() {
-            self.leaf_token_ids_buffer.resize_with(source_idx + 1, Vec::new);
-        }
-
-        let labels = &mut self.leaf_token_ids_buffer[source_idx];
-        let label_idx = label as usize;
-        if label_idx >= labels.len() {
-            labels.resize_with(label_idx + 1, SmallVec::new);
-        }
-
-        &mut labels[label_idx]
+    fn leaf_token_ids_for(&mut self,source:u32,label:TerminalID)->&mut LeafTokenIds {
+        self.leaf_token_ids_buffer.slot(source, label)
     }
 
     fn buffer_leaf_token_id(&mut self, source: u32, label: TerminalID, internal_token_id: u32) {
@@ -521,12 +688,14 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     fn possible_future_terminals_for_state(&mut self, tokenizer_state: TokenizerState) -> Vec<TerminalID> {
+        if let Some(existing)=self.possible_future_terminals.get(&tokenizer_state){return existing.clone()}
         let active = self.active_terminals.clone();
+        let original=self.original_state(tokenizer_state);
         self.possible_future_terminals
             .entry(tokenizer_state)
             .or_insert_with(|| {
                 self.tokenizer
-                    .possible_future_terminals_iter(tokenizer_state)
+                    .possible_future_terminals_iter(original)
                     .filter(|&terminal| active.as_ref().is_none_or(|mask| {
                         mask.get(terminal as usize).copied().unwrap_or(false)
                     }))
@@ -544,7 +713,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let mut colors = SmallVec::<[ColorId; 8]>::new();
         let mut ignore_present = false;
 
-        for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
+        for terminal_id in self.tokenizer.possible_future_terminals_iter(self.original_state(tokenizer_state)) {
             if !self.terminal_is_active(terminal_id) {
                 continue;
             }
@@ -675,7 +844,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         &mut self,
         sources: &[u32],
         tokenizer_state: TokenizerState,
-        weight: &Weight,
+        weight: &S::Coefficient,
     ) {
         if !self.use_terminal_coloring {
             let future_terminals = self.possible_future_terminals_for_state(tokenizer_state);
@@ -712,7 +881,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
     }
 
-    fn cached_reachable_weight(&mut self, token_ids: &RangeSetBlaze<usize>) -> Weight {
+    fn cached_reachable_weight(&mut self, token_ids: &RangeSetBlaze<usize>) -> S::Coefficient {
         let cache_key = token_ids as *const RangeSetBlaze<usize> as usize;
         if let Some(weight) = self.reachable_weight_cache.get(&cache_key) {
             return weight.clone();
@@ -724,28 +893,21 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     /// Build a weight covering all tsids for the given set of internal token IDs.
-    fn token_set_weight_fast(&self, internal_token_ids: &RangeSetBlaze<usize>) -> Weight {
-        if self.num_tsids == 0 || internal_token_ids.is_empty() {
-            return Weight::empty();
-        }
-        let tokens: RangeSetBlaze<u32> = internal_token_ids
-            .ranges()
-            .map(|r| (*r.start() as u32)..=(*r.end() as u32))
-            .collect();
-        Weight::from_uniform(0..=self.num_tsids - 1, tokens)
+    fn token_set_weight_fast(&self, tokens: &RangeSetBlaze<usize>) -> S::Coefficient {
+        S::Coefficient::from_reachable(self.num_tsids, tokens)
     }
 
-    fn cached_leaf_weight(&mut self, mut token_ids: LeafTokenIds) -> Weight {
-        token_ids.sort_unstable();
-        token_ids.dedup();
-
-        if let Some(weight) = self.leaf_weight_cache.get(&token_ids) {
+    fn cached_leaf_weight(&mut self, mut tokens: LeafTokenIds) -> S::Coefficient {
+        if S::NATIVE {
+            return S::Coefficient::from_leaf_tokens(self.num_tsids, &tokens);
+        }
+        tokens.sort_unstable();
+        tokens.dedup();
+        if let Some(weight) = self.leaf_weight_cache.get(&tokens) {
             return weight.clone();
         }
-
-        let tokens = RangeSetBlaze::from_iter(token_ids.iter().copied().map(|id| id..=id));
-        let weight = Weight::from_uniform(0..=self.num_tsids - 1, tokens);
-        self.leaf_weight_cache.insert(token_ids, weight.clone());
+        let weight = S::Coefficient::from_leaf_tokens(self.num_tsids, &tokens);
+        self.leaf_weight_cache.insert(tokens, weight.clone());
         weight
     }
 
@@ -756,13 +918,40 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         terminal_id: TerminalID,
         end_state: Option<u32>,
         remaining_segment: &[u8],
-    ) -> Option<Weight> {
+    ) -> Option<S::Coefficient> {
         if end_state.is_none() && !(remaining_segment.is_empty() && child_node.has_token()) {
             return Some(self.cached_reachable_weight(child_node.reachable_token_ids()));
         }
 
         let remove_leaf = remaining_segment.is_empty() && child_node.has_token();
-        let possible_matches = end_state.map(|end_state| {
+        // Strict future excludes zero-byte acceptance. At an epsilon-free
+        // matching state, absence of this terminal proves that no positive
+        // continuation can extend it. The current trie-node token is still
+        // removed independently, exactly as in the ordinary scanner.
+        if self.prove_future_absence && end_state.is_some_and(|q|
+            !self.tokenizer.state_has_epsilon_transitions(self.original_state(q))
+            && !self.tokenizer.possible_future_terminals(self.original_state(q)).get(terminal_id as usize))
+        {
+            self.future_absence_hits += 1;
+            let mut weight=self.cached_reachable_weight(child_node.reachable_token_ids());
+            if remove_leaf {
+                weight = weight.without_token(self.num_tsids, leaf_token_id)?;
+            }
+            if self.validate_future_absence {
+                let original = self.original_state(end_state.expect("checked matching state"));
+                let ordinary = self.possible_matches.possible_matches_for_suffix_and_node(
+                    remaining_segment, child_node, original);
+                let mut expected=child_node.reachable_token_ids().clone();
+                if remove_leaf{expected.remove(leaf_token_id as usize);}
+                if let Some(tokens)=ordinary.get(&terminal_id){subtract_possible_matches(&mut expected,tokens);}
+                let expected=self.token_set_weight_fast(&expected);
+                assert_eq!(weight, expected,
+                    "strict-future absence changed exact continuation coefficient");
+            }
+            return (!weight.is_empty()).then_some(weight);
+        }
+        let original_end=end_state.map(|q|self.original_state(q));
+        let possible_matches = original_end.map(|end_state| {
             self.possible_matches
                 .possible_matches_for_suffix_and_node(
                     remaining_segment,
@@ -820,9 +1009,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     ) {
         if self.ignore_terminal == Some(label) {
             let weight = if self.num_tsids == 0 {
-                Weight::empty()
+                S::Coefficient::empty()
             } else {
-                Weight::from_uniform(
+                S::Coefficient::from_uniform(
                     0..=self.num_tsids - 1,
                     RangeSetBlaze::from_iter(std::iter::once(internal_token_id..=internal_token_id)),
                 )
@@ -848,10 +1037,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
         self.profile.trie_self_loop_checks += 1;
         if let Some(flat_transitions) = self.shared_flat_transitions {
-            let base = tokenizer_state as usize * 256;
+            let raw=self.original_state(tokenizer_state);
+            let base = raw as usize * 256;
             let can_skip = U8Set::from_words(*node.subtree_bytes())
                 .iter()
-                .all(|byte| flat_transitions[base + byte as usize] == tokenizer_state);
+                .all(|byte| flat_transitions[base + byte as usize] == raw);
             if can_skip {
                 self.profile.trie_self_loop_skips += 1;
             }
@@ -863,7 +1053,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let self_loop_bytes = self
             .self_loop_bytes
             .entry(tokenizer_state)
-            .or_insert_with(|| self.tokenizer.self_loop_bytes(tokenizer_state));
+            .or_insert_with(|| self.tokenizer.self_loop_bytes(self.borrowed_map.map_or(tokenizer_state,|m|m.original(tokenizer_state))));
         let can_skip = U8Set::from_words(*node.subtree_bytes()).is_subset(self_loop_bytes);
         if can_skip {
             self.profile.trie_self_loop_skips += 1;
@@ -898,7 +1088,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         sources: &[u32],
         label: TerminalID,
         target: u32,
-        weight: &Weight,
+        weight: &S::Coefficient,
     ) {
         let lower_ignore_to_epsilon = self.ignore_terminal == Some(label);
         for &source in sources {
@@ -914,6 +1104,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     .and_modify(|existing| *existing = existing.union(weight))
                     .or_insert_with(|| weight.clone());
             } else {
+                if let Some(buffer)=&mut self.compact_buffer{buffer.add((source,label as i32,target),weight);continue}
                 self.transition_buffer
                     .entry((source, label as i32, target))
                     .and_modify(|existing| *existing = existing.union(weight))
@@ -923,25 +1114,15 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     pub fn flush_transition_buffer(&mut self) {
+        if self.batch_leaf_flush && !self.use_terminal_coloring && self.future_leaf_buffer.is_empty(){
+            self.flush_factored_leaf_outputs();return;
+        }
         let flush_start = std::time::Instant::now();
-        let mut leaf_transition_buckets: Vec<FxHashMap<i32, BufferedLeafTransition>> =
-            (0..self.nwa.states().len()).map(|_| FxHashMap::default()).collect();
+        let mut leaf_transition_buckets: Vec<FxHashMap<i32, BufferedLeafTransition<S::Coefficient>>> =
+            (0..self.nwa.states_len()).map(|_| FxHashMap::default()).collect();
 
-        let leaf_buf_count = self.leaf_token_ids_buffer.len();
-        for (from, labels_vec) in std::mem::take(&mut self.leaf_token_ids_buffer)
-            .into_iter()
-            .enumerate()
-        {
-            for (label_idx, token_ids) in labels_vec.into_iter().enumerate() {
-                if token_ids.is_empty() {
-                    continue;
-                }
-                leaf_transition_buckets[from]
-                    .entry(label_idx as i32)
-                    .or_default()
-                    .token_ids
-                    .extend(token_ids);
-            }
+        for (from, label, token_ids) in std::mem::take(&mut self.leaf_token_ids_buffer).into_entries() {
+            if !token_ids.is_empty(){leaf_transition_buckets[from as usize].entry(label as i32).or_default().token_ids.extend(token_ids);}
         }
         let flush_leaf_ms = flush_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -978,7 +1159,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         // Keep deferred future leaves as raw token IDs until the
                         // existing final per-(source, terminal) bucket pass.  The
                         // older deferred implementation eagerly materialized a
-                        // Weight for every (source, scanner-state) group and then
+                        // coefficient for every (source, scanner-state) group and then
                         // repeatedly unioned those weights here, which moved work
                         // out of the trie only to make flush substantially slower.
                         // Appending IDs preserves the exact eager semantics and
@@ -989,7 +1170,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
         }
 
-        let future_buf_count = self.future_leaf_buffer.len();
         let flush_future_start = std::time::Instant::now();
         let buffer = std::mem::take(&mut self.future_leaf_buffer);
 
@@ -1032,39 +1212,19 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let flush_future_ms = flush_future_start.elapsed().as_secs_f64() * 1000.0;
 
         let flush_weight_start = std::time::Instant::now();
-        let mut epsilon_entries: Vec<_> = std::mem::take(&mut self.epsilon_buffer).into_iter().collect();
-        epsilon_entries.sort_unstable_by_key(|((from, target), _)| (*from, *target));
-        for ((from, target), weight) in epsilon_entries {
-            let state = self
-                .nwa
-                .states_mut()
-                .get_mut(from as usize)
-                .expect("buffered epsilon source state must exist");
-            state.epsilons.push((target, weight));
-        }
-
-        let mut transition_entries: Vec<_> = std::mem::take(&mut self.transition_buffer).into_iter().collect();
-        transition_entries.sort_unstable_by_key(|((from, label, target), _)| (*from, *label, *target));
-        for ((from, label, target), weight) in transition_entries {
-            let state = self
-                .nwa
-                .states_mut()
-                .get_mut(from as usize)
-                .expect("buffered transition source state must exist");
-            state.transitions.entry(label).or_default().push((target, weight));
-        }
+        self.flush_non_leaf_events();
 
         for (from, bucket) in leaf_transition_buckets.into_iter().enumerate() {
             if bucket.is_empty() {
                 continue;
             }
 
-            let mut entries: Vec<(i32, BufferedLeafTransition)> = bucket.into_iter().collect();
+            let mut entries: Vec<(i32, BufferedLeafTransition<S::Coefficient>)> = bucket.into_iter().collect();
             entries.sort_unstable_by_key(|(label, _)| *label);
 
             let mut finalized_entries = Vec::with_capacity(entries.len());
             for (label, mut entry) in entries {
-                let mut weight = entry.weight.take().unwrap_or_else(Weight::empty);
+                let mut weight = entry.weight.take().unwrap_or_else(S::Coefficient::empty);
                 if !entry.token_ids.is_empty() {
                     let token_weight = self.cached_leaf_weight(entry.token_ids);
                     weight = if weight.is_empty() {
@@ -1078,14 +1238,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 }
             }
 
-            let state = self
-                .nwa
-                .states_mut()
-                .get_mut(from)
-                .expect("buffered leaf transition source state must exist");
-            for (label, weight) in finalized_entries {
-                state.transitions.entry(label).or_default().push((self.leaf_state, weight));
-            }
+            self.nwa.emit_leaf_transitions(from as u32, self.leaf_state, finalized_entries);
         }
         let flush_weight_ms = flush_weight_start.elapsed().as_secs_f64() * 1000.0;
         self.profile.flush_leaf_ms = flush_leaf_ms;
@@ -1093,118 +1246,72 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         self.profile.flush_weight_ms = flush_weight_ms;
     }
 
-    /// Fast NWA construction for L1-only grammars (all terminals have path
-    /// length ≤ 1).  Replaces the trie walk with a simple flat loop over
-    /// internal vocab × state class representatives.
-    ///
-    /// Uses a two-phase approach to avoid per-token future-leaf buffering:
-    /// Phase 1: Walk all (token, state) pairs, collecting:
-    ///   - Terminal matches at token endpoint → direct leaf buffering
-    ///   - Alive pairs grouped by (start_state, end_state) → batched token lists
-    ///
-    /// Phase 2: Process grouped alive pairs, adding future leaves in batch.
-    pub fn build_l1_fast(
-        &mut self,
-        internal_vocab: &[(u32, Vec<u8>)],
-        roots_by_tokenizer_state: &NodesByTokenizerState,
-        id_map: &InternalIdMap,
-    ) {
-        assert!(
-            !self.has_epsilon_transitions
-                || self.scalar_deterministic_dispatch,
-            "L1 flat-state construction requires scalar deterministic scan roots",
-        );
-        // Pre-populate flat transition tables for ALL tokenizer states.
-        let num_states = self.tokenizer.num_states() as usize;
-        for state_idx in 0..num_states {
-            if self.flat_transitions[state_idx].is_none() {
-                self.flat_transitions[state_idx] =
-                    Some(self.tokenizer.transition_row(state_idx as u32));
-            }
+    fn flush_non_leaf_events(&mut self) {
+        let mut epsilon_entries: Vec<_> = std::mem::take(&mut self.epsilon_buffer).into_iter().collect();
+        epsilon_entries.sort_unstable_by_key(|((from, target), _)| (*from, *target));
+        for ((from, target), weight) in epsilon_entries {
+            self.nwa.emit_epsilon(from, target, weight);
         }
 
-        // Phase 1: Walk all (token, state) pairs.
-        // Group alive pairs by (representative_state, ending_state) to batch future leaves.
-        let mut future_groups: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
-        let phase1_start = std::time::Instant::now();
-        for &(internal_token_id, ref bytes) in internal_vocab {
-            for (representative_state, source_nodes) in roots_by_tokenizer_state.iter() {
-                if source_nodes.is_empty() {
-                    continue;
-                }
+        if let Some(buffer)=&mut self.compact_buffer{buffer.flush(self.nwa);}
+        let mut transition_entries: Vec<_> = std::mem::take(&mut self.transition_buffer).into_iter().collect();
+        transition_entries.sort_unstable_by_key(|((from, label, target), _)| (*from, *label, *target));
+        for ((from, label, target), weight) in transition_entries {
+            self.nwa.emit_transition(from, label, target, weight);
+        }
+    }
 
-                // Walk bytes using O(1) flat transition table.
-                let mut scan_state = representative_state;
-                let mut alive = true;
-                for &byte in bytes.iter() {
-                    let next = unsafe {
-                        // SAFETY: scan_state < num_states (maintained by DFA construction)
-                        // and flat table is always Some (populated above).
-                        *self.flat_transitions
-                            .get_unchecked(scan_state as usize)
-                            .as_ref()
-                            .unwrap_unchecked()
-                            .get_unchecked(byte as usize)
-                    };
-                    if next == u32::MAX {
-                        alive = false;
-                        break;
-                    }
-                    scan_state = next;
+    /// Compile sparse leaf observations in two factored arrays. A deferred
+    /// (source, lexer-state, token-set) contributes one coefficient to every
+    /// possible terminal; do not clone that token vector into a hash map for
+    /// every source/terminal pair. Only the (source,label,coefficient-ID) keys
+    /// are sorted. Exact union and final edge order are unchanged.
+    fn flush_factored_leaf_outputs(&mut self) {
+        let started=std::time::Instant::now();
+        let mut coefficients=Vec::<S::Coefficient>::new();
+        let mut entries=Vec::<(u32,u32,u32)>::new();
+        if self.leaf_token_ids_buffer.len()>100_000{self.leaf_flush_failed=true;return}
+        for (source, label, tokens) in std::mem::take(&mut self.leaf_token_ids_buffer).into_entries() {
+            if tokens.is_empty(){continue}
+            let weight=self.cached_leaf_weight(tokens);
+            let id=coefficients.len()as u32;coefficients.push(weight);entries.push((source,label,id));
+        }
+        let deferred=std::mem::take(&mut self.deferred_uncolored_future_leaf_buffer);
+        let mut future_cache=FxHashMap::<u32,Vec<u32>>::default();
+        for (source,groups)in deferred.into_iter().enumerate(){
+            for (state,tokens)in groups {
+                if tokens.is_empty(){continue}
+                let count=tokens.len()as u64;
+                if coefficients.len()>=100_000{self.leaf_flush_failed=true;return}
+                let weight=self.cached_leaf_weight(tokens);
+                let id=coefficients.len()as u32;coefficients.push(weight);
+                let terminals=future_cache.entry(state).or_insert_with(||self.possible_future_terminals_for_state(state));
+                for &terminal in terminals.iter(){
+                    if self.ignore_terminal==Some(terminal){continue}
+                    if entries.len()>=100_000{self.leaf_flush_failed=true;return}
+                    self.profile.future_terminal_additions+=count;
+                    entries.push((source as u32,terminal,id));
                 }
-
-                if alive {
-                    // Terminal matches at the exact token endpoint.
-                    for terminal in self.tokenizer.matched_terminals_iter(scan_state) {
-                        if !self.terminal_is_active(terminal) {
-                            continue;
-                        }
-                        self.profile.match_transition_additions += source_nodes.len() as u64;
-                        self.add_leaf_token_from_sources(
-                            source_nodes,
-                            terminal,
-                            internal_token_id,
-                        );
-                    }
-
-                    // Collect for batched future leaf processing.
-                    future_groups
-                        .entry((representative_state, scan_state))
-                        .or_default()
-                        .push(internal_token_id);
-                }
+                if entries.len()>100_000||coefficients.len()>100_000{self.leaf_flush_failed=true;return}
             }
         }
-        let phase1_ms = phase1_start.elapsed().as_secs_f64() * 1000.0;
-
-        // Phase 2: Process future leaves in batch using pre-computed weights.
-        // Convert each group's token_ids to a Weight ONCE, then distribute.
-        let phase2_start = std::time::Instant::now();
-        let num_groups = future_groups.len();
-        for ((representative_state, ending_state), token_ids) in future_groups {
-            let source_nodes =
-                match roots_by_tokenizer_state.entries.get(&representative_state) {
-                    Some(nodes) => nodes.as_slice(),
-                    None => continue,
-                };
-
-            if token_ids.is_empty() {
-                continue;
+        if entries.len()>100_000||coefficients.len()>100_000{self.leaf_flush_failed=true;return}
+        // Keep all non-leaf transitions exactly as before, before appending
+        // any leaf branch. Duplicate targets must not be coalesced here.
+        self.flush_non_leaf_events();
+        entries.sort_unstable();
+        let mut i=0;
+        while i<entries.len(){
+            let(from,label,_)=entries[i];let mut weight=S::Coefficient::empty();
+            while i<entries.len()&&entries[i].0==from&&entries[i].1==label {
+                weight=weight.union(&coefficients[entries[i].2 as usize]);i+=1;
             }
-
-            // Pre-compute weight from token_ids (ONCE per group).
-            let leaf_ids: LeafTokenIds = token_ids.into();
-            let weight = self.cached_leaf_weight(leaf_ids);
-
-            // Distribute the lightweight Weight (Arc) to all future terminals.
-            self.add_future_weighted_match_from_sources(
-                source_nodes,
-                ending_state,
-                &weight,
-            );
+            if !weight.is_empty(){self.nwa.emit_transition(from, label as i32, self.leaf_state, weight);}
         }
-        let phase2_ms = phase2_start.elapsed().as_secs_f64() * 1000.0;
-
+        self.profile.flush_weight_ms=started.elapsed().as_secs_f64()*1000.;
+        if std::env::var_os("GLRMASK_PROFILE_NATIVE_BUILDER").is_some(){
+            eprintln!("[glrmask/profile][native_factored_leaf] coefficients={} contributions={} exact_source_order=true",coefficients.len(),entries.len());
+        }
     }
 
     pub fn build_from_trie(
@@ -1269,7 +1376,16 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let leaf_token_id = child_node.token_id() as u32;
         let mut next_level_nodes = NodesByTokenizerState::new();
         let mut pending_by_offset = BTreeMap::<usize, NodesByTokenizerState>::new();
-        pending_by_offset.insert(0, initial_nodes.clone());
+        // The initial frontier is immutable for this entire segment. Borrow it
+        // instead of allocating/copying one source Vec per raw lexer state.
+        let mut initial = Some(if self.lean_frontiers {
+            std::borrow::Cow::Borrowed(initial_nodes)
+        } else {
+            std::borrow::Cow::Owned(initial_nodes.clone())
+        });
+        // No recursive caller observes the continuation frontier of a trie
+        // leaf. Token-end futures and longest-match events are still emitted.
+        let keep_next_frontier = !self.lean_frontiers || !child_node.children().is_empty();
 
         // Reusable DFA longest-match buffer. The pre-epsilon lexer path used
         // this scalar scanner and is dramatically faster than routing every
@@ -1277,27 +1393,41 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let mut match_map_buf = FxHashMap::<TerminalID, (usize, u32)>::default();
         let mut matches_buf: Vec<TokenizerMatch> = Vec::new();
 
-        while let Some((offset, nodes_at_offset)) = pending_by_offset.pop_first() {
+        loop {
+            let batch = initial.take().map(|nodes| (0, nodes)).or_else(||
+                pending_by_offset.pop_first().map(|(offset,nodes)| (offset,std::borrow::Cow::Owned(nodes))));
+            let Some((offset,nodes_at_offset)) = batch else {break};
             if offset == segment_bytes.len() {
-                for (tokenizer_state, nwa_states) in nodes_at_offset {
-                    next_level_nodes.merge(tokenizer_state, &nwa_states);
+                if keep_next_frontier {
+                    for (tokenizer_state, nwa_states) in nodes_at_offset.iter() {
+                        next_level_nodes.merge(tokenizer_state, nwa_states);
+                    }
                 }
                 continue;
             }
 
-            for (tokenizer_state, source_nodes) in nodes_at_offset {
+            // FxHashMap::iter and its owning iterator visit the same buckets;
+            // borrowing changes storage lifetime, not discovery/event order.
+            for (tokenizer_state, source_nodes) in nodes_at_offset.iter() {
                 let remaining = &segment_bytes[offset..];
                 let execute_started_at = self.profile_timing.then(std::time::Instant::now);
                 let end_states = if self.has_epsilon_transitions {
-                    self.nfa_scan_cache
-                        .as_mut()
-                        .expect("epsilon tokenizer must initialize NFA trie scan cache")
-                        .execute_into(
-                            self.possible_matches.state_action(self.tokenizer),
-                            remaining,
-                            tokenizer_state,
-                            &mut matches_buf,
-                        )
+                    let raw=self.original_state(tokenizer_state);
+                    let cache=self.nfa_scan_cache.as_mut().expect("epsilon tokenizer must initialize NFA trie scan cache");
+                    let action = self.possible_matches.state_action(self.tokenizer);
+                    let mut ends=if let Some(prepared)=self.borrowed_cursor.as_ref(){
+                        cache.execute_native_borrowed_into(action,remaining,raw,&mut matches_buf,prepared,self.validate_scalar_cursor)
+                    }else if self.scalar_cursor {
+                        cache.execute_native_scalar_into(action,remaining,raw,&mut matches_buf,
+                            self.shared_flat_transitions,self.validate_scalar_cursor)
+                    }else{cache.execute_into(action,remaining,raw,&mut matches_buf)};
+                    if let Some(map)=self.borrowed_map {
+                        let mut failed=false;
+                        matches_buf.retain_mut(|matched|{if let Some(q)=map.logical(matched.end_state){matched.end_state=q;true}else{failed=true;false}});
+                        ends.retain_mut(|q|{if let Some(logical)=map.logical(*q){*q=logical;true}else{failed=true;false}});
+                        self.mapping_failed|=failed;
+                    }
+                    ends
                 } else {
                     match_map_buf.clear();
                     let mut scan_state = tokenizer_state;
@@ -1305,7 +1435,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     for (index, &byte) in segment_bytes[offset..].iter().enumerate() {
                         if let Some(next) = self.fast_step(scan_state, byte) {
                             scan_state = next;
-                            for terminal in self.tokenizer.matched_terminals_iter(scan_state) {
+                            for terminal in self.tokenizer.matched_terminals_iter(self.original_state(scan_state)) {
                                 if !self.terminal_is_active(terminal) {
                                     continue;
                                 }
@@ -1335,10 +1465,14 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     if self.dfa_scan_strict_reference {
                         let mut reference = self
                             .tokenizer
-                            .execute_from_state(remaining, tokenizer_state);
+                            .execute_from_state(remaining, self.original_state(tokenizer_state));
                         reference
                             .matches
                             .retain(|matched| self.terminal_is_active(matched.id));
+                        if let Some(map)=self.borrowed_map {
+                            reference.matches.retain_mut(|m|{if let Some(q)=map.logical(m.end_state){m.end_state=q;true}else{self.mapping_failed=true;false}});
+                            reference.end_state.retain_mut(|q|{if let Some(v)=map.logical(*q){*q=v;true}else{self.mapping_failed=true;false}});
+                        }
                         let mut actual_matches = matches_buf.clone();
                         actual_matches.sort_unstable_by_key(|matched| {
                             (matched.id, matched.width, matched.end_state)
@@ -1370,13 +1504,15 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 for &end_state in &end_states {
                     if child_node.has_token() {
                         self.add_future_leaf_token_from_sources(
-                            &source_nodes,
+                            source_nodes,
                             end_state,
                             leaf_token_id,
                         );
                     }
 
-                    next_level_nodes.merge(end_state, &source_nodes);
+                    if keep_next_frontier {
+                        next_level_nodes.merge(end_state, source_nodes);
+                    }
                 }
                 if let Some(started_at) = end_state_started_at {
                     self.profile.trie_end_state_ms +=
@@ -1399,19 +1535,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     {
                         self.profile.match_transition_additions += source_nodes.len() as u64;
                         self.add_leaf_token_from_sources(
-                            &source_nodes,
+                            source_nodes,
                             matched.id,
                             leaf_token_id,
                         );
                     }
-
-                    // L1 terminals never appear in multi-terminal paths, so
-                    // skip continuation processing (no second terminal will
-                    // follow within the same token).
-                    if let Some(ref lengths) = self.terminal_path_lengths
-                        && let Some(&TerminalPathLength::One) = lengths.get(matched.id as usize) {
-                            continue;
-                        }
 
                     let continuation_weight_started_at =
                         self.profile_timing.then(std::time::Instant::now);
@@ -1436,16 +1564,22 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     let continuation_nodes = pending_by_offset
                         .entry(next_offset)
                         .or_insert_with(NodesByTokenizerState::new);
-                    let reset_states = self.tokenizer.deterministic_reset_states();
+                    let uncached_reset_states;
+                    let reset_states = if self.lean_frontiers {
+                        self.cached_reset_roots.as_slice()
+                    } else {
+                        uncached_reset_states = self.reset_roots();
+                        uncached_reset_states.as_slice()
+                    };
                     let destination = ensure_continuation_state(
                         continuation_nodes,
-                        &reset_states,
+                        reset_states,
                         self.nwa,
                     );
 
                     self.profile.match_transition_additions += source_nodes.len() as u64;
                     self.add_match_from_sources(
-                        &source_nodes,
+                        source_nodes,
                         matched.id,
                         destination,
                         &continuation_weight,
@@ -1461,7 +1595,6 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         next_level_nodes
     }
 }
-
 fn subtract_possible_matches(
     continuation_tokens: &mut RangeSetBlaze<usize>,
     possible_matches: &RangeSetBlaze<u32>,
@@ -1471,10 +1604,10 @@ fn subtract_possible_matches(
     }
 }
 
-fn ensure_continuation_state(
+fn ensure_continuation_state<S: EventSink>(
     pending: &mut NodesByTokenizerState,
     tokenizer_states: &[TokenizerState],
-    nwa: &mut NWA,
+    nwa: &mut S,
 ) -> NwaState {
     if let Some(existing) = pending.first_any() {
         return existing;
@@ -1815,7 +1948,6 @@ pub fn build_nwa_via_trie_walk<'a>(
                     ignore_terminal,
                     initial_source_states.clone(),
                     use_terminal_coloring,
-                    None,
                     Some(active_terminals.to_vec()),
                     num_tokenizer_states,
                     shared_flat_transitions,
@@ -1875,7 +2007,6 @@ pub fn build_nwa_via_trie_walk<'a>(
             ignore_terminal,
             flush_initial_sources,
             use_terminal_coloring,
-            None,
             Some(active_terminals.to_vec()),
             num_tokenizer_states,
             shared_flat_transitions,
@@ -1910,7 +2041,6 @@ pub fn build_nwa_via_trie_walk<'a>(
             ignore_terminal,
             initial_source_states,
             use_terminal_coloring,
-            None,
             Some(active_terminals.to_vec()),
             num_tokenizer_states,
             shared_flat_transitions,
@@ -1978,7 +2108,6 @@ mod tests {
             Some(0),
             vec![true, false, false],
             false,
-            None,
             None,
             tokenizer.num_states() as usize,
             None,
@@ -2170,7 +2299,6 @@ mod tests {
             None,
             initial_source_states,
             false,
-            None,
             None,
             tokenizer.num_states() as usize,
             None,
@@ -3700,7 +3828,6 @@ pub fn build_transport_nwa_via_trie_walk<'a>(
         initial_source_states,
         false,
         None,
-        None,
         tokenizer.num_states() as usize,
         None,
     );
@@ -3724,3 +3851,7 @@ pub fn build_transport_nwa_via_trie_walk<'a>(
 }
 
 #[path="nwa_builder/native_builder.rs"] pub mod native_builder;
+use native_builder::BorrowedObservation;
+#[path="nwa_builder/native_scalar_cursor.rs"] mod native_scalar_cursor;
+#[path="nwa_builder/native_borrowed_cursor.rs"] mod native_borrowed_cursor;
+#[path="nwa_builder/native_compact_buffer.rs"] mod native_compact_buffer;

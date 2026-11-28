@@ -2,14 +2,19 @@
 //! the 12-byte lookup key from the 72-byte payload without changing any union
 //! or flush order. A budget failure invalidates the entire native attempt.
 use super::*;
-#[derive(Default)]
-pub(super) struct CompactBuffer {
+pub(super) struct CompactBuffer<C: EventCoefficient> {
     index:FxHashMap<(u32,i32,u32),u32>,
-    weights:Vec<Weight>,
+    weights:Vec<C>,
     pub failed:bool,
 }
-impl CompactBuffer {
-    pub fn add(&mut self,key:(u32,i32,u32),weight:&Weight){
+impl<C: EventCoefficient> Default for CompactBuffer<C> {
+    fn default() -> Self {
+        Self { index: FxHashMap::default(), weights: Vec::new(), failed: false }
+    }
+}
+
+impl<C: EventCoefficient> CompactBuffer<C> {
+    pub fn add(&mut self,key:(u32,i32,u32),weight:&C){
         if self.failed{return}
         use std::collections::hash_map::Entry;
         match self.index.entry(key){
@@ -18,23 +23,24 @@ impl CompactBuffer {
             }
             Entry::Vacant(entry)=>{
                 if self.weights.len()>=100_000{self.failed=true;return}
-                entry.insert(self.weights.len()as u32);self.weights.push(*weight);
+                entry.insert(self.weights.len()as u32);self.weights.push(weight.clone());
             }
         }
     }
     pub fn len(&self)->usize{self.index.len()}
-    pub fn flush(&mut self,nwa:&mut NWA){
+    pub fn flush<S: EventSink<Coefficient = C>>(&mut self, nwa: &mut S){
         if self.failed{return}
         let mut keys=std::mem::take(&mut self.index).into_iter().collect::<Vec<_>>();
         keys.sort_unstable_by_key(|(key,_)|*key);
         for((from,label,to),id)in keys{
-            let w=&self.weights[id as usize];nwa.append_transition(from,label,to,w.end,w.valid,&w.bits);
+            let w=&self.weights[id as usize];nwa.emit_transition(from, label, to, w.clone());
         }
         self.weights.clear();
     }
 }
 #[cfg(test)]mod tests {
     use super::*;
+    use super::super::native_builder::Weight;
     #[test]
     fn compact_event_buffer_preserves_all_key_unions_and_order(){
         let mut seed=221719u64;let mut next=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(seed>>32)as u32};

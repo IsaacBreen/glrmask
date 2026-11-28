@@ -25,7 +25,7 @@ fn seeded(tokenizer:&Tokenizer,map:&InternalIdMap,keep:&[bool])->(GenericNwa,u32
 }
 
 #[test]
-fn native_emission_matches_original_nwa_on_generated_lexers() {
+fn native_and_ordinary_sinks_publish_identical_event_graphs() {
     let expressions=vec![
         choice(vec![bytes(b"a"),bytes(b"ab"),bytes(b"abc")]),
         plus(choice(vec![bytes(b"b"),bytes(b"ca")])),
@@ -155,7 +155,7 @@ fn native_factored_leaf_flush_exhaustion_declines_without_mutating_the_seed() {
     let mut nwa=NWA::from_seed(&seed,map.num_tsids()).unwrap();
     let mut pm=PossibleMatchesComputer::new(&tokenizer);
     let mut builder=TerminalNwaBuilder::new(&tokenizer,TerminalColoring::identity(2),&mut pm,
-        &mut nwa,map.num_tsids(),leaf,None,vec![true;seed.states().len()],false,None,Some(vec![true,true]),tokenizer.num_states()as usize,None);
+        &mut nwa,map.num_tsids(),leaf,None,vec![true;seed.states().len()],false,Some(vec![true,true]),tokenizer.num_states()as usize,None);
     builder.batch_leaf_flush=true;
     for q in 0..100001u32 {builder.leaf_token_ids_buffer.insert((q,0),smallvec::smallvec![0]);}
     builder.flush_transition_buffer();
@@ -241,5 +241,62 @@ fn borrowed_view_epsilon_free_packed_sources_are_exact(){
             let mut b=build_borrowed(tok,&color,None,&seed,leaf,ids.num_tsids(),tree.root(),&roots,Some(&rawflat),&active,map).unwrap();
             assert_eq!(a.sink.export_raw().unwrap().states(),b.sink.export_raw().unwrap().states());
         }
+    }
+}
+
+/// Literal path membership of a raw weighted graph, independent of the
+/// event producer, its longest-match cache and downstream determinization.
+fn accepts_literal(nwa: &GenericNwa, tsid: u32, token: u32, labels: &[i32]) -> bool {
+    let allows = |weight: &GenericWeight| {
+        weight.is_full() || weight.tokens_for_tsid(tsid).contains(token)
+    };
+    let mut pending = nwa.start_states().iter().map(|&state| (state, 0usize)).collect::<Vec<_>>();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some((state, offset)) = pending.pop() {
+        if !seen.insert((state, offset)) {
+            continue;
+        }
+        let row = &nwa.states()[state as usize];
+        if offset == labels.len() && row.final_weight.as_ref().is_some_and(allows) {
+            return true;
+        }
+        pending.extend(row.epsilons.iter().filter(|(_, weight)| allows(weight))
+            .map(|(target, _)| (*target, offset)));
+        if let Some(label) = labels.get(offset) {
+            if let Some(targets) = row.transitions.get(label) {
+                pending.extend(targets.iter().filter(|(_, weight)| allows(weight))
+                    .map(|(target, _)| (*target, offset + 1)));
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn native_event_graph_preserves_literal_longest_match_boundaries() {
+    let expressions = vec![plus(bytes(b"_")), bytes(b".")];
+    let words = vec![(0, b"__.".to_vec()), (1, b"_.".to_vec()), (2, b".".to_vec())];
+    let tree = VocabPrefixTree::build(&words);
+    for partitioned in [false, true] {
+        let tokenizer = if partitioned {
+            build_regex_partitioned(&expressions, &[0, 1])
+        } else {
+            build_regex(&expressions)
+        }.into_tokenizer(2, Some(Arc::from(expressions.clone())));
+        let map = id_map(tokenizer.num_states(), words.len());
+        let keep = vec![true; tokenizer.num_states() as usize];
+        let (seed, leaf, roots) = seeded(&tokenizer, &map, &keep);
+        let mut native = build(&tokenizer, &TerminalColoring::identity(2), None,
+            &seed, leaf, map.num_tsids(), tree.root(), &roots, None, &[true, true])
+            .expect("bounded native fixture");
+        let graph = native.sink.export_raw().expect("finite coefficients");
+        let start = tokenizer.initial_state_id();
+        for token in [0, 1] {
+            assert!(accepts_literal(&graph, start, token, &[0, 1]));
+            assert!(!accepts_literal(&graph, start, token, &[0, 0, 1]));
+            assert!(!accepts_literal(&graph, start, token, &[1]));
+        }
+        assert!(accepts_literal(&graph, start, 2, &[1]));
+        assert!(!accepts_literal(&graph, start, 2, &[0, 1]));
     }
 }
