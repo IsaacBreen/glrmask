@@ -97,7 +97,7 @@ fn vocab_partition_exact_l2p_selected(
     boundary_tokens >= min_tokens
 }
 
-fn singleton_vocab_map(token_ids: &[u32]) -> LocalTerminalBuild {
+fn singleton_vocab_product(token_ids: &[u32]) -> LocalTerminalBuild {
     LocalTerminalBuild::VocabMap {
         map: ManyToOneIdMap {
             original_to_internal: Vec::new(),
@@ -1176,7 +1176,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                     vocab_partition_exact_l2p_min_tokens(),
                                 )
                             {
-                                let result = singleton_vocab_map(split.boundary_token_ids());
+                                let result = singleton_vocab_product(split.boundary_token_ids());
                                 return (
                                     Some(result),
                                     started_at.elapsed().as_secs_f64() * 1000.0,
@@ -1765,20 +1765,6 @@ fn singleton_vocab_map(vocab: &Vocab) -> ManyToOneIdMap {
         next += 1;
     }
     ManyToOneIdMap::from_original_to_internal_allowing_unmapped(original_to_internal, next)
-}
-
-fn singleton_group_vocab_map(vocab: &Vocab) -> ManyToOneIdMap {
-    let internal_to_originals = vocab
-        .entries_map()
-        .keys()
-        .map(|&token_id| vec![token_id])
-        .collect::<Vec<_>>();
-    let representative_original_ids = vocab.entries_map().keys().copied().collect::<Vec<_>>();
-    ManyToOneIdMap {
-        original_to_internal: Vec::new(),
-        internal_to_originals,
-        representative_original_ids,
-    }
 }
 
 fn common_refine_partition_maps(vocab: &Vocab, maps: &[ManyToOneIdMap]) -> ManyToOneIdMap {
