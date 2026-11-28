@@ -3710,45 +3710,6 @@ fn build_and_merge_parser_dwa_families(
     )
 }
 
-fn common_terminal_family_id_map(terminal_dwas: &TerminalDwaFamilies) -> Option<InternalIdMap> {
-    // Ordinary parser-family merge keeps the deeper L2P family as the primary
-    // coordinate and folds the immediate L1 top-accept overlay into it. Mirror
-    // that left-to-right ordering so map-only construction gets identical class
-    // numbering, not merely the same equivalence partition.
-    let maps = [
-        terminal_dwas.l2p.as_ref().map(MappedArtifact::id_map),
-        terminal_dwas.l1.as_ref().map(MappedArtifact::id_map),
-        terminal_dwas.special.as_ref().map(MappedArtifact::id_map),
-    ];
-    let mut maps = maps.into_iter().flatten();
-    let mut common = maps
-        .next()?
-        .clone();
-    for next in maps {
-        common = crate::compiler::stages::mapped_artifact::common_internal_id_map(&[
-            &common,
-            next,
-        ]);
-    }
-    Some(common)
-}
-
-fn same_internal_id_map_numbering(left: &InternalIdMap, right: &InternalIdMap) -> bool {
-    left.tokenizer_states.original_to_internal == right.tokenizer_states.original_to_internal
-        && left.vocab_tokens.original_to_internal == right.vocab_tokens.original_to_internal
-}
-
-fn compacted_possible_matches_id_map(
-    result: &cpm::ConstraintPossibleMatchesComputation,
-) -> InternalIdMap {
-    let mut mapped = result.mapped_possible_matches.clone();
-    if compact_possible_matches_before_reconcile_enabled() {
-        let _ = mapped.compact_dimensions_fast();
-    }
-    mapped.id_map().clone()
-}
-
-
 fn maybe_dump_terminal_dwa_experiment(
     families: &TerminalDwaFamilies,
     terminal_display_names: &[String],
@@ -4124,13 +4085,12 @@ struct ParserDagResult {
     parser_dwa_started_ms: f64,
     parser_dwa_finished_ms: f64,
     terminal_run_collapse_ms: f64,
-    prebuilt_token_mask_caches: Option<(InternalIdMap, crate::runtime::TokenProjection)>,
 }
 
 fn build_static_parser(
     grammar: &GrammarDef, vocab: &Vocab, tokenizer: &TokenizerDagLane,
     analysis: &AnalysisDagLane, table: &GLRTable, templates: &Templates,
-    terminal_dwas: &mut TerminalDwaFamilies, possible_matches_id_map: Option<&InternalIdMap>,
+    terminal_dwas: &mut TerminalDwaFamilies,
     compile_started_at: Instant,
 ) -> ParserDagResult {
     let collapse_started = Instant::now();
@@ -4141,27 +4101,14 @@ fn build_static_parser(
     debug_assert!(terminal_run_collapse_ms + 0.001 >= collapse.certificate_ms + collapse.rewrite_ms);
     let parser_started = Instant::now();
     let parser_dwa_started_ms = elapsed_ms(compile_started_at);
-    let (parser_dwa, prebuilt_token_mask_caches) = macro_join(
-        "parser_dwa_and_token_cache",
-        || build_and_merge_parser_dwa_families(
-            terminal_dwas, table, &analysis.analyzed_grammar, grammar.ignore_terminal,
-            templates, &tokenizer.tokenizer, vocab,
-        ),
-        || {
-            let pm_map = possible_matches_id_map?;
-            let parser_id_map = common_terminal_family_id_map(terminal_dwas)?;
-            let final_id_map = crate::compiler::stages::mapped_artifact::common_internal_id_map(
-                &[&parser_id_map, pm_map],
-            );
-            let internal_to_tokens = final_id_map.vocab_tokens.internal_to_originals_vecs();
-            let mask_words = final_id_map.vocab_tokens.original_to_internal.len().div_ceil(32);
-            Some((final_id_map, crate::runtime::TokenProjection::build(&internal_to_tokens, mask_words)))
-        },
+    let parser_dwa = build_and_merge_parser_dwa_families(
+        terminal_dwas, table, &analysis.analyzed_grammar, grammar.ignore_terminal,
+        templates, &tokenizer.tokenizer, vocab,
     );
     ParserDagResult {
         parser_dwa, parser_dwa_ms: elapsed_ms(parser_started), parser_dwa_started_ms,
         parser_dwa_finished_ms: elapsed_ms(compile_started_at),
-        terminal_run_collapse_ms, prebuilt_token_mask_caches,
+        terminal_run_collapse_ms,
     }
 }
 
@@ -4388,7 +4335,6 @@ fn compile_prepared_with_profile_and_table_construction(
         let analysis = analysis?;
         let eager_possible_matches = env_flag_enabled_by_default("GLRMASK_EAGER_POSSIBLE_MATCHES")
             && !derive_single_use_terminal_possible_matches;
-        let early_pm_map = std::sync::OnceLock::new();
 
         // The exact runtime lexer and PM table are siblings of the complete
         // parser/terminal pipeline, not prerequisites of parser construction.
@@ -4403,11 +4349,6 @@ fn compile_prepared_with_profile_and_table_construction(
                         let started = elapsed_ms(compile_started_at);
                         let result = flat.possible_matches(&tokenizer_lane.tokenizer, vocab, eager_possible_matches);
                         let finished = elapsed_ms(compile_started_at);
-                        if !derive_single_use_terminal_possible_matches
-                            && env_flag_enabled_by_default("GLRMASK_EARLY_TOKEN_CACHE_PREBUILD")
-                        {
-                            let _ = early_pm_map.set(compacted_possible_matches_id_map(&result));
-                        }
                         (result, started, finished)
                     },
                 ),
@@ -4437,7 +4378,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     let templates = templates?;
                     let parser = build_static_parser(
                         &prepared_grammar, vocab, &tokenizer_lane, &analysis, &table.table,
-                        &templates.templates, &mut terminal.terminal_dwas, early_pm_map.get(), compile_started_at,
+                        &templates.templates, &mut terminal.terminal_dwas, compile_started_at,
                     );
                     Ok(Box::new((table, terminal, templates, parser)))
                 },
@@ -4468,7 +4409,7 @@ fn compile_prepared_with_profile_and_table_construction(
         } = templates;
         let ParserDagResult {
             parser_dwa, parser_dwa_ms, parser_dwa_started_ms, parser_dwa_finished_ms,
-            terminal_run_collapse_ms, prebuilt_token_mask_caches,
+            terminal_run_collapse_ms,
         } = parser;
         maybe_dump_terminal_dwa_experiment(
             &terminal_dwas,
@@ -4605,21 +4546,29 @@ fn compile_prepared_with_profile_and_table_construction(
             parser_pm_pair.compact_dimensions();
             profile.compact_ms += elapsed_ms(compact_started_at);
         }
-        let ((parser_dwa_artifact, possible_matches_artifact), internal_ids) =
+        let ((mut parser_dwa_artifact, mut possible_matches_artifact), internal_ids) =
             parser_pm_pair.into_parts();
-        let prebuilt_token_mask_caches = prebuilt_token_mask_caches.and_then(
-            |(prebuilt_id_map, caches)| {
-                same_internal_id_map_numbering(&prebuilt_id_map, &internal_ids).then_some(caches)
+        // Only the real final coordinate can define a token projection.
+        // Its construction can overlap the independent exact runtime-state lift.
+        let ((runtime_tokenizer_state_map, runtime_state_map_lift_ms), prebuilt_token_mask_caches) = macro_join(
+            "runtime_state_map_and_token_projection",
+            || {
+                let started = Instant::now();
+                let map = match full_to_synthesized_state_map.as_ref() {
+                    Some(certified) => certified
+                        .lift_internal_tsid_map(&internal_ids.tokenizer_states)
+                        .expect("certified full lexer state map must lift the final synthesized TSID map"),
+                    None => internal_ids.tokenizer_states.clone(),
+                };
+                (map, elapsed_ms(started))
+            },
+            || {
+                let internal_to_tokens = internal_ids.vocab_tokens.internal_to_originals_vecs();
+                let mask_words = internal_ids.vocab_tokens.original_to_internal.len().div_ceil(32);
+                env_flag_enabled_by_default("GLRMASK_EARLY_TOKEN_CACHE_PREBUILD")
+                    .then(|| crate::runtime::TokenProjection::build(&internal_to_tokens, mask_words))
             },
         );
-        let runtime_state_map_lift_started_at = Instant::now();
-        let runtime_tokenizer_state_map = match full_to_synthesized_state_map.as_ref() {
-            Some(certified) => certified
-                .lift_internal_tsid_map(&internal_ids.tokenizer_states)
-                .expect("certified full lexer state map must lift the final synthesized TSID map"),
-            None => internal_ids.tokenizer_states.clone(),
-        };
-        let runtime_state_map_lift_ms = elapsed_ms(runtime_state_map_lift_started_at);
         if compile_profile_enabled() {
             eprintln!(
                 "[glrmask/profile][runtime_tokenizer_join] finish_ms={:.3} state_map_lift_ms={:.3} runtime_states={} synthesized_states={}",
@@ -4631,26 +4580,20 @@ fn compile_prepared_with_profile_and_table_construction(
                 tokenizer.num_states(),
             );
         }
-        let mut parser_dwa = MappedArtifact::new(parser_dwa_artifact, internal_ids.clone());
-        possible_matches =
-            MappedArtifact::new(possible_matches_artifact, internal_ids.clone());
-
         let (
             parser_dwa_interned_ranges,
             possible_matches_interned_ranges,
             parser_pm_joint_interned_ranges,
         ) = if collect_expensive_profile_stats {
             let parser_dwa_interned_ranges =
-                count_interned_ranges_for_weights(parser_dwa.artifact().weight_refs())
+                count_interned_ranges_for_weights(parser_dwa_artifact.weight_refs())
                     .total_ranges();
-            let (parser_dwa_artifact, _) = parser_dwa.parts_mut();
-            let (possible_matches_artifact, _) = possible_matches.parts_mut();
             (
                 parser_dwa_interned_ranges,
-                interned_range_count_for_artifact(possible_matches_artifact),
+                interned_range_count_for_artifact(&mut possible_matches_artifact),
                 joint_interned_range_count_for_artifacts(
-                    parser_dwa_artifact,
-                    possible_matches_artifact,
+                    &mut parser_dwa_artifact,
+                    &mut possible_matches_artifact,
                 ),
             )
         } else {
@@ -4663,7 +4606,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 parts: parser_top_accept_parts,
                 direct_l1_complete_by_terminal,
             },
-        ) = parser_dwa.into_artifact();
+        ) = parser_dwa_artifact;
         let parser_dwa = parser_dwa.share_exact_transition_rows_owned();
         // Large parser DWAs are much cheaper to serialize and load from the
         // immutable packed runtime representation. Small/medium schema DWAs are
@@ -4755,7 +4698,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     parser_top_accept,
                     parser_top_accept_parts,
                     direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,
-                    possible_matches: possible_matches.into_artifact(),
+                    possible_matches: possible_matches_artifact,
                 },
             ),
             direct_regular_wide_frontier_acceptance: Vec::new(),
