@@ -6,16 +6,15 @@ use crate::public_api::VocabPartitionStrategy;
 use crate::Vocab;
 use crate::automata::lexer::Lexer;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
+use super::lexical_observation::LexicalObservationSource;
 use crate::compiler::grammar::transforms::prepare_grammar_for_vocab_partition;
 use crate::compiler::pipeline::{
     build_vocab_partition_compile_context, compute_disallowed_follows, run_with_compile_thread_pool,
 };
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::{
-    build_global_max_length_state_map,
     build_vocab_partition_from_static_id_maps,
     build_vocab_equivalence_partition_with_precomputed_global_max_length,
-    l1,
     types::TerminalColoring,
 };
 use crate::grammar::flat::{GrammarDef, Symbol, Terminal};
@@ -279,10 +278,9 @@ pub(crate) fn compile_vocab_partition_owned(
         // an otherwise lexer-only API.
         let (
             (
-                tokenizer,
+                source,
                 partition_local_synthesis_plan,
                 direct_mask_tokenizer,
-                flat_trans,
                 global_max_length_state_map,
                 context_ms,
                 flat_ms,
@@ -312,22 +310,16 @@ pub(crate) fn compile_vocab_partition_owned(
                 let context_ms = context_started.elapsed().as_secs_f64() * 1000.0;
 
                 let flat_started = std::time::Instant::now();
-                let flat_trans: Arc<[u32]> =
-                    Arc::from(l1::build_flat_transition_table(&tokenizer));
+                let source = Box::new(LexicalObservationSource::new(tokenizer));
                 let flat_ms = flat_started.elapsed().as_secs_f64() * 1000.0;
 
                 let max_length_started = std::time::Instant::now();
-                let global_max_length_state_map = build_global_max_length_state_map(
-                    &tokenizer,
-                    vocab,
-                    &flat_trans,
-                );
+                let global_max_length_state_map = source.global_map(vocab);
                 let max_length_ms = max_length_started.elapsed().as_secs_f64() * 1000.0;
                 (
-                    tokenizer,
+                    source,
                     partition_local_synthesis_plan,
                     direct_mask_tokenizer,
-                    flat_trans,
                     global_max_length_state_map,
                     context_ms,
                     flat_ms,
@@ -343,6 +335,7 @@ pub(crate) fn compile_vocab_partition_owned(
             },
         );
 
+        let tokenizer = &source.tokenizer;
         if crate::env::var_os("GLRMASK_PROFILE_TERMINAL_OBSERVATION_PARTITIONS").is_some() {
             let started = std::time::Instant::now();
             let mut total_configs = 0usize;
@@ -407,12 +400,12 @@ pub(crate) fn compile_vocab_partition_owned(
         };
         let result = if use_dedicated {
             build_vocab_equivalence_partition_with_precomputed_global_max_length(
-                &tokenizer,
+                tokenizer,
                 vocab,
                 prepared_grammar.ignore_terminal,
                 &analyzed_grammar,
                 &disallowed_follows,
-                Arc::clone(&flat_trans),
+                Arc::clone(&source.flat_trans),
                 &global_max_length_state_map,
                 partition_local_synthesis_plan.as_deref(),
             )
@@ -420,7 +413,7 @@ pub(crate) fn compile_vocab_partition_owned(
             let terminal_coloring =
                 TerminalColoring::identity(analyzed_grammar.num_terminals as usize);
             build_vocab_partition_from_static_id_maps(
-                &tokenizer,
+                tokenizer,
                 vocab,
                 &terminal_coloring,
                 false,
@@ -428,7 +421,7 @@ pub(crate) fn compile_vocab_partition_owned(
                 &analyzed_grammar,
                 &disallowed_follows,
                 None,
-                Arc::clone(&flat_trans),
+                Arc::clone(&source.flat_trans),
                 &global_max_length_state_map,
                 None,
                 partition_local_synthesis_plan.as_deref(),

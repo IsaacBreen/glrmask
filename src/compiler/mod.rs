@@ -20,6 +20,7 @@ pub(crate) mod constraint_compose;
 pub(crate) mod constraint_possible_matches;
 pub(crate) use glrmask_glr::__private::glr;
 pub mod grammar;
+mod lexical_observation;
 pub(crate) mod pipeline;
 pub(crate) mod terminal_run_collapse;
 pub(crate) mod vocab_partition;

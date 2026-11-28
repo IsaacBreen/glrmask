@@ -1300,12 +1300,10 @@ fn use_global_max_length(
 pub fn build_global_max_length_state_map(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    flat_trans: &Arc<[u32]>,
 ) -> ManyToOneIdMap {
     build_global_max_length_state_map_with_initial(
         tokenizer,
         vocab,
-        flat_trans,
         None,
     )
 }
@@ -1313,7 +1311,6 @@ pub fn build_global_max_length_state_map(
 pub fn build_global_max_length_state_map_with_initial(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    _flat_trans: &Arc<[u32]>,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> ManyToOneIdMap {
     let started_at = Instant::now();
@@ -2930,7 +2927,7 @@ pub fn build_id_map_and_terminal_dwa(
 
     let global_max_length_started_at = Instant::now();
     let global_max_length_state_map =
-        build_global_max_length_state_map(tokenizer, vocab, &flat_trans);
+        build_global_max_length_state_map(tokenizer, vocab);
     let global_max_length_ms = global_max_length_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let (mapped_dwa, mut inner_profile) =
