@@ -1,55 +1,120 @@
-//! A single physical lexer coordinate and its derived compiler indexes.
-//! The owner binds the flat byte action and derived observations to the same
-//! immutable tokenizer. Finite-vocabulary quotients are separate proofs;
-//! their rows must not be used as unrestricted runtime transitions.
+//! Source-pinned lexical observations for a single compile.
+//! The raw byte action, exact vocabulary, conservative global partition,
+//! classifier, and optional certified local synthesis share this owner.
+//! Local and terminal-conditioned partitions may refine or forget different
+//! observations; no finite-token proof authorizes unrestricted byte steps.
+use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
+use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::constraint_possible_matches as cpm;
+use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::{
-    build_global_max_length_state_map, l1,
+    build_global_max_length_state_map,
+    build_terminal_dwa_families_with_precomputed_global_max_length,
+    build_vocab_equivalence_partition_with_precomputed_global_max_length,
+    build_vocab_partition_from_static_id_maps,
     classify::{SharedClassifyBytesets, SharedClassifyCache},
-    l2p::equivalence_analysis::compat::compute_physical_byte_classes,
+    l1, l2p::equivalence_analysis::compat::compute_physical_byte_classes,
+    types::{TerminalColoring, TerminalDwaFamilies, TerminalDwaPhaseProfile},
+    PartitionLocalSynthesisPlan, PreparedPartitionLocalTokenizers,
 };
+use crate::ds::bitset::BitSet;
+use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
-pub(super) struct LexicalObservationSource {
+pub(super) struct LexicalObservationSource<'v> {
     pub tokenizer: Tokenizer,
     pub flat_trans: Arc<[u32]>,
+    vocab: &'v Vocab,
     physical_classes: OnceLock<[u8; 256]>,
+    global: OnceLock<ManyToOneIdMap>,
+    classification: SharedClassifyCache,
+    local_synthesis: Option<Arc<PartitionLocalSynthesisPlan>>,
+    prepared_locals: Option<Arc<PreparedPartitionLocalTokenizers>>,
 }
 
-impl LexicalObservationSource {
-    pub fn new(tokenizer: Tokenizer) -> Self {
+impl<'v> LexicalObservationSource<'v> {
+    pub fn new(
+        tokenizer: Tokenizer,
+        vocab: &'v Vocab,
+        local_synthesis: Option<Arc<PartitionLocalSynthesisPlan>>,
+        prepared_locals: Option<Arc<PreparedPartitionLocalTokenizers>>,
+    ) -> Self {
         let flat_trans = Arc::from(l1::build_flat_transition_table(&tokenizer));
-        Self { tokenizer, flat_trans, physical_classes: OnceLock::new() }
+        Self {
+            tokenizer, flat_trans, vocab, local_synthesis, prepared_locals,
+            physical_classes: OnceLock::new(), global: OnceLock::new(),
+            classification: SharedClassifyCache::new(),
+        }
     }
 
-    pub fn global_map(&self, vocab: &Vocab) -> ManyToOneIdMap {
-        build_global_max_length_state_map(&self.tokenizer, vocab)
+    pub fn global_map(&self) -> &ManyToOneIdMap {
+        self.global.get_or_init(|| build_global_max_length_state_map(&self.tokenizer, self.vocab))
     }
 
     fn physical_classes(&self) -> &[u8; 256] {
         self.physical_classes.get_or_init(|| compute_physical_byte_classes(&self.tokenizer, &self.flat_trans))
     }
 
-    pub fn classification(&self, num_terminals: u32) -> SharedClassifyCache {
-        let cache = SharedClassifyCache::new();
-        cache.get_or_init(|| SharedClassifyBytesets::build_with_physical_classes(&self.tokenizer, num_terminals, *self.physical_classes()));
-        cache
+    pub fn classification(&self, num_terminals: u32) -> &SharedClassifyCache {
+        self.classification.get_or_init(|| SharedClassifyBytesets::build_with_physical_classes(&self.tokenizer, num_terminals, *self.physical_classes()));
+        &self.classification
     }
 
-    pub fn possible_matches(&self, vocab: &Vocab, eager: bool) -> cpm::ConstraintPossibleMatchesComputation {
+    pub fn terminal_families(
+        &self,
+        coloring: &TerminalColoring,
+        use_coloring: bool,
+        ignore: Option<TerminalID>,
+        grammar: &AnalyzedGrammar,
+        disallowed: &BTreeMap<u32, BitSet>,
+        always_allowed: &[Vec<TerminalID>],
+    ) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
+        build_terminal_dwa_families_with_precomputed_global_max_length(
+            &self.tokenizer, self.vocab, coloring, use_coloring, ignore, grammar,
+            disallowed, Some(always_allowed), Arc::clone(&self.flat_trans),
+            self.global_map(), Some(self.classification(grammar.num_terminals)),
+            self.local_synthesis.as_deref(), self.prepared_locals.as_deref(), None,
+        )
+    }
+
+    pub fn vocab_partition(
+        &self,
+        dedicated: bool,
+        ignore: Option<TerminalID>,
+        grammar: &AnalyzedGrammar,
+        disallowed: &BTreeMap<u32, BitSet>,
+    ) -> ManyToOneIdMap {
+        if dedicated {
+            build_vocab_equivalence_partition_with_precomputed_global_max_length(
+                &self.tokenizer, self.vocab, ignore, grammar, disallowed,
+                Arc::clone(&self.flat_trans), self.global_map(),
+                self.local_synthesis.as_deref(),
+                Some(self.classification(self.tokenizer.num_terminals())),
+            )
+        } else {
+            build_vocab_partition_from_static_id_maps(
+                &self.tokenizer, self.vocab,
+                &TerminalColoring::identity(grammar.num_terminals as usize), false,
+                ignore, grammar, disallowed, None, Arc::clone(&self.flat_trans),
+                self.global_map(), Some(&self.classification),
+                self.local_synthesis.as_deref(), self.prepared_locals.as_deref(),
+            )
+        }
+    }
+
+    pub fn possible_matches(&self, eager: bool) -> cpm::ConstraintPossibleMatchesComputation {
         if eager {
-            let classes = self.physical_classes();
             cpm::compute_constraint_possible_matches_for_vocab_with_byte_observations(
-                &self.tokenizer, vocab, cpm::ConstraintPossibleMatchesConfig::EAGER,
-                classes, &self.flat_trans,
+                &self.tokenizer, self.vocab, cpm::ConstraintPossibleMatchesConfig::EAGER,
+                self.physical_classes(), &self.flat_trans,
             )
         } else {
             cpm::compute_constraint_possible_matches_for_vocab(
-                &self.tokenizer, vocab, cpm::ConstraintPossibleMatchesConfig::DEFER_TO_DYNAMIC_MASK,
+                &self.tokenizer, self.vocab, cpm::ConstraintPossibleMatchesConfig::DEFER_TO_DYNAMIC_MASK,
             )
         }
     }

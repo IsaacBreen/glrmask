@@ -50,7 +50,6 @@ use crate::compiler::grammar::transforms::{
     prepare_grammar_transforms_only,
 };
 use super::lexical_observation::LexicalObservationSource;
-use crate::compiler::stages::id_map_and_terminal_dwa::classify::SharedClassifyCache;
 use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::{
     compute_allowed_follow_sets,
     compute_ever_allowed_follows,
@@ -3192,14 +3191,8 @@ impl ParserFamilyInventory {
     }
 }
 
-struct StaticLexicalPlan {
-    source: Box<LexicalObservationSource>,
-    partition_local_synthesis_plan: Option<Arc<
-        crate::compiler::stages::id_map_and_terminal_dwa::PartitionLocalSynthesisPlan,
-    >>,
-    prepared_partition_local_tokenizers: Option<Arc<
-        crate::compiler::stages::id_map_and_terminal_dwa::PreparedPartitionLocalTokenizers,
-    >>,
+struct StaticLexicalPlan<'v> {
+    source: Box<LexicalObservationSource<'v>>,
     tokenizer_build_ms: f64,
     tokenizer_ready_ms: f64,
     flat_trans_ms: f64,
@@ -3716,12 +3709,12 @@ impl StaticRuntimeLexer {
     }
 }
 
-fn prepare_static_lexer(
+fn prepare_static_lexer<'v>(
     prepared_grammar_ref: &GrammarDef,
-    vocab: &Vocab,
+    vocab: &'v Vocab,
     synthetic_tokenizer_plan_ref: Option<&SyntheticTokenizerPlan>,
     analysis_started_at: Instant, compile_started_at: Instant,
-) -> (StaticLexicalPlan, StaticRuntimeLexer) {
+) -> (StaticLexicalPlan<'v>, StaticRuntimeLexer) {
     let partition_local_synthesis_plan_ref = synthetic_tokenizer_plan_ref.map(|plan| &plan.local);
     let tok_started = Instant::now();
     let static_virtual_pair = if static_virtual_residual_candidate(
@@ -3814,17 +3807,19 @@ fn prepare_static_lexer(
     let tokenizer_ready_ms = elapsed_ms(analysis_started_at);
     let flat_started_ms = elapsed_ms(compile_started_at);
     let flat_started = Instant::now();
-    let source = Box::new(LexicalObservationSource::new(tokenizer));
+    let source = Box::new(LexicalObservationSource::new(
+        tokenizer, vocab, partition_local_synthesis_plan, prepared_partition_local_tokenizers,
+    ));
     let flat_trans_ms = elapsed_ms(flat_started);
     (StaticLexicalPlan {
-        source, partition_local_synthesis_plan, prepared_partition_local_tokenizers,
+        source,
         tokenizer_build_ms, tokenizer_ready_ms, flat_trans_ms, flat_started_ms,
     }, runtime)
 }
 fn classify_static_lexer(
-    prepared_grammar: &GrammarDef, tokenizer: &StaticLexicalPlan,
+    prepared_grammar: &GrammarDef, tokenizer: &StaticLexicalPlan<'_>,
     analysis: &AnalysisDagLane, compile_started_at: Instant,
-) -> (SharedClassifyCache, f64, f64, f64) {
+) -> (f64, f64, f64) {
     let token_path_disallowed_follows = ignore_transparent_disallowed_follows(
         &analysis.disallowed_follows,
         prepared_grammar.ignore_terminal,
@@ -3839,7 +3834,7 @@ fn classify_static_lexer(
             token_path_disallowed_follows.len(),
         );
     }
-    let cache = tokenizer.source.classification(analysis.analyzed_grammar.num_terminals);
+    tokenizer.source.classification(analysis.analyzed_grammar.num_terminals);
     let classify_ms = elapsed_ms(classify_started_at);
     if crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
         eprintln!(
@@ -3849,33 +3844,22 @@ fn classify_static_lexer(
     }
     let classify_finished_ms = elapsed_ms(compile_started_at);
 
-    (cache, classify_ms, classify_started_ms, classify_finished_ms)
+    (classify_ms, classify_started_ms, classify_finished_ms)
 }
 
 fn build_static_terminal_families(
-    prepared_grammar: &GrammarDef, vocab: &Vocab, tokenizer: &StaticLexicalPlan,
-    global_map: &ManyToOneIdMap, analysis: &AnalysisDagLane,
-    classify_cache: SharedClassifyCache, coloring: ColoringDagLane,
+    prepared_grammar: &GrammarDef, tokenizer: &StaticLexicalPlan<'_>,
+    analysis: &AnalysisDagLane,
+    coloring: ColoringDagLane,
     use_terminal_coloring: bool, compile_started_at: Instant,
 ) -> TerminalDagResult {
     let ColoringDagLane { terminal_coloring, terminal_coloring_ms } = coloring;
     let terminal_dwa_started_ms = elapsed_ms(compile_started_at);
     let (mut terminal_dwas, mut terminal_phase_profile) =
-        crate::compiler::stages::id_map_and_terminal_dwa::build_terminal_dwa_families_with_precomputed_global_max_length(
-            &tokenizer.source.tokenizer,
-            vocab,
-            &terminal_coloring,
-            use_terminal_coloring,
-            prepared_grammar.ignore_terminal,
-            &analysis.analyzed_grammar,
-            &analysis.disallowed_follows,
-            Some(&analysis.always_allowed_follows),
-            Arc::clone(&tokenizer.source.flat_trans),
-            global_map,
-            Some(&classify_cache),
-            tokenizer.partition_local_synthesis_plan.as_deref(),
-            tokenizer.prepared_partition_local_tokenizers.as_deref(),
-            None,
+        tokenizer.source.terminal_families(
+            &terminal_coloring, use_terminal_coloring, prepared_grammar.ignore_terminal,
+            &analysis.analyzed_grammar, &analysis.disallowed_follows,
+            &analysis.always_allowed_follows,
         );
     let special_started_at = Instant::now();
     let special_token_terminals = collect_special_token_terminals(prepared_grammar);
@@ -3900,7 +3884,7 @@ struct ParserDagResult {
 }
 
 fn build_static_parser(
-    vocab: &Vocab, tokenizer: &StaticLexicalPlan,
+    vocab: &Vocab, tokenizer: &StaticLexicalPlan<'_>,
     analysis: &AnalysisDagLane, table: &GLRTable, templates: &Templates,
     terminal_dwas: &mut TerminalDwaFamilies,
     compile_started_at: Instant,
@@ -4076,20 +4060,20 @@ fn compile_prepared_with_profile_and_table_construction(
                     || runtime_plan.finish(),
                     || {
                         let started = elapsed_ms(compile_started_at);
-                        let result = tokenizer_lane.source.possible_matches(vocab, eager_possible_matches);
+                        let result = tokenizer_lane.source.possible_matches(eager_possible_matches);
                         let finished = elapsed_ms(compile_started_at);
                         (result, started, finished)
                     },
                 ),
                 || -> crate::Result<_> {
-                    let (((global, global_max_length_ms, flat_global_finished_ms), (classify_cache, classify_ms, classify_started_ms, classify_finished_ms)), table) = macro_join(
+                    let (((global_max_length_ms, flat_global_finished_ms), (classify_ms, classify_started_ms, classify_finished_ms)), table) = macro_join(
                         "compile_terminal_coordinates_and_table",
                         || macro_join(
                             "compile_global_and_classify",
                             || {
                                 let started = Instant::now();
-                                let map = tokenizer_lane.source.global_map(vocab);
-                                (map, elapsed_ms(started), elapsed_ms(compile_started_at))
+                                tokenizer_lane.source.global_map();
+                                (elapsed_ms(started), elapsed_ms(compile_started_at))
                             },
                             || classify_static_lexer(
                                 &prepared_grammar, &tokenizer_lane, &analysis, compile_started_at,
@@ -4102,8 +4086,8 @@ fn compile_prepared_with_profile_and_table_construction(
                         || {
                             let coloring = table.color(&analysis, synthetic_tokenizer_plan.as_ref(), use_terminal_coloring);
                             build_static_terminal_families(
-                                &prepared_grammar, vocab, &tokenizer_lane, &global,
-                                &analysis, classify_cache, coloring, use_terminal_coloring, compile_started_at,
+                                &prepared_grammar, &tokenizer_lane,
+                                &analysis, coloring, use_terminal_coloring, compile_started_at,
                             )
                         },
                         || table.templates(&prepared_grammar, &analysis, compile_started_at),
@@ -4166,7 +4150,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     // closed by running the ordinary eager computation rather
                     // than leaving an incomplete runtime fallback table.
                     possible_matches_started_ms = elapsed_ms(compile_started_at);
-                    cpm_result = source.possible_matches(vocab, true);
+                    cpm_result = source.possible_matches(true);
                     possible_matches_finished_ms = elapsed_ms(compile_started_at);
                 }
             }

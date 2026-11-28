@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use rustc_hash::FxHashMap;
 
 use crate::public_api::VocabPartitionStrategy;
@@ -12,11 +10,6 @@ use crate::compiler::pipeline::{
     build_vocab_partition_compile_context, compute_disallowed_follows, run_with_compile_thread_pool,
 };
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
-use crate::compiler::stages::id_map_and_terminal_dwa::{
-    build_vocab_partition_from_static_id_maps,
-    build_vocab_equivalence_partition_with_precomputed_global_max_length,
-    types::TerminalColoring,
-};
 use crate::grammar::flat::{GrammarDef, Symbol, Terminal};
 
 const SINGLETON_LITERAL_PARTITION_MAX_BYTES: usize = 64;
@@ -279,9 +272,7 @@ pub(crate) fn compile_vocab_partition_owned(
         let (
             (
                 source,
-                partition_local_synthesis_plan,
                 direct_mask_tokenizer,
-                global_max_length_state_map,
                 context_ms,
                 flat_ms,
                 max_length_ms,
@@ -310,17 +301,17 @@ pub(crate) fn compile_vocab_partition_owned(
                 let context_ms = context_started.elapsed().as_secs_f64() * 1000.0;
 
                 let flat_started = std::time::Instant::now();
-                let source = Box::new(LexicalObservationSource::new(tokenizer));
+                let source = Box::new(LexicalObservationSource::new(
+                    tokenizer, vocab, partition_local_synthesis_plan, None,
+                ));
                 let flat_ms = flat_started.elapsed().as_secs_f64() * 1000.0;
 
                 let max_length_started = std::time::Instant::now();
-                let global_max_length_state_map = source.global_map(vocab);
+                source.global_map();
                 let max_length_ms = max_length_started.elapsed().as_secs_f64() * 1000.0;
                 (
                     source,
-                    partition_local_synthesis_plan,
                     direct_mask_tokenizer,
-                    global_max_length_state_map,
                     context_ms,
                     flat_ms,
                     max_length_ms,
@@ -398,36 +389,10 @@ pub(crate) fn compile_vocab_partition_owned(
             VocabPartitionStrategy::Compact => false,
             VocabPartitionStrategy::Dedicated => true,
         };
-        let result = if use_dedicated {
-            build_vocab_equivalence_partition_with_precomputed_global_max_length(
-                tokenizer,
-                vocab,
-                prepared_grammar.ignore_terminal,
-                &analyzed_grammar,
-                &disallowed_follows,
-                Arc::clone(&source.flat_trans),
-                &global_max_length_state_map,
-                partition_local_synthesis_plan.as_deref(),
-            )
-        } else {
-            let terminal_coloring =
-                TerminalColoring::identity(analyzed_grammar.num_terminals as usize);
-            build_vocab_partition_from_static_id_maps(
-                tokenizer,
-                vocab,
-                &terminal_coloring,
-                false,
-                prepared_grammar.ignore_terminal,
-                &analyzed_grammar,
-                &disallowed_follows,
-                None,
-                Arc::clone(&source.flat_trans),
-                &global_max_length_state_map,
-                None,
-                partition_local_synthesis_plan.as_deref(),
-                None,
-            )
-        };
+        let result = source.vocab_partition(
+            use_dedicated, prepared_grammar.ignore_terminal,
+            &analyzed_grammar, &disallowed_follows,
+        );
         let partition_ms = partition_started.elapsed().as_secs_f64() * 1000.0;
         if profile {
             eprintln!(

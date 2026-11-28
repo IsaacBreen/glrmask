@@ -1509,6 +1509,7 @@ pub fn build_vocab_equivalence_partition_with_precomputed_global_max_length(
     flat_trans: Arc<[u32]>,
     global_max_length_state_map: &ManyToOneIdMap,
     partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
+    external_classify_cache: Option<&classify::SharedClassifyCache>,
 ) -> ManyToOneIdMap {
     use rayon::prelude::*;
 
@@ -1520,12 +1521,13 @@ pub fn build_vocab_equivalence_partition_with_precomputed_global_max_length(
         disallowed_follows,
         ignore_terminal,
     ));
-    let shared_classify_cache = classify::SharedClassifyCache::new();
+    let owned_classify_cache = classify::SharedClassifyCache::new();
+    let shared_classify_cache = external_classify_cache.unwrap_or(&owned_classify_cache);
     let prewarm_started = Instant::now();
     classify::prewarm_shared_classify_cache(
         tokenizer,
         tokenizer.num_terminals(),
-        &shared_classify_cache,
+        shared_classify_cache,
     );
     let prewarm_ms = prewarm_started.elapsed().as_secs_f64() * 1000.0;
     let sub_vocab_started = Instant::now();
@@ -1557,7 +1559,7 @@ pub fn build_vocab_equivalence_partition_with_precomputed_global_max_length(
             &token_path_disallowed_follows,
             &flat_trans,
             Some(global_max_length_state_map),
-            Some(&shared_classify_cache),
+            Some(shared_classify_cache),
         );
         if let Some(started) = started {
             eprintln!(
