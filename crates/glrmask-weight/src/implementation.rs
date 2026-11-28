@@ -1517,14 +1517,14 @@ impl CompactRangeBuilder {
     }
 }
 
-fn intersect_overlay_with_domain(
-    overlay: impl IntoIterator<Item = WeightRangeEntry>,
+fn intersect_overlay_with_domain<'a>(
+    overlay: impl IntoIterator<Item = (u32, u32, &'a SharedTokenSet)>,
     domain: &Weight,
 ) -> Weight {
     if domain.is_full() {
         let mut builder = CompactRangeBuilder::new();
-        for entry in overlay {
-            builder.push(entry.start, entry.end, entry.tokens);
+        for (start, end, tokens) in overlay {
+            builder.push(start, end, Arc::clone(tokens));
         }
         return builder.finish();
     }
@@ -1537,20 +1537,20 @@ fn intersect_overlay_with_domain(
     ); 8]> = SmallVec::new();
     let mut domain_iter = domain.0.range_values();
     let mut current_domain = domain_iter.next();
-    for entry in overlay {
+    for (entry_start, entry_end, entry_tokens) in overlay {
         while current_domain
             .as_ref()
-            .is_some_and(|(range, _)| *range.end() < entry.start)
+            .is_some_and(|(range, _)| *range.end() < entry_start)
         {
             current_domain = domain_iter.next();
         }
         while let Some((range, domain_tokens)) = current_domain.as_ref() {
-            if *range.start() > entry.end {
+            if *range.start() > entry_end {
                 break;
             }
-            let start = entry.start.max(*range.start());
-            let end = entry.end.min(*range.end());
-            let source_ptr = Arc::as_ptr(&entry.tokens);
+            let start = entry_start.max(*range.start());
+            let end = entry_end.min(*range.end());
+            let source_ptr = Arc::as_ptr(entry_tokens);
             let domain_ptr = Arc::as_ptr(domain_tokens);
             let tokens = if let Some((_, _, cached)) =
                 overlap_cache
@@ -1561,14 +1561,14 @@ fn intersect_overlay_with_domain(
             {
                 cached.clone()
             } else {
-                let overlap = shared_token_intersection(&entry.tokens, domain_tokens);
+                let overlap = shared_token_intersection(entry_tokens, domain_tokens);
                 overlap_cache.push((source_ptr, domain_ptr, overlap.clone()));
                 overlap
             };
             if let Some(tokens) = tokens {
                 builder.push(start, end, tokens);
             }
-            if *range.end() <= entry.end {
+            if *range.end() <= entry_end {
                 current_domain = domain_iter.next();
             } else {
                 break;
@@ -2637,58 +2637,11 @@ impl Weight {
         &self,
         overrides: &[(u32, SharedTokenSet)],
     ) -> Self {
-        if overrides.is_empty() || self.is_full() {
-            return self.clone();
-        }
-        debug_assert!(overrides.windows(2).all(|pair| pair[0].0 < pair[1].0));
-
-        let mut builder = CompactRangeBuilder::new();
-        let mut override_index = 0usize;
-
-        let push_override = |builder: &mut CompactRangeBuilder,
-                             tsid: u32,
-                             tokens: &SharedTokenSet| {
-            if !tokens.is_empty() {
-                builder.push(tsid, tsid, Arc::clone(tokens));
-            }
-        };
-
-        for (start, end, tokens) in self.range_entries() {
-            while override_index < overrides.len() && overrides[override_index].0 < start {
-                let (tsid, override_tokens) = &overrides[override_index];
-                push_override(&mut builder, *tsid, override_tokens);
-                override_index += 1;
-            }
-
-            let mut cursor = start;
-            while override_index < overrides.len() && overrides[override_index].0 <= end {
-                let (tsid, override_tokens) = &overrides[override_index];
-                if cursor < *tsid {
-                    builder.push(cursor, *tsid - 1, Arc::clone(tokens));
-                }
-                push_override(&mut builder, *tsid, override_tokens);
-                cursor = tsid.saturating_add(1);
-                override_index += 1;
-            }
-            if cursor <= end {
-                builder.push(cursor, end, Arc::clone(tokens));
-            }
-        }
-
-        while override_index < overrides.len() {
-            let (tsid, tokens) = &overrides[override_index];
-            push_override(&mut builder, *tsid, tokens);
-            override_index += 1;
-        }
-
-        builder.finish()
+        self.with_sparse_tsid_overrides_intersection(overrides, &Self::all())
     }
 
-    /// Apply sparse TSID overrides and restrict the result to `domain` in a
-    /// single range walk. This is exactly equivalent to
-    /// `self.with_sparse_tsid_overrides(overrides).intersection(domain)`, but
-    /// avoids interning and then immediately re-reading the intermediate
-    /// overridden weight.
+    /// Apply sparse TSID overrides and restrict the result to the domain
+    /// without materializing the intermediate overridden weight.
     #[cfg(feature = "internal-api")]
     #[doc(hidden)]
     pub fn with_sparse_tsid_overrides_intersection(
@@ -2697,17 +2650,14 @@ impl Weight {
         domain: &Weight,
     ) -> Self {
         debug_assert!(overrides.windows(2).all(|pair| pair[0].0 < pair[1].0));
-        let range_overrides = overrides
-            .iter()
-            .map(|(tsid, tokens)| (*tsid, *tsid, Arc::clone(tokens)))
-            .collect::<SmallVec<[(u32, u32, SharedTokenSet); 16]>>();
-        self.with_sparse_tsid_range_overrides_intersection(&range_overrides, domain)
+        self.assign_ranges(
+            overrides.iter().map(|(tsid, tokens)| (*tsid, *tsid, tokens)),
+            domain,
+        )
     }
 
-    /// Apply sorted, disjoint TSID-range overrides and restrict the result to
-    /// `domain`. This is the ranged analogue of
-    /// `with_sparse_tsid_overrides_intersection`: an override replaces the base
-    /// token set at every TSID in its inclusive range.
+    /// Apply sorted, disjoint inclusive TSID-range replacements and
+    /// restrict the result to the domain. Empty replacements erase support.
     #[cfg(feature = "internal-api")]
     #[doc(hidden)]
     pub fn with_sparse_tsid_range_overrides_intersection(
@@ -2715,84 +2665,68 @@ impl Weight {
         overrides: &[(u32, u32, SharedTokenSet)],
         domain: &Weight,
     ) -> Self {
+        debug_assert!(overrides.iter().all(|(start, end, _)| start <= end));
+        debug_assert!(overrides.windows(2).all(|pair| pair[0].1 < pair[1].0));
+        self.assign_ranges(
+            overrides.iter().map(|(start, end, tokens)| (*start, *end, tokens)),
+            domain,
+        )
+    }
+
+    #[cfg(feature = "internal-api")]
+    fn assign_ranges<'a>(
+        &'a self,
+        overrides: impl Iterator<Item = (u32, u32, &'a SharedTokenSet)>,
+        domain: &Weight,
+    ) -> Self {
+        let mut overrides = overrides.peekable();
         if domain.is_empty() {
             return Self::empty();
         }
-        if self.is_full() {
+        // Full is the domain-independent multiplicative identity, not an
+        // enumerable relation on a particular coordinate system.
+        if self.is_full() || overrides.peek().is_none() {
             return self.intersection(domain);
         }
-        if overrides.is_empty() {
-            return self.intersection(domain);
-        }
-        debug_assert!(overrides.iter().all(|(start, end, _)| start <= end));
-        debug_assert!(
-            overrides
-                .windows(2)
-                .all(|pair| pair[0].1 < pair[1].0)
-        );
 
-        let mut overlay = SmallVec::<[WeightRangeEntry; 16]>::new();
-        let push_overlay = |entries: &mut SmallVec<[WeightRangeEntry; 16]>,
-                            start: u32,
-                            end: u32,
-                            tokens: &SharedTokenSet| {
-            if tokens.is_empty() || start > end {
-                return;
-            }
-            if let Some(previous) = entries.last_mut()
-                && previous.end.checked_add(1) == Some(start)
-                && same_shared_token_set(&previous.tokens, tokens)
-            {
-                previous.end = end;
-            } else {
-                entries.push(WeightRangeEntry {
-                    start,
-                    end,
-                    tokens: Arc::clone(tokens),
-                });
-            }
-        };
+        let mut base = self.range_entries();
+        let mut current = base.next();
+        let overlay = std::iter::from_fn(move || loop {
+            let Some(&(lo, hi, replacement)) = overrides.peek() else {
+                let row = current.take()?;
+                current = base.next();
+                return Some(row);
+            };
 
-        let mut base_iter = self.range_entries();
-        let mut current_base = base_iter.next();
-        for (override_start, override_end, override_tokens) in overrides {
-            while let Some((start, end, tokens)) = current_base.take() {
-                if end < *override_start {
-                    push_overlay(&mut overlay, start, end, tokens);
-                    current_base = base_iter.next();
-                    continue;
+            if let Some((start, end, tokens)) = current {
+                if end < lo {
+                    current = base.next();
+                    return Some((start, end, tokens));
                 }
-                if start < *override_start {
-                    push_overlay(&mut overlay, start, *override_start - 1, tokens);
+                if start < lo {
+                    current = Some((lo, end, tokens));
+                    return Some((start, lo - 1, tokens));
                 }
-                current_base = Some((start.max(*override_start), end, tokens));
-                break;
             }
 
-            push_overlay(
-                &mut overlay,
-                *override_start,
-                *override_end,
-                override_tokens,
-            );
-
-            while let Some((start, end, tokens)) = current_base.take() {
-                if start > *override_end {
-                    current_base = Some((start, end, tokens));
+            overrides.next();
+            // Consume the covered base rows, retaining only a suffix beyond
+            // this replacement. hi + 1 is safe because end > hi here.
+            while let Some((start, end, tokens)) = current {
+                if start > hi {
                     break;
                 }
-                if end <= *override_end {
-                    current_base = base_iter.next();
-                    continue;
+                if end <= hi {
+                    current = base.next();
+                } else {
+                    current = Some((hi + 1, end, tokens));
+                    break;
                 }
-                current_base = Some((*override_end + 1, end, tokens));
-                break;
             }
-        }
-        while let Some((start, end, tokens)) = current_base {
-            push_overlay(&mut overlay, start, end, tokens);
-            current_base = base_iter.next();
-        }
+            if !replacement.is_empty() {
+                return Some((lo, hi, replacement));
+            }
+        });
 
         intersect_overlay_with_domain(overlay, domain)
     }
@@ -4176,6 +4110,44 @@ mod tests {
             &[(0, 2, Arc::clone(&tokens))], &domain,
         );
         assert_eq!(actual, Weight::from_uniform(1..=2, RangeSetBlaze::from_iter([6..=9])));
+    }
+
+    #[test]
+    fn sparse_overlay_literal_endpoints() {
+        let original = shared_rangeset(RangeSetBlaze::from_iter([1..=3]));
+        let replacement = shared_rangeset(RangeSetBlaze::from_iter([3..=5]));
+        let base = Weight::from_tsid_ranges_shared([
+            (0, 2, Arc::clone(&original)),
+            (4, 6, Arc::clone(&original)),
+            (u32::MAX - 2, u32::MAX, Arc::clone(&original)),
+        ]);
+        let domain = Weight::from_tsid_ranges_shared([
+            (1, 8, shared_rangeset(RangeSetBlaze::from_iter([2..=4]))),
+            (u32::MAX - 1, u32::MAX, Arc::clone(&original)),
+        ]);
+        let overrides = [
+            (1, 5, Arc::clone(&replacement)),
+            (7, 9, Arc::clone(&replacement)),
+            (u32::MAX, u32::MAX, Arc::clone(&EMPTY_RANGESET)),
+        ];
+        let expected = Weight::from_tsid_ranges_shared([
+            (1, 5, shared_rangeset(RangeSetBlaze::from_iter([3..=4]))),
+            (6, 6, shared_rangeset(RangeSetBlaze::from_iter([2..=3]))),
+            (7, 8, shared_rangeset(RangeSetBlaze::from_iter([3..=4]))),
+            (u32::MAX - 1, u32::MAX - 1, Arc::clone(&original)),
+        ]);
+        assert_eq!(
+            base.with_sparse_tsid_range_overrides_intersection(&overrides, &domain),
+            expected
+        );
+        assert_eq!(
+            base.with_sparse_tsid_overrides(&[(u32::MAX, Arc::clone(&EMPTY_RANGESET))]),
+            Weight::from_tsid_ranges_shared([
+                (0, 2, Arc::clone(&original)),
+                (4, 6, Arc::clone(&original)),
+                (u32::MAX - 2, u32::MAX - 1, original),
+            ])
+        );
     }
 
     fn small_exhaustive_weights() -> Vec<Weight> {
