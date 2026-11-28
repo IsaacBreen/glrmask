@@ -4547,32 +4547,6 @@ impl VirtualResidualRuntime {
     /// dynamic compilation: the producer needs the physical proxy/root
     /// metadata for the transfer artifact, but the execution process will
     /// reconstruct the runtime (and its liveness oracle) after load.
-    pub(super) fn new_without_liveness_oracle(
-        expr: &Expr,
-        runtime_index: u32,
-        terminal: TerminalID,
-        num_terminals: u32,
-        physical_state_count: u32,
-        root_state: u32,
-        state_allocator: Arc<VirtualStateAllocator>,
-        state_owners: Arc<VirtualRuntimeStateOwners>,
-    ) -> Option<Self> {
-        Self::new_impl(
-            expr,
-            runtime_index,
-            terminal,
-            num_terminals,
-            physical_state_count,
-            root_state,
-            state_allocator,
-            state_owners,
-            false,
-            true,
-            false,
-            None,
-        )
-    }
-
     pub(super) fn new_with_liveness_oracle(
         expr: &Expr,
         liveness_oracle: BoundedCodeIntersectionOracle,

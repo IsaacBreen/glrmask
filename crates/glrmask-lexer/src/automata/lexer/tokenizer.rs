@@ -1239,6 +1239,35 @@ pub struct PreparedVirtualResidualComponent {
     liveness_oracle: BoundedCodeIntersectionOracle,
 }
 
+/// Namespace for lazily allocated handles and their physical proxy roots.
+/// Shared by every virtual runtime in one tokenizer.
+struct VirtualComponentLayout {
+    physical_state_count: u32,
+    roots: Vec<u32>,
+    allocator: Arc<VirtualStateAllocator>,
+    owners: Arc<VirtualRuntimeStateOwners>,
+}
+
+impl VirtualComponentLayout {
+    fn new(physical_state_count: u32, roots: Vec<u32>) -> Option<Self> {
+        let allocator = Arc::new(VirtualStateAllocator::new(physical_state_count)?);
+        let owners = Arc::new(VirtualRuntimeStateOwners::new(physical_state_count, &roots)?);
+        Some(Self { physical_state_count, roots, allocator, owners })
+    }
+
+    fn append(existing: u32, count: usize) -> Option<Self> {
+        let physical_state_count = existing.checked_add(u32::try_from(count).ok()?)?;
+        Self::new(physical_state_count, (existing..physical_state_count).collect())
+    }
+}
+
+struct PendingVirtualComponent<R> {
+    terminal: TerminalID,
+    root: u32,
+    byte_support: U8Set,
+    runtime: Arc<R>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PackedRuntimeTransitions {
     byte_offsets: Arc<[u32]>,
@@ -9964,92 +9993,78 @@ impl Tokenizer {
         self.install_virtual_binary_repeat_intersection_components(vec![(descriptor, terminal)])
     }
 
-    /// Add multiple independent exact lazy bounded-repeat components. All
-    /// physical proxy roots are installed first; their lazily reached product
-    /// residuals then draw globally unique handles from one shared allocator
-    /// below the dynamic-NFA high-bit tag.
+    /// Plan fresh virtual components without mutating the physical graph.
+    fn virtual_component_layout(
+        &self, terminals: impl Iterator<Item = TerminalID> + ExactSizeIterator,
+    ) -> Option<VirtualComponentLayout> {
+        if self.has_any_virtual_runtime() || terminals.len() == 0 {
+            return None;
+        }
+        let count = terminals.len();
+        let mut seen = BTreeSet::new();
+        for terminal in terminals {
+            if terminal >= self.num_terminals || !seen.insert(terminal) {
+                return None;
+            }
+        }
+        VirtualComponentLayout::append(u32::try_from(self.dfa.num_states()).ok()?, count)
+    }
+
+    /// Install the already-constructed owners and publish proxy observations
+    /// in one transaction. No virtual constructor can decline after this.
+    fn append_virtual_components<R>(
+        &mut self, pending: Vec<PendingVirtualComponent<R>>,
+        root_has_future: impl Fn(&R) -> bool,
+    ) -> Vec<Arc<R>> {
+        self.invalidate_derived_caches();
+        self.dfa.ensure_group_capacity(self.num_terminals as usize);
+        let start = self.start_state();
+        let mut start_futures = self.dfa.possible_future_group_ids(start).clone();
+        let mut runtimes = Vec::with_capacity(pending.len());
+        for component in pending {
+            self.dfa.set_group_u8set(component.terminal, component.byte_support);
+            let root = self.dfa.add_state();
+            debug_assert_eq!(root, component.root);
+            self.dfa.add_epsilon_transition(start, root);
+            let mut root_futures = BitSet::new(self.num_terminals as usize);
+            if root_has_future(&component.runtime) {
+                root_futures.set(component.terminal as usize);
+                start_futures.set(component.terminal as usize);
+            }
+            self.dfa.overwrite_state_metadata(
+                root, BitSet::new(self.num_terminals as usize), root_futures,
+            );
+            runtimes.push(component.runtime);
+        }
+        let start_finalizers = self.dfa.finalizers(start).clone();
+        self.dfa.overwrite_state_metadata(start, start_finalizers, start_futures);
+        runtimes
+    }
+
+    /// Add multiple independent exact lazy bounded-repeat components.
     #[doc(hidden)]
     pub fn install_virtual_binary_repeat_intersection_components(
         &mut self,
         components: Vec<(VirtualBinaryRepeatIntersectionDescriptor, TerminalID)>,
     ) -> Option<()> {
-        if self.virtual_unit_repeat.is_some()
-            || !self.virtual_repeat_intersections.is_empty()
-            || !self.virtual_residuals.is_empty()
-            || components.is_empty()
-            || components.iter().any(|(descriptor, terminal)| {
-                *terminal >= self.num_terminals || descriptor.byte_support.is_empty()
-            })
-        {
+        if components.iter().any(|(descriptor, _)| descriptor.byte_support.is_empty()) {
             return None;
         }
-        let mut seen_terminals = BTreeSet::new();
-        if components
-            .iter()
-            .any(|(_, terminal)| !seen_terminals.insert(*terminal))
-        {
-            return None;
-        }
-        // Prove every runtime can be constructed before mutating the physical
-        // tokenizer. This keeps the virtual selection transaction-like: a
-        // rejected descriptor cannot leave proxy roots behind before the
-        // caller chooses another exact path.
-        let existing_physical_state_count = u32::try_from(self.dfa.num_states()).ok()?;
-        let physical_state_count = existing_physical_state_count
-            .checked_add(u32::try_from(components.len()).ok()?)?;
-        let allocator = Arc::new(VirtualStateAllocator::new(physical_state_count)?);
-        let roots = (0..components.len())
-            .map(|index| existing_physical_state_count.checked_add(u32::try_from(index).ok()?))
-            .collect::<Option<Vec<_>>>()?;
-        let owners = Arc::new(VirtualRuntimeStateOwners::new(physical_state_count, &roots)?);
+        let layout = self.virtual_component_layout(components.iter().map(|&(_, terminal)| terminal))?;
         let mut pending = Vec::with_capacity(components.len());
         for (index, (descriptor, terminal)) in components.into_iter().enumerate() {
-            let root_state = roots[index];
+            let root = layout.roots[index];
             let byte_support = descriptor.byte_support;
             let runtime = Arc::new(VirtualBinaryRepeatIntersectionRuntime::new(
-                descriptor,
-                u32::try_from(index).ok()?,
-                terminal,
-                self.num_terminals,
-                physical_state_count,
-                root_state,
-                Arc::clone(&allocator),
-                Arc::clone(&owners),
+                descriptor, u32::try_from(index).ok()?, terminal, self.num_terminals,
+                layout.physical_state_count, root, Arc::clone(&layout.allocator),
+                Arc::clone(&layout.owners),
             )?);
-            pending.push((terminal, root_state, byte_support, runtime));
+            pending.push(PendingVirtualComponent { terminal, root, byte_support, runtime });
         }
-
-        self.invalidate_derived_caches();
-        self.dfa.ensure_group_capacity(self.num_terminals as usize);
-        for &(terminal, expected_root, byte_support, _) in &pending {
-            self.dfa.set_group_u8set(terminal, byte_support);
-            let root_state = self.dfa.add_state();
-            debug_assert_eq!(root_state, expected_root);
-            self.dfa.add_epsilon_transition(self.start_state(), root_state);
-        }
-
-        let mut runtimes = Vec::with_capacity(pending.len());
-        let mut start_futures = self.dfa.possible_future_group_ids(self.start_state()).clone();
-        for (terminal, root_state, _, runtime) in pending {
-            let mut root_futures = BitSet::new(self.num_terminals as usize);
-            if runtime.root_has_future() {
-                root_futures.set(terminal as usize);
-                start_futures.set(terminal as usize);
-            }
-            self.dfa.overwrite_state_metadata(
-                root_state,
-                BitSet::new(self.num_terminals as usize),
-                root_futures,
-            );
-            runtimes.push(runtime);
-        }
-        let start_finalizers = self.dfa.finalizers(self.start_state()).clone();
-        self.dfa.overwrite_state_metadata(
-            self.start_state(),
-            start_finalizers,
-            start_futures,
+        self.virtual_repeat_intersections = self.append_virtual_components(
+            pending, VirtualBinaryRepeatIntersectionRuntime::root_has_future,
         );
-        self.virtual_repeat_intersections = runtimes;
         self.invalidate_derived_caches();
         Some(())
     }
@@ -10062,7 +10077,7 @@ impl Tokenizer {
         &mut self,
         components: Vec<(Expr, TerminalID)>,
     ) -> Option<()> {
-        self.install_virtual_residual_components_impl(components, false, false)
+        self.install_virtual_residual_components_impl(components, false)
     }
 
     /// Construct exact bounded-code liveness proofs before the physical
@@ -10086,111 +10101,19 @@ impl Tokenizer {
             .collect()
     }
 
-    /// Install residual components whose exact dynamic liveness proofs were
-    /// prepared independently of this tokenizer.
+    /// Install residual components whose liveness proofs were prepared
+    /// independently of the tokenizer. Root identities match the ordinary
+    /// dynamic construction exactly.
     #[doc(hidden)]
     pub fn install_prepared_virtual_residual_components(
         &mut self,
         components: Vec<PreparedVirtualResidualComponent>,
     ) -> Option<()> {
-        if self.virtual_unit_repeat.is_some()
-            || !self.virtual_repeat_intersections.is_empty()
-            || !self.virtual_residuals.is_empty()
-            || components.is_empty()
-            || components
-                .iter()
-                .any(|component| component.terminal >= self.num_terminals)
-        {
-            return None;
-        }
-        let mut seen_terminals = BTreeSet::new();
-        if components
-            .iter()
-            .any(|component| !seen_terminals.insert(component.terminal))
-        {
-            return None;
-        }
-
-        let existing_physical_state_count = u32::try_from(self.dfa.num_states()).ok()?;
-        let physical_state_count = existing_physical_state_count
-            .checked_add(u32::try_from(components.len()).ok()?)?;
-        let allocator = Arc::new(VirtualStateAllocator::new(physical_state_count)?);
-        let roots = (0..components.len())
-            .map(|index| existing_physical_state_count.checked_add(u32::try_from(index).ok()?))
-            .collect::<Option<Vec<_>>>()?;
-        let owners = Arc::new(VirtualRuntimeStateOwners::new(physical_state_count, &roots)?);
-
-        let pending = components
-            .into_iter()
-            .enumerate()
-            .map(|(index, component)| {
-                let root_state = roots[index];
-                let byte_support = super::compile::expr_u8set(&component.expression);
-                let runtime_index = u32::try_from(index).ok()?;
-                let runtime = VirtualResidualRuntime::new_with_liveness_oracle(
-                    &component.expression,
-                    component.liveness_oracle,
-                    runtime_index,
-                    component.terminal,
-                    self.num_terminals,
-                    physical_state_count,
-                    root_state,
-                    Arc::clone(&allocator),
-                    Arc::clone(&owners),
-                )?;
-                Some((
-                    component.terminal,
-                    root_state,
-                    byte_support,
-                    Arc::new(runtime),
-                ))
-            })
-            .collect::<Option<Vec<_>>>()?;
-
-        self.invalidate_derived_caches();
-        self.dfa.ensure_group_capacity(self.num_terminals as usize);
-        for &(terminal, expected_root, byte_support, _) in &pending {
-            self.dfa.set_group_u8set(terminal, byte_support);
-            let root_state = self.dfa.add_state();
-            debug_assert_eq!(root_state, expected_root);
-            self.dfa.add_epsilon_transition(self.start_state(), root_state);
-        }
-
-        let mut runtimes = Vec::with_capacity(pending.len());
-        let mut start_futures = self.dfa.possible_future_group_ids(self.start_state()).clone();
-        for (terminal, root_state, _, runtime) in pending {
-            let mut root_futures = BitSet::new(self.num_terminals as usize);
-            if runtime.root_has_future() {
-                root_futures.set(terminal as usize);
-                start_futures.set(terminal as usize);
-            }
-            self.dfa.overwrite_state_metadata(
-                root_state,
-                BitSet::new(self.num_terminals as usize),
-                root_futures,
-            );
-            runtimes.push(runtime);
-        }
-        let start_finalizers = self.dfa.finalizers(self.start_state()).clone();
-        self.dfa.overwrite_state_metadata(
-            self.start_state(),
-            start_finalizers,
-            start_futures,
-        );
-        self.virtual_residuals = runtimes;
-        self.invalidate_derived_caches();
-        Some(())
-    }
-
-    /// Install residual proxy/runtime metadata for a transfer-producing
-    /// dynamic compile without eagerly constructing bounded-code liveness
-    /// oracles that are not serialized in the compact artifact.
-    #[doc(hidden)]
-    pub fn install_virtual_residual_components_without_liveness_oracles(
-        &mut self,
-        components: Vec<(Expr, TerminalID)>,
-    ) -> Option<()> {
-        self.install_virtual_residual_components_impl(components, false, true)
+        self.install_residual_components(
+            components.into_iter().map(|component|
+                (component.expression, component.terminal, Some(component.liveness_oracle))
+            ).collect(), false,
+        )
     }
 
     #[doc(hidden)]
@@ -10198,123 +10121,59 @@ impl Tokenizer {
         &mut self,
         components: Vec<(Expr, TerminalID)>,
     ) -> Option<()> {
-        self.install_virtual_residual_components_impl(components, true, false)
+        self.install_virtual_residual_components_impl(components, true)
     }
 
     fn install_virtual_residual_components_impl(
         &mut self,
         components: Vec<(Expr, TerminalID)>,
         preserve_oracle_coordinate: bool,
-        suppress_dynamic_liveness_oracle: bool,
     ) -> Option<()> {
-        if self.virtual_unit_repeat.is_some()
-            || !self.virtual_repeat_intersections.is_empty()
-            || !self.virtual_residuals.is_empty()
-            || components.is_empty()
-            || components
-                .iter()
-                .any(|(_, terminal)| *terminal >= self.num_terminals)
-        {
-            return None;
-        }
-        let mut seen_terminals = BTreeSet::new();
-        if components
-            .iter()
-            .any(|(_, terminal)| !seen_terminals.insert(*terminal))
-        {
-            return None;
-        }
+        self.install_residual_components(
+            components.into_iter().map(|(expression, terminal)| (expression, terminal, None)).collect(),
+            preserve_oracle_coordinate,
+        )
+    }
 
-        let existing_physical_state_count = u32::try_from(self.dfa.num_states()).ok()?;
-        let physical_state_count = existing_physical_state_count
-            .checked_add(u32::try_from(components.len()).ok()?)?;
-        let allocator = Arc::new(VirtualStateAllocator::new(physical_state_count)?);
-        let roots = (0..components.len())
-            .map(|index| existing_physical_state_count.checked_add(u32::try_from(index).ok()?))
-            .collect::<Option<Vec<_>>>()?;
-        let owners = Arc::new(VirtualRuntimeStateOwners::new(physical_state_count, &roots)?);
-        // General residual components are independent until their proxy roots
-        // are appended below. Building a bounded-code oracle can involve DFA
-        // construction and relation doubling, so doing that serially makes a
-        // multi-string schema pay the sum of all component setup costs even
-        // though the resulting runtime ordering is fixed. Indexed parallel
-        // collection preserves input order and therefore root/runtime IDs.
-        let pending = components
-            .into_par_iter()
-            .enumerate()
-            .map(|(index, (expression, terminal))| {
-                let root_state = roots[index];
+    fn install_residual_components(
+        &mut self,
+        components: Vec<(Expr, TerminalID, Option<BoundedCodeIntersectionOracle>)>,
+        preserve_oracle_coordinate: bool,
+    ) -> Option<()> {
+        let layout = self.virtual_component_layout(components.iter().map(|(_, terminal, _)| *terminal))?;
+        // Indexed parallel collection preserves root/runtime IDs. Build
+        // every exact residual before installing any physical proxy.
+        let pending = components.into_par_iter().enumerate()
+            .map(|(index, (expression, terminal, oracle))| {
+                let root = layout.roots[index];
                 let byte_support = super::compile::expr_u8set(&expression);
                 let runtime_index = u32::try_from(index).ok()?;
-                let runtime = if preserve_oracle_coordinate {
-                    VirtualResidualRuntime::new_preserving_oracle_coordinate(
-                        &expression,
-                        runtime_index,
-                        terminal,
-                        self.num_terminals,
-                        physical_state_count,
-                        root_state,
-                        Arc::clone(&allocator),
-                        Arc::clone(&owners),
+                let runtime = if let Some(oracle) = oracle {
+                    VirtualResidualRuntime::new_with_liveness_oracle(
+                        &expression, oracle, runtime_index, terminal, self.num_terminals,
+                        layout.physical_state_count, root, Arc::clone(&layout.allocator),
+                        Arc::clone(&layout.owners),
                     )?
-                } else if suppress_dynamic_liveness_oracle {
-                    VirtualResidualRuntime::new_without_liveness_oracle(
-                        &expression,
-                        runtime_index,
-                        terminal,
-                        self.num_terminals,
-                        physical_state_count,
-                        root_state,
-                        Arc::clone(&allocator),
-                        Arc::clone(&owners),
+                } else if preserve_oracle_coordinate {
+                    VirtualResidualRuntime::new_preserving_oracle_coordinate(
+                        &expression, runtime_index, terminal, self.num_terminals,
+                        layout.physical_state_count, root, Arc::clone(&layout.allocator),
+                        Arc::clone(&layout.owners),
                     )?
                 } else {
                     VirtualResidualRuntime::new_dynamic(
-                        &expression,
-                        runtime_index,
-                        terminal,
-                        self.num_terminals,
-                        physical_state_count,
-                        root_state,
-                        Arc::clone(&allocator),
-                        Arc::clone(&owners),
+                        &expression, runtime_index, terminal, self.num_terminals,
+                        layout.physical_state_count, root, Arc::clone(&layout.allocator),
+                        Arc::clone(&layout.owners),
                     )?
                 };
-                Some((terminal, root_state, byte_support, Arc::new(runtime)))
-            })
-            .collect::<Option<Vec<_>>>()?;
-
-        self.invalidate_derived_caches();
-        self.dfa.ensure_group_capacity(self.num_terminals as usize);
-        for &(terminal, expected_root, byte_support, _) in &pending {
-            self.dfa.set_group_u8set(terminal, byte_support);
-            let root_state = self.dfa.add_state();
-            debug_assert_eq!(root_state, expected_root);
-            self.dfa.add_epsilon_transition(self.start_state(), root_state);
-        }
-
-        let mut runtimes = Vec::with_capacity(pending.len());
-        let mut start_futures = self.dfa.possible_future_group_ids(self.start_state()).clone();
-        for (terminal, root_state, _, runtime) in pending {
-            let mut root_futures = BitSet::new(self.num_terminals as usize);
-            if runtime.root_has_future() {
-                root_futures.set(terminal as usize);
-                start_futures.set(terminal as usize);
-            }
-            self.dfa.overwrite_state_metadata(
-                root_state,
-                BitSet::new(self.num_terminals as usize),
-                root_futures,
-            );
-            runtimes.push(runtime);
-        }
-        let start_finalizers = self.dfa.finalizers(self.start_state()).clone();
-        self.dfa.overwrite_state_metadata(
-            self.start_state(),
-            start_finalizers,
-            start_futures,
+                Some(PendingVirtualComponent {
+                    terminal, root, byte_support, runtime: Arc::new(runtime),
+                })
+            }).collect::<Option<Vec<_>>>()?;
+        self.virtual_residuals = self.append_virtual_components(
+            pending, VirtualResidualRuntime::root_has_future,
         );
-        self.virtual_residuals = runtimes;
         self.invalidate_derived_caches();
         Some(())
     }
