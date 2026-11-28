@@ -83,7 +83,7 @@ impl Expr {
         }
     }
 
-    pub(crate) fn skeleton(&self, allow_modules: bool) -> Result<(Grammar, Vec<(String, Binding)>)> {
+    pub(super) fn skeleton(&self, allow_modules: bool) -> Result<(Grammar, Vec<(String, Binding)>)> {
         fn walk(
             expr: &Expr,
             leaves: &mut Vec<(String, Binding)>,
