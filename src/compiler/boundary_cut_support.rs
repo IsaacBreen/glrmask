@@ -1,6 +1,6 @@
 //! Exact factorization of the existing necessary crossing-token observer.
 //! This is not an admission oracle and does not build a parser automaton.
-use crate::automata::lexer::observation::ByteRows;
+use crate::automata::lexer::observation::{ByteRows, ConfigInterner, EpsilonImageScratch};
 use glrmask_lexer::__private::automata::lexer::tokenizer::SingletonEpsilonClosures;
 use glrmask_lexer::__private::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use glrmask_lexer::__private::ds::bitset::BitSet;
@@ -9,6 +9,7 @@ use glrmask_terminal_dwa::__private::terminal_dwa::scope::{
 };
 use glrmask_vocab::Vocab;
 use rustc_hash::FxHashMap;
+use super::boundary_token_support::{FollowMasks, FollowPolicy};
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 #[derive(Clone)]
@@ -45,38 +46,28 @@ impl Observation {
             })
     }
 }
-struct Row {
-    raw: Vec<u32>,
-    observation: Observation,
-}
 struct SegmentCache<'a> {
     tok: &'a Tokenizer,
     flat: Option<&'a ByteRows>,
     closures: Arc<SingletonEpsilonClosures>,
-    marks: Vec<u32>,
-    epoch: u32,
-    rows: Vec<Row>,
-    ids: FxHashMap<Vec<u32>, u32>,
+    image: EpsilonImageScratch,
+    configs: ConfigInterner,
+    observations: Vec<Observation>,
     edges: FxHashMap<(u32, u8), u32>,
     work: usize,
     retained_raw: usize,
 }
 impl<'a> SegmentCache<'a> {
     fn new(tok: &'a Tokenizer, flat: Option<&'a ByteRows>) -> Self {
-        let empty = Vec::new();
-        let mut ids = FxHashMap::default();
-        ids.insert(empty.clone(), 0);
+        let mut configs = ConfigInterner::default();
+        assert_eq!(configs.intern(Vec::new()), 0);
         Self {
             tok,
             flat,
             closures: tok.all_singleton_epsilon_closures(),
-            marks: vec![0; tok.num_states() as usize],
-            epoch: 0,
-            rows: vec![Row {
-                observation: Observation::from_states(tok, &empty),
-                raw: empty,
-            }],
-            ids,
+            image: EpsilonImageScratch::new(tok.num_states() as usize),
+            configs,
+            observations: vec![Observation::from_states(tok, &[])],
             edges: FxHashMap::default(),
             work: 0,
             retained_raw: 0,
@@ -85,32 +76,22 @@ impl<'a> SegmentCache<'a> {
     fn intern(&mut self, mut states: Vec<u32>) -> Option<u32> {
         states.sort_unstable();
         states.dedup();
-        if let Some(&id) = self.ids.get(&states) {
+        if let Some(id) = self.configs.find(&states) {
             return Some(id);
         }
-        if self.rows.len() >= 32768 || states.iter().any(|&q| q >= self.tok.num_states()) {
+        if self.configs.len() >= 32768 || states.iter().any(|&q| q >= self.tok.num_states()) {
             return None;
         }
         self.retained_raw = self.retained_raw.checked_add(states.len())?;
         if self.retained_raw > 4_000_000
-            || self
-                .rows
-                .len()
-                .checked_add(1)?
+            || self.configs.len().checked_add(1)?
                 .checked_mul((self.tok.num_terminals() as usize).div_ceil(64))?
-                .checked_mul(2)?
-                > 4_000_000
+                .checked_mul(2)? > 4_000_000
         {
             return None;
         }
-        let id = self.rows.len() as u32;
-        let observation = Observation::from_states(self.tok, &states);
-        self.ids.insert(states.clone(), id);
-        self.rows.push(Row {
-            raw: states,
-            observation,
-        });
-        Some(id)
+        self.observations.push(Observation::from_states(self.tok, &states));
+        Some(self.configs.intern(states))
     }
     fn start(&mut self, seeds: &[u32]) -> Option<u32> {
         let mut closed = Vec::new();
@@ -132,38 +113,17 @@ impl<'a> SegmentCache<'a> {
         if self.edges.len() >= 1_000_000 {
             return None;
         }
-        self.work = self.work.checked_add(self.rows[q as usize].raw.len())?;
+        self.work = self.work.checked_add(self.configs[q as usize].len())?;
         if self.work > 16_000_000 {
             return None;
         }
-        let raw = if let Some(flat) = self.flat {
-            // Every stored frontier is epsilon closed. One raw direct-byte pass
-            // followed by target closures is exactly the ordinary NFA transition.
-            // No source-closure re-expansion or per-source allocation is required.
-            self.epoch = self.epoch.wrapping_add(1);
-            if self.epoch == 0 {
-                self.marks.fill(0);
-                self.epoch = 1;
-            }
-            let mut out = Vec::new();
-            for &source in &self.rows[q as usize].raw {
-                let target = flat.trans(source as usize, byte as usize);
-                if target == u32::MAX {
-                    continue;
-                }
-                for &closed in &self.closures[target as usize] {
-                    if self.marks[closed as usize] != self.epoch {
-                        self.marks[closed as usize] = self.epoch;
-                        out.push(closed);
-                    }
-                }
-            }
-            out
-        } else {
-            self.tok
-                .step_all(&self.rows[q as usize].raw, byte)
-                .into_vec()
-        };
+        let tok = self.tok;
+        let flat = self.flat;
+        let raw = self.image.step(
+            &self.configs[q as usize], byte, true, &self.closures, None,
+            |state, byte| flat.map_or_else(|| tok.get_transition(state, byte),
+                |rows| rows.trans(state as usize, byte as usize)),
+        ).to_vec();
         let next = self.intern(raw)?;
         self.edges.insert((q, byte), next);
         Some(next)
@@ -187,66 +147,6 @@ pub(crate) struct Result {
     pub profile: Profile,
 }
 
-struct Masks {
-    rows: Vec<Vec<u64>>,
-    ids: FxHashMap<Vec<u64>, u32>,
-    joins: FxHashMap<(u32, u32), u32>,
-}
-impl Masks {
-    fn new(all: Vec<u64>) -> Self {
-        let rows = vec![vec![0; all.len()], all];
-        let ids = rows
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(i, r)| (r, i as u32))
-            .collect();
-        Self {
-            rows,
-            ids,
-            joins: FxHashMap::default(),
-        }
-    }
-    fn intern(&mut self, row: Vec<u64>) -> Option<u32> {
-        if let Some(&id) = self.ids.get(&row) {
-            return Some(id);
-        }
-        if self.rows.len() >= 8192
-            || self.rows.len().checked_add(1)?.checked_mul(row.len())? > 4_000_000
-        {
-            return None;
-        }
-        let id = self.rows.len() as u32;
-        self.ids.insert(row.clone(), id);
-        self.rows.push(row);
-        Some(id)
-    }
-    fn join(&mut self, a: u32, b: u32) -> Option<u32> {
-        if a == 0 || a == b {
-            return Some(b);
-        }
-        if b == 0 || a == 1 {
-            return Some(a);
-        }
-        if b == 1 {
-            return Some(1);
-        }
-        let key = if a < b { (a, b) } else { (b, a) };
-        if let Some(&id) = self.joins.get(&key) {
-            return Some(id);
-        }
-        let row = self.rows[a as usize]
-            .iter()
-            .zip(&self.rows[b as usize])
-            .map(|(a, b)| a | b)
-            .collect();
-        let id = self.intern(row)?;
-        if self.joins.len() < 262144 {
-            self.joins.insert(key, id);
-        }
-        Some(id)
-    }
-}
 struct Transfers {
     rows: FxHashMap<(u32, u32), [u32; 2]>,
 }
@@ -258,7 +158,7 @@ impl Transfers {
         eligible: u32,
         follows: &[u32],
         foreign: &[bool],
-        pool: &mut Masks,
+        pool: &mut FollowMasks,
         events: &mut usize,
     ) -> Option<[u32; 2]> {
         if eligible == 0 {
@@ -292,7 +192,7 @@ fn propagate(
     transfer: [u32; 2],
     crossed: bool,
     target: &mut [u32; 2],
-    pool: &mut Masks,
+    pool: &mut FollowMasks,
 ) -> Option<()> {
     if crossed {
         let all = pool.join(transfer[0], transfer[1])?;
@@ -371,49 +271,9 @@ fn crossing_support_with_flat(
     if nt.checked_mul(width)? > 4_000_000 {
         return None;
     }
-    let mut all = vec![u64::MAX; width];
-    if !nt.is_multiple_of(64) {
-        *all.last_mut()? = (1u64 << (nt % 64)) - 1;
-    }
-    let foreign = (0..nt)
-        .map(|t| ownership.owner_of_terminal(t as u32) != Some(start))
-        .collect::<Vec<_>>();
-    let mut foreign_bits = vec![0u64; width];
-    let mut transparent_bits = vec![0u64; width];
-    let is_transparent =
-        |t: usize| Some(t as u32) == ignore || transparent.is_some_and(|m| m.get(t));
-    for t in 0..nt {
-        if foreign[t] {
-            foreign_bits[t / 64] |= 1u64 << (t % 64);
-        }
-        if is_transparent(t) {
-            transparent_bits[t / 64] |= 1u64 << (t % 64);
-        }
-    }
-    let mut pool = Masks::new(all.clone());
-    let mut transfers = Transfers {
-        rows: FxHashMap::default(),
-    };
-    let mut follows = Vec::with_capacity(nt);
-    for t in 0..nt {
-        let mut row = all.clone();
-        if !is_transparent(t) {
-            if let Some(blocked) = disallowed.get(&(t as u32)) {
-                for (a, &b) in row.iter_mut().zip(blocked.words()) {
-                    *a &= !b;
-                }
-            }
-            for (a, &b) in row.iter_mut().zip(&transparent_bits) {
-                *a |= b;
-            }
-        }
-        if let Some(blocked) = adjacency.and_then(|a| a.get(&(t as u32))) {
-            for (a, &b) in row.iter_mut().zip(blocked.words()) {
-                *a &= !b;
-            }
-        }
-        follows.push(pool.intern(row)?);
-    }
+    let FollowPolicy { masks: mut pool, follows, foreign, foreign_bits } =
+        FollowPolicy::new(nt, ownership, start, disallowed, ignore, transparent, adjacency, 4_000_000)?;
+    let mut transfers = Transfers { rows: FxHashMap::default() };
     let mut cache = SegmentCache::new(tok, flat);
     let first = cache.start(
         &initial
@@ -442,9 +302,9 @@ fn crossing_support_with_flat(
         let mut state = first;
         for end in 1..=word.len() {
             state = cache.step(state, word[end - 1])?;
-            let obs = &cache.rows[state as usize].observation;
+            let obs = &cache.observations[state as usize];
             if end == word.len() {
-                accepted |= obs.endpoint(&all, &foreign_bits, false);
+                accepted |= obs.endpoint(&pool.rows[1], &foreign_bits, false);
             } else {
                 let t = transfers.get(
                     state,
@@ -476,7 +336,7 @@ fn crossing_support_with_flat(
                     return None;
                 }
                 state = cache.step(state, word[end - 1])?;
-                let obs = &cache.rows[state as usize].observation;
+                let obs = &cache.observations[state as usize];
                 for lane in 0..2 {
                     if end == word.len() {
                         accepted |= obs.endpoint(
@@ -508,7 +368,7 @@ fn crossing_support_with_flat(
     }
     tokens.sort_unstable();
     profile.solve_ms = solve.elapsed().as_secs_f64() * 1000.0;
-    profile.states = cache.rows.len();
+    profile.states = cache.configs.len();
     profile.edges = cache.edges.len();
     profile.raw_step_work = cache.work;
     profile.mask_classes = pool.rows.len();

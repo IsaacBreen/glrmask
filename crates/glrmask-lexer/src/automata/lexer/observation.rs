@@ -371,6 +371,18 @@ impl ConfigInterner {
         id
     }
 
+    /// Query the canonical state-set identity without publishing a row.
+    /// Bounded observers can admit a new configuration only after their
+    /// independent state and memory budgets have been checked.
+    pub fn find(&self, states: &[u32]) -> Option<u32> {
+        if let [state] = states {
+            if let Some(&id) = self.singleton_ids.get(*state as usize) {
+                return (id != u32::MAX).then_some(id);
+            }
+        }
+        self.lookup(Self::hash(states), states)
+    }
+
     pub fn intern(&mut self, states: Vec<u32>) -> u32 {
         if let [state] = states.as_slice() {
             if let Some(id) = self.intern_singleton(*state) { return id; }

@@ -122,27 +122,28 @@ pub(crate) fn crossing_token_support(
 /// pair-follow observer. Multiple histories arriving at the same byte state
 /// can be joined by union: tests for the next terminal distribute over that
 /// union, and its subsequent follow set depends only on the emitted terminal.
-struct FollowMasks {
-    rows: Vec<Vec<u64>>,
+pub(super) struct FollowMasks {
+    pub(super) rows: Vec<Vec<u64>>,
     ids: FxHashMap<Vec<u64>, u32>,
     joins: FxHashMap<(u32,u32),u32>,
+    max_words: usize,
 }
 
 impl FollowMasks {
-    fn new(terminals: usize) -> Self {
+    fn new(terminals: usize, max_words: usize) -> Self {
         let words=terminals.div_ceil(64);
         let mut all=vec![u64::MAX;words];
         if !terminals.is_multiple_of(64) { *all.last_mut().unwrap()=(1u64<<(terminals%64))-1; }
         let rows=vec![vec![0;words],all];
         let ids=rows.iter().cloned().enumerate().map(|(i,row)|(row,i as u32)).collect();
-        Self { rows,ids,joins:FxHashMap::default() }
+        Self { rows,ids,joins:FxHashMap::default(),max_words }
     }
     fn intern(&mut self,bits:Vec<u64>)->Option<u32> {
         if let Some(&id)=self.ids.get(&bits){return Some(id);}
-        if self.rows.len()>=8192{return None;}
+        if self.rows.len()>=8192 || self.rows.len().checked_add(1)?.checked_mul(bits.len())? > self.max_words {return None;}
         let id=self.rows.len() as u32;self.rows.push(bits.clone());self.ids.insert(bits,id);Some(id)
     }
-    fn join(&mut self,a:u32,b:u32)->Option<u32> {
+    pub(super) fn join(&mut self,a:u32,b:u32)->Option<u32> {
         if a==b || b==0 || a==1{return Some(a);}
         if a==0 || b==1{return Some(b);}
         let key=if a<b{(a,b)}else{(b,a)};
@@ -157,6 +158,48 @@ impl FollowMasks {
     }
     fn intersects(&self,mask:u32,observations:&BitSet)->bool {
         self.rows[mask as usize].iter().zip(observations.words()).any(|(a,b)|a&b!=0)
+    }
+}
+
+/// Shared existential follow policy. Transparent terminals preserve the
+/// original relaxation and explicit adjacency is always applied last.
+pub(super) struct FollowPolicy {
+    pub masks: FollowMasks,
+    pub follows: Vec<u32>,
+    pub foreign: Vec<bool>,
+    pub foreign_bits: Vec<u64>,
+}
+
+impl FollowPolicy {
+    pub(super) fn new(
+        terminals: usize, ownership: &BoundaryOwnership, start: ImmediateComponentId,
+        disallowed: &BTreeMap<u32, BitSet>, ignore: Option<u32>, transparent: Option<&BitSet>,
+        adjacency: Option<&BTreeMap<u32, BitSet>>, max_words: usize,
+    ) -> Option<Self> {
+        let mut masks = FollowMasks::new(terminals, max_words);
+        let is_transparent = |t: u32| Some(t) == ignore || transparent.is_some_and(|m| m.get(t as usize));
+        let foreign = (0..terminals as u32).map(|t| ownership.owner_of_terminal(t) != Some(start)).collect::<Vec<_>>();
+        let mut transparent_words = vec![0u64; terminals.div_ceil(64)];
+        let mut foreign_bits = transparent_words.clone();
+        for t in 0..terminals {
+            if is_transparent(t as u32) { transparent_words[t/64] |= 1u64 << (t%64); }
+            if foreign[t] { foreign_bits[t/64] |= 1u64 << (t%64); }
+        }
+        let mut follows = Vec::with_capacity(terminals);
+        for t in 0..terminals as u32 {
+            let mut bits = masks.rows[1].clone();
+            if !is_transparent(t) {
+                if let Some(blocked) = disallowed.get(&t) {
+                    for (word, blocked) in bits.iter_mut().zip(blocked.words()) { *word &= !*blocked; }
+                }
+                for (word, &transparent) in bits.iter_mut().zip(&transparent_words) { *word |= transparent; }
+            }
+            if let Some(blocked) = adjacency.and_then(|rows| rows.get(&t)) {
+                for (word, blocked) in bits.iter_mut().zip(blocked.words()) { *word &= !*blocked; }
+            }
+            follows.push(masks.intern(bits)?);
+        }
+        Some(Self { masks, follows, foreign, foreign_bits })
     }
 }
 
@@ -253,37 +296,13 @@ pub(crate) fn crossing_token_support_with_prepared_transitions(
     if initial_mask.len()!=n || terminals==0 || tokenizer.has_virtual_residual_runtime()
         || vocab.entries_map().values().try_fold(0usize,|n,w|n.checked_add(w.len()))?>262_144
     {return None;}
-    let is_transparent=|t:u32|Some(t)==ignore || transparent.is_some_and(|m|m.get(t as usize));
-    let mut masks=FollowMasks::new(terminals);
-    let mut transparent_words=vec![0u64;terminals.div_ceil(64)];
-    for t in 0..terminals as u32 {
-        if is_transparent(t){transparent_words[t as usize/64]|=1u64<<(t%64);}
-    }
-    let mut follows=Vec::with_capacity(terminals);
-    for t in 0..terminals as u32 {
-        let mut bits=masks.rows[1].clone();
-        if !is_transparent(t) {
-            if let Some(blocked)=disallowed.get(&t) {
-                for (word,blocked) in bits.iter_mut().zip(blocked.words()){*word&=!*blocked;}
-            }
-            // Transparent terminals do not add a new restriction. Widen their
-            // reset relation to ALL below rather than accidentally forbidding
-            // a path whose real predecessor survives across ignored text.
-            for (word,&transparent) in bits.iter_mut().zip(&transparent_words){*word|=transparent;}
-        }
-        if let Some(blocked)=adjacency.and_then(|rows|rows.get(&t)) {
-            for (word,blocked) in bits.iter_mut().zip(blocked.words()){*word&=!*blocked;}
-        }
-        follows.push(masks.intern(bits)?);
-    }
-    let foreign=(0..terminals as u32).map(|t|ownership.owner_of_terminal(t)!=Some(start)).collect::<Vec<_>>();
+    let FollowPolicy { mut masks, follows, foreign, foreign_bits } =
+        FollowPolicy::new(terminals, ownership, start, disallowed, ignore, transparent, adjacency, usize::MAX)?;
     // Keep metadata borrowed from the immutable tokenizer. A live witness
     // proves a positive intersection immediately; fallback checks both exact
     // matched and future sets. A missing witness proves the union is empty.
     let mut live_witness=Vec::with_capacity(n);
     let mut foreign_witness=Vec::with_capacity(n);
-    let mut foreign_bits=vec![0u64;terminals.div_ceil(64)];
-    for t in 0..terminals { if foreign[t] { foreign_bits[t/64]|=1u64<<(t%64); } }
     for q in 0..n as u32 {
         if tokenizer.state_is_virtual_runtime(q){return None;}
         live_witness.push(tokenizer.matched_terminals_slice(q).first().copied()
