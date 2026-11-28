@@ -4,6 +4,7 @@
 //! Committing one `a` leaves a parser state whose epsilon/GLR bookkeeping is
 //! cyclic; the next mask or byte commit must merge equivalent stack
 //! configurations instead of regenerating them forever.
+use glrmask_vocab::__private::VocabExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 

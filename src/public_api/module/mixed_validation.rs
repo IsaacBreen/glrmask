@@ -5,6 +5,7 @@
 //! every route against an all-`ParserDwa` compile and records whether any
 //! fallback was used.
 #![allow(clippy::needless_range_loop)]
+use glrmask_vocab::__private::VocabExt as _;
 use crate::test_modes::MaskMode;
 
 use super::*;

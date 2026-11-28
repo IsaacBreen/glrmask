@@ -1,4 +1,5 @@
 //! First-segment completion observations; never a quotient of reset states.
+use glrmask_vocab::__private::VocabExt as _;
 use glrmask_lexer::__private::automata::lexer::{Lexer,tokenizer::Tokenizer};
 use glrmask_terminal_dwa::__private::terminal_dwa::scope::BoundaryAnalysisScope;
 use glrmask_vocab::Vocab;

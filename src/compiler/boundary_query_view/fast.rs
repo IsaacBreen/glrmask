@@ -1,6 +1,7 @@
 //! Exact query-view reachability using an already source-certified direct
 //! transition table. The selected raw states, induced tokenizer and its ID
 //! layout must match `boundary_query_view::prepare`; only the traversal changes.
+use glrmask_vocab::__private::VocabExt as _;
 use super::QueryView;
 use crate::automata::lexer::tokenizer::{Lexer, Tokenizer, SingletonEpsilonClosures};
 use crate::compiler::stages::id_map_and_terminal_dwa::scope::BoundaryAnalysisScope;

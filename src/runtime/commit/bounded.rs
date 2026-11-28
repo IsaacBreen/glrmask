@@ -4,6 +4,7 @@
 //! We may read an existing exact mask, but never construct a vocabulary-wide
 //! mask. Prepared vocabulary ordering is reused only if it already exists;
 //! otherwise exact individual recognition is the allocation-bounded fallback.
+use glrmask_vocab::__private::VocabExt as _;
 use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;

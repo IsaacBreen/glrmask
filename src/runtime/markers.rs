@@ -1,5 +1,6 @@
 //! Passive grammar-boundary observations. Markers never enter the model-token
 //! inventory, never execute parser actions, and never participate in mask walks.
+use glrmask_vocab::__private::VocabExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 use std::sync::Arc;

@@ -1,6 +1,7 @@
 //! Query an already-certified component injected into the link's disjoint lexer.
 //! Caller must own the same source-pinned injection proof as PreparedSourceSpan.
 //! This helper is private: numeric offsets alone are not an injection certificate.
+use glrmask_vocab::__private::VocabExt as _;
 use super::completion_index::CompletionContext;
 use glrmask_lexer::__private::automata::lexer::{Lexer,tokenizer::Tokenizer};
 use glrmask_vocab::Vocab;

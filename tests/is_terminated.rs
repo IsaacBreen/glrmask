@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::VocabExt as _;
 use glrmask::test_modes::MaskMode;
 use glrmask::{
     ConstraintInner as Constraint, ConstraintState, DynamicConstraint, Expr, Grammar,

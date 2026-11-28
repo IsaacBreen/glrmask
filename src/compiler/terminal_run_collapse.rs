@@ -9,6 +9,7 @@
 //! all repetitions beyond `k` can be lowered to epsilon. The rewritten weighted
 //! terminal NWA is then determinized and minimized before parser-DWA composition.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Instant;
 

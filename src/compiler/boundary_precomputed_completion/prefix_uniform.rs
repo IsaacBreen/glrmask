@@ -4,6 +4,7 @@
 //! certificate as production PreparedSourceSpan. State and terminal offsets
 //! MUST come from that union, not a guessed or merely hash-matched lexer.
 //! This changes only how local ownership is proved. No token is admitted here.
+use glrmask_vocab::__private::VocabExt as _;
 use super::completion_index::CompletionContext;
 use glrmask_lexer::__private::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use glrmask_vocab::Vocab;

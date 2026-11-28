@@ -5,6 +5,7 @@
 //! component's public outward interface from some component-local history?
 //! It is an upper bound. Every uncertainty widens; none is interpreted as an
 //! empty language.
+use glrmask_vocab::__private::VocabExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 

@@ -6,6 +6,7 @@
 //! compact coordinates. This proves equality of every raw
 //! `(state, original token, terminal)` tuple without expanding those tuples.
 
+use glrmask_vocab::__private::VocabExt as _;
 use rustc_hash::FxHashMap;
 
 use super::{BuildInput, Implementation, LocalIdMapTerminalDwa};

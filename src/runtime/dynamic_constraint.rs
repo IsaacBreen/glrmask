@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::VocabExt as _;
 use crate::ErrorExt as _;
 // PRE-RELEASE COMPATIBILITY POLICY
 // ================================

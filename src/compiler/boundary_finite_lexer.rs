@@ -6,6 +6,7 @@
 //! observation/edge signatures. Context is part of the key: bounded trace
 //! equality is never used as an unlayered raw-state congruence.
 
+use glrmask_vocab::__private::VocabExt as _;
 use glrmask_lexer::__private::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use glrmask_terminal_dwa::__private::terminal_dwa::scope::{BoundaryOwnership, ImmediateComponentId};
 use glrmask_vocab::Vocab;

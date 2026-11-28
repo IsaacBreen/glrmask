@@ -10,6 +10,7 @@
 //! the grammar.  The production hierarchy currently keeps one-byte tails for
 //! ordinary leaf preparation and a two-byte compositional refinement. Unknown
 //! interiors widen locally; known parent postambles remain exact.
+use glrmask_vocab::__private::VocabExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 

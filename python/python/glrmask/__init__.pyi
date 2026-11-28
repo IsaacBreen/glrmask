@@ -66,7 +66,7 @@ print(bytes(output).decode())  # e.g. {"color": "blue"}
 """
 from __future__ import annotations
 from collections.abc import Mapping
-from typing import Any, ClassVar, Iterable, Literal, final
+from typing import Any, ClassVar, Iterable, Literal, NoReturn, final
 import numpy as np
 from numpy.typing import NDArray
 
@@ -90,22 +90,22 @@ __all__: list[str] = [
 class Vocab:
     """Each token ID and its bytes."""
     def __init__(self, id_to_bytes: Mapping[int, bytes], /) -> None:
-        """Fails on duplicate IDs."""
         ...
 
 @final
 class Grammar:
+    def __new__(cls, _private: NoReturn, /) -> Grammar: ...
     @staticmethod
     def from_glrm(source: str, /) -> Grammar:
-        """Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source."""
+        """Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/docs/glrm-format.md) source."""
         ...
     @staticmethod
     def from_lark(source: str, /) -> Grammar:
-        """Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats) source."""
+        """Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/GUIDE.md#grammar-formats) source."""
         ...
     @staticmethod
     def from_json_schema(schema: str | bool | dict[str, Any], /) -> Grammar:
-        """Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats), given as JSON text or a dict."""
+        """Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/GUIDE.md#grammar-formats), given as JSON text or a dict."""
         ...
     @staticmethod
     def from_expr(expr: Expr, /) -> Grammar:
@@ -132,6 +132,7 @@ class Grammar:
 @final
 class Expr:
     """A grammar expression."""
+    def __new__(cls, _private: NoReturn, /) -> Expr: ...
     @staticmethod
     def literal(value: str | bytes, /) -> Expr:
         """Matches `value` exactly."""
@@ -199,6 +200,7 @@ class Module:
 
 @final
 class Constraint:
+    def __new__(cls, _private: NoReturn, /) -> Constraint: ...
     def __repr__(self) -> str:
         ...
     def start(self) -> ConstraintState:
@@ -217,6 +219,7 @@ class Constraint:
 
 @final
 class ConstraintState:
+    def __new__(cls, _private: NoReturn, /) -> ConstraintState: ...
     def __repr__(self) -> str:
         ...
     def mask(self) -> NDArray[np.uint32]:
@@ -254,6 +257,7 @@ class ConstraintState:
 @final
 class MaskStrategy:
     """Controls how the constraint is compiled."""
+    def __new__(cls, _private: NoReturn, /) -> MaskStrategy: ...
     AUTO: ClassVar[MaskStrategy]
     """The default; currently `FAST_MASKS`."""
     FAST_COMPILE: ClassVar[MaskStrategy]
@@ -267,6 +271,7 @@ class MaskStrategy:
 @final
 class Externs(Mapping[str, "Extern"]):
     """A read-only mapping of extern names to `Extern`."""
+    def __new__(cls, _private: NoReturn, /) -> Externs: ...
     @property
     def unbound(self) -> Externs:
         ...
@@ -278,6 +283,7 @@ class Externs(Mapping[str, "Extern"]):
 @final
 class Extern:
     """A named placeholder in a grammar."""
+    def __new__(cls, _private: NoReturn, /) -> Extern: ...
     @property
     def name(self) -> str:
         ...

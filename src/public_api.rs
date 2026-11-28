@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::{VocabExt as _, TokenSetExt as _};
 use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
@@ -276,19 +277,49 @@ impl Externs {
         Self { entries: self.unbound.clone(), unbound: self.unbound.clone() }
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Extern> + '_ { self.entries.iter() }
+    pub fn iter(&self) -> ExternIter<'_> { ExternIter(self.entries.iter()) }
 }
+
+/// A borrowed iterator over externs.
+#[derive(Clone, Debug)]
+pub struct ExternIter<'a>(std::slice::Iter<'a, Extern>);
+
+impl<'a> Iterator for ExternIter<'a> {
+    type Item = &'a Extern;
+    fn next(&mut self) -> Option<Self::Item> { self.0.next() }
+    fn size_hint(&self) -> (usize, Option<usize>) { self.0.size_hint() }
+}
+impl DoubleEndedIterator for ExternIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> { self.0.next_back() }
+}
+impl ExactSizeIterator for ExternIter<'_> {}
+impl std::iter::FusedIterator for ExternIter<'_> {}
+
+/// An owning iterator over externs.
+#[derive(Clone, Debug)]
+pub struct ExternIntoIter(std::vec::IntoIter<Extern>);
+
+impl Iterator for ExternIntoIter {
+    type Item = Extern;
+    fn next(&mut self) -> Option<Self::Item> { self.0.next() }
+    fn size_hint(&self) -> (usize, Option<usize>) { self.0.size_hint() }
+}
+impl DoubleEndedIterator for ExternIntoIter {
+    fn next_back(&mut self) -> Option<Self::Item> { self.0.next_back() }
+}
+impl ExactSizeIterator for ExternIntoIter {}
+impl std::iter::FusedIterator for ExternIntoIter {}
 
 impl IntoIterator for Externs {
     type Item = Extern;
-    type IntoIter = std::vec::IntoIter<Extern>;
-    fn into_iter(self) -> Self::IntoIter { self.entries.into_iter() }
+    type IntoIter = ExternIntoIter;
+    fn into_iter(self) -> Self::IntoIter { ExternIntoIter(self.entries.into_iter()) }
 }
 
 impl<'a> IntoIterator for &'a Externs {
     type Item = &'a Extern;
-    type IntoIter = std::slice::Iter<'a, Extern>;
-    fn into_iter(self) -> Self::IntoIter { self.entries.iter() }
+    type IntoIter = ExternIter<'a>;
+    fn into_iter(self) -> Self::IntoIter { self.iter() }
 }
 
 /// How the parser is represented and run when masks are computed with
@@ -612,7 +643,7 @@ impl Grammar {
         Ok(grammar)
     }
 
-    /// Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source.
+    /// Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/docs/glrm-format.md) source.
     pub fn from_glrm(source: &str) -> Result<Self> {
         let grammar = Self::new(GrammarSource::Glrm(Arc::from(source)));
         grammar.component()?;
@@ -620,7 +651,7 @@ impl Grammar {
     }
 
 
-    /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats) source.
+    /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/GUIDE.md#grammar-formats) source.
     pub fn from_lark(source: &str) -> Result<Self> {
         let grammar = Self::new(GrammarSource::Lark(Arc::from(source)));
         grammar.lark_document()?;
@@ -628,7 +659,7 @@ impl Grammar {
         Ok(grammar)
     }
 
-    /// Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats), given as JSON text.
+    /// Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/GUIDE.md#grammar-formats), given as JSON text.
     pub fn from_json_schema(source: &str) -> Result<Self> {
         crate::import::parse_json_schema_to_named(source)?;
         Ok(Self::new(GrammarSource::JsonSchema(Arc::from(source))))

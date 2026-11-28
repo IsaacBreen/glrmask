@@ -5,7 +5,6 @@ export declare const version: string;
 export declare class Vocab implements Disposable {
   private readonly __vocabBrand: void;
 
-  /** Fails on duplicate IDs. */
   constructor(entries: Iterable<readonly [number, Uint8Array]>);
 
   clone(): Vocab;
@@ -23,11 +22,11 @@ export interface CompileOptions {
 export declare class Grammar implements Disposable {
   private constructor();
   private readonly __grammarBrand: void;
-  /** Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source. */
+  /** Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/docs/glrm-format.md) source. */
   static fromGlrm(source: string): Grammar;
-  /** Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats) source. */
+  /** Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/GUIDE.md#grammar-formats) source. */
   static fromLark(source: string): Grammar;
-  /** Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats), given as JSON text, a boolean or an object. */
+  /** Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/GUIDE.md#grammar-formats), given as JSON text, a boolean or an object. */
   static fromJsonSchema(schema: string | boolean | object): Grammar;
   /** Builds a grammar from an `Expr`. */
   static fromExpr(expr: Expr): Grammar;

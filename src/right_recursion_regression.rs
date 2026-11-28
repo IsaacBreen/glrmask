@@ -1,5 +1,6 @@
 //! Regression coverage for right-recursion elimination on a small grammar that
 //! used to grow the rule set without bound.
+use glrmask_vocab::__private::VocabExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 

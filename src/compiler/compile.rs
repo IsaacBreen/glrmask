@@ -8,6 +8,7 @@ pub(crate) use super::pipeline::{
     emit_compile_profile_summary,
 };
 
+use glrmask_vocab::__private::VocabExt as _;
 #[derive(Debug)]
 struct VocabPackedTokenBytes {
     packed: std::sync::Arc<crate::runtime::PackedTokenBytes>,

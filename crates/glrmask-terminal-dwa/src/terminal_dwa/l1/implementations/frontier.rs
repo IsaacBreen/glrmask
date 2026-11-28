@@ -4,6 +4,7 @@
 //! OR-ing their origin masks after every trie edge, exactly matching the proposed
 //! weighted-NWA execution without constructing or determinizing that NWA.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::time::Instant;
 
 use rustc_hash::FxHashMap;

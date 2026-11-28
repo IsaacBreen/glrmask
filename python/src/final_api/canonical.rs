@@ -68,7 +68,7 @@ impl From<&glrmask::Extern> for PyExtern {
 }
 
 /// A read-only mapping of extern names to `Extern`.
-#[pyclass(name = "Externs", module = "glrmask", frozen, from_py_object)]
+#[pyclass(name = "Externs", module = "glrmask", frozen, mapping, from_py_object)]
 #[derive(Clone, Debug)]
 pub(super) struct PyExterns {
     pub(super) entries: Vec<PyExtern>,
@@ -98,25 +98,27 @@ impl PyExterns {
         self.entries.len()
     }
 
-    fn __contains__(&self, key: &str) -> bool {
-        self.entries.iter().any(|e| e.name == key)
+    fn __contains__(&self, key: &Bound<'_, PyAny>) -> bool {
+        key.extract::<&str>().is_ok_and(|key| self.entries.iter().any(|e| e.name == key))
     }
 
-    fn __getitem__(&self, key: &str) -> PyResult<PyExtern> {
-        self.entries
-            .iter()
-            .find(|e| e.name == key)
-            .cloned()
-            .ok_or_else(|| PyKeyError::new_err(key.to_string()))
+    fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<PyExtern> {
+        if let Ok(name) = key.extract::<&str>() {
+            if let Some(entry) = self.entries.iter().find(|e| e.name == name) {
+                return Ok(entry.clone());
+            }
+        }
+        Err(PyKeyError::new_err(key.clone().unbind()))
     }
 
     #[pyo3(signature = (key, default = None, /))]
-    fn get(&self, py: Python<'_>, key: &str, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-        if let Some(e) = self.entries.iter().find(|e| e.name == key) {
-            Ok(e.clone().into_pyobject(py)?.into_any().unbind())
-        } else {
-            Ok(default.unwrap_or_else(|| py.None()))
+    fn get(&self, py: Python<'_>, key: &Bound<'_, PyAny>, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+        if let Ok(name) = key.extract::<&str>() {
+            if let Some(entry) = self.entries.iter().find(|e| e.name == name) {
+                return Ok(entry.clone().into_pyobject(py)?.into_any().unbind());
+            }
         }
+        Ok(default.unwrap_or_else(|| py.None()))
     }
 
     fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {

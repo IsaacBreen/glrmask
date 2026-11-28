@@ -2,6 +2,7 @@
 //! `ParserBackend::LrTable` runtime, compared against the default native
 //! `TemplateDfa` backend. Construction-shape witnesses (retained table, no
 //! template artifacts) live in the crate-internal `explicit_lr_tests` module.
+use glrmask_vocab::__private::VocabExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 

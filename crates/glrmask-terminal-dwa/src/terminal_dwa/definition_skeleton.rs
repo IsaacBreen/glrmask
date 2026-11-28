@@ -9,6 +9,7 @@
 //! This module deliberately does not alter the production tokenizer or remove
 //! terminal labels. It measures scanner-topology sharing only.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};

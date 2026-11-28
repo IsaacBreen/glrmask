@@ -1,4 +1,5 @@
 //! Component-only observations feeding the exact necessary cut-support DP.
+use glrmask_vocab::__private::VocabExt as _;
 use std::{collections::BTreeMap,time::Instant};
 use rustc_hash::FxHashMap;
 use glrmask_lexer::__private::{automata::lexer::Lexer,ds::bitset::BitSet};

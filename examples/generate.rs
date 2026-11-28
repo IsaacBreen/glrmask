@@ -2,6 +2,7 @@
 //! stop if EOS is chosen, otherwise commit it.
 //!
 //! Random numbers stand in for the model.
+use glrmask_vocab::__private::VocabExt as _;
 use glrmask::{Grammar, Vocab};
 
 fn main() -> glrmask::Result<()> {

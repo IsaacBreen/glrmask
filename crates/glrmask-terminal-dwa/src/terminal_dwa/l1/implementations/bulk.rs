@@ -4,6 +4,7 @@
 //! starts therefore share the whole remaining subtree, not merely its first-byte
 //! entry. Per-node canonical profile IDs are the implicit weighted frontier.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::time::Instant;
 
 use rustc_hash::FxHashMap;

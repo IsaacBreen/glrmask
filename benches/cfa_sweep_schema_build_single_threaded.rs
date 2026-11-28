@@ -1,6 +1,7 @@
 #[path = "support/cfa_sweep.rs"]
 mod cfa_sweep;
 
+use glrmask_vocab::__private::VocabExt as _;
 use criterion::{criterion_group, criterion_main, Criterion};
 
 fn bench_cfa_sweep_schema_build_single_threaded(c: &mut Criterion) {

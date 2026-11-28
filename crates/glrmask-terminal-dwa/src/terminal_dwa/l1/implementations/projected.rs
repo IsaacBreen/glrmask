@@ -6,6 +6,7 @@
 //! residuals are roots; minimization therefore never prunes by reachability from
 //! one distinguished start state.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;

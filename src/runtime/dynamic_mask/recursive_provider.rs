@@ -3,6 +3,7 @@
 //! Composition supplies namespaces and CALL/RETURN reset routing. Vocabulary
 //! traversal, exact lexer execution, guard advancement and product caching are
 //! the ordinary masking implementations, not another composition mask walk.
+use glrmask_vocab::__private::VocabExt as _;
 use super::*;
 
 #[derive(Clone, Copy)]

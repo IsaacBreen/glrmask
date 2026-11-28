@@ -35,6 +35,7 @@
 //! the representative extends every positional observation known for each
 //! member, but two members need not extend each other.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::time::Instant;
 
 use rustc_hash::FxHashMap;

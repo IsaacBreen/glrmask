@@ -20,7 +20,7 @@
  * reads it. A constraint can be shared across threads, with one state per
  * thread.
  *
- * Fallible functions return a status and set output handles to NULL on
+ * Fallible functions (not frees or infallible accessors) return a status and set output handles to NULL on
  * failure. glrmask_error_message() describes the last failure on the current
  * thread.
  */
@@ -135,7 +135,6 @@ GLRMASK_API const char *glrmask_error_message(void);
 /// Initializes the caller-owned options buffer with defaults and its size in bytes.
 GLRMASK_NODISCARD GLRMASK_API glrmask_status glrmask_compile_options_init(glrmask_compile_options* opts,size_t struct_size);
 
-/// Fails on duplicate IDs.
 GLRMASK_NODISCARD GLRMASK_API glrmask_status glrmask_vocab_new(const glrmask_vocab_entry* entries,size_t n,glrmask_vocab** out);
 GLRMASK_NODISCARD GLRMASK_API glrmask_status glrmask_vocab_clone(const glrmask_vocab* vocab,glrmask_vocab** out);
 GLRMASK_API void glrmask_vocab_free(glrmask_vocab* vocab);

@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::VocabExt as _;
 use super::*;
 use super::boundary_cache::FullWalkBoundaryDirectCache;
 use crate::runtime::artifact::{DynamicLazyUnionRow, DynamicMaskTrieFullWalkOp};

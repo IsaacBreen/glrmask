@@ -2,6 +2,7 @@
 //! Definitions are stored once, instance environments separately, and references
 //! point backwards in postorder. Loading cannot recurse through attacker-chosen
 //! serialized component graphs or duplicate a shared definition per path.
+use glrmask_vocab::__private::VocabExt as _;
 use super::*;
 use crate::artifact_load::LoadBudget;
 use std::collections::HashMap;

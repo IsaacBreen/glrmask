@@ -6,6 +6,7 @@
 //! merged tokenizer. Keep those domains explicit so a quotient cannot seed a
 //! representative owned by another component.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::sync::Arc;
 
 use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};

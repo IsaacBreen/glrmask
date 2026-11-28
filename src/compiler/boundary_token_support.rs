@@ -9,6 +9,7 @@
 //! a proof that the token cannot occur in the boundary terminal language.
 //! This is a support filter, NEVER an admission oracle.
 
+use glrmask_vocab::__private::VocabExt as _;
 use crate::automata::lexer::tokenizer::{Lexer, Tokenizer};
 use crate::compiler::stages::id_map_and_terminal_dwa::scope::{
     BoundaryOwnership, ImmediateComponentId,

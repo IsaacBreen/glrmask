@@ -6,6 +6,7 @@
 //! The expected masks come from an exact CFG/prefix-DFA intersection over the
 //! source CFG, not from any glrmask parser. Masks are checked at every prefix
 //! of length at most four, for byte feeds and token feeds.
+use glrmask_vocab::__private::VocabExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 

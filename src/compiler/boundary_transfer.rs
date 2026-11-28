@@ -42,6 +42,7 @@ mod admission;
 #[path = "boundary_direct_program.rs"]
 mod direct_program;
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 

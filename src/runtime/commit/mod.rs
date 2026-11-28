@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::VocabExt as _;
 use crate::runtime::markers::{CommitObserver, NoMarkers};
 use crate::automata::lexer::Lexer;
 pub(crate) mod profile;

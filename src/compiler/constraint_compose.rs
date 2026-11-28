@@ -8,6 +8,7 @@
 //! the overlap-local union: explicit positive labels override them, unmatched
 //! positive labels fall through to them, and negative labels never do.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};

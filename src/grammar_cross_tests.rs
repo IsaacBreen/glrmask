@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::VocabExt as _;
 use crate::grammar::ast::lower;
 
 #[test]

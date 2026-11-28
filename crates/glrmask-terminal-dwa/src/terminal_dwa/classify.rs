@@ -1,5 +1,6 @@
 //! Vocab and terminal classification utilities.
 
+use glrmask_vocab::__private::VocabExt as _;
 use crate::automata::lexer::compile::{build_regex, build_regex_local_small_product};
 use crate::automata::lexer::ast::Expr;
 use crate::automata::lexer::Lexer;

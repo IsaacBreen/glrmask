@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::VocabExt as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

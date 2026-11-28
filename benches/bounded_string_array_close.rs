@@ -1,6 +1,7 @@
 #[path = "support/cfa_sweep.rs"]
 mod cfa_sweep;
 
+use glrmask_vocab::__private::VocabExt as _;
 use criterion::{
     BatchSize,
     BenchmarkId,

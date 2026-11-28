@@ -1,6 +1,7 @@
 //! End-to-end smoke tests for grammar/schema construction, masks, commits, and
 //! serialization. Narrow regressions live in dedicated test files.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::{
     env,
     ffi::OsString,

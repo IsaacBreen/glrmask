@@ -3,6 +3,7 @@
 //! cargo run --release --example exact_token_range_bench -- 131072 2000
 //! Prints JSON. Run without competing CPU-heavy jobs. Vocabulary preparation,
 //! cold compilation, warm compilation and precompiled linking are distinct.
+use glrmask_vocab::__private::TokenSetExt as _;
 use glrmask::test_modes::MaskMode;
 use std::hint::black_box;
 use std::ops::Range;

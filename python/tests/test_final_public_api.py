@@ -471,3 +471,18 @@ def test_mixed_token_set_constructor_and_bool_rejection():
         glrmask.TokenSet([True])
     with pytest.raises(TypeError):
         glrmask.TokenSet([False])
+
+def test_factory_only_and_extern_mapping_protocol():
+    from collections.abc import Mapping
+    for cls in (glrmask.Grammar, glrmask.Expr, glrmask.Constraint,
+                glrmask.ConstraintState, glrmask.MaskStrategy, glrmask.Externs, glrmask.Extern):
+        with pytest.raises(TypeError):
+            cls()
+    externs = glrmask.Grammar.from_glrm("extern token T start root nt root=T").externs
+    assert isinstance(externs, Mapping)
+    assert dict(externs) == {"T": externs["T"]}
+    assert set(externs.keys()) == {"T"}
+    assert list(externs.items()) == [("T", externs["T"])]
+    assert 42 not in externs and externs.get(42, "missing") == "missing"
+    with pytest.raises(KeyError):
+        externs[42]

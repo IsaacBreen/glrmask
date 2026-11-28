@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::VocabExt as _;
 use crate::ErrorExt as _;
 use crate::artifact_load::{LoadBudget, reserve, copy_bytes};
 use bincode::Options;

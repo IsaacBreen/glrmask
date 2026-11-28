@@ -1,5 +1,6 @@
 //! Tiny driver and equivalence test for the swappable L1 implementations.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::sync::Arc;
 
 use glrmask_glr::__private::glr::analysis::AnalyzedGrammar;

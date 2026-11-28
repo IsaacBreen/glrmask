@@ -2,6 +2,7 @@
 //! `ParserBackend::LrTable` backend. These assert the *construction* shape that
 //! the public enum alone cannot prove: a retained LR table with no template
 //! parser, no template DFAs and no direct-regular runtime bypass.
+use glrmask_vocab::__private::VocabExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 

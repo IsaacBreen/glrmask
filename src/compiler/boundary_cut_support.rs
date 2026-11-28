@@ -1,5 +1,6 @@
 //! Exact factorization of the existing necessary crossing-token observer.
 //! This is not an admission oracle and does not build a parser automaton.
+use glrmask_vocab::__private::VocabExt as _;
 use glrmask_lexer::__private::automata::lexer::tokenizer::SingletonEpsilonClosures;
 use glrmask_lexer::__private::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use glrmask_lexer::__private::ds::bitset::BitSet;

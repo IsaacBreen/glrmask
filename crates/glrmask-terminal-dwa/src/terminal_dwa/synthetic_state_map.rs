@@ -5,6 +5,7 @@
 //! exact K-bounded residual observer, and require every full residual state to
 //! share a class with at least one synthesized residual state.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::sync::Arc;
 
 use crate::Vocab;

@@ -3,6 +3,7 @@
 //! Reuse the ordinary boundary lexical walk, signed-template substitution,
 //! exact cancellation/normalization, and StaticParser runtime publication.
 //! The only parser input is the persisted finite relation inventory.
+use glrmask_vocab::__private::VocabExt as _;
 use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;

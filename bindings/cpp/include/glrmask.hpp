@@ -162,7 +162,11 @@ public:
     Owned& operator=(const Owned& other) { Owned copy(other); handle_.swap(copy.handle_); return *this; }
     Owned& operator=(Owned&&) noexcept = default;
     /// Borrows the live native handle; do not free it or retain it beyond this object.
-    H* native_handle() const {
+    const H* native_handle() const {
+        if (!handle_) throw Error(GLRMASK_CLOSED, "object has been moved from");
+        return handle_.get();
+    }
+    H* native_handle() {
         if (!handle_) throw Error(GLRMASK_CLOSED, "object has been moved from");
         return handle_.get();
     }
@@ -227,7 +231,6 @@ class Vocab : public detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vo
     }
 public:
 
-    /// Fails on duplicate IDs.
     explicit Vocab(const std::vector<VocabEntry>& entries) : Base(create(entries)) {}
 };
 
@@ -238,11 +241,11 @@ class Grammar : public detail::Owned<glrmask_grammar, glrmask_grammar_free, glrm
         glrmask_grammar* p = nullptr; detail::check(parse(text.data(), text.size(), &p)); return Grammar(p);
     }
 public:
-    /// Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source.
+    /// Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/docs/glrm-format.md) source.
     static Grammar from_glrm(std::string_view text) { return source(glrmask_grammar_from_glrm, text); }
-    /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats) source.
+    /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/GUIDE.md#grammar-formats) source.
     static Grammar from_lark(std::string_view text) { return source(glrmask_grammar_from_lark, text); }
-    /// Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats), given as JSON text.
+    /// Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/GUIDE.md#grammar-formats), given as JSON text.
     static Grammar from_json_schema(std::string_view text) { return source(glrmask_grammar_from_json_schema, text); }
 
     /// Builds a grammar from an `Expr`.
@@ -263,10 +266,12 @@ public:
 };
 
 /// One part of an expression: a grammar, module, constraint, expression or token set.
-///
-/// It refers to the object, which must outlive the operand.
-struct ExprOperand {
-    glrmask_expr_operand value;
+class ExprOperand {
+    std::shared_ptr<const void> owner_;
+    std::uint32_t kind_;
+    glrmask_expr_operand native() const;
+    friend class Expr;
+public:
     ExprOperand(const Grammar&);
     ExprOperand(const Module&);
     ExprOperand(const Constraint&);
@@ -282,13 +287,13 @@ public:
     /// Matches any one of `values`.
     static Expr choice(const std::vector<ExprOperand>& values) {
         std::vector<glrmask_expr_operand> items; items.reserve(values.size());
-        for (const auto& value : values) items.push_back(value.value);
+        for (const auto& value : values) items.push_back(value.native());
         glrmask_expr* p = nullptr; detail::check(glrmask_expr_choice(items.data(), items.size(), &p)); return Expr(p);
     }
     /// Matches `values` in order.
     static Expr sequence(const std::vector<ExprOperand>& values) {
         std::vector<glrmask_expr_operand> items; items.reserve(values.size());
-        for (const auto& value : values) items.push_back(value.value);
+        for (const auto& value : values) items.push_back(value.native());
         glrmask_expr* p = nullptr; detail::check(glrmask_expr_sequence(items.data(), items.size(), &p)); return Expr(p);
     }
     /// Matches `data` exactly.
@@ -372,10 +377,10 @@ public:
     }
 };
 
-inline ExprOperand::ExprOperand(const Grammar& value) : value{0, value.native_handle()} {}
-inline ExprOperand::ExprOperand(const Module& value) : value{1, value.native_handle()} {}
-inline ExprOperand::ExprOperand(const Expr& value) : value{2, value.native_handle()} {}
-inline ExprOperand::ExprOperand(const TokenSet& value) : value{4, value.native_handle()} {}
+inline ExprOperand::ExprOperand(const Grammar& value) : owner_(std::make_shared<Grammar>(value)), kind_(GLRMASK_OPERAND_GRAMMAR) {}
+inline ExprOperand::ExprOperand(const Module& value) : owner_(std::make_shared<Module>(value)), kind_(GLRMASK_OPERAND_MODULE) {}
+inline ExprOperand::ExprOperand(const Expr& value) : owner_(std::make_shared<Expr>(value)), kind_(GLRMASK_OPERAND_EXPR) {}
+inline ExprOperand::ExprOperand(const TokenSet& value) : owner_(std::make_shared<TokenSet>(value)), kind_(GLRMASK_OPERAND_TOKEN_SET) {}
 
 class Constraint : public detail::Owned<glrmask_constraint, glrmask_constraint_free, glrmask_constraint_clone> {
     using Base = detail::Owned<glrmask_constraint, glrmask_constraint_free, glrmask_constraint_clone>;
@@ -395,7 +400,19 @@ public:
     }
 };
 
-inline ExprOperand::ExprOperand(const Constraint& value) : value{5, value.native_handle()} {}
+inline ExprOperand::ExprOperand(const Constraint& value) : owner_(std::make_shared<Constraint>(value)), kind_(GLRMASK_OPERAND_CONSTRAINT) {}
+
+inline glrmask_expr_operand ExprOperand::native() const {
+    if (!owner_) throw Error(GLRMASK_CLOSED, "object has been moved from");
+    switch (kind_) {
+        case GLRMASK_OPERAND_GRAMMAR: return {kind_, static_cast<const Grammar*>(owner_.get())->native_handle()};
+        case GLRMASK_OPERAND_MODULE: return {kind_, static_cast<const Module*>(owner_.get())->native_handle()};
+        case GLRMASK_OPERAND_EXPR: return {kind_, static_cast<const Expr*>(owner_.get())->native_handle()};
+        case GLRMASK_OPERAND_TOKEN_SET: return {kind_, static_cast<const TokenSet*>(owner_.get())->native_handle()};
+        case GLRMASK_OPERAND_CONSTRAINT: return {kind_, static_cast<const Constraint*>(owner_.get())->native_handle()};
+        default: throw Error(GLRMASK_INVALID_INPUT, "invalid expression operand");
+    }
+}
 
 inline void Module::bind(std::string_view name, const Constraint& value) {
     detail::check(glrmask_module_bind_constraint(native_handle(), name.data(), name.size(), value.native_handle()));

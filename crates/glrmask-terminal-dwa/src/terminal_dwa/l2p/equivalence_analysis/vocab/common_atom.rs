@@ -26,6 +26,7 @@
 //! vocabulary-equivalence engine still runs on one representative per class
 //! and its exact classes are expanded through these aliases.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::sync::Arc;
 use std::time::Instant;
 

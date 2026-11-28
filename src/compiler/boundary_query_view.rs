@@ -6,6 +6,7 @@
 //! every query path and cannot invent an original byte path. Full lexical
 //! observations and raw coordinate lifting are preserved. No runtime lexer
 //! or reusable incoming-component whitelist is replaced by this local view.
+use glrmask_vocab::__private::VocabExt as _;
 use crate::automata::lexer::tokenizer::{Lexer,Tokenizer,TokenizerObservationView};
 use crate::compiler::stages::id_map_and_terminal_dwa::scope::BoundaryAnalysisScope;
 use crate::Vocab;

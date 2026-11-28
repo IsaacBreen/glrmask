@@ -1,5 +1,6 @@
 //! The parser is supplied as data; no LR grammar or callback implementation is
 //! involved in constructing or replaying the parenthesis recognizer.
+use glrmask_vocab::__private::VocabExt as _;
 use glrmask::test_modes::MaskMode;
 use std::cell::Cell;
 use glrmask::{BuildOptions, ConstraintInner as Constraint, Grammar, ParserBackend, Vocab};

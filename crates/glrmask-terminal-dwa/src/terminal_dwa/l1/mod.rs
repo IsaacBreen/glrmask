@@ -1,6 +1,7 @@
 //! L1 terminal DWA: direct 2-state construction for terminals with max path
 //! length ≤ 1.
 
+use glrmask_vocab::__private::VocabExt as _;
 use crate::automata::lexer::Lexer;
 pub mod implementations;
 pub mod max_length;

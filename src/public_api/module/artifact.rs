@@ -1,4 +1,5 @@
 //! Versioned postorder DAG. Sources and retained compiled definitions are interned separately.
+use glrmask_vocab::__private::{VocabExt as _, TokenSetExt as _};
 use super::*;
 use crate::artifact_load::LoadBudget;
 use bincode::Options;

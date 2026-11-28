@@ -6,6 +6,7 @@
 //! signatures, quotient identical state rows and token columns, and directly
 //! construct the two-state weighted DWA.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 

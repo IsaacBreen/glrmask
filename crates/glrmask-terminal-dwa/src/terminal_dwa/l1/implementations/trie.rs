@@ -1,5 +1,6 @@
 //! Concise optimized reference: share token prefixes and memoize subtree walks.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::sync::Arc;
 use std::time::Instant;
 

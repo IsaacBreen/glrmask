@@ -1,5 +1,6 @@
 // Measurement driver for the prepared-static composition-linker redesign.
 // Subcommands: sizes | link | tbm | compile-one | dump-schema | monolithic
+use glrmask_vocab::__private::VocabExt as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

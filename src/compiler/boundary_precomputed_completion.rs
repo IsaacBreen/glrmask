@@ -8,6 +8,7 @@ mod prefix_span_support;
 mod prefix_uniform;
 #[allow(dead_code)] mod reset_index;
 #[allow(dead_code)] mod cut_query;
+use glrmask_vocab::__private::VocabExt as _;
 use self::completion_index::{CompletionContext, UntrustedCompletionIndex};
 use self::prefix_observer::{Limits, PrefixObserver, Profile};
 use crate::automata::lexer::tokenizer::{Lexer,Tokenizer};

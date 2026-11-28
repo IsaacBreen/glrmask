@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::VocabExt as _;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};

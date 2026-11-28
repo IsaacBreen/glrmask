@@ -12,6 +12,7 @@
 //!
 //! Plan note: `prepared-static-linker-architecture-2026-09-17.md` §2 (rev 4).
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;

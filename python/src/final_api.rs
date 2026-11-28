@@ -1,6 +1,7 @@
 //! Python's source/module/root lifecycle, backed by the production Rust API.
 mod canonical;
 use super::{check_token_id, PyConstraint, PyVocab};
+use glrmask::__private::TokenSetExt as _;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyModule};
@@ -211,14 +212,14 @@ impl Drop for PyGrammar {
 
 #[pymethods]
 impl PyGrammar {
-    /// Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source.
+    /// Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/docs/glrm-format.md) source.
     #[staticmethod]
     #[pyo3(signature = (source, /))]
     fn from_glrm(source: String) -> PyResult<Self> {
         Self::new(source, SourceKind::Glrm)
     }
 
-    /// Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats), given as JSON text or a dict.
+    /// Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/GUIDE.md#grammar-formats), given as JSON text or a dict.
     #[staticmethod]
     #[pyo3(signature = (schema, /))]
     fn from_json_schema(schema: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -235,7 +236,7 @@ impl PyGrammar {
         Self::new(source, SourceKind::JsonSchema)
     }
 
-    /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats) source.
+    /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/GUIDE.md#grammar-formats) source.
     #[staticmethod]
     #[pyo3(signature = (source, /))]
     fn from_lark(source: String) -> PyResult<Self> {

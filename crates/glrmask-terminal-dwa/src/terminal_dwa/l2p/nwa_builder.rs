@@ -3,6 +3,7 @@
 //! Contains the core `TerminalNwaBuilder` that walks the vocab prefix trie
 //! and constructs NWA transitions for each (byte, tokenizer-state) pair.
 
+use glrmask_vocab::__private::VocabExt as _;
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;

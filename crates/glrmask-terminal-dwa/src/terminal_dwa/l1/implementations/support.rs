@@ -1,5 +1,6 @@
 //! Shared scanner and vocabulary-trie support for experimental L1 builders.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;

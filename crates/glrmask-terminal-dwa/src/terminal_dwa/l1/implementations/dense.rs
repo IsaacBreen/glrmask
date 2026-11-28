@@ -1,5 +1,6 @@
 //! Cache-sized dense batches of start configurations over one flattened trie.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::time::Instant;
 
 use rustc_hash::FxHashMap;

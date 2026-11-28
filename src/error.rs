@@ -36,6 +36,7 @@ pub(crate) fn catch_template_attempt<T>(f: impl FnOnce() -> Result<T>) -> Result
 }
 
 pub use glrmask_vocab::{Error, ErrorKind};
+use glrmask_vocab::__private::{VocabExt as _, TokenSetExt as _};
 use glrmask_vocab::__private as error_internal;
 
 /// Crate-internal constructors and helpers for [`Error`]. The type lives in

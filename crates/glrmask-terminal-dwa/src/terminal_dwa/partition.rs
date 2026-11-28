@@ -4,6 +4,7 @@
 //! and L2+, build those two pieces independently, then merge them into a
 //! single `(InternalIdMap, DWA)` for the partition.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Instant;

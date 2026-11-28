@@ -7,6 +7,7 @@
 //!     target-vocab-partition/vocab-partition-results.json \
 //!     5
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::collections::BTreeMap;
 use std::fs;
 use std::hint::black_box;

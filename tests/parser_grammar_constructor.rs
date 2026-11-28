@@ -1,5 +1,6 @@
 //! An independent finite-language compiler consumes only public parser data.
 //! It knows nothing about GLR tables, lexer expressions, or masking internals.
+use glrmask_vocab::__private::VocabExt as _;
 use std::{cell::Cell, collections::{BTreeMap, BTreeSet}, sync::Arc};
 use glrmask::{CompileOptions, ConstraintInner as Constraint, Grammar, InternalMaskStrategy, Module, ParserBackend, TokenSet, Vocab};
 use glrmask::template_parser::{CfgRecursion, FlatParserGrammar, ParserDefinition, ParserExpr,

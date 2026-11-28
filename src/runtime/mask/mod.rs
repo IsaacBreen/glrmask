@@ -1,6 +1,7 @@
 pub(crate) mod profile;
 pub(crate) mod queue;
 mod static_dwa_walk;
+use glrmask_vocab::__private::VocabExt as _;
 use static_dwa_walk::{StackWalkEvent, walk_single_stack};
 
 use crate::automata::lexer::Lexer;

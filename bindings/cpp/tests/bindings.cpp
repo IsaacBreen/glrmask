@@ -1,3 +1,4 @@
+#include <type_traits>
 #include <glrmask.hpp>
 #include <algorithm>
 #include <atomic>
@@ -531,6 +532,13 @@ void direct_constraint_binding() {
 }
 
 void singleton_expression_binding() {
+    static_assert(std::is_same_v<decltype(std::declval<Grammar&>().native_handle()), glrmask_grammar*>);
+    static_assert(std::is_same_v<decltype(std::declval<const Grammar&>().native_handle()), const glrmask_grammar*>);
+    std::vector<ExprOperand> stored{Grammar::from_lark(R"(start: "a")"), Expr::literal("b")};
+    auto stored_constraint=Grammar::from_expr(Expr::choice(stored)).compile(Vocab({{0,"a"},{1,"b"}}));
+    auto stored_state=stored_constraint.start();
+    CHECK(allowed(stored_state.mask(),0) && allowed(stored_state.mask(),1));
+
     Vocab v({{0,"a"}});
     auto g=Grammar::from_lark(R"(start: "a")");
     auto m=Module(g); auto c=m.compile(v);

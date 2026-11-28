@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::VocabExt as _;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;

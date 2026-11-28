@@ -1,5 +1,6 @@
 //! Original-ID and byte-language forcing regressions. Kept separate from
 //! backend-agreement tests: comparing two identical bugs is not an oracle.
+use glrmask_vocab::__private::VocabExt as _;
 use glrmask::test_modes::MaskMode;
 use glrmask::{ConstraintInner as Constraint, Grammar, TokenSet, Vocab};
 const MODES: [MaskMode; 6] = MaskMode::ALL;

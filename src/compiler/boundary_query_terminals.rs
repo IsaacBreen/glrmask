@@ -2,6 +2,7 @@
 //! Permit reset at every byte cut, and ignore follows/longest-match pruning.
 //! Every real terminal path is included; this helper only removes terminals
 //! with no observation in that superset. Unsupported/budgeted cases decline.
+use glrmask_vocab::__private::VocabExt as _;
 use crate::automata::lexer::tokenizer::{Lexer,Tokenizer};
 use crate::Vocab;
 pub(super) fn query_support(tok:&Tokenizer,vocab:&Vocab,seeds:&[bool])->Option<(Vec<bool>,usize)>{

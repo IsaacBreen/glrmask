@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::VocabExt as _;
 use crate::ErrorExt as _;
 pub use crate::grammar::ast as ast;
 pub(crate) use glrmask_grammar::__private::import::ebnf;

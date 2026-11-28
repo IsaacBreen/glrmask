@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::VocabExt as _;
 use crate::ErrorExt as _;
 mod boundary_reset_support;
 pub(crate) mod packed_final_masks;

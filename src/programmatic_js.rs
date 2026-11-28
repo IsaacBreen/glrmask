@@ -14,6 +14,7 @@
 //! are deliberately excluded at the schema root so a computed expression
 //! cannot replace the entire arguments object and bypass its shape.
 
+use glrmask_vocab::__private::VocabExt as _;
 use std::collections::BTreeSet;
 
 use crate::compiler::constraint_compose::{

@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::VocabExt as _;
 use crate::automata::lexer::Lexer;
 use std::collections::BTreeMap;
 use std::hash::Hasher;

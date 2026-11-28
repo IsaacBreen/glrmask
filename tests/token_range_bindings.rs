@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::TokenSetExt as _;
 use glrmask::test_modes::MaskMode;
 use glrmask::{ConstraintInner as Constraint, Grammar, PreparedGrammar, TokenSet, Vocab};
 

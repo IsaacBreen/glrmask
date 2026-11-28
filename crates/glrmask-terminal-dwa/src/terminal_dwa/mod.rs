@@ -4,6 +4,7 @@
 //! preserves each partition's L1 and L2P outputs, merges like families across
 //! all partitions in parallel, then merges the two family DWAs.
 
+use glrmask_vocab::__private::VocabExt as _;
 use crate::automata::lexer::Lexer;
 use glrmask_invariant::__private::charge_template_build_budget as charge_build_budget;
 use crate::automata::lexer::compile::{

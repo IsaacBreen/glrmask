@@ -1,3 +1,4 @@
+use glrmask_vocab::__private::VocabExt as _;
 use glrmask_artifact::CommitTemplateDfas;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};

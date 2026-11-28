@@ -2,6 +2,7 @@
 //! maps. This does not infer a quotient or weaken the normal L2P contract.
 //! The caller has already checked the total singleton lexer-state permutation
 //! and byte-identical token groups. Every unsupported case uses ordinary L2P.
+use glrmask_vocab::__private::VocabExt as _;
 use super::*;
 use crate::terminal_dwa::scope::BoundaryAnalysisScope;
 
