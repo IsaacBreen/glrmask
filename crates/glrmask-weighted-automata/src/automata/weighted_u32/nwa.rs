@@ -170,37 +170,36 @@ impl NWA {
     }
 
     pub fn append_with_body(&mut self, other: &NWA) -> NwaBody {
-        self.invalidate_graph_caches();
-        let offset = self.states.len() as u32;
-        self.states.reserve(other.states.len());
-
-        for state in &other.states {
-            let mut appended = state.clone();
-            for targets in appended.transitions.values_mut() {
-                for (target, _) in targets.iter_mut() {
-                    *target += offset;
-                }
-            }
-            for (target, _) in appended.epsilons.iter_mut() {
-                *target += offset;
-            }
-            self.states.push(appended);
-        }
-
-        NwaBody {
-            start_states: other.start_states.iter().map(|state| offset + *state).collect(),
-        }
+        self.append_states(other.states.iter().cloned(), other.start_states.iter().copied())
     }
 
-    /// Append a graph whose ownership has already been transferred. The
-    /// accepting and transition weights move with their states; only graph
-    /// state references need rebasing.
+    /// Append a graph whose ownership has already been transferred.
     pub fn append_owned_with_body(&mut self, other: NWA) -> NwaBody {
+        let (states, starts) = other.into_parts();
+        self.append_states(states, starts)
+    }
+
+    /// Embed a deterministic graph directly in the nondeterministic union.
+    /// No temporary NWA or second copy of the state rows is needed.
+    pub fn append_dwa_with_body(&mut self, other: &super::dwa::DWA) -> NwaBody {
+        self.append_states(other.states().iter().map(|state| NWAState {
+            final_weight: state.final_weight.clone(),
+            transitions: state.transitions.iter().map(|(&label, (target, weight))| {
+                (label, vec![(*target, weight.clone())])
+            }).collect(),
+            epsilons: Vec::new(),
+        }), [other.start_state()])
+    }
+
+    fn append_states(
+        &mut self, states: impl IntoIterator<Item = NWAState>, starts: impl IntoIterator<Item = u32>,
+    ) -> NwaBody {
         self.invalidate_graph_caches();
         let offset = u32::try_from(self.states.len()).expect("NWA state count overflow");
-        let (states, mut start_states) = other.into_parts();
-        self.states.reserve(states.len());
+        let states = states.into_iter();
+        self.states.reserve(states.size_hint().0);
         for mut state in states {
+            assert!(self.states.len() < u32::MAX as usize, "NWA state count overflow");
             for targets in state.transitions.values_mut() {
                 for (target, _) in targets {
                     *target = target.checked_add(offset).expect("NWA target overflow");
@@ -211,10 +210,9 @@ impl NWA {
             }
             self.states.push(state);
         }
-        for state in &mut start_states {
-            *state = state.checked_add(offset).expect("NWA start state overflow");
-        }
-        NwaBody { start_states }
+        NwaBody { start_states: starts.into_iter().map(|state| {
+            state.checked_add(offset).expect("NWA start state overflow")
+        }).collect() }
     }
 
     pub fn concatenate_in_place(&mut self, left: &NWA, right_body: &NwaBody) -> NwaBody {
@@ -375,6 +373,38 @@ impl std::fmt::Display for NWA {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+
+    #[test]
+    fn append_mixed_graphs_rebases_all_references_and_preserves_weights() {
+        let weight = Weight::all();
+        let mut union = NWA::new(1, 1);
+        union.add_state();
+        let mut dwa = super::super::dwa::DWA::new(1, 1);
+        let first = dwa.add_state();
+        let last = dwa.add_state();
+        dwa.set_start_state(first);
+        dwa.add_transition(first, 13, last, weight.clone());
+        dwa.set_final_weight(last, weight.clone());
+        let offset = union.num_states();
+        let body = union.append_dwa_with_body(&dwa);
+        assert_eq!(body.start_states, vec![offset + first]);
+        assert_eq!(union.states()[(offset + first) as usize].transitions[&13],
+            vec![(offset + last, weight.clone())]);
+        assert_eq!(union.states()[(offset + last) as usize].final_weight,
+            Some(weight.clone()));
+
+        let mut epsilon = NWA::new(1, 1);
+        epsilon.add_state();
+        epsilon.add_state();
+        epsilon.set_start_states(vec![0, 1]);
+        epsilon.add_epsilon(0, 1, weight.clone());
+        epsilon.set_final_weight(1, weight.clone());
+        let offset = union.num_states();
+        let body = union.append_owned_with_body(epsilon);
+        assert_eq!(body.start_states, vec![offset, offset + 1]);
+        assert_eq!(union.states()[offset as usize].epsilons, vec![(offset + 1, weight.clone())]);
+        assert_eq!(union.states()[(offset + 1) as usize].final_weight, Some(weight));
+    }
 
     #[test]
     fn graph_property_caches_invalidate_on_labeled_and_epsilon_mutation() {

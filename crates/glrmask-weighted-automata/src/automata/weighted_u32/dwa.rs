@@ -7518,25 +7518,9 @@ impl DWA {
 
     /// Convert this DWA to an NWA representation.
     pub fn to_nwa(&self) -> super::nwa::NWA {
-        use super::nwa::{NWA, NWAState};
-        let mut nwa = NWA::from_parts(
-            Vec::with_capacity(self.states.len()),
-            vec![self.start_state],
-        );
-        for state in &self.states {
-            let mut nwa_state = NWAState {
-                final_weight: state.final_weight.clone(),
-                ..Default::default()
-            };
-            for (&label, (target, weight)) in &state.transitions {
-                nwa_state
-                    .transitions
-                    .entry(label)
-                    .or_default()
-                    .push((*target, weight.clone()));
-            }
-            nwa.states_mut().push(nwa_state);
-        }
+        let mut nwa = super::nwa::NWA::new(0, 0);
+        let body = nwa.append_dwa_with_body(self);
+        nwa.set_start_states(body.start_states);
         nwa
     }
 }

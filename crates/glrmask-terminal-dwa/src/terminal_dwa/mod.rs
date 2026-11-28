@@ -2424,7 +2424,7 @@ fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         let mut union = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
         let mut starts = Vec::new();
         for dwa in dwas {
-            let body = union.append_with_body(&dwa.to_nwa());
+            let body = union.append_dwa_with_body(&dwa);
             starts.extend(body.start_states);
         }
         union.set_start_states(starts);
@@ -2731,43 +2731,31 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa_with_filter(
 
     let family_count = families.len();
     let merge_started = Instant::now();
-    let mut mapped_dwas = families
-        .into_vec()
-        .into_iter()
-        .map(|family| {
-            let (automaton, id_map) = family.into_parts();
-            let dwa = match automaton {
-                TerminalAutomaton::Dwa(dwa) => dwa,
-                TerminalAutomaton::TokenDeterministicNwa(nwa)
-                | TerminalAutomaton::EpsilonNwa(nwa) => {
-                    crate::automata::weighted::determinize::determinize(&nwa)
-                        .expect("scoped boundary terminal family must be acyclic")
-                }
-            };
-            MappedArtifact::new(dwa, id_map)
-        })
-        .collect::<Vec<_>>();
-
-    // A single scoped family has already applied the exact ownership crossing
-    // product and its local L2P postprocess. Re-wrapping it as an NWA and
-    // determinizing again can expand a compact shard into thousands of
-    // weighted subset states without changing the language. Multi-partition
-    // builds still reconcile through the generic union below.
-    if mapped_dwas.len() == 1 {
-        let mapped = mapped_dwas.pop().expect("length checked");
-        let (dwa, id_map) = mapped.into_parts();
-        return (
-            MappedArtifact::new(TerminalAutomaton::Dwa(dwa), id_map),
-            profile,
-        );
+    let mut mapped = families.into_vec();
+    // A single family already carries the exact crossing restriction.
+    if mapped.len() == 1 {
+        let (automaton, id_map) = mapped.pop().unwrap().into_parts();
+        let dwa = match automaton {
+            TerminalAutomaton::Dwa(dwa) => dwa,
+            TerminalAutomaton::TokenDeterministicNwa(nwa) | TerminalAutomaton::EpsilonNwa(nwa) =>
+                crate::automata::weighted::determinize::determinize(&nwa)
+                    .expect("scoped terminal family must be acyclic"),
+        };
+        return (MappedArtifact::new(TerminalAutomaton::Dwa(dwa), id_map), profile);
     }
 
-    let reconciled = MappedArtifact::reconcile_vec_preserving_unmapped_tokenizer(mapped_dwas);
-    let (dwas, id_map) = reconciled.into_parts();
+    // Keep nondeterministic families nondeterministic until their exact
+    // common-coordinate union has been assembled.
+    let (automata, id_map) =
+        MappedArtifact::reconcile_vec_preserving_unmapped_tokenizer(mapped).into_parts();
     let mut union = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     let mut starts = Vec::new();
-    for dwa in dwas {
-        let body = union.append_with_body(&dwa.to_nwa());
+    for automaton in automata {
+        let body = match automaton {
+            TerminalAutomaton::Dwa(dwa) => union.append_dwa_with_body(&dwa),
+            TerminalAutomaton::TokenDeterministicNwa(nwa) | TerminalAutomaton::EpsilonNwa(nwa) =>
+                union.append_owned_with_body(nwa),
+        };
         starts.extend(body.start_states);
     }
     union.set_start_states(starts);

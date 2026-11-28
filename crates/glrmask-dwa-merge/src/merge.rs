@@ -859,11 +859,11 @@ fn union_parser_dwas_in_common(
         && std::env::var_os("GLRMASK_DISABLE_DIRECT_TWO_PARSER_UNION").is_none();
     let generic_union = |sources: &[DWA]| {
         let mut union = NWA::new(common.num_tsids(), common.max_internal_token_id());
-        let mut body = union.body();
+        let mut starts = Vec::with_capacity(sources.len());
         for source in sources {
-            body = union.union_in_place(&source.to_nwa(), &body);
+            starts.extend(union.append_dwa_with_body(source).start_states);
         }
-        union.set_start_states(body.start_states);
+        union.set_start_states(starts);
         determinize(&union).expect("parser-family NWA union must determinize")
     };
     if direct {
@@ -953,22 +953,10 @@ fn append_lifted_dwa(
     tokens: TokenAxisMap<'_>,
     map: &InternalIdMap,
 ) -> u32 {
-    let start = global.num_states();
-    let states = global.states_mut();
-    assert!(states.len().saturating_add(dwa.states().len()) <= u32::MAX as usize,
-        "NWA state domain exhausted");
-    states.reserve(dwa.states().len());
-    for state in dwa.states() {
-        states.push(NWAState {
-            final_weight: state.final_weight.clone(),
-            transitions: state.transitions.iter().map(|(&label, (target, weight))| {
-                (label, vec![(start.checked_add(*target).expect("NWA state domain exhausted"), weight.clone())])
-            }).collect(),
-            epsilons: Vec::new(),
-        });
-    }
-    remap_nwa_states(&mut states[start as usize..], tsids, tokens, map);
-    start.checked_add(dwa.start_state()).expect("NWA start domain exhausted")
+    let offset = global.states().len();
+    let start = global.append_dwa_with_body(dwa).start_states[0];
+    remap_nwa_states(&mut global.states_mut()[offset..], tsids, tokens, map);
+    start
 }
 
 /// Publish the common-coordinate union. In the disjoint case one start is

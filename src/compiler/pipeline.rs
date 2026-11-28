@@ -3614,12 +3614,11 @@ fn maybe_dump_terminal_dwa_experiment(
     let mut union = crate::automata::weighted_u32::nwa::NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     let mut starts = Vec::new();
     for automaton in automata {
-        let nwa = match automaton {
-            TerminalAutomaton::Dwa(dwa) => dwa.to_nwa(),
+        let body = match automaton {
+            TerminalAutomaton::Dwa(dwa) => union.append_dwa_with_body(&dwa),
             TerminalAutomaton::TokenDeterministicNwa(nwa)
-            | TerminalAutomaton::EpsilonNwa(nwa) => nwa,
+            | TerminalAutomaton::EpsilonNwa(nwa) => union.append_owned_with_body(nwa),
         };
-        let body = union.append_with_body(&nwa);
         starts.extend(body.start_states);
     }
     union.set_start_states(starts);
