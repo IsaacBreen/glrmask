@@ -40,12 +40,6 @@ pub(crate) type RuntimePossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
 pub(crate) type SignatureClassId = u32;
 type StateTerminalLabel = (u32, TerminalID);
 
-#[derive(Debug, Clone)]
-pub(crate) struct PossibleMatchVocabMap {
-    pub(crate) original_to_internal: Vec<u32>,
-    pub(crate) internal_to_originals: Vec<Vec<u32>>,
-}
-
 // WARNING: terminal-DWA equivalence maps must never be reused for possible
 // matches. Terminal-DWA equivalence does not imply possible-matches
 // equivalence. This warning must never be removed under any circumstances.
@@ -548,31 +542,6 @@ fn active_group_key_matches(
     sorted_key.iter().all(|&group_id| active_group_counts[group_id as usize] > 0)
 }
 
-fn build_signature_from_active_groups(
-    active_group_counts: &[u32],
-    active_group_count: usize,
-    groups: &[SweepGroup],
-    labels_by_id: &[StateTerminalLabel],
-    label_stamps: &mut [u32],
-    stamp_generation: &mut u32,
-) -> Vec<StateTerminalLabel> {
-    if active_group_count == 0 { return Vec::new(); }
-    let stamp = next_nonzero_stamp(stamp_generation, label_stamps);
-    let mut signature = Vec::new();
-    for (group_id, group) in groups.iter().enumerate() {
-        if active_group_counts[group_id] == 0 { continue; }
-        for &label_id in group.label_ids.iter() {
-            let stamp_slot = &mut label_stamps[label_id as usize];
-            if *stamp_slot != stamp {
-                *stamp_slot = stamp;
-                signature.push(labels_by_id[label_id as usize]);
-            }
-        }
-    }
-    signature.sort_unstable();
-    signature
-}
-
 fn build_signature_from_active_group_ids(
     active_group_ids: &[u32],
     groups: &[SweepGroup],
@@ -602,7 +571,7 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     class_maps: &[Arc<IntervalPossibleMatchMap>],
     state_classes: &[u32],
     ordered_vocab: &OrderedVocab,
-) -> (PossibleMatchVocabMap, RuntimePossibleMatchesByTerminal) {
+) -> (ManyToOneIdMap, RuntimePossibleMatchesByTerminal) {
     let num_ordered_tokens = ordered_vocab.ordered_to_originals.len();
     let pmv_detail_enabled = crate::env::var("GLRMASK_PROFILE_PMV_DETAIL")
         .map(|value| value == "1")
@@ -617,7 +586,6 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     let mut active_group_signature_to_signature_id: FxHashMap<u64, Vec<(Vec<u32>, SignatureClassId)>> = FxHashMap::default();
     let mut signature_labels: Vec<Vec<StateTerminalLabel>> = Vec::new();
     let mut original_to_internal = vec![u32::MAX; ordered_vocab.original_slot_count];
-    let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
     let mut active_group_counts = vec![0u32; groups.len()];
     let mut active_group_ids = Vec::<u32>::new();
     let mut active_group_positions = vec![u32::MAX; groups.len()];
@@ -693,7 +661,6 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
                 let new_id = signature_labels.len() as SignatureClassId;
                 signature_to_id.insert(signature.clone(), new_id);
                 signature_labels.push(signature);
-                internal_to_originals.push(Vec::new());
                 new_id
             };
             let active_group_key_started_at = Instant::now();
@@ -727,14 +694,11 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     }
     let sweep_ms = elapsed_ms(sweep_started_at);
 
-    let internal_to_originals_started_at = Instant::now();
-    for (original, &signature_id) in original_to_internal.iter().enumerate() {
-        if signature_id != u32::MAX {
-            internal_to_originals[signature_id as usize].push(original as u32);
-        }
-    }
-    let sort_dedup_ms = elapsed_ms(internal_to_originals_started_at);
-
+    let publication_started_at = Instant::now();
+    let vocab_map = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+        original_to_internal, signature_labels.len() as u32,
+    );
+    let sort_dedup_ms = elapsed_ms(publication_started_at);
     let ids_by_label_started_at = Instant::now();
     let use_bitmask_ids_by_label = signature_labels.len() <= u128::BITS as usize;
     let mut label_entries = 0usize;
@@ -855,7 +819,7 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
         eprintln!(
             "[glrmask/profile][pmv_detail] stage=sort_dedup sort_dedup_ms={:.3} internal_signature_classes={}",
             sort_dedup_ms,
-            internal_to_originals.len(),
+            vocab_map.num_internal_ids(),
         );
         eprintln!(
             "[glrmask/profile][pmv_detail] stage=ids_by_label ids_by_label_ms={:.3} label_entries={} terminal_ids={} bitmask_path_used={}",
@@ -876,22 +840,11 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
         );
     }
 
-    let possible_match_vocab = PossibleMatchVocabMap { original_to_internal, internal_to_originals };
-    if group_pmv_validation_enabled() {
-        validate_group_pmv_outputs(class_maps, state_classes, ordered_vocab, &possible_match_vocab, &possible_matches);
-    }
-
-    (possible_match_vocab, possible_matches)
+    (vocab_map, possible_matches)
 }
 
-
+#[cfg(test)]
 type ExpandedIntervalPossibleMatchMap = BTreeMap<TerminalID, Vec<(u32, u32)>>;
-
-#[derive(Debug, Clone, Copy)]
-struct LegacySweepEvent {
-    add: bool,
-    label_id: u32,
-}
 
 fn normalize_token_ranges(ranges: &mut Vec<(u32, u32)>) {
     if ranges.len() <= 1 { return; }
@@ -910,6 +863,7 @@ fn normalize_token_ranges(ranges: &mut Vec<(u32, u32)>) {
     ranges.truncate(write + 1);
 }
 
+#[cfg(test)]
 fn append_expanded_ranges(
     map: &mut ExpandedIntervalPossibleMatchMap,
     terminal: TerminalID,
@@ -920,6 +874,7 @@ fn append_expanded_ranges(
     }
 }
 
+#[cfg(test)]
 fn normalize_expanded_interval_map(map: &mut ExpandedIntervalPossibleMatchMap) {
     map.retain(|_, ranges| {
         normalize_token_ranges(ranges);
@@ -927,6 +882,7 @@ fn normalize_expanded_interval_map(map: &mut ExpandedIntervalPossibleMatchMap) {
     });
 }
 
+#[cfg(test)]
 fn expand_interval_class_maps(
     class_maps: &[Arc<IntervalPossibleMatchMap>],
 ) -> Vec<Arc<ExpandedIntervalPossibleMatchMap>> {
@@ -940,204 +896,6 @@ fn expand_interval_class_maps(
         normalize_expanded_interval_map(&mut expanded);
         Arc::new(expanded)
     }).collect()
-}
-
-fn push_legacy_sweep_event(
-    events: &mut [Vec<LegacySweepEvent>],
-    event_positions: &mut Vec<u32>,
-    position: u32,
-    event: LegacySweepEvent,
-) {
-    let Some(bucket) = events.get_mut(position as usize) else { return; };
-    if bucket.is_empty() { event_positions.push(position); }
-    bucket.push(event);
-}
-
-fn build_legacy_sweep_events(
-    class_maps: &[Arc<ExpandedIntervalPossibleMatchMap>],
-    state_classes: &[u32],
-    num_ordered_tokens: usize,
-) -> (Vec<Vec<LegacySweepEvent>>, Vec<u32>, Vec<StateTerminalLabel>) {
-    let mut events = vec![Vec::new(); num_ordered_tokens + 1];
-    let mut event_positions = Vec::new();
-    let mut labels_by_id = Vec::<StateTerminalLabel>::new();
-    let mut label_ids = FxHashMap::<StateTerminalLabel, u32>::default();
-
-    for class_id in used_state_class_ids(state_classes) {
-        let Some(class_map) = class_maps.get(class_id as usize) else { continue; };
-        for (&terminal_id, ranges) in class_map.iter() {
-            let label_id = intern_state_terminal_label(&mut label_ids, &mut labels_by_id, (class_id, terminal_id));
-            for &(lo, mut hi) in ranges.iter() {
-                if num_ordered_tokens == 0 { continue; }
-                let max_token = num_ordered_tokens as u32 - 1;
-                if lo > max_token { continue; }
-                hi = hi.min(max_token);
-                if lo > hi { continue; }
-                push_legacy_sweep_event(&mut events, &mut event_positions, lo, LegacySweepEvent { add: true, label_id });
-                let after = hi.saturating_add(1);
-                if after <= num_ordered_tokens as u32 {
-                    push_legacy_sweep_event(&mut events, &mut event_positions, after, LegacySweepEvent { add: false, label_id });
-                }
-            }
-        }
-    }
-
-    event_positions.sort_unstable();
-    event_positions.dedup();
-    (events, event_positions, labels_by_id)
-}
-
-fn apply_legacy_sweep_events(
-    active_counts: &mut [u32],
-    events: &[LegacySweepEvent],
-    active_label_count: &mut usize,
-) {
-    for event in events.iter().filter(|event| !event.add) {
-        let count = &mut active_counts[event.label_id as usize];
-        assert!(*count > 0, "legacy pmv sweep removal underflow for label_id={}", event.label_id);
-        if *count == 1 {
-            *active_label_count -= 1;
-        }
-        *count -= 1;
-    }
-    for event in events.iter().filter(|event| event.add) {
-        let count = &mut active_counts[event.label_id as usize];
-        if *count == 0 {
-            *active_label_count += 1;
-        }
-        *count += 1;
-    }
-}
-
-fn build_legacy_possible_match_vocab_and_weights_from_interval_maps(
-    class_maps: &[Arc<IntervalPossibleMatchMap>],
-    state_classes: &[u32],
-    ordered_vocab: &OrderedVocab,
-) -> (PossibleMatchVocabMap, RuntimePossibleMatchesByTerminal) {
-    let expanded_class_maps = expand_interval_class_maps(class_maps);
-    let num_ordered_tokens = ordered_vocab.ordered_to_originals.len();
-    let (events, event_positions, labels_by_id) =
-        build_legacy_sweep_events(&expanded_class_maps, state_classes, num_ordered_tokens);
-
-    let mut signature_to_id: FxHashMap<Vec<StateTerminalLabel>, SignatureClassId> = FxHashMap::default();
-    let mut signature_labels: Vec<Vec<StateTerminalLabel>> = Vec::new();
-    let mut original_to_internal = vec![u32::MAX; ordered_vocab.original_slot_count];
-    let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
-    let mut active_counts = vec![0u32; labels_by_id.len()];
-    let mut active_label_count = 0usize;
-
-    let mut event_index = 0usize;
-    let mut position = 0usize;
-    while position < num_ordered_tokens {
-        while event_index < event_positions.len() && event_positions[event_index] as usize == position {
-            apply_legacy_sweep_events(&mut active_counts, &events[position], &mut active_label_count);
-            event_index += 1;
-        }
-
-        let next_position = event_positions.get(event_index).map(|&next| (next as usize).min(num_ordered_tokens)).unwrap_or(num_ordered_tokens);
-        let mut signature = Vec::with_capacity(active_label_count);
-        for (label_id, &label) in labels_by_id.iter().enumerate() {
-            if active_counts[label_id] > 0 {
-                signature.push(label);
-            }
-        }
-        signature.sort_unstable();
-
-        let signature_id = if let Some(&existing) = signature_to_id.get(&signature) { existing } else {
-            let new_id = signature_labels.len() as SignatureClassId;
-            signature_to_id.insert(signature.clone(), new_id);
-            signature_labels.push(signature);
-            internal_to_originals.push(Vec::new());
-            new_id
-        };
-
-        for ordered_id in position..next_position {
-            for &original in &ordered_vocab.ordered_to_originals[ordered_id] {
-                if let Some(slot) = original_to_internal.get_mut(original as usize) { *slot = signature_id; }
-                internal_to_originals[signature_id as usize].push(original);
-            }
-        }
-        position = next_position;
-    }
-
-    for originals in &mut internal_to_originals { originals.sort_unstable(); originals.dedup(); }
-
-    let mut ids_by_label: BTreeMap<TerminalID, BTreeMap<u32, Vec<u32>>> = BTreeMap::new();
-    for (signature_id, labels) in signature_labels.iter().enumerate() {
-        let signature_id = signature_id as u32;
-        for &(class_id, terminal_id) in labels {
-            ids_by_label.entry(terminal_id).or_default().entry(class_id).or_default().push(signature_id);
-        }
-    }
-
-    let possible_matches = ids_by_label.into_iter().map(|(terminal_id, by_state)| {
-        let mut entries = Vec::new();
-        for (state, mut ids) in by_state {
-            ids.sort_unstable();
-            ids.dedup();
-            let token_set = range_set_from_sorted_ids(&ids);
-            if !token_set.is_empty() {
-                entries.push((state, shared_rangeset(token_set)));
-            }
-        }
-        (terminal_id, Weight::from_per_tsid_shared(entries))
-    }).filter(|(_, weight)| !weight.is_empty()).collect();
-
-    (PossibleMatchVocabMap { original_to_internal, internal_to_originals }, possible_matches)
-}
-
-fn validate_group_pmv_outputs(
-    class_maps: &[Arc<IntervalPossibleMatchMap>],
-    state_classes: &[u32],
-    ordered_vocab: &OrderedVocab,
-    actual_vocab: &PossibleMatchVocabMap,
-    actual_matches: &RuntimePossibleMatchesByTerminal,
-) {
-    let started_at = Instant::now();
-    let (expected_vocab, expected_matches) =
-        build_legacy_possible_match_vocab_and_weights_from_interval_maps(class_maps, state_classes, ordered_vocab);
-
-    if actual_vocab.original_to_internal != expected_vocab.original_to_internal {
-        let mut mismatch = None;
-        for idx in 0..actual_vocab.original_to_internal.len().min(expected_vocab.original_to_internal.len()) {
-            let actual = actual_vocab.original_to_internal[idx];
-            let expected = expected_vocab.original_to_internal[idx];
-            if actual != expected {
-                mismatch = Some((idx, actual, expected));
-                break;
-            }
-        }
-        panic!("group PMV validation failed: original_to_internal mismatch at {:?}", mismatch);
-    }
-    if actual_vocab.internal_to_originals != expected_vocab.internal_to_originals {
-        let mut mismatch = None;
-        for idx in 0..actual_vocab.internal_to_originals.len().min(expected_vocab.internal_to_originals.len()) {
-            let actual = &actual_vocab.internal_to_originals[idx];
-            let expected = &expected_vocab.internal_to_originals[idx];
-            if actual != expected {
-                mismatch = Some((idx, actual.clone(), expected.clone()));
-                break;
-            }
-        }
-        panic!("group PMV validation failed: internal_to_originals mismatch at {:?}; actual_len={} expected_len={}", mismatch, actual_vocab.internal_to_originals.len(), expected_vocab.internal_to_originals.len());
-    }
-    if actual_matches != &expected_matches {
-        let mut terminal_ids: Vec<TerminalID> = actual_matches.keys().chain(expected_matches.keys()).copied().collect();
-        terminal_ids.sort_unstable();
-        terminal_ids.dedup();
-        let mismatch = terminal_ids.into_iter().find(|terminal_id| actual_matches.get(terminal_id) != expected_matches.get(terminal_id));
-        panic!("group PMV validation failed: possible match weight mismatch for terminal {:?}", mismatch);
-    }
-
-    if crate::env::var_os("GLRMASK_PROFILE_PMV_DETAIL").is_some() {
-        eprintln!("[glrmask/profile][pmv_validate] legacy_expand_compare_ms={:.3}", elapsed_ms(started_at));
-    }
-}
-
-fn group_pmv_validation_enabled() -> bool {
-    crate::env::var("GLRMASK_VALIDATE_GROUP_PMV")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
 }
 
 const PM_NFA_POWERSET_DEFAULT_MAX_STATES: usize = 12_000;
@@ -2939,16 +2697,14 @@ fn compute_constraint_possible_matches_with_artifacts(
     let possible_match_vocab_started_at = Instant::now();
     let (possible_match_vocab, possible_matches) = build_possible_match_vocab_and_weights_from_interval_maps(&trie_class_result.class_maps, &trie_class_result.state_classes, ordered_vocab.as_ref());
 
-    let vocab_tokens = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-        possible_match_vocab.original_to_internal.clone(),
-        possible_match_vocab.internal_to_originals.len() as u32,
-    );
+    let state_class_count = trie_class_result.state_classes.iter().copied()
+        .filter(|&id| id != u32::MAX).max().map_or(0, |id| id + 1);
     let possible_matches_id_map = InternalIdMap {
         tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
-            trie_class_result.state_classes.clone(),
-            trie_class_result.state_classes.iter().copied().filter(|&class_id| class_id != u32::MAX).max().map(|class_id| class_id + 1).unwrap_or(0),
+            trie_class_result.state_classes,
+            state_class_count,
         ),
-        vocab_tokens,
+        vocab_tokens: possible_match_vocab,
         deferred_vocab_singleton_original_ids: None,
     };
 
@@ -3107,6 +2863,59 @@ mod tests {
         query=[0;4];query[b'b' as usize>>6]|=1u64<<(b'b'&63);
         assert_eq!(prepared_proper_prefix_byte_candidates(&vocab,&query),Some(Vec::new()),
             "a byte occurring only at the endpoint is still not a witness");
+    }
+
+    #[test]
+    fn grouped_interval_publication_matches_literal_relation() {
+        let vocab = Vocab::from_entries_unchecked(vec![
+            (1, b"a".to_vec()), (9, b"a".to_vec()), (3, b"b".to_vec()),
+            (7, b"c".to_vec()), (12, b"d".to_vec()), (14, b"e".to_vec()),
+        ]);
+        let ordered = vocab.lexical_vocabulary();
+        let group = |terminals: &[u32], ranges: &[(u32, u32)]| TerminalRangeGroup {
+            terminals: terminals.into(), ranges: ranges.to_vec(),
+        };
+        let maps = vec![
+            Arc::new(vec![group(&[0, 3], &[(0, 2)]), group(&[3, 5], &[(1, 3)])]),
+            Arc::new(vec![group(&[0, 3], &[(0, 0), (3, 3)])]),
+            Arc::new(vec![group(&[7], &[(0, 4)])]), // unreferenced state class
+        ];
+        let states = [0, 1, 0, u32::MAX];
+        let (map, weights) = build_possible_match_vocab_and_weights_from_interval_maps(
+            &maps, &states, &ordered,
+        );
+        let literal = |spelling: u32| -> Vec<(u32, u32)> {
+            let mut labels = BTreeSet::new();
+            for state in [0, 1] {
+                for group in maps[state as usize].iter() {
+                    if group.ranges.iter().any(|&(lo, hi)| lo <= spelling && spelling <= hi) {
+                        labels.extend(group.terminals.iter().map(|&terminal| (state, terminal)));
+                    }
+                }
+            }
+            labels.into_iter().collect()
+        };
+        for (id, _) in vocab.iter() {
+            let spelling = ordered.original_to_ordered()[id as usize];
+            let expected = literal(spelling);
+            let class = map.original_to_internal[id as usize];
+            assert_ne!(class, u32::MAX);
+            assert!(map.internal_to_originals[class as usize].contains(&id));
+            for state in [0, 1, 2] {
+                for terminal in 0..8 {
+                    let actual = weights.get(&terminal).is_some_and(|weight| {
+                        weight.tokens_for_tsid(state).contains(class)
+                    });
+                    assert_eq!(actual, expected.contains(&(state, terminal)));
+                }
+            }
+            for (other, _) in vocab.iter() {
+                let other_spelling = ordered.original_to_ordered()[other as usize];
+                assert_eq!(class == map.original_to_internal[other as usize],
+                    expected == literal(other_spelling));
+            }
+        }
+        assert_eq!(map.original_to_internal[2], u32::MAX);
     }
 
     #[test]
@@ -3340,9 +3149,10 @@ mod tests {
         // Only state 2 directly matches demanded bit 0b10; every predecessor
         // that can reach it must inherit that bit, while disconnected state 4
         // must remain empty.
-        let mut transitions = vec![vec![u32::MAX; 5]; 256];
-        transitions[b'a' as usize][0] = 1;
-        transitions[b'b' as usize][1] = 2;
+        let mut transitions = vec![u32::MAX; 5 * 256];
+        transitions[b'a' as usize] = 1;
+        transitions[256 + b'b' as usize] = 2;
+        let transitions = ByteRows::dense(transitions.into());
         let boundary = [u32::MAX, u32::MAX, u32::MAX, 1, u32::MAX];
         let masks = batched_future_matched_masks(
             &[0, 0, 0b10, 0, 0],
