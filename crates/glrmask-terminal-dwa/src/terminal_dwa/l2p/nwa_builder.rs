@@ -741,7 +741,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
     fn continuation_weight_for_match(
         &mut self,
-        child_node: &VocabPrefixTreeNode,
+        child_node: VocabPrefixTreeNode<'_>,
         leaf_token_id: u32,
         terminal_id: TerminalID,
         end_state: Option<u32>,
@@ -776,7 +776,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         // continuations. Checking it after the no-pruning fast path avoids a hash
         // lookup on the overwhelmingly common case.
         let cache_key = (
-            child_node as *const VocabPrefixTreeNode as usize,
+            child_node.cache_key(),
             remaining_segment.len(),
             end_state.unwrap_or(u32::MAX),
             terminal_id,
@@ -828,7 +828,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
     fn can_skip_self_loop_subtree(
         &mut self,
-        node: &VocabPrefixTreeNode,
+        node: VocabPrefixTreeNode<'_>,
         tokenizer_state: TokenizerState,
     ) -> bool {
         if self.has_epsilon_transitions
@@ -863,7 +863,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
     fn emit_self_loop_leaf_only_subtree(
         &mut self,
-        node: &VocabPrefixTreeNode,
+        node: VocabPrefixTreeNode<'_>,
         assoc_by_state: &NodesByTokenizerState,
     ) {
         let mut accessible = node.reachable_token_ids().clone();
@@ -1199,7 +1199,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
     pub fn build_from_trie(
         &mut self,
-        node: &VocabPrefixTreeNode,
+        node: VocabPrefixTreeNode<'_>,
         assoc_by_state: &NodesByTokenizerState,
     ) {
         if !self.self_loop_subtree_skip_enabled {
@@ -1252,7 +1252,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     fn process_child_segment(
         &mut self,
         segment_bytes: &[u8],
-        child_node: &VocabPrefixTreeNode,
+        child_node: VocabPrefixTreeNode<'_>,
         initial_nodes: &NodesByTokenizerState,
     ) -> NodesByTokenizerState {
         // Token IDs in the trie are already internal (equivalence class) IDs.
@@ -1737,7 +1737,7 @@ pub fn build_nwa_via_trie_walk<'a>(
     nwa: &mut NWA,
     leaf_state: u32,
     num_tsids: u32,
-    vocab_tree_root: &VocabPrefixTreeNode,
+    vocab_tree_root: VocabPrefixTreeNode<'_>,
     roots: &NodesByTokenizerState,
     possible_matches: &mut PossibleMatchesComputer<'a>,
     shared_flat_transitions: Option<&'a [u32]>,
@@ -2054,7 +2054,7 @@ mod tests {
             start,
             leaf,
             &id_map,
-            &tree.root,
+            tree.root(),
             &mut possible_matches,
             &[true, false, true],
             &modes,
@@ -2166,7 +2166,7 @@ mod tests {
         );
         builder.self_loop_subtree_skip_enabled = self_loop_subtree_skip_enabled;
         builder.defer_uncolored_future_leaves = defer_uncolored_future_leaves;
-        builder.build_from_trie(&tree.root, &roots);
+        builder.build_from_trie(tree.root(), &roots);
         builder.flush_transition_buffer();
         drop(builder);
         finish_test_artifact(&nwa, id_map.clone())
@@ -2316,7 +2316,7 @@ mod tests {
                 &mut nwa,
                 leaf,
                 id_map.num_tsids(),
-                &tree.root,
+                tree.root(),
                 &roots,
                 &mut possible_matches,
                 None,
@@ -2390,7 +2390,7 @@ mod tests {
             start,
             leaf,
             id_map,
-            &tree.root,
+            tree.root(),
             &mut possible_matches,
             visible_output_raw_labels,
             modes,
@@ -2620,7 +2620,7 @@ mod tests {
             start,
             leaf,
             &id_map,
-            &tree.root,
+            tree.root(),
             &mut possible_matches,
             &visible_output_raw_labels(
                 &partition,
@@ -3437,7 +3437,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
 
     fn build_from_trie(
         &mut self,
-        node: &VocabPrefixTreeNode,
+        node: VocabPrefixTreeNode<'_>,
         contexts: &NodesByTransportContext,
     ) {
         if contexts.is_empty() {
@@ -3454,7 +3454,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
     fn process_child_segment(
         &mut self,
         segment_bytes: &[u8],
-        child_node: &VocabPrefixTreeNode,
+        child_node: VocabPrefixTreeNode<'_>,
         initial_contexts: &NodesByTransportContext,
     ) -> NodesByTransportContext {
         let leaf_token_id = child_node.token_id() as u32;
@@ -3632,7 +3632,7 @@ pub fn build_transport_nwa_via_trie_walk<'a>(
     start_state: u32,
     leaf_state: u32,
     id_map: &InternalIdMap,
-    vocab_tree_root: &VocabPrefixTreeNode,
+    vocab_tree_root: VocabPrefixTreeNode<'_>,
     possible_matches: &mut PossibleMatchesComputer<'a>,
     visible_output_raw_labels: &[bool],
     modes: &[TerminalNwaTransportMode],

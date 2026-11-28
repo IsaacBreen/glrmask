@@ -14,8 +14,12 @@ use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 
 type PossibleMatchMap = FxHashMap<TerminalID, RangeSetBlaze<u32>>;
 
-fn reachable_u32(node: &VocabPrefixTreeNode) -> RangeSetBlaze<u32> {
+fn reachable_u32(node: VocabPrefixTreeNode<'_>) -> RangeSetBlaze<u32> {
     let mut out = RangeSetBlaze::new();
+    if let Some((first, end)) = node.ordered_interval() {
+        if first < end { out.ranges_insert(first..=end - 1); }
+        return out;
+    }
     for range in node.reachable_token_ids().ranges() {
         out.ranges_insert(*range.start() as u32..=*range.end() as u32);
     }
@@ -74,8 +78,8 @@ impl<'a> PossibleMatchesComputer<'a> {
         if next == u32::MAX { None } else { Some(next) }
     }
 
-    fn reachable_for_node(&mut self, node: &VocabPrefixTreeNode) -> Rc<RangeSetBlaze<u32>> {
-        let cache_key = node as *const VocabPrefixTreeNode as usize;
+    fn reachable_for_node(&mut self, node: VocabPrefixTreeNode<'_>) -> Rc<RangeSetBlaze<u32>> {
+        let cache_key = node.cache_key();
         if let Some(cached) = self.reachable_cache.get(&cache_key) {
             Rc::clone(cached)
         } else {
@@ -87,7 +91,7 @@ impl<'a> PossibleMatchesComputer<'a> {
 
     fn can_skip_self_loop_subtree(
         &mut self,
-        node: &VocabPrefixTreeNode,
+        node: VocabPrefixTreeNode<'_>,
         tokenizer_state: u32,
     ) -> bool {
         if !self.scalar_deterministic_scan {
@@ -102,7 +106,7 @@ impl<'a> PossibleMatchesComputer<'a> {
 
     pub fn possible_matches_for_node(
         &mut self,
-        node: &VocabPrefixTreeNode,
+        node: VocabPrefixTreeNode<'_>,
         tokenizer_state: u32,
     ) -> Rc<PossibleMatchMap> {
         let states = self
@@ -121,7 +125,7 @@ impl<'a> PossibleMatchesComputer<'a> {
     pub fn possible_matches_for_suffix_and_node(
         &mut self,
         suffix: &[u8],
-        node: &VocabPrefixTreeNode,
+        node: VocabPrefixTreeNode<'_>,
         tokenizer_state: u32,
     ) -> Rc<PossibleMatchMap> {
         if suffix.is_empty() {
@@ -176,13 +180,13 @@ impl<'a> PossibleMatchesComputer<'a> {
 
     fn possible_matches_for_node_states(
         &mut self,
-        node: &VocabPrefixTreeNode,
+        node: VocabPrefixTreeNode<'_>,
         mut tokenizer_states: TokenizerStateSet,
     ) -> Rc<PossibleMatchMap> {
         tokenizer_states.sort_unstable();
         tokenizer_states.dedup();
         let cache_key = (
-            node as *const VocabPrefixTreeNode as usize,
+            node.cache_key(),
             tokenizer_states.clone(),
         );
         if let Some(cached) = self.cache.get(&cache_key) {

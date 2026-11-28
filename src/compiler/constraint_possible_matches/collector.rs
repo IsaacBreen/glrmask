@@ -405,7 +405,10 @@ impl IntervalMapBuilder {
     }
 }
 
-fn reachable_ranges(node: &VocabPrefixTreeNode) -> Box<[TokenRange]> {
+fn reachable_ranges(node: VocabPrefixTreeNode<'_>) -> Box<[TokenRange]> {
+    if let Some((first, end)) = node.ordered_interval() {
+        return if first < end { Box::new([(first, end - 1)]) } else { Box::new([]) };
+    }
     let mut ranges = Vec::new();
     for range in node.reachable_token_ids().ranges() {
         ranges.push((*range.start() as u32, *range.end() as u32));
@@ -652,7 +655,7 @@ struct ChildBuildData {
     result: NodeClasses,
 }
 struct ChildPendingData<'a> {
-    child: &'a VocabPrefixTreeNode,
+    child: VocabPrefixTreeNode<'a>,
     outcomes: Arc<[SegmentOutcome]>,
     descend_positions: Vec<u32>,
     child_active_states: Vec<u32>,
@@ -661,7 +664,7 @@ struct ChildPendingData<'a> {
 }
 
 fn build_node(
-    node: &VocabPrefixTreeNode,
+    node: VocabPrefixTreeNode<'_>,
     num_states: usize,
     num_terminals: usize,
     active_states: &[u32],
@@ -1280,7 +1283,7 @@ fn build_node(
 }
 
 pub(crate) fn collect_possible_matches_interval_trie_class_build_precomputed(
-    root: &VocabPrefixTreeNode,
+    root: VocabPrefixTreeNode<'_>,
     entries: &[u32],
     canonical_state: Option<&[u32]>,
     num_states: usize,
@@ -1413,7 +1416,7 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_precomputed(
 pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     tokenizer: &Tokenizer,
     raw_transitions: Option<&[u32]>,
-    root: &VocabPrefixTreeNode,
+    root: VocabPrefixTreeNode<'_>,
     entries: &[u32],
     canonical_state: Option<&[u32]>,
 ) -> (TrieClassBuildResult, PossibleMatchesProfile) {

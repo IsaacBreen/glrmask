@@ -1530,7 +1530,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                     let filter=shard_options.and_then(|o|o.crossing_filter)?;
                     let mut native=nwa_builder::native_builder::build(
                         tokenizer_for_build,terminal_coloring,ignore_terminal,&nwa,
-                        leaf_state,simplified_id_map.num_tsids(),&full_tree.root,&roots,
+                        leaf_state,simplified_id_map.num_tsids(),full_tree.root(),&roots,
                         flat_trans.map(AsRef::as_ref),representative_core_active_terminals)?;
                     if validate_native_pipeline {native_pipeline_raw=Some(native.sink.export_raw()?);}
                     let started=Instant::now();
@@ -1560,7 +1560,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 &mut nwa,
                 leaf_state,
                 simplified_id_map.num_tsids(),
-                &full_tree.root,
+                full_tree.root(),
                 &roots,
                 &mut pm_computer,
                 flat_trans.map(AsRef::as_ref),

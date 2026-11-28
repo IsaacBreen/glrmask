@@ -445,7 +445,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
     fn continuation_weight_for_match(
         &mut self,
-        child_node: &VocabPrefixTreeNode,
+        child_node: VocabPrefixTreeNode<'_>,
         leaf_token_id: u32,
         terminal_id: TerminalID,
         end_state: Option<u32>,
@@ -507,7 +507,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         // continuations. Checking it after the no-pruning fast path avoids a hash
         // lookup on the overwhelmingly common case.
         let cache_key = (
-            child_node as *const VocabPrefixTreeNode as usize,
+            child_node.cache_key(),
             remaining_segment.len(),
             end_state.unwrap_or(u32::MAX),
             terminal_id,
@@ -559,7 +559,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
     fn can_skip_self_loop_subtree(
         &mut self,
-        node: &VocabPrefixTreeNode,
+        node: VocabPrefixTreeNode<'_>,
         tokenizer_state: TokenizerState,
     ) -> bool {
         if self.has_epsilon_transitions
@@ -595,7 +595,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
     fn emit_self_loop_leaf_only_subtree(
         &mut self,
-        node: &VocabPrefixTreeNode,
+        node: VocabPrefixTreeNode<'_>,
         assoc_by_state: &NodesByTokenizerState,
     ) {
         let mut accessible = node.reachable_token_ids().clone();
@@ -854,7 +854,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
 
     pub fn build_from_trie(
         &mut self,
-        node: &VocabPrefixTreeNode,
+        node: VocabPrefixTreeNode<'_>,
         assoc_by_state: &NodesByTokenizerState,
     ) {
         if !self.self_loop_subtree_skip_enabled {
@@ -907,7 +907,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     fn process_child_segment(
         &mut self,
         segment_bytes: &[u8],
-        child_node: &VocabPrefixTreeNode,
+        child_node: VocabPrefixTreeNode<'_>,
         initial_nodes: &NodesByTokenizerState,
     ) -> NodesByTokenizerState {
         // Token IDs in the trie are already internal (equivalence class) IDs.
@@ -1217,26 +1217,26 @@ pub struct NativeBuild {
 #[allow(clippy::too_many_arguments)]
 pub fn build<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Option<TerminalID>,
  seed:&crate::automata::weighted_u32::nwa::NWA,leaf:u32,num_tsids:u32,
- tree:&VocabPrefixTreeNode,roots:&NodesByTokenizerState,flat:Option<&'a [u32]>,active:&[bool])->Option<NativeBuild>{
+ tree:VocabPrefixTreeNode<'_>,roots:&NodesByTokenizerState,flat:Option<&'a [u32]>,active:&[bool])->Option<NativeBuild>{
  build_impl(tokenizer,coloring,ignore,NativeSeedInput::Generic(seed),leaf,num_tsids,tree,roots,flat,active,None)
 }
 #[allow(clippy::too_many_arguments)]
 pub fn build_borrowed<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Option<TerminalID>,
  seed:&crate::automata::weighted_u32::nwa::NWA,leaf:u32,num_tsids:u32,
- tree:&VocabPrefixTreeNode,roots:&NodesByTokenizerState,flat:Option<&'a [u32]>,active:&[bool],map:BorrowedObservation<'a>)->Option<NativeBuild>{
+ tree:VocabPrefixTreeNode<'_>,roots:&NodesByTokenizerState,flat:Option<&'a [u32]>,active:&[bool],map:BorrowedObservation<'a>)->Option<NativeBuild>{
  build_impl(tokenizer,coloring,ignore,NativeSeedInput::Generic(seed),leaf,num_tsids,tree,roots,flat,active,Some(map))
 }
 enum NativeSeedInput<'a>{Generic(&'a crate::automata::weighted_u32::nwa::NWA),Direct{max_token:u32,classes:&'a [u32]}}
 #[allow(clippy::too_many_arguments)]
 pub fn build_borrowed_direct_seed<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Option<TerminalID>,
- classes:&[u32],max_token:u32,num_tsids:u32,tree:&VocabPrefixTreeNode,roots:&NodesByTokenizerState,
+ classes:&[u32],max_token:u32,num_tsids:u32,tree:VocabPrefixTreeNode<'_>,roots:&NodesByTokenizerState,
  flat:Option<&'a [u32]>,active:&[bool],map:BorrowedObservation<'a>)->Option<NativeBuild>{
  build_impl(tokenizer,coloring,ignore,NativeSeedInput::Direct{max_token,classes},0,num_tsids,tree,roots,flat,active,Some(map))
 }
 #[allow(clippy::too_many_arguments)]
 fn build_impl<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Option<TerminalID>,
  seed:NativeSeedInput<'_>,leaf:u32,num_tsids:u32,
- tree:&VocabPrefixTreeNode,roots:&NodesByTokenizerState,flat:Option<&'a [u32]>,active:&[bool],map:Option<BorrowedObservation<'a>>)->Option<NativeBuild>{
+ tree:VocabPrefixTreeNode<'_>,roots:&NodesByTokenizerState,flat:Option<&'a [u32]>,active:&[bool],map:Option<BorrowedObservation<'a>>)->Option<NativeBuild>{
  let parallel=std::env::var_os("GLRMASK_DISABLE_L2P_PARALLEL_ROOT_TRIE").is_none()
    && std::env::var_os("GLRMASK_ENABLE_L2P_SELF_LOOP_SUBTREE_SKIP").is_none()
    && tree.children().len()>=2 && rayon::current_num_threads()>1

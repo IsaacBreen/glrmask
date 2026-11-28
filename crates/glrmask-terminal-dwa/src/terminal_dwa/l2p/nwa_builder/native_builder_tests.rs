@@ -56,9 +56,9 @@ fn native_emission_matches_original_nwa_on_generated_lexers() {
                 let original=(seed.start_states().to_vec(),seed.states().to_vec());
                 let mut ordinary=seed.clone();let mut pm=PossibleMatchesComputer::new(&tokenizer);
                 super::super::build_nwa_via_trie_walk(&tokenizer,&coloring,false,ignore,&mut ordinary,
-                    leaf,map.num_tsids(),&tree.root,&roots,&mut pm,supplied,&active);
+                    leaf,map.num_tsids(),tree.root(),&roots,&mut pm,supplied,&active);
                 let mut native=build(&tokenizer,&coloring,ignore,&seed,leaf,map.num_tsids(),
-                    &tree.root,&roots,supplied,&active).expect("bounded serial-native eligibility");
+                    tree.root(),&roots,supplied,&active).expect("bounded serial-native eligibility");
                 let native=native.sink.export_raw().expect("valid finite event coefficients");
                 assert_eq!(native.start_states(),ordinary.start_states());
                 assert_eq!(native.states(),ordinary.states(),"partitioned={partitioned} case={case} supplied={}",supplied.map_or(0,|v|v.len()));
@@ -94,7 +94,7 @@ fn native_emission_declines_unsupported_seed_and_token_domains() {
     let map=id_map(tokenizer.num_states(),513);
     let keep=vec![true;tokenizer.num_states() as usize];let (seed,leaf,roots)=seeded(&tokenizer,&map,&keep);
     let tree=VocabPrefixTree::build(&[(512usize,b"a!".to_vec())]);
-    assert!(build(&tokenizer,&TerminalColoring::identity(2),None,&seed,leaf,map.num_tsids(),&tree.root,&roots,None,&[true,true]).is_none());
+    assert!(build(&tokenizer,&TerminalColoring::identity(2),None,&seed,leaf,map.num_tsids(),tree.root(),&roots,None,&[true,true]).is_none());
     assert!(NWA::from_seed(&seed,map.num_tsids()).is_none(),"seed itself contains token512");
     let map=id_map(tokenizer.num_states(),32);
     let (seed,leaf,_)=seeded(&tokenizer,&map,&keep);
@@ -117,8 +117,8 @@ fn strict_future_absence_preserves_only_possible_zero_byte_node_match() {
     let words=[b"a".to_vec(),b"ab".to_vec(),b"aba!".to_vec(),b"b".to_vec(),b"bb!".to_vec(),
         b"abbb".to_vec(),vec![0,255],vec![0,255,b'!'],vec![255,0],b"!".to_vec()];
     let tree=VocabPrefixTree::build(&words.into_iter().enumerate().collect::<Vec<_>>());
-    let mut nodes=vec![&tree.root];let mut cursor=0;
-    while cursor<nodes.len(){let children=nodes[cursor].children();nodes.extend(children);cursor+=1;}
+    let mut nodes=vec![tree.root()];let mut cursor=0;
+    while cursor<nodes.len(){let children=nodes[cursor].iter_children().map(|(_,child)|child);nodes.extend(children);cursor+=1;}
     let mut checks=0;
     for partitioned in [false,true]{
         let tok=if partitioned{build_regex_partitioned(&exprs,&[0,1,2,3,4])}else{build_regex(&exprs)}
@@ -129,7 +129,7 @@ fn strict_future_absence_preserves_only_possible_zero_byte_node_match() {
             for t in 0..5u32{
                 if tok.possible_future_terminals(q).get(t as usize){continue}
                 for node in &nodes{for suffix in [&b""[..],&b"a"[..],&b"bb"[..],&b"ab!"[..],&[0,255][..]]{
-                    let ordinary=pm.possible_matches_for_suffix_and_node(suffix,node,q);
+                    let ordinary=pm.possible_matches_for_suffix_and_node(suffix,*node,q);
                     if let Some(found)=ordinary.get(&t){
                         assert!(found.iter().all(|id|suffix.is_empty()&&node.has_token()&&id==node.token_id()as u32),
                             "future absence lost a positive extension q={q} t={t} suffix={suffix:?}");
@@ -202,14 +202,14 @@ fn borrowed_source_matches_materialized_logical_event_graph(){
             assert_eq!(borrowed.scalar_dispatch,view.tokenizer.has_scalar_deterministic_dispatch());
             let mask=view.view_to_original.iter().map(|raw|starts.contains(raw)).collect::<Vec<_>>();
             let tree=VocabPrefixTree::build(&words.into_iter().enumerate().collect::<Vec<_>>());
-            let ids=id_map(view.tokenizer.num_states(),tree.root.reachable_token_ids().len()as usize);
+            let ids=id_map(view.tokenizer.num_states(),tree.root().reachable_token_ids().len()as usize);
             let(seed,leaf,roots)=seeded(&view.tokenizer,&ids,&mask);
             let flat=crate::terminal_dwa::l1::build_flat_transition_table(&view.tokenizer);
             let coloring=TerminalColoring::identity(6);let active=(0..6).map(|i|case%3!=0||i!=4).collect::<Vec<_>>();let ignore=(case%2==0).then_some(4);
-            let mut a=build(&view.tokenizer,&coloring,ignore,&seed,leaf,ids.num_tsids(),&tree.root,&roots,Some(&flat),&active).unwrap();
-            let mut b=build_borrowed(&source,&coloring,ignore,&seed,leaf,ids.num_tsids(),&tree.root,&roots,Some(&source_flat),&active,borrowed).expect("certified query-prefix coverage");
+            let mut a=build(&view.tokenizer,&coloring,ignore,&seed,leaf,ids.num_tsids(),tree.root(),&roots,Some(&flat),&active).unwrap();
+            let mut b=build_borrowed(&source,&coloring,ignore,&seed,leaf,ids.num_tsids(),tree.root(),&roots,Some(&source_flat),&active,borrowed).expect("certified query-prefix coverage");
             let classes=mask.iter().enumerate().filter(|(_,v)|**v).map(|(q,_)|ids.tokenizer_states.original_to_internal[q]).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
-            let mut direct=build_borrowed_direct_seed(&source,&coloring,ignore,&classes,ids.max_internal_token_id(),ids.num_tsids(),&tree.root,&roots,Some(&source_flat),&active,borrowed).unwrap();
+            let mut direct=build_borrowed_direct_seed(&source,&coloring,ignore,&classes,ids.max_internal_token_id(),ids.num_tsids(),tree.root(),&roots,Some(&source_flat),&active,borrowed).unwrap();
             let a=a.sink.export_raw().unwrap();let b=b.sink.export_raw().unwrap();let d=direct.sink.export_raw().unwrap();assert_eq!(a.start_states(),b.start_states());assert_eq!(a.states(),b.states(),"split={split},case={case}");assert_eq!(a.start_states(),d.start_states());assert_eq!(a.states(),d.states(),"direct_seed split={split},case={case}");checked+=1;
         }
     }
@@ -237,8 +237,8 @@ fn borrowed_view_epsilon_free_packed_sources_are_exact(){
             assert_eq!(map.has_epsilon,view.tokenizer.has_epsilon_transitions());assert_eq!(map.scalar_dispatch,view.tokenizer.has_scalar_deterministic_dispatch());
             let initial=view.view_to_original.iter().map(|q|first.contains(q)).collect::<Vec<_>>();let ids=id_map(view.tokenizer.num_states(),entries.len());let (seed,leaf,roots)=seeded(&view.tokenizer,&ids,&initial);let color=TerminalColoring::identity(4);let active=vec![true;4];
             let flat=crate::terminal_dwa::l1::build_flat_transition_table(&view.tokenizer);let rawflat=crate::terminal_dwa::l1::build_flat_transition_table(tok);
-            let mut a=build(&view.tokenizer,&color,None,&seed,leaf,ids.num_tsids(),&tree.root,&roots,Some(&flat),&active).unwrap();
-            let mut b=build_borrowed(tok,&color,None,&seed,leaf,ids.num_tsids(),&tree.root,&roots,Some(&rawflat),&active,map).unwrap();
+            let mut a=build(&view.tokenizer,&color,None,&seed,leaf,ids.num_tsids(),tree.root(),&roots,Some(&flat),&active).unwrap();
+            let mut b=build_borrowed(tok,&color,None,&seed,leaf,ids.num_tsids(),tree.root(),&roots,Some(&rawflat),&active,map).unwrap();
             assert_eq!(a.sink.export_raw().unwrap().states(),b.sink.export_raw().unwrap().states());
         }
     }

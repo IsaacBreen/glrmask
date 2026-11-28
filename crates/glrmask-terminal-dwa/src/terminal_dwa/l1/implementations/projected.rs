@@ -20,6 +20,7 @@ use crate::automata::lexer::tokenizer::{SingletonEpsilonClosures, TerminalResidu
 use crate::automata::lexer::{DFA, Lexer};
 use crate::terminal_dwa::l1::implementations::support::{DEAD, Scanner};
 use crate::Vocab;
+use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 
 const UNKNOWN: u32 = u32::MAX - 1;
 
@@ -1555,22 +1556,6 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
 }
 
 
-#[derive(Default)]
-struct FiniteTrieNode {
-    token: Option<usize>,
-    edge_token: usize,
-    edge_start: u32,
-    edge_end: u32,
-    subtree_start: u32,
-    subtree_end: u32,
-    subtree_bytes: [u64; 4],
-    children: Vec<u32>,
-}
-
-struct FiniteTrie {
-    nodes: Vec<FiniteTrieNode>,
-}
-
 struct ReverseVocabTrie {
     // Nodes are topological: every parent index is smaller than its child.
     // Keeping the fields split avoids padding a ~170k-node p2 trie and makes
@@ -1591,7 +1576,7 @@ struct FiniteVocabProjection {
     /// vocabulary property and is reused by the residual kernel on every
     /// grammar instead of rescanning all token bytes.
     vocab_bytes: Arc<[u8]>,
-    trie: FiniteTrie,
+    trie: Arc<VocabPrefixTree>,
     reverse_trie: Option<ReverseVocabTrie>,
 }
 
@@ -1740,7 +1725,7 @@ fn build_finite_vocab_projection(vocab: &Vocab) -> Arc<FiniteVocabProjection> {
     let aliases = Arc::clone(&order.ordered_to_originals);
     let original_order = order.original_order();
     let vocab_bytes = vocab.relevant_bytes();
-    let trie = FiniteTrie::build(&tokens);
+    let trie = order.trie();
     let reverse_trie =
         (tokens.len() >= reverse_vocab_trie_min_tokens()).then(|| build_reverse_vocab_trie(&tokens));
     let projection = Arc::new(FiniteVocabProjection {
@@ -1786,7 +1771,7 @@ fn finite_vocab_projection(input: BuildInput<'_>) -> (Arc<FiniteVocabProjection>
     }
     let (aliases, tokens) = unique_vocab(input);
     let vocab_bytes = input.vocab.relevant_bytes();
-    let trie = FiniteTrie::build(&tokens);
+    let trie = Arc::new(VocabPrefixTree::from_ordered_tokens(Arc::clone(&tokens)));
     let reverse_trie =
         (tokens.len() >= reverse_vocab_trie_min_tokens()).then(|| build_reverse_vocab_trie(&tokens));
     (
@@ -1802,107 +1787,6 @@ fn finite_vocab_projection(input: BuildInput<'_>) -> (Arc<FiniteVocabProjection>
         started.elapsed().as_secs_f64() * 1000.0,
     )
 }
-
-impl FiniteTrie {
-    /// Build a compressed radix trie directly from the byte-sorted unique
-    /// vocabulary. Edge labels are slices of one vocabulary token, so the trie
-    /// allocates no copied edge bytes and carries no unrelated subtree metadata.
-    fn build(tokens: &[Arc<[u8]>]) -> Self {
-        fn lcp(first: &[u8], last: &[u8], from: usize) -> usize {
-            let mut index = from;
-            let end = first.len().min(last.len());
-            while index < end && first[index] == last[index] {
-                index += 1;
-            }
-            index
-        }
-
-        fn add_range(
-            tokens: &[Arc<[u8]>],
-            begin: usize,
-            end: usize,
-            parent_prefix_len: usize,
-            nodes: &mut Vec<FiniteTrieNode>,
-        ) -> u32 {
-            debug_assert!(begin < end);
-            let first = tokens[begin].as_ref();
-            let last = tokens[end - 1].as_ref();
-            let prefix_len = lcp(first, last, parent_prefix_len);
-            let token = (first.len() == prefix_len).then_some(begin);
-            let node = nodes.len() as u32;
-            nodes.push(FiniteTrieNode {
-                token,
-                edge_token: begin,
-                edge_start: parent_prefix_len as u32,
-                edge_end: prefix_len as u32,
-                subtree_start: begin as u32,
-                subtree_end: end as u32,
-                subtree_bytes: [0; 4],
-                children: Vec::new(),
-            });
-            let mut cursor = begin + usize::from(token.is_some());
-            while cursor < end {
-                let byte = tokens[cursor][prefix_len];
-                let child_begin = cursor;
-                cursor += 1;
-                while cursor < end && tokens[cursor][prefix_len] == byte {
-                    cursor += 1;
-                }
-                let child = add_range(tokens, child_begin, cursor, prefix_len, nodes);
-                nodes[node as usize].children.push(child);
-            }
-            let children = nodes[node as usize].children.clone();
-            let mut subtree_bytes = [0u64; 4];
-            for child in children {
-                let child_node = &nodes[child as usize];
-                let edge = &tokens[child_node.edge_token]
-                    [child_node.edge_start as usize..child_node.edge_end as usize];
-                for &byte in edge {
-                    subtree_bytes[byte as usize >> 6] |= 1u64 << (byte & 63);
-                }
-                for (dst, &src) in subtree_bytes.iter_mut().zip(child_node.subtree_bytes.iter()) {
-                    *dst |= src;
-                }
-            }
-            nodes[node as usize].subtree_bytes = subtree_bytes;
-            node
-        }
-
-        if tokens.is_empty() {
-            return Self { nodes: vec![FiniteTrieNode::default()] };
-        }
-        let mut nodes = Vec::new();
-        let root = add_range(tokens, 0, tokens.len(), 0, &mut nodes);
-        debug_assert_eq!(root, 0);
-        // If all tokens have a non-empty common prefix, `add_range` puts that
-        // prefix on node zero. Split it into an empty root so the first cached
-        // transition is still one common vocabulary bucket.
-        if nodes[0].edge_end != 0 {
-            let old = std::mem::take(&mut nodes);
-            let mut shifted = Vec::with_capacity(old.len() + 1);
-            shifted.push(FiniteTrieNode {
-                children: vec![1],
-                ..FiniteTrieNode::default()
-            });
-            shifted.extend(old.into_iter().map(|mut node| {
-                for child in &mut node.children {
-                    *child += 1;
-                }
-                node
-            }));
-            nodes = shifted;
-        }
-        Self { nodes }
-    }
-
-    #[inline]
-    fn edge<'a>(&self, node: u32, tokens: &'a [Arc<[u8]>]) -> &'a [u8] {
-        let node = &self.nodes[node as usize];
-        &tokens[node.edge_token][node.edge_start as usize..node.edge_end as usize]
-    }
-}
-
-
 
 struct FrozenFiniteScanner {
     width: usize,
@@ -2063,8 +1947,7 @@ impl ProfileWork {
 
 fn collect_finite_profile(
     scanner: &mut impl FiniteProfileMachine,
-    trie: &FiniteTrie,
-    tokens: &[Arc<[u8]>],
+    trie: &VocabPrefixTree,
     node: u32,
     config: u32,
     out: &mut Vec<ProfileRun>,
@@ -2076,25 +1959,27 @@ fn collect_finite_profile(
     if work.visits > max_visits {
         return false;
     }
-    let current = &trie.nodes[node as usize];
+    let current = trie.node(node);
+    let (first, end) = current.lexical_interval();
     if scanner.self_loops(config).is_some_and(|loops|
-        crate::ds::u8set::U8Set::from_words(current.subtree_bytes).is_subset(&loops))
+        crate::ds::u8set::U8Set::from_words(*current.subtree_bytes()).is_subset(&loops))
     {
-        push_profile_run(out, current.subtree_start, current.subtree_end, scanner.signature(config));
+        push_profile_run(out, first, end, scanner.signature(config));
         work.uniform_subtrees += 1;
-        work.uniform_tokens += (current.subtree_end - current.subtree_start) as usize;
+        work.uniform_tokens += (end - first) as usize;
         return out.len() <= max_runs;
     }
-    if let Some(token) = current.token {
+    if current.has_token() {
+        let token = current.token_id();
         push_profile_run(out, token as u32, token as u32 + 1, scanner.signature(config));
         if out.len() > max_runs {
             return false;
         }
     }
-    for &child in &current.children {
-        let target = scanner.step_bytes(config, trie.edge(child, tokens));
+    for (edge, child) in current.iter_children() {
+        let target = scanner.step_bytes(config, edge);
         if target != DEAD && !collect_finite_profile(
-            scanner, trie, tokens, child, target, out, work, max_runs, max_visits,
+            scanner, trie, child.index(), target, out, work, max_runs, max_visits,
         ) {
             return false;
         }
@@ -2576,7 +2461,7 @@ struct FiniteObservation {
 impl FiniteObservation {
     fn compact(&self, materialize_rows: bool) -> (Vec<u32>, Vec<Vec<u32>>, usize, usize) {
         let (classes, _, rows, events, referenced_runs) = finite_compact_runs(
-            self.vocab.trie.nodes[0].token, &self.class_fingerprints, &self.profiles,
+            self.vocab.trie.root().has_token().then(|| self.vocab.trie.root().token_id()), &self.class_fingerprints, &self.profiles,
             self.vocab.aliases.len(), materialize_rows,
         );
         (classes, rows, events, referenced_runs)
@@ -2638,8 +2523,8 @@ fn observe_finite_projection(
         }
     }
 
-    let root_token = trie.nodes[0].token;
-    let root_children = trie.nodes[0].children.clone();
+    let root_token = trie.root().has_token().then(|| trie.root().token_id());
+    let root_children = trie.root().children();
     let mut rows = FiniteRowPartition::new(input.tokenizer.num_states() as usize);
     let mut store = FiniteProfileStore::new();
     let mut bucket_cache = FxHashMap::<(u32, u32), u32>::default();
@@ -2712,8 +2597,8 @@ fn observe_finite_projection(
         let mut work = Vec::<(u32, Vec<u32>, Vec<usize>)>::with_capacity(starts.len());
         for (start, raw_states) in starts {
             let mut ids = Vec::with_capacity(root_children.len());
-            for &child in &root_children {
-                let target = frozen.step_bytes(start, trie.edge(child, tokens));
+            for &child in root_children {
+                let target = frozen.step_bytes(start, trie.node(child).prefix());
                 if target == DEAD {
                     ids.push(usize::MAX);
                     continue;
@@ -2739,7 +2624,7 @@ fn observe_finite_projection(
                 let mut values = Vec::<ProfileRun>::new();
                 let mut work = ProfileWork::default();
                 let completed = collect_finite_profile(
-                    &mut &frozen, trie, tokens, child, target, &mut values,
+                    &mut &frozen, trie, child, target, &mut values,
                     &mut work, usize::MAX, usize::MAX,
                 );
                 debug_assert!(completed);
@@ -2806,8 +2691,8 @@ fn observe_finite_projection(
             if root_token.is_some() {
                 fingerprint.push(scanner.signature(start));
             }
-            for &child in &root_children {
-                let target = scanner.step_bytes(start, trie.edge(child, tokens));
+            for &child in root_children {
+                let target = scanner.step_bytes(start, trie.node(child).prefix());
                 if target == DEAD {
                     fingerprint.push(0);
                     continue;
@@ -2821,7 +2706,7 @@ fn observe_finite_projection(
                     let remaining_runs = profile_run_budget.saturating_sub(store.runs);
                     if !collect_finite_profile(
                         &mut LazyFiniteScanner { scanner: &mut scanner, self_loops: self_loops.as_ref() },
-                        trie, tokens, child, target, &mut values, &mut profile_work,
+                        trie, child, target, &mut values, &mut profile_work,
                         remaining_runs, pair_visit_budget,
                     ) {
                         if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
@@ -2850,7 +2735,7 @@ fn observe_finite_projection(
     if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
         eprintln!(
             "[glrmask/profile][l1_finite_observation] partition={} raw_states={} tokens={} trie_nodes={} configs={} signatures={} bucket_cache={} cache_hits={} pair_visits={} uniform_subtrees={} uniform_tokens={} profile_runs={} profiles={} state_classes={} vocab_cache_hit={} prep_ms={:.3} scan_ms={:.3}",
-            input.partition_label, input.tokenizer.num_states(), aliases.len(), trie.nodes.len(),
+            input.partition_label, input.tokenizer.num_states(), aliases.len(), trie.len(),
             scanner.configs.len(), scanner.signatures.len(), bucket_cache.len(), cache_hits,
             pair_visits, uniform_subtrees, uniform_tokens,
             store.runs, store.profiles.len(),

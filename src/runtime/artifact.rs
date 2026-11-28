@@ -2286,9 +2286,9 @@ impl DynamicMaskTrie {
         }
     }
 
-    fn append_prefix_tree(&mut self, root: &VocabPrefixTreeNode, parent: Option<u32>, incoming: &[u8]) {
+    fn append_prefix_tree(&mut self, root: VocabPrefixTreeNode<'_>, parent: Option<u32>, incoming: &[u8]) {
         enum Task<'a> {
-            Enter(&'a VocabPrefixTreeNode, Option<u32>, &'a [u8]),
+            Enter(VocabPrefixTreeNode<'a>, Option<u32>, &'a [u8]),
             Finish(u32, &'a [u8]),
         }
         let mut work = vec![Task::Enter(root, parent, incoming)];
@@ -2298,9 +2298,8 @@ impl DynamicMaskTrie {
                 Task::Enter(node, parent, bytes) => {
                     let id = self.begin_node(parent, node.has_token().then_some(node.token_id() as u32), bytes.len());
                     work.push(Task::Finish(id, bytes));
-                    let prefix_len = node.prefix().len();
-                    for child in node.children().iter().rev() {
-                        work.push(Task::Enter(child, Some(id), &child.prefix()[prefix_len..]));
+                    for (edge, child) in node.iter_children().rev() {
+                        work.push(Task::Enter(child, Some(id), edge));
                     }
                 }
             }
@@ -2309,7 +2308,7 @@ impl DynamicMaskTrie {
 
     pub(crate) fn from_vocab_prefix_tree(tree: &VocabPrefixTree) -> Self {
         let mut output = Self::new();
-        output.append_prefix_tree(&tree.root, None, &[]);
+        output.append_prefix_tree(tree.root(), None, &[]);
         output.finalize_full_walk();
         output
     }
@@ -2367,7 +2366,7 @@ impl DynamicMaskTrie {
             output.root_layout_classes.push(class);
             output.root_layout_all_valid_utf8.push(refs.iter().all(|(_, bytes)| std::str::from_utf8(bytes).is_ok()));
             let tree = VocabPrefixTree::build_presorted(&refs);
-            output.append_prefix_tree(&tree.root, Some(0), &[]);
+            output.append_prefix_tree(tree.root(), Some(0), &[]);
         }
         output.finish_node(0, &[]);
         output.finalize_full_walk();

@@ -217,11 +217,6 @@ struct SweepBuildStats {
     total_events: usize,
 }
 
-fn build_ordered_vocab_prefix_tree(ordered_vocab: &OrderedVocab) -> VocabPrefixTree {
-    let entries: Vec<(usize, &[u8])> = ordered_vocab.ordered_token_bytes.iter().enumerate().map(|(ordered_id, bytes)| (ordered_id, bytes.as_ref())).collect();
-    VocabPrefixTree::build_presorted(&entries)
-}
-
 fn ordered_vocab_cache_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -291,7 +286,7 @@ fn get_ordered_vocab_trie_artifacts_for_vocab(
     let ordered_vocab = if enabled { vocab.lexical_vocabulary() } else { Arc::new(OrderedVocab::build(vocab.entries_map())) };
     let ordered_vocab_build_ns = ordered_vocab_started_at.elapsed().as_nanos();
     let trie_started_at = Instant::now();
-    let trie = Arc::new(build_ordered_vocab_prefix_tree(ordered_vocab.as_ref()));
+    let trie = ordered_vocab.trie();
     let trie_build_ns = trie_started_at.elapsed().as_nanos();
     let artifacts = OrderedVocabTrieArtifacts::new(ordered_vocab, trie);
     if enabled { vocab.vocab_derived_cache_set(Arc::new(artifacts.clone())); }
@@ -1522,7 +1517,7 @@ fn filter_trie_class_result_to_terminals(
 
 fn collect_sparse_root_possible_matches(
     tokenizer: &Tokenizer,
-    root: &crate::ds::vocab_prefix_tree::VocabPrefixTreeNode,
+    root: VocabPrefixTreeNode<'_>,
     entries: &[u32],
     canonical_state: Option<&[u32]>,
 ) -> TrieClassBuildResult {
@@ -1654,7 +1649,7 @@ fn append_batched_demand_matches(
     terminal_count: usize,
     origins: &[u32],
     matched: u128,
-    child: &VocabPrefixTreeNode,
+    child: VocabPrefixTreeNode<'_>,
     profile: &mut BatchedDemandProfile,
 ) {
     if matched == 0 {
@@ -1668,10 +1663,10 @@ fn append_batched_demand_matches(
         }
         for &origin in origins {
             profile.origin_updates += 1;
-            for range in child.reachable_token_ids().ranges() {
+            let (first, end) = child.ordered_interval().expect("PM lexical token coordinate");
+            if first < end {
                 profile.range_inserts += 1;
-                outputs[origin as usize * terminal_count + bit]
-                    .push((*range.start() as u32, *range.end() as u32));
+                outputs[origin as usize * terminal_count + bit].push((first, end - 1));
             }
         }
     }
@@ -1740,7 +1735,7 @@ fn batched_group_has_future_demand(view: &BatchedDemandView<'_>, state: u32, rem
 }
 
 fn collect_batched_demand_node(
-    node: &VocabPrefixTreeNode,
+    node: VocabPrefixTreeNode<'_>,
     groups: Vec<BatchedDemandGroup>,
     view: &BatchedDemandView<'_>,
     demanded_terminals: &[TerminalID],
@@ -1888,7 +1883,7 @@ fn demanded_terminal_bits(demand: &DelayedTerminalDemand, terminal_count: usize)
 /// Exact existential prefix observation over either scalar or subset states.
 /// Query entries retain their raw IDs; the walk uses the view's indices.
 fn collect_batched_demand_view(
-    root: &VocabPrefixTreeNode,
+    root: VocabPrefixTreeNode<'_>,
     entries: &[u32],
     origin_state_count: usize,
     raw_to_index: Option<&[u32]>,
@@ -1960,7 +1955,7 @@ fn collect_batched_demand_view(
 fn collect_batched_demand_possible_matches(
     tokenizer: &Tokenizer,
     raw_transitions: Option<&[u32]>,
-    root: &VocabPrefixTreeNode,
+    root: VocabPrefixTreeNode<'_>,
     entries: &[u32],
     demand: &DelayedTerminalDemand,
 ) -> TrieClassBuildResult {
@@ -2001,7 +1996,7 @@ fn collect_batched_demand_possible_matches(
 }
 
 fn collect_batched_demand_possible_matches_precomputed(
-    root: &VocabPrefixTreeNode,
+    root: VocabPrefixTreeNode<'_>,
     entries: &[u32],
     num_states: usize,
     num_terminals: usize,
@@ -2702,7 +2697,7 @@ fn compute_constraint_possible_matches_with_artifacts(
         let result = collect_batched_demand_possible_matches(
             tokenizer,
             raw_transitions,
-            &trie.root,
+            trie.root(),
             &trie_build_states,
             &demand,
         );
@@ -2757,7 +2752,7 @@ fn compute_constraint_possible_matches_with_artifacts(
             root_terminal_union <= 128 && powerset_batched_requested && view_entries.len() <= powerset_batched_max_states;
         let view_result = if powerset_batched {
             collect_batched_demand_possible_matches_precomputed(
-                &trie.root,
+                trie.root(),
                 &view_entries,
                 powerset.num_states,
                 tokenizer.num_terminals() as usize,
@@ -2770,7 +2765,7 @@ fn compute_constraint_possible_matches_with_artifacts(
             )
         } else {
             collector::collect_possible_matches_interval_trie_class_build_precomputed(
-                &trie.root,
+                trie.root(),
                 &view_entries,
                 Some(&powerset.boundary_state),
                 powerset.num_states,
@@ -2788,7 +2783,7 @@ fn compute_constraint_possible_matches_with_artifacts(
             let strict_started_at = Instant::now();
             let (reference, _) =
                 collector::collect_possible_matches_interval_trie_class_build_precomputed(
-                    &trie.root,
+                    trie.root(),
                     &view_entries,
                     Some(&powerset.boundary_state),
                     powerset.num_states,
@@ -2917,7 +2912,7 @@ fn compute_constraint_possible_matches_with_artifacts(
         }
         collect_sparse_root_possible_matches(
             tokenizer,
-            &trie.root,
+            trie.root(),
             &trie_build_states,
             None,
         )
@@ -2925,7 +2920,7 @@ fn compute_constraint_possible_matches_with_artifacts(
         collector::collect_possible_matches_interval_trie_class_build_with_classes(
             tokenizer,
             raw_transitions,
-            &trie.root,
+            trie.root(),
             &trie_build_states,
             None,
         )
@@ -3088,7 +3083,7 @@ mod tests {
         assert!(prepared_proper_prefix_byte_candidates(&vocab,&query).is_none());
         assert_eq!(vocab.compiler_cache_entry_count(),before,"query must not shift cold work into preparation");
         let ordered=Arc::new(OrderedVocab::build(vocab.entries_map()));
-        let trie=Arc::new(build_ordered_vocab_prefix_tree(&ordered));
+        let trie=ordered.trie();
         vocab.vocab_derived_cache_set(Arc::new(OrderedVocabTrieArtifacts::new(ordered,trie)));
         assert_eq!(prepared_proper_prefix_byte_candidates(&vocab,&query),Some(vec![1_003,9_000_001]));
         assert_eq!(prepared_proper_prefix_byte_candidates(&vocab.clone(),&query),Some(vec![1_003,9_000_001]));
@@ -3104,7 +3099,7 @@ mod tests {
         let entries=(0..130u32).map(|i|(i*97+3,b"ab".to_vec())).collect::<Vec<_>>();
         let vocab=Vocab::from_entries_unchecked(entries);
         let ordered=Arc::new(OrderedVocab::build(vocab.entries_map()));
-        let trie=Arc::new(build_ordered_vocab_prefix_tree(&ordered));
+        let trie=ordered.trie();
         vocab.vocab_derived_cache_set(Arc::new(OrderedVocabTrieArtifacts::new(ordered,trie)));
         let mut query=[0u64;4];query[b'a' as usize>>6]|=1u64<<(b'a'&63);
         assert!(prepared_proper_prefix_byte_candidates(&vocab,&query).is_none(),
@@ -3395,7 +3390,7 @@ mod tests {
         let raw_states = (0..tokenizer.num_states()).collect::<Vec<_>>();
         let sparse = collect_sparse_root_possible_matches(
             &tokenizer,
-            &artifacts.trie.root,
+            artifacts.trie.root(),
             &raw_states,
             None,
         );
@@ -3420,7 +3415,7 @@ mod tests {
         view_entries.dedup();
         let (powerset_rows, _) =
             collector::collect_possible_matches_interval_trie_class_build_precomputed(
-                &artifacts.trie.root,
+                artifacts.trie.root(),
                 &view_entries,
                 Some(&powerset.boundary_state),
                 powerset.num_states,

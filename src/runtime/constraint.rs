@@ -1272,7 +1272,7 @@ impl Constraint {
             mut states: TokenizerStateSet,
             mut depth: usize,
             edge: &[u8],
-            child: &VocabPrefixTreeNode,
+            child: VocabPrefixTreeNode<'_>,
             matched_flags: &[(bool, bool)],
             out: &mut Vec<u32>,
         ) -> Option<(TokenizerStateSet, usize)> {
@@ -1314,19 +1314,19 @@ impl Constraint {
         }
 
         let reset = self.runtime_commit_initial_state();
-        let root_children = tree.0.root.iter_children().collect::<Vec<_>>();
+        let root_children = tree.0.root().iter_children().collect::<Vec<_>>();
         let mut candidates = root_children
             .par_iter()
             .flat_map_iter(|(edge, child)| {
                 let mut out = Vec::new();
-                let mut pending: Vec<(&VocabPrefixTreeNode, TokenizerStateSet, usize)> = Vec::new();
+                let mut pending: Vec<(VocabPrefixTreeNode<'_>, TokenizerStateSet, usize)> = Vec::new();
                 if let Some((states, depth)) = advance_edge(
                     &self.tokenizer,
                     reset,
                     all_states.clone(),
                     0,
                     edge,
-                    child,
+                    *child,
                     matched_flags.as_slice(),
                     &mut out,
                 ) {

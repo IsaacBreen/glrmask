@@ -123,6 +123,7 @@ pub struct LexicalVocabulary {
     pub ordered_token_bytes: Arc<Vec<Arc<[u8]>>>,
     original_to_ordered: OnceLock<Arc<[u32]>>,
     original_order: OnceLock<Arc<[(u32, u32)]>>,
+    trie: OnceLock<Arc<vocab_prefix_tree::VocabPrefixTree>>,
 }
 
 impl VocabDerivedArtifact for LexicalVocabulary {}
@@ -147,6 +148,7 @@ impl LexicalVocabulary {
             ordered_token_bytes: Arc::new(words),
             original_to_ordered: OnceLock::new(),
             original_order: OnceLock::new(),
+            trie: OnceLock::new(),
         }
     }
 
@@ -158,6 +160,12 @@ impl LexicalVocabulary {
             }
             map.into()
         })
+    }
+
+    pub fn trie(&self) -> Arc<vocab_prefix_tree::VocabPrefixTree> {
+        Arc::clone(self.trie.get_or_init(|| Arc::new(
+            vocab_prefix_tree::VocabPrefixTree::from_ordered_tokens(Arc::clone(&self.ordered_token_bytes))
+        )))
     }
 
     pub fn original_order(&self) -> Arc<[(u32, u32)]> {
