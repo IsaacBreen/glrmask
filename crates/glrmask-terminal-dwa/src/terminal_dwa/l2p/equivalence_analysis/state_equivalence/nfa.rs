@@ -8,7 +8,7 @@ use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::{SingletonEpsilonClosures, Tokenizer};
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
-use super::super::compat::{ByteRows, FlatDfa, FlatDfaState, TokenizerView};
+use super::super::compat::{ByteRows, FlatDfa, FlatDfaState, TokenizerView, conservative_byte_classes};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RawPowersetTargetMode {
@@ -118,20 +118,33 @@ impl RelevantPowersetView {
         state
     }
 
-    pub fn into_tokenizer_view(self) -> TokenizerView {
-        let mut transitions = vec![u32::MAX; self.states.len() * 256];
+    fn byte_rows(&self) -> ByteRows {
+        let mut relevant = [false; 256];
+        for &byte in &self.bytes {
+            relevant[byte as usize] = true;
+        }
+        let classes = conservative_byte_classes(&relevant)
+            .unwrap_or_else(|| std::array::from_fn(|byte| byte as u8));
+        let width = classes.iter().copied().max().unwrap() as usize + 1;
+        let mut transitions = vec![u32::MAX; self.states.len() * width];
         for state in 0..self.states.len() {
             let start = self.edge_offsets[state] as usize;
             let end = self.edge_offsets[state + 1] as usize;
             for &(byte, target) in &self.edges[start..end] {
-                transitions[state * 256 + byte as usize] = target;
+                debug_assert!(relevant[byte as usize]);
+                transitions[state * width + classes[byte as usize] as usize] = target;
             }
         }
+        ByteRows::new(Arc::from(transitions), classes)
+    }
+
+    pub fn into_tokenizer_view(self) -> TokenizerView {
+        let transitions = self.byte_rows();
         TokenizerView {
             flat_dfa: FlatDfa {
                 states: self.states,
                 start_state: self.start_state,
-                transitions: ByteRows::dense(Arc::from(transitions)),
+                transitions,
             },
         }
     }
@@ -139,9 +152,7 @@ impl RelevantPowersetView {
 
 fn mark_relevant_powerset_trie_trajectories(
     view: &RelevantPowersetView,
-    dense_transitions: &[u32],
-    byte_to_slot: &[u16; 256],
-    transition_stride: usize,
+    rows: &ByteRows,
     start_states: &[u32],
     trie: &[ByteTrieNode],
     selected: &mut [bool],
@@ -217,16 +228,9 @@ fn mark_relevant_powerset_trie_trajectories(
             }
             let byte = token_byte;
             let child_start = product_states.len();
-            let byte_slot = byte_to_slot[byte as usize];
-            if byte_slot == u16::MAX {
-                node_state_start[child] = child_start as u32;
-                node_state_len[child] = 0;
-                continue;
-            }
             for offset in 0..state_len {
                 let source = product_states[state_start + offset];
-                let target = dense_transitions
-                    [source as usize * transition_stride + byte_slot as usize];
+                let target = rows.trans(source as usize, byte as usize);
                 if target == u32::MAX {
                     continue;
                 }
@@ -254,22 +258,7 @@ pub fn build_bounded_analysis_view_from_relevant_powerset(
     raw_start_states: &[usize],
     tokens: &[&[u8]],
 ) -> BoundedAnalysisView {
-    let transition_stride = view.bytes.len();
-    let mut byte_to_slot = [u16::MAX; 256];
-    for (slot, &byte) in view.bytes.iter().enumerate() {
-        byte_to_slot[byte as usize] = slot as u16;
-    }
-    let mut dense_transitions =
-        vec![u32::MAX; view.states.len().saturating_mul(transition_stride)];
-    for state in 0..view.states.len() {
-        let edge_start = view.edge_offsets[state] as usize;
-        let edge_end = view.edge_offsets[state + 1] as usize;
-        for &(byte, target) in &view.edges[edge_start..edge_end] {
-            let slot = byte_to_slot[byte as usize];
-            debug_assert_ne!(slot, u16::MAX);
-            dense_transitions[state * transition_stride + slot as usize] = target;
-        }
-    }
+    let rows = view.byte_rows();
     let token_trie = build_byte_trie(tokens.iter().copied());
     let suffix_trie = build_byte_trie(
         tokens
@@ -286,9 +275,7 @@ pub fn build_bounded_analysis_view_from_relevant_powerset(
     raw_seed_states.dedup();
     mark_relevant_powerset_trie_trajectories(
         view,
-        &dense_transitions,
-        &byte_to_slot,
-        transition_stride,
+        &rows,
         &raw_seed_states,
         &token_trie,
         &mut selected,
@@ -296,9 +283,7 @@ pub fn build_bounded_analysis_view_from_relevant_powerset(
     );
     mark_relevant_powerset_trie_trajectories(
         view,
-        &dense_transitions,
-        &byte_to_slot,
-        transition_stride,
+        &rows,
         std::slice::from_ref(&(view.start_state as u32)),
         &suffix_trie,
         &mut selected,
@@ -314,7 +299,7 @@ pub fn build_bounded_analysis_view_from_relevant_powerset(
             states.push(view.states[old].clone());
         }
     }
-    let mut transitions = vec![u32::MAX; states.len().saturating_mul(256)];
+    let mut transitions = vec![u32::MAX; states.len().saturating_mul(rows.width)];
     for (old_source, &new_source) in old_to_new.iter().enumerate() {
         if new_source == u32::MAX {
             continue;
@@ -328,7 +313,7 @@ pub fn build_bounded_analysis_view_from_relevant_powerset(
             }
             let new_target = old_to_new[old_target as usize];
             debug_assert_ne!(new_target, u32::MAX);
-            transitions[new_source as usize * 256 + byte as usize] = new_target;
+            transitions[new_source as usize * rows.width + rows.byte_to_column[byte as usize] as usize] = new_target;
         }
     }
 
@@ -346,7 +331,7 @@ pub fn build_bounded_analysis_view_from_relevant_powerset(
             flat_dfa: FlatDfa {
                 states,
                 start_state: start_state as usize,
-                transitions: ByteRows::dense(Arc::from(transitions)),
+                transitions: ByteRows::new(Arc::from(transitions), rows.byte_to_column),
             },
         },
         raw_start_to_view,
@@ -1452,13 +1437,15 @@ fn ensure_config_transition(
     config_ids: &mut FxHashMap<Vec<u32>, u32>,
     transitions: &mut Vec<u32>,
     known_transitions: &mut Vec<u8>,
+    byte_to_column: &[u8; 256],
+    width: usize,
     preseeded_raw_closures: Option<&[u32]>,
     singleton_closures: &SingletonEpsilonClosures,
     active_language: Option<&[bool]>,
     target_marks: &mut [u32],
     target_generation: &mut u32,
 ) -> u32 {
-    let slot = state as usize * 256 + byte as usize;
+    let slot = state as usize * width + byte_to_column[byte as usize] as usize;
     if known_transitions[slot] != 0 {
         return transitions[slot];
     }
@@ -1493,9 +1480,9 @@ fn ensure_config_transition(
         return u32::MAX;
     }
     let target = intern_config(targets, config_ids, configs);
-    if transitions.len() < configs.len() * 256 {
-        transitions.resize(configs.len() * 256, u32::MAX);
-        known_transitions.resize(configs.len() * 256, 0);
+    if transitions.len() < configs.len() * width {
+        transitions.resize(configs.len() * width, u32::MAX);
+        known_transitions.resize(configs.len() * width, 0);
     }
     transitions[slot] = target;
     target
@@ -1555,6 +1542,8 @@ struct BoundedExpansion<'a> {
     config_ids: &'a mut FxHashMap<Vec<u32>, u32>,
     transitions: &'a mut Vec<u32>,
     known_transitions: &'a mut Vec<u8>,
+    byte_to_column: &'a [u8; 256],
+    width: usize,
     singleton_closures: &'a SingletonEpsilonClosures,
     active_language: Option<&'a [bool]>,
     target_marks: &'a mut [u32],
@@ -1573,6 +1562,7 @@ impl BoundedExpansion<'_> {
         ensure_config_transition(
             self.tokenizer, self.raw_transitions, state, byte,
             self.configs, self.config_ids, self.transitions, self.known_transitions,
+            self.byte_to_column, self.width,
             preseeded, self.singleton_closures, self.active_language,
             self.target_marks, self.target_generation,
         )
@@ -1784,7 +1774,7 @@ impl BoundedExpansion<'_> {
 pub struct TokenBoundedAnalysisTopology {
     configurations: Arc<[Box<[u32]>]>,
     start_state: usize,
-    transitions: Arc<[u32]>,
+    transitions: ByteRows,
     raw_start_to_view: Arc<[u32]>,
 }
 
@@ -1793,7 +1783,7 @@ fn materialize_bounded_analysis_view(
     active_groups: Option<&[bool]>,
     configurations: &[Box<[u32]>],
     start_state: usize,
-    transitions: Arc<[u32]>,
+    transitions: ByteRows,
     raw_start_to_view: Vec<u32>,
 ) -> BoundedAnalysisView {
     let raw_state_count = tokenizer.num_states() as usize;
@@ -1841,7 +1831,7 @@ fn materialize_bounded_analysis_view(
             flat_dfa: FlatDfa {
                 states,
                 start_state,
-                transitions: ByteRows::dense(transitions),
+                transitions,
             },
         },
         raw_start_to_view,
@@ -1855,7 +1845,7 @@ impl TokenBoundedAnalysisTopology {
 
     /// Materialize a topology that was already constructed with the same
     /// active-language projection. Re-projecting such a topology would be
-    /// exact but wastefully scan and rebuild its full dense transition table.
+    /// exact but wastefully scan and rebuild its transition rows.
     fn materialize_already_projected(
         &self,
         tokenizer: &Tokenizer,
@@ -1866,7 +1856,7 @@ impl TokenBoundedAnalysisTopology {
             Some(active_groups),
             &self.configurations,
             self.start_state,
-            Arc::clone(&self.transitions),
+            self.transitions.clone(),
             self.raw_start_to_view.to_vec(),
         )
     }
@@ -1882,7 +1872,7 @@ impl TokenBoundedAnalysisTopology {
                 active_groups,
                 &self.configurations,
                 self.start_state,
-                Arc::clone(&self.transitions),
+                self.transitions.clone(),
                 self.raw_start_to_view.to_vec(),
             );
         };
@@ -1909,15 +1899,13 @@ impl TokenBoundedAnalysisTopology {
             .collect::<Vec<_>>();
 
         let mut projected_transitions =
-            vec![u32::MAX; projected_configs.len().saturating_mul(256)];
+            vec![u32::MAX; projected_configs.len().saturating_mul(self.transitions.width)];
         for topology_source in 0..self.configurations.len() {
             let source = projected_state_by_topology_state[topology_source] as usize;
             if projected_configs[source].is_empty() {
                 continue;
             }
-            let topology_row = topology_source * 256;
-            for byte in 0..256 {
-                let topology_target = self.transitions[topology_row + byte];
+            for (column, &topology_target) in self.transitions.row(topology_source).iter().enumerate() {
                 if topology_target == u32::MAX {
                     continue;
                 }
@@ -1925,7 +1913,7 @@ impl TokenBoundedAnalysisTopology {
                 if projected_configs[target as usize].is_empty() {
                     continue;
                 }
-                let slot = source * 256 + byte;
+                let slot = source * self.transitions.width + column;
                 let previous = projected_transitions[slot];
                 debug_assert!(
                     previous == u32::MAX || previous == target,
@@ -1948,7 +1936,7 @@ impl TokenBoundedAnalysisTopology {
             active_groups,
             &projected_configs,
             start_state,
-            Arc::from(projected_transitions),
+            ByteRows::new(Arc::from(projected_transitions), self.transitions.byte_to_column),
             raw_start_to_view,
         )
     }
@@ -2056,8 +2044,6 @@ fn build_bounded_analysis_topology_impl_with_expansion(
             trie_visits: 0,
         });
     }
-    let mut transitions = vec![u32::MAX; configs.len() * 256];
-    let mut known_transitions = vec![0u8; transitions.len()];
     let setup_ms = setup_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let trie_started_at = profile_timing.then(std::time::Instant::now);
     let common_first_byte = factor_common_first_byte
@@ -2097,6 +2083,22 @@ fn build_bounded_analysis_topology_impl_with_expansion(
         )
     });
     let trie_ms = trie_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+    // The shared prefix trie may be a superset of the requested tokens.
+    // The alphabet is that of the actual walks, not just the local token list.
+    let mut relevant = [false; 256];
+    for node in token_trie.iter().chain(suffix_trie.iter().flatten()) {
+        for &(byte, _) in &node.children {
+            relevant[byte as usize] = true;
+        }
+    }
+    if let Some(byte) = common_first_byte {
+        relevant[byte as usize] = true;
+    }
+    let classes = conservative_byte_classes(&relevant)
+        .unwrap_or_else(|| std::array::from_fn(|byte| byte as u8));
+    let width = classes.iter().copied().max().unwrap() as usize + 1;
+    let mut transitions = vec![u32::MAX; configs.len() * width];
+    let mut known_transitions = vec![0u8; transitions.len()];
     let expansion_started_at = profile_timing.then(std::time::Instant::now);
     let mut target_marks = vec![0u32; raw_state_count];
     let mut target_generation = 0u32;
@@ -2114,6 +2116,8 @@ fn build_bounded_analysis_topology_impl_with_expansion(
         config_ids: &mut config_ids,
         transitions: &mut transitions,
         known_transitions: &mut known_transitions,
+        byte_to_column: &classes,
+        width,
         singleton_closures: singleton_closures.as_ref(),
         active_language: active_language.as_deref(),
         target_marks: &mut target_marks,
@@ -2168,7 +2172,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
         TokenBoundedAnalysisTopology {
             configurations: Arc::from(configs),
             start_state: start_state as usize,
-            transitions: Arc::from(transitions),
+            transitions: ByteRows::new(Arc::from(transitions), classes),
             raw_start_to_view: Arc::from(raw_start_to_view),
         },
         work,
