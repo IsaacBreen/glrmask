@@ -1776,61 +1776,6 @@ fn common_refine_partition_maps_impl(
     maps: &[ManyToOneIdMap],
     merge_uncovered: bool,
 ) -> ManyToOneIdMap {
-    use rustc_hash::FxHashMap;
-    if merge_uncovered {
-        // The O2 vocab-only path carries partition results as class groups and
-        // intentionally omits model-vocabulary-sized dense original->class
-        // vectors. Reconstruct only the sparse per-partition membership needed
-        // for this local common refinement, then keep the result grouped as
-        // well. Class numbering follows token-id order, matching the historical
-        // generic refinement.
-        let memberships = maps
-            .iter()
-            .map(|map| {
-                let mut membership = FxHashMap::<u32, u32>::default();
-                for (class, originals) in map.internal_to_originals.iter().enumerate() {
-                    for &token_id in originals {
-                        membership.insert(token_id, class as u32);
-                    }
-                }
-                membership
-            })
-            .collect::<Vec<_>>();
-        let mut classes = FxHashMap::<Vec<u32>, u32>::default();
-        let mut uncovered_class = None::<u32>;
-        let mut internal_to_originals = Vec::<Vec<u32>>::new();
-        let mut representative_original_ids = Vec::<u32>::new();
-        for &token_id in vocab.entries_map().keys() {
-            let mut key = Vec::with_capacity(memberships.len());
-            let mut covered = false;
-            for membership in &memberships {
-                let class = membership.get(&token_id).copied().unwrap_or(u32::MAX);
-                covered |= class != u32::MAX;
-                key.push(class);
-            }
-            let class = if covered {
-                *classes.entry(key).or_insert_with(|| {
-                    let class = internal_to_originals.len() as u32;
-                    internal_to_originals.push(Vec::new());
-                    representative_original_ids.push(token_id);
-                    class
-                })
-            } else {
-                *uncovered_class.get_or_insert_with(|| {
-                    let class = internal_to_originals.len() as u32;
-                    internal_to_originals.push(Vec::new());
-                    representative_original_ids.push(token_id);
-                    class
-                })
-            };
-            internal_to_originals[class as usize].push(token_id);
-        }
-        return ManyToOneIdMap {
-            original_to_internal: Vec::new(),
-            internal_to_originals,
-            representative_original_ids,
-        };
-    }
     let force_generic = std::env::var("GLRMASK_VOCAB_PARTITION_GENERIC_REFINE")
         .ok()
         .is_some_and(|value| {
@@ -1839,7 +1784,7 @@ fn common_refine_partition_maps_impl(
         });
     // The specialized two-map paths preserve the historical conservative
     // singleton treatment for uncovered tokens.
-    if !force_generic && maps.len() == 2 {
+    if !merge_uncovered && !force_generic && maps.len() == 2 {
         let left_singleton = maps[0].internal_to_originals.iter().all(|class| class.len() == 1);
         let right_singleton = maps[1].internal_to_originals.iter().all(|class| class.len() == 1);
         let left_full = vocab.entries_map().keys().all(|&token_id| {
@@ -1875,39 +1820,12 @@ fn common_refine_partition_maps_impl(
             return concatenate_disjoint_partition_maps(vocab, maps);
         }
     }
-    let mut original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
-    let mut classes = FxHashMap::<Vec<u32>, u32>::default();
-    let mut next = 0u32;
-    for &token_id in vocab.entries_map().keys() {
-        let mut key = Vec::with_capacity(maps.len());
-        let mut covered = false;
-        for map in maps {
-            let class = map
-                .original_to_internal
-                .get(token_id as usize)
-                .copied()
-                .unwrap_or(u32::MAX);
-            covered |= class != u32::MAX;
-            key.push(class);
-        }
-        let class = if covered {
-            *classes.entry(key).or_insert_with(|| {
-                let class = next;
-                next += 1;
-                class
-            })
-        } else {
-            // An unobserved token is conservatively singleton rather than being
-            // merged merely because no branch happened to map it.
-            let class = next;
-            next += 1;
-            class
-        };
-        original_to_internal[token_id as usize] = class;
-    }
-    ManyToOneIdMap::from_original_to_internal_allowing_unmapped(original_to_internal, next)
+    glrmask_artifact::__private::mapped_artifact::refine_vocab_observations(
+        maps, vocab.entries_map().keys().copied(),
+        (!merge_uncovered).then(|| vocab.max_token_id() as usize + 1),
+        merge_uncovered,
+    )
 }
-
 fn refine_full_map_with_sparse_singletons(
     vocab: &Vocab,
     full: &ManyToOneIdMap,

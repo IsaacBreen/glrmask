@@ -13,7 +13,7 @@ use crate::ds::weight::Weight;
 
 pub use compaction::{CompactPlan, CompactReport, InternedRangeCounts};
 #[cfg(feature = "internal-api")]
-pub use reconcile::{remap_weights_with_maps, remap_weights_with_token_axis, TokenAxisMap, refine_observation_classes, refine_sparse_memberships, local_to_refined_classes};
+pub use reconcile::{remap_weights_with_maps, remap_weights_with_token_axis, TokenAxisMap, refine_observation_classes, refine_vocab_observations, refine_sparse_memberships, local_to_refined_classes};
 
 pub fn common_internal_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
     reconcile::build_common_internal_id_map(inputs)

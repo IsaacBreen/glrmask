@@ -1460,7 +1460,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
         external_classify_cache,
         partition_local_synthesis_plan,
         prepared_partition_local_tokenizers,
-        None,
+        active_terminal_filter,
         None,
         false,
     ).into_weighted()
@@ -1731,7 +1731,8 @@ fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     // terminal DWA. Vocabulary partitioning cannot simplify its topology; it
     // only repeats tokenizer-state equivalence discovery for each partition.
     // Build the exact full-vocabulary relation once and compact it globally.
-    let direct_single_terminal = use_global_single_terminal_l1(grammar, ignore_terminal);
+    let direct_single_terminal = use_global_single_terminal_l1(grammar, ignore_terminal)
+        && terminal_filter.is_none_or(|mask| mask.first().copied() == Some(true));
     if direct_single_terminal {
         let active_terminals = vec![true];
         let scoped_initial_state_map =

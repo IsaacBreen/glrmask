@@ -404,43 +404,109 @@ pub fn refine_observation_classes(
         return refine_sparse_memberships(inputs, num_originals, true, false).0;
     }
 
-    let mut composite_to_class = FxHashMap::<Box<[u32]>, u32>::default();
-    let mut composite = vec![u32::MAX; inputs.len()];
-    let mut original_to_internal = vec![u32::MAX; num_originals];
-    let mut internal_to_originals = Vec::<Vec<u32>>::new();
-    let mut representatives = Vec::<u32>::new();
-
-    for (original, slot) in original_to_internal.iter_mut().enumerate() {
-        for (value, input) in composite.iter_mut().zip(inputs) {
-            *value = input.original_to_internal.get(original)
-                .copied().unwrap_or(u32::MAX);
-        }
-        if allow_unmapped && composite.iter().all(|&value| value == u32::MAX) {
-            continue;
-        }
-        // Borrow the reusable lookup key. Allocate a signature only for a
-        // distinct class, rather than for every original state.
-        let class = if let Some(&class) = composite_to_class.get(composite.as_slice()) {
-            class
-        } else {
-            let class = internal_to_originals.len() as u32;
-            composite_to_class.insert(composite.clone().into_boxed_slice(), class);
-            internal_to_originals.push(Vec::new());
-            representatives.push(original as u32);
-            class
-        };
-        *slot = class;
-        internal_to_originals[class as usize].push(original as u32);
-    }
+    let (mut result, signatures) = partition_observation_domain(
+        (0..num_originals).map(|original| original as u32), inputs.len(),
+        |original, key| {
+            for (value, input) in key.iter_mut().zip(inputs) {
+                *value = input.original_to_internal.get(original as usize)
+                    .copied().unwrap_or(u32::MAX);
+            }
+        },
+        Some(num_originals),
+        if allow_unmapped { Unobserved::Omit } else { Unobserved::Merge },
+    );
     if lexicographic {
-        reorder_common_classes(composite_to_class, &mut original_to_internal,
-            &mut internal_to_originals, &mut representatives, allow_unmapped);
+        reorder_common_classes(signatures, &mut result.original_to_internal,
+            &mut result.internal_to_originals, &mut result.representative_original_ids,
+            allow_unmapped);
     }
-
-    ManyToOneIdMap { original_to_internal, internal_to_originals,
-        representative_original_ids: representatives }
+    result
 }
 
+#[derive(Clone, Copy)]
+enum Unobserved {
+    Omit,
+    Merge,
+    Singleton,
+}
+
+/// Partition an explicit ordered original domain by the same observation
+/// signature used for dense artifact reconciliation.  An omitted original
+/// is not equivalent to an unobserved member of the requested domain.
+fn partition_observation_domain(
+    originals: impl IntoIterator<Item = u32>,
+    source_count: usize,
+    mut observe: impl FnMut(u32, &mut [u32]),
+    dense_len: Option<usize>,
+    unobserved: Unobserved,
+) -> (ManyToOneIdMap, FxHashMap<Box<[u32]>, u32>) {
+    let mut signatures = FxHashMap::<Box<[u32]>, u32>::default();
+    let mut key = vec![u32::MAX; source_count];
+    let mut result = ManyToOneIdMap {
+        original_to_internal: vec![u32::MAX; dense_len.unwrap_or(0)],
+        internal_to_originals: Vec::new(),
+        representative_original_ids: Vec::new(),
+    };
+    for original in originals {
+        observe(original, &mut key);
+        let absent = key.iter().all(|&value| value == u32::MAX);
+        if absent && matches!(unobserved, Unobserved::Omit) {
+            continue;
+        }
+        let singleton = absent && matches!(unobserved, Unobserved::Singleton);
+        let existing = if singleton { None } else { signatures.get(key.as_slice()).copied() };
+        let class = existing.unwrap_or_else(|| {
+            let class = result.internal_to_originals.len() as u32;
+            if !singleton {
+                signatures.insert(key.clone().into_boxed_slice(), class);
+            }
+            result.internal_to_originals.push(Vec::new());
+            result.representative_original_ids.push(original);
+            class
+        });
+        if dense_len.is_some() {
+            result.original_to_internal[original as usize] = class;
+        }
+        result.internal_to_originals[class as usize].push(original);
+    }
+    (result, signatures)
+}
+
+/// First-original ordering on an explicit sparse vocabulary domain.
+/// Group-only sources are indexed only by actual memberships. Group-only
+/// output merges the all-absent signature; conservative dense publication
+/// can instead retain each unobserved original as a separate class.
+pub fn refine_vocab_observations(
+    inputs: &[ManyToOneIdMap],
+    originals: impl IntoIterator<Item = u32>,
+    dense_len: Option<usize>,
+    merge_unobserved: bool,
+) -> ManyToOneIdMap {
+    let sparse = inputs.iter().map(|input| {
+        (merge_unobserved || input.original_to_internal.is_empty()).then(|| {
+            let mut membership = FxHashMap::default();
+            for (class, members) in input.internal_to_originals.iter().enumerate() {
+                for &original in members {
+                    membership.insert(original, class as u32);
+                }
+            }
+            membership
+        })
+    }).collect::<Vec<_>>();
+    partition_observation_domain(
+        originals, inputs.len(),
+        |original, key| {
+            for ((value, input), sparse) in key.iter_mut().zip(inputs).zip(&sparse) {
+                *value = match sparse {
+                    Some(membership) => membership.get(&original).copied(),
+                    None => input.original_to_internal.get(original as usize).copied(),
+                }.unwrap_or(u32::MAX);
+            }
+        },
+        dense_len,
+        if merge_unobserved { Unobserved::Merge } else { Unobserved::Singleton },
+    ).0
+}
 /// A persistent signature prefix, interned once for each distinct
 /// membership extension. An original carries only its current head ID.
 struct Membership {
