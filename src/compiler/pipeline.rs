@@ -75,6 +75,7 @@ use crate::compiler::stages::mapped_artifact::{
     MappedArtifact,
     WeightRefs,
     count_interned_ranges_for_weights,
+    joint_observation_id_map,
 };
 use crate::compiler::stages::parser_dwa::{
     build_parser_dwa_from_terminal_dwa_with_precomputed_templates,
@@ -3230,7 +3231,77 @@ impl WeightRefs for ParserTopAccept {
     }
 }
 
-type MappedParserDwa = MappedArtifact<(DWA, ParserTopAccept)>;
+/// Independent weighted observations, before any family-specific coordinate
+/// becomes the runtime coordinate. The common partition is chosen only once,
+/// after delayed possible matches are available.
+struct ParserFamilyInventory {
+    primary: Vec<MappedArtifact<DWA>>,
+    direct: Vec<MappedArtifact<ParserTopAccept>>,
+}
+
+impl ParserFamilyInventory {
+    fn publish(
+        self,
+        possible_matches: MappedArtifact<cpm::RuntimePossibleMatchesByTerminal>,
+        terminal_count: usize,
+    ) -> MappedArtifact<((DWA, ParserTopAccept), cpm::RuntimePossibleMatchesByTerminal)> {
+        let common = {
+            // Empty weighted artifacts do not distinguish observations.
+            let mut maps = self.primary.iter()
+                .filter(|input| !input.artifact().weight_refs().is_empty())
+                .map(MappedArtifact::id_map)
+                .chain(self.direct.iter()
+                    .filter(|input| !input.artifact().weight_refs().is_empty())
+                    .map(MappedArtifact::id_map))
+                .collect::<Vec<_>>();
+            if !possible_matches.artifact().is_empty() {
+                maps.push(possible_matches.id_map());
+            }
+            if maps.is_empty() {
+                maps.push(self.primary.first().map(MappedArtifact::id_map)
+                    .or_else(|| self.direct.first().map(MappedArtifact::id_map))
+                    .unwrap_or_else(|| possible_matches.id_map()));
+            }
+            // Keep the largest state partition as the ordering anchor,
+            // preserving locality for the heaviest static rows.
+            maps.sort_unstable_by_key(|map| std::cmp::Reverse(map.num_tsids()));
+            joint_observation_id_map(&maps)
+        };
+        let ((dwa, top_accept), possible_matches) = macro_join(
+            "publish_joint_parser_observations",
+            || {
+                let (dwa, combined) =
+                    glrmask_parser_dwa::__private::merge::merge_parser_dwas_in_common(
+                        self.primary, &common, self.direct.is_empty(),
+                    );
+                let mut top_accept = ParserTopAccept {
+                    combined,
+                    ..ParserTopAccept::default()
+                };
+                for part in self.direct {
+                    top_accept = merge_parser_top_accept(
+                        top_accept, part.into_common_artifact(&common),
+                    );
+                }
+                let collapse_started = Instant::now();
+                let collapse = collapse_huge_parser_top_accept_parts(
+                    &mut top_accept, terminal_count,
+                );
+                if compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][parser_top_accept] labels={} collapsed={} refs_before={} refs_after={} unique_unions={} collapse_ms={:.3}",
+                        top_accept.parts.len(), collapse.labels_collapsed,
+                        collapse.part_refs_before, collapse.part_refs_after,
+                        collapse.unique_unions_built, elapsed_ms(collapse_started),
+                    );
+                }
+                (dwa, top_accept)
+            },
+            || possible_matches.into_common_artifact(&common),
+        );
+        MappedArtifact::new(((dwa, top_accept), possible_matches), common)
+    }
+}
 
 struct TokenizerDagLane {
     tokenizer: Arc<Tokenizer>,
@@ -3455,29 +3526,14 @@ fn collapse_huge_parser_top_accept_parts(
     report
 }
 
-fn reconcile_parser_top_accept_parts(
-    mut inputs: Vec<MappedArtifact<ParserTopAccept>>,
-) -> Option<MappedArtifact<ParserTopAccept>> {
-    if inputs.is_empty() {
-        return None;
-    }
-    inputs.sort_unstable_by_key(|mapped| std::cmp::Reverse(mapped.id_map().num_tsids()));
-    let (parts, common) = MappedArtifact::reconcile_vec(inputs).into_parts();
-    let merged = parts.into_iter().reduce(merge_parser_top_accept)
-        .expect("nonempty acceptance inventory");
-    Some(MappedArtifact::new(merged, common))
-}
-
-fn build_and_merge_parser_dwa_families(
+fn build_parser_dwa_families(
     terminal_dwas: &TerminalDwaFamilies,
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
-    _ignore_terminal: Option<u32>,
     templates: &Templates,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-) -> MappedParserDwa {
-    let total_started_at = Instant::now();
+) -> ParserFamilyInventory {
     let collapse_immediate_acceptance = !tokenizer.has_epsilon_transitions();
     let direct_l1_parts = grammar
         .direct_regular_automaton
@@ -3614,100 +3670,13 @@ fn build_and_merge_parser_dwa_families(
         .chain(l2p_parser)
         .chain(special_parser)
         .collect();
-    let direct_parts = reconcile_parser_top_accept_parts(
-        direct_l1_parts
-            .into_iter()
+    ParserFamilyInventory {
+        primary: parser_dwas,
+        direct: direct_l1_parts.into_iter()
             .chain(direct_l2p_parts)
             .chain(direct_special_parts)
             .collect(),
-    );
-    let max_token_id = terminal_dwas
-        .max_original_token_id()
-        .unwrap_or_else(|| vocab.max_token_id())
-        .max(vocab.max_token_id());
-
-    if let Some(mapped_parts) = direct_parts {
-        let (dwa, top_accept, id_map, parts_first) = if parser_dwas.is_empty() {
-            let (top_accept, id_map) = mapped_parts.into_parts();
-            (
-                DWA::new(id_map.num_tsids(), id_map.max_internal_token_id()),
-                top_accept,
-                id_map,
-                true,
-            )
-        } else {
-            let mapped_dwa =
-                glrmask_parser_dwa::__private::merge::merge_mapped_parser_dwas(
-                    parser_dwas,
-                    tokenizer.num_states() as usize,
-                    max_token_id,
-                );
-            let parts_first = mapped_parts.id_map().num_tsids() > mapped_dwa.id_map().num_tsids();
-            if parts_first {
-                let ((top_accept, dwa), id_map) =
-                    mapped_parts.pair_forced_common(mapped_dwa).into_parts();
-                (dwa, top_accept, id_map, true)
-            } else {
-                let ((dwa, top_accept), id_map) =
-                    mapped_dwa.pair_forced_common(mapped_parts).into_parts();
-                (dwa, top_accept, id_map, false)
-            }
-        };
-        let mut top_accept = top_accept;
-        let collapse_started_at = Instant::now();
-        let collapse_report = collapse_huge_parser_top_accept_parts(
-            &mut top_accept,
-            grammar.num_terminals as usize,
-        );
-        let collapse_ms = elapsed_ms(collapse_started_at);
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][parser_dwa_merge] mode=top_accept_parts l1_direct={} l2p_direct={} special_direct={} id_order={} labels={} part_refs={} unique_part_weights={} huge_collapsed_labels={} huge_part_refs_before={} huge_part_refs_after={} huge_max_parts_before={} huge_unique_unions={} huge_collapse_ms={:.3} states={} transitions={} total_ms={:.3}",
-                use_direct_l1_parts,
-                use_direct_l2p_parts,
-                use_direct_special_parts,
-                if parts_first { "parts" } else { "primary" },
-                top_accept.parts.len(),
-                top_accept.parts.values().map(Vec::len).sum::<usize>(),
-                top_accept
-                    .parts
-                    .values()
-                    .flatten()
-                    .map(Weight::ptr_key)
-                    .collect::<rustc_hash::FxHashSet<_>>()
-                    .len(),
-                collapse_report.labels_collapsed,
-                collapse_report.part_refs_before,
-                collapse_report.part_refs_after,
-                collapse_report.max_parts_before,
-                collapse_report.unique_unions_built,
-                collapse_ms,
-                dwa.num_states(),
-                dwa.num_transitions(),
-                total_started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        return MappedArtifact::new((dwa, top_accept), id_map);
     }
-
-    let (mapped_dwa, combined) =
-        glrmask_parser_dwa::__private::merge::merge_mapped_parser_dwas_with_top_accept(
-            parser_dwas,
-            tokenizer.num_states() as usize,
-            max_token_id,
-        );
-    let (dwa, id_map) = mapped_dwa.into_parts();
-    MappedArtifact::new(
-        (
-            dwa,
-            ParserTopAccept {
-                combined,
-                parts: BTreeMap::new(),
-                direct_l1_complete_by_terminal: BTreeMap::new(),
-            },
-        ),
-        id_map,
-    )
 }
 
 fn maybe_dump_terminal_dwa_experiment(
@@ -4080,7 +4049,7 @@ fn build_static_terminal_families(
 }
 
 struct ParserDagResult {
-    parser_dwa: MappedParserDwa,
+    families: ParserFamilyInventory,
     parser_dwa_ms: f64,
     parser_dwa_started_ms: f64,
     parser_dwa_finished_ms: f64,
@@ -4088,7 +4057,7 @@ struct ParserDagResult {
 }
 
 fn build_static_parser(
-    grammar: &GrammarDef, vocab: &Vocab, tokenizer: &TokenizerDagLane,
+    vocab: &Vocab, tokenizer: &TokenizerDagLane,
     analysis: &AnalysisDagLane, table: &GLRTable, templates: &Templates,
     terminal_dwas: &mut TerminalDwaFamilies,
     compile_started_at: Instant,
@@ -4101,12 +4070,12 @@ fn build_static_parser(
     debug_assert!(terminal_run_collapse_ms + 0.001 >= collapse.certificate_ms + collapse.rewrite_ms);
     let parser_started = Instant::now();
     let parser_dwa_started_ms = elapsed_ms(compile_started_at);
-    let parser_dwa = build_and_merge_parser_dwa_families(
-        terminal_dwas, table, &analysis.analyzed_grammar, grammar.ignore_terminal,
+    let families = build_parser_dwa_families(
+        terminal_dwas, table, &analysis.analyzed_grammar,
         templates, &tokenizer.tokenizer, vocab,
     );
     ParserDagResult {
-        parser_dwa, parser_dwa_ms: elapsed_ms(parser_started), parser_dwa_started_ms,
+        families, parser_dwa_ms: elapsed_ms(parser_started), parser_dwa_started_ms,
         parser_dwa_finished_ms: elapsed_ms(compile_started_at),
         terminal_run_collapse_ms,
     }
@@ -4377,7 +4346,7 @@ fn compile_prepared_with_profile_and_table_construction(
                     );
                     let templates = templates?;
                     let parser = build_static_parser(
-                        &prepared_grammar, vocab, &tokenizer_lane, &analysis, &table.table,
+                        vocab, &tokenizer_lane, &analysis, &table.table,
                         &templates.templates, &mut terminal.terminal_dwas, compile_started_at,
                     );
                     Ok(Box::new((table, terminal, templates, parser)))
@@ -4408,7 +4377,7 @@ fn compile_prepared_with_profile_and_table_construction(
             templates_ms, templates_started_ms, templates_finished_ms,
         } = templates;
         let ParserDagResult {
-            parser_dwa, parser_dwa_ms, parser_dwa_started_ms, parser_dwa_finished_ms,
+            families, parser_dwa_ms, parser_dwa_started_ms, parser_dwa_finished_ms,
             terminal_run_collapse_ms,
         } = parser;
         maybe_dump_terminal_dwa_experiment(
@@ -4504,7 +4473,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 let overlap_ms = possible_matches_finished_ms.min(parser_dwa_finished_ms)
                     - possible_matches_started_ms.max(parser_dwa_started_ms);
                 eprintln!(
-                    "[glrmask/profile][compile_dag] tokenizer_ready_ms={:.3} analysis_ready_ms={:.3} glr_ready_ms={:.3} flat_global_started_ms={:.3} flat_global_finished_ms={:.3} classify_started_ms={:.3} classify_finished_ms={:.3} templates_started_ms={:.3} templates_finished_ms={:.3} terminal_dwa_started_ms={:.3} terminal_dwa_finished_ms={:.3} possible_matches_started_ms={:.3} possible_matches_finished_ms={:.3} parser_dwa_started_ms={:.3} parser_dwa_finished_ms={:.3} possible_matches_parser_overlap_ms={:.3} parser_waited_for_possible_matches=false terminal_coloring_enabled={}",
+                    "[glrmask/profile][compile_dag] tokenizer_ready_ms={:.3} analysis_ready_ms={:.3} glr_ready_ms={:.3} flat_global_started_ms={:.3} flat_global_finished_ms={:.3} classify_started_ms={:.3} classify_finished_ms={:.3} templates_started_ms={:.3} templates_finished_ms={:.3} terminal_dwa_started_ms={:.3} terminal_dwa_finished_ms={:.3} possible_matches_started_ms={:.3} possible_matches_finished_ms={:.3} parser_dwa_started_ms={:.3} parser_dwa_finished_ms={:.3} possible_matches_parser_overlap_ms={:.3} parser_family_build_waited_for_possible_matches=false terminal_coloring_enabled={}",
                     tokenizer_ready_ms,
                     analysis_ready_ms,
                     glr_ready_ms,
@@ -4534,12 +4503,12 @@ fn compile_prepared_with_profile_and_table_construction(
             0
         };
 
-        // Parser-family union may choose a different but equivalent internal ID
-        // numbering from the reconciled terminal families.  Always make the
-        // parser/possible-match relationship explicit instead of relying on
-        // coincidentally identical numbering.
+        // All weighted projections are now complete. Refine their observation
+        // coordinates together and transport each source before any union.
         let shared_id_reconcile_started_at = Instant::now();
-        let mut parser_pm_pair = MappedArtifact::from((parser_dwa, possible_matches));
+        let mut parser_pm_pair = families.publish(
+            possible_matches, analyzed_grammar.num_terminals as usize,
+        );
         shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
         if compact_parser_pm {
             let compact_started_at = Instant::now();
@@ -4563,10 +4532,11 @@ fn compile_prepared_with_profile_and_table_construction(
                 (map, elapsed_ms(started))
             },
             || {
-                let internal_to_tokens = internal_ids.vocab_tokens.internal_to_originals_vecs();
-                let mask_words = internal_ids.vocab_tokens.original_to_internal.len().div_ceil(32);
-                env_flag_enabled_by_default("GLRMASK_EARLY_TOKEN_CACHE_PREBUILD")
-                    .then(|| crate::runtime::TokenProjection::build(&internal_to_tokens, mask_words))
+                env_flag_enabled_by_default("GLRMASK_EARLY_TOKEN_CACHE_PREBUILD").then(|| {
+                    let internal_to_tokens = internal_ids.vocab_tokens.internal_to_originals_vecs();
+                    let mask_words = internal_ids.vocab_tokens.original_to_internal.len().div_ceil(32);
+                    crate::runtime::TokenProjection::build(&internal_to_tokens, mask_words)
+                })
             },
         );
         if compile_profile_enabled() {

@@ -126,29 +126,23 @@ fn profile_token_nwa_remap_detail(
 /// domain.  Consequently intersections of contributions from different
 /// sources are empty, which lets `direct_union_disjoint_token_domain_dwas`
 /// distribute the weighted path intersection over the branch union exactly.
-fn inputs_have_disjoint_token_domains(inputs: &[LocalIdMapTerminalDwa], max_token_id: u32) -> bool {
-    let mut owner = vec![u32::MAX; max_token_id as usize + 1];
-
-    for (input_index, input) in inputs.iter().enumerate() {
-        for (original_token, &local_token) in input
-            .id_map
-            .vocab_tokens
-            .original_to_internal
-            .iter()
-            .enumerate()
-        {
-            if local_token == u32::MAX {
-                continue;
-            }
-            let slot = &mut owner[original_token];
-            if *slot != u32::MAX {
+fn token_domains_disjoint<'a>(
+    maps: impl IntoIterator<Item = &'a InternalIdMap>,
+    original_token_count: usize,
+) -> bool {
+    let mut occupied = vec![false; original_token_count];
+    for map in maps {
+        for (original, &local) in map.vocab_tokens.original_to_internal.iter().enumerate() {
+            if local != u32::MAX && std::mem::replace(&mut occupied[original], true) {
                 return false;
             }
-            *slot = input_index as u32;
         }
     }
-
     true
+}
+
+fn inputs_have_disjoint_token_domains(inputs: &[LocalIdMapTerminalDwa], max_token_id: u32) -> bool {
+    token_domains_disjoint(inputs.iter().map(|input| &input.id_map), max_token_id as usize + 1)
 }
 
 /// Token-class remapping used while merging id-map-local weights.
@@ -1185,345 +1179,156 @@ fn union_two_parser_dwas_impl<const FALLBACK: bool>(mut left: DWA, mut right: DW
 /// a fallback. Parser-family artifacts are immediately reconciled with possible
 /// matches and finalized, so globally minimizing them here can dominate compile
 /// time without being required for correctness.
-pub fn merge_mapped_parser_dwas(
+/// Publish parser families directly in the already-planned joint observation
+/// coordinate. Only primary stack languages enter the weighted union;
+/// one-symbol accepting languages can remain independent top overlays.
+pub fn merge_parser_dwas_in_common(
     inputs: Vec<MappedArtifact<DWA>>,
-    num_tokenizer_states: usize,
-    max_token_id: u32,
-) -> MappedArtifact<DWA> {
-    assert!(
-        !inputs.is_empty(),
-        "merge_mapped_parser_dwas called with empty inputs"
-    );
-    if inputs.len() == 1 {
-        return inputs.into_iter().next().unwrap();
-    }
-
-    // Every merge reconciles and copies the complete input state/transition
-    // domains, and the two-family fallback union can expand it further. Charge
-    // the input size before any reconciliation allocation.
-    let input_work = inputs
-        .iter()
-        .map(|input| {
-            input.artifact().num_states() as u64
-                + input.artifact().num_transitions() as u64
-        })
-        .sum::<u64>();
-    charge_build_budget("template_determinization", input_work);
-
-    if inputs.len() == 2 {
-        let total_started_at = Instant::now();
-        let mut iter = inputs.into_iter();
-        let left = iter.next().unwrap();
-        let right = iter.next().unwrap();
-        let left_is_immediate = immediate_dwa_accepting_edges(left.artifact()).is_some();
-        let right_is_immediate = immediate_dwa_accepting_edges(right.artifact()).is_some();
-
-        // Reconcile with the deeper family first so refinements of each L2P
-        // class remain contiguous. Then form the exact deterministic union.
-        // Do not run the generic weighted minimizer here: parser DWAs interpret
-        // DEFAULT_LABEL as fallback, while that minimizer treats labels as an
-        // ordinary alphabet and can change the parser language.
-        let reconcile_started_at = Instant::now();
-        let reconciled = if left_is_immediate && !right_is_immediate {
-            let paired = right.pair_forced_common(left);
-            let ((right, left), id_map) = paired.into_parts();
-            MappedArtifact::new(vec![left, right], id_map)
-        } else if right_is_immediate && !left_is_immediate {
-            let paired = left.pair_forced_common(right);
-            let ((left, right), id_map) = paired.into_parts();
-            MappedArtifact::new(vec![left, right], id_map)
+    common: &InternalIdMap,
+    overlay_immediate: bool,
+) -> (DWA, BTreeMap<i32, Weight>) {
+    let started = Instant::now();
+    let count = inputs.len();
+    let mut overlay = BTreeMap::<i32, Weight>::new();
+    let mut primaries = Vec::with_capacity(count);
+    // Classify before remapping: the local graph establishes whether the
+    // first-symbol acceptance projection is an exact language replacement.
+    let immediate_count = if overlay_immediate && count > 1 {
+        inputs.iter().filter(|input| immediate_dwa_accepting_edges(input.artifact()).is_some()).count()
+    } else {
+        0
+    };
+    let mut overlays_left = if count == 2 && immediate_count != 0 {
+        1
+    } else if immediate_count < count {
+        immediate_count
+    } else {
+        0
+    };
+    for input in inputs {
+        if overlays_left != 0
+            && let Some(edges) = immediate_dwa_accepting_edges(input.artifact())
+        {
+            let (_, local) = input.into_parts();
+            let weights = MappedArtifact::new(edges.into_iter().collect::<BTreeMap<_, _>>(), local)
+                .into_common_artifact(common);
+            for (label, weight) in weights {
+                overlay.entry(label).and_modify(|existing| *existing = existing.union(&weight))
+                    .or_insert(weight);
+            }
+            overlays_left -= 1;
         } else {
-            MappedArtifact::reconcile_vec(vec![left, right])
-        };
-        let reconcile_ms = reconcile_started_at.elapsed().as_secs_f64() * 1000.0;
-        let (dwas, common_id_map) = reconciled.into_parts();
-
-        if dwas.iter().any(has_parser_fallback) {
-            let union_started_at = Instant::now();
-            let mut iter = dwas.into_iter();
-            let dwa = union_two_parser_dwas_with_fallback(
-                iter.next().expect("left parser family"),
-                iter.next().expect("right parser family"),
-            );
-            if compile_profile_enabled() {
-                eprintln!("[glrmask/profile][parser_dwa_merge] inputs=2 mode=fallback_semantic_union reconcile_ms={:.3} union_ms={:.3} states={} transitions={} total_ms={:.3}",
-                    reconcile_ms, union_started_at.elapsed().as_secs_f64()*1000.0,
-                    dwa.num_states(), dwa.num_transitions(),
-                    total_started_at.elapsed().as_secs_f64()*1000.0);
-            }
-            return MappedArtifact::new(dwa, common_id_map);
+            primaries.push(input);
         }
+    }
 
-        let source_states: usize = dwas.iter().map(|dwa| dwa.states().len()).sum();
-        // Large normalized unions are dominated by copying and re-expanding
-        // singleton rows. Small unions keep the existing builder unless an
-        // explicit diagnostic asks for the residual-aware direct path.
-        let direct_by_default = source_states >= 16_384
-            && normalize_direct_singletons_enabled(source_states);
-        let use_direct = std::env::var_os("GLRMASK_DISABLE_DIRECT_TWO_PARSER_UNION").is_none()
-            && direct_by_default;
-        if use_direct {
-            let reference = if std::env::var_os("GLRMASK_VALIDATE_DIRECT_TWO_PARSER_UNION").is_some() {
-                let mut reference_nwa = NWA::new(
-                    common_id_map.num_tsids(),
-                    common_id_map.max_internal_token_id(),
-                );
-                let mut body = reference_nwa.body();
-                for source in &dwas {
-                    body = reference_nwa.union_in_place(&source.to_nwa(), &body);
-                }
-                reference_nwa.set_start_states(body.start_states);
-                Some(
-                    determinize(&reference_nwa)
-                        .expect("parser-family reference NWA union must determinize"),
-                )
-            } else {
-                None
-            };
-            let union_started_at = Instant::now();
-            let mut iter = dwas.into_iter();
-            let dwa = union_two_parser_dwas_direct(
-                iter.next().expect("two parser DWAs have a left input"),
-                iter.next().expect("two parser DWAs have a right input"),
-            );
-            let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
-            if let Some(reference) = reference {
-                let difference = find_difference(&dwa, &reference)
-                    .expect("direct parser-family union equivalence check failed");
-                assert!(
-                    difference.is_none(),
-                    "direct parser-family union differs from generic union on labels {difference:?}",
-                );
-            }
-            if compile_profile_enabled() {
-                eprintln!(
-                    "[glrmask/profile][parser_dwa_merge] inputs=2 mode=direct_two_dwa reconcile_ms={:.3} union_ms={:.3} states={} transitions={} total_ms={:.3}",
-                    reconcile_ms,
-                    union_ms,
-                    dwa.num_states(),
-                    dwa.num_transitions(),
-                    total_started_at.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-            return MappedArtifact::new(dwa, common_id_map);
-        }
-
-        let union_started_at = Instant::now();
-        let mut union = NWA::new(
-            common_id_map.num_tsids(),
-            common_id_map.max_internal_token_id(),
+    let primary_count = primaries.len();
+    if primary_count > 1 {
+        charge_build_budget("template_determinization", primaries.iter()
+            .map(|input| input.artifact().num_states() as u64
+                + input.artifact().num_transitions() as u64)
+            .sum());
+    }
+    // Preserve the disjoint-domain proof from the *local* coordinates:
+    // it cannot be recovered from the now-shared destination map.
+    let original_count = primaries.iter()
+        .map(|input| input.id_map().vocab_tokens.original_to_internal.len())
+        .max().unwrap_or(0);
+    let disjoint = primary_count > 2 && token_domains_disjoint(
+        primaries.iter().map(MappedArtifact::id_map), original_count,
+    );
+    let dwas = primaries.into_iter()
+        .map(|input| input.into_common_artifact(common))
+        .collect::<Vec<_>>();
+    let (merged, mode) = union_parser_dwas_in_common(dwas, common, disjoint);
+    if compile_profile_enabled() && count > 1 {
+        eprintln!(
+            "[glrmask/profile][parser_dwa_merge] inputs={} mode={} primary_families={} overlay_labels={} states={} transitions={} total_ms={:.3}",
+            count, mode, primary_count, overlay.len(), merged.num_states(), merged.num_transitions(),
+            started.elapsed().as_secs_f64() * 1000.0,
         );
-        let mut body = union.body();
-        for dwa in dwas {
-            body = union.union_in_place(&dwa.to_nwa(), &body);
-        }
-        union.set_start_states(body.start_states);
-        let dwa = determinize(&union).expect("parser-family NWA union must determinize");
-        let union_ms = union_started_at.elapsed().as_secs_f64() * 1000.0;
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][parser_dwa_merge] inputs=2 mode=exact_raw_union reconcile_ms={:.3} union_ms={:.3} states={} transitions={} total_ms={:.3}",
-                reconcile_ms,
-                union_ms,
-                dwa.num_states(),
-                dwa.num_transitions(),
-                total_started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        return MappedArtifact::new(dwa, common_id_map);
     }
-
-    if inputs.iter().any(|input| has_parser_fallback(input.artifact())) {
-        let (dwas, common_id_map) = MappedArtifact::reconcile_vec(inputs).into_parts();
-        let mut iter = dwas.into_iter();
-        let mut merged = iter.next().expect("nonempty parser families");
-        for next in iter {
-            merged = union_two_parser_dwas_with_fallback(merged, next);
-        }
-        return MappedArtifact::new(merged, common_id_map);
-    }
-
-    let locals: Vec<LocalIdMapTerminalDwa> = inputs
-        .into_iter()
-        .map(|input| {
-            let (dwa, id_map) = input.into_parts();
-            LocalIdMapTerminalDwa {
-                id_map,
-                dwa,
-                profile: TerminalDwaPhaseProfile::default(),
-            }
-        })
-        .collect();
-    let input_refs: Vec<&LocalIdMapTerminalDwa> = locals.iter().collect();
-    let id_map_refs: Vec<&InternalIdMap> =
-        input_refs.iter().map(|input| &input.id_map).collect();
-    let total_started_at = Instant::now();
-    let (global_id_map, direct_local_to_global_token_maps) =
-        build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
-
-    if let Some(dwa) = try_merge_disjoint_token_domain_dwas(
-        &locals,
-        &global_id_map,
-        direct_local_to_global_token_maps.as_ref(),
-        max_token_id,
-    ) {
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][parser_dwa_merge] inputs={} mode=direct_disjoint states={} transitions={} total_ms={:.3}",
-                locals.len(),
-                dwa.num_states(),
-                dwa.num_transitions(),
-                total_started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
-        return MappedArtifact::new(dwa, global_id_map);
-    }
-
-    // Overlapping source domains need the generic weighted union and
-    // minimization used by the ordinary merge path.
-    let inputs = locals
-        .into_iter()
-        .map(|local| MappedArtifact::new(local.dwa, local.id_map))
-        .collect();
-    merge_mapped_dwas(inputs, num_tokenizer_states, max_token_id)
+    (merged, overlay)
 }
 
-/// Keep an immediate parser family as a top-state acceptance overlay instead
-/// of materializing its union with the deeper parser DWA.
-///
-/// The returned DWA is the non-immediate family in the exact common ID space;
-/// `top_accept[label]` is unioned after consuming the first stack symbol. This
-/// is semantically the same union that `try_graft_immediate_parser_dwa` builds,
-/// but avoids destination decoration and the subsequent quotient.
-pub fn merge_mapped_parser_dwas_with_top_accept(
+fn union_parser_dwas_in_common(
+    dwas: Vec<DWA>,
+    common: &InternalIdMap,
+    disjoint: bool,
+) -> (DWA, &'static str) {
+    if dwas.is_empty() {
+        return (DWA::new(common.num_tsids(), common.max_internal_token_id()), "empty");
+    }
+    if dwas.len() == 1 {
+        return (dwas.into_iter().next().unwrap(), "single");
+    }
+    // DEFAULT is a per-operand fallback rather than a shared alphabet
+    // letter. Its semantic union must not enter the generic minimizer.
+    if dwas.iter().any(has_parser_fallback) {
+        return (dwas.into_iter().reduce(union_two_parser_dwas_with_fallback).unwrap(),
+            "fallback_semantic_union");
+    }
+    if disjoint {
+        return (direct_union_disjoint_token_domain_dwas(&dwas), "direct_disjoint");
+    }
+
+    let source_states = dwas.iter().map(|dwa| dwa.states().len()).sum::<usize>();
+    let direct = dwas.len() == 2 && source_states >= 16_384
+        && normalize_direct_singletons_enabled(source_states)
+        && std::env::var_os("GLRMASK_DISABLE_DIRECT_TWO_PARSER_UNION").is_none();
+    let generic_union = |sources: &[DWA]| {
+        let mut union = NWA::new(common.num_tsids(), common.max_internal_token_id());
+        let mut body = union.body();
+        for source in sources {
+            body = union.union_in_place(&source.to_nwa(), &body);
+        }
+        union.set_start_states(body.start_states);
+        determinize(&union).expect("parser-family NWA union must determinize")
+    };
+    if direct {
+        let reference = std::env::var_os("GLRMASK_VALIDATE_DIRECT_TWO_PARSER_UNION").is_some()
+            .then(|| generic_union(&dwas));
+        let merged = dwas.into_iter().reduce(union_two_parser_dwas_direct).unwrap();
+        if let Some(reference) = reference {
+            let difference = find_difference(&merged, &reference)
+                .expect("direct parser-family union equivalence check failed");
+            assert!(difference.is_none(),
+                "direct parser-family union differs from generic union on labels {difference:?}");
+        }
+        return (merged, "direct_two_dwa");
+    }
+    let merged = generic_union(&dwas);
+    if dwas.len() > 2 {
+        (minimize_owned(merged), "minimized_generic_union")
+    } else {
+        (merged, "exact_raw_union")
+    }
+}
+
+// Keep the existing independent mapped-union regression fixtures exercising
+// the same production merge, including source-specific default labels.
+#[cfg(test)]
+fn merge_mapped_parser_dwas(
     inputs: Vec<MappedArtifact<DWA>>,
-    num_tokenizer_states: usize,
-    max_token_id: u32,
+    _num_tokenizer_states: usize,
+    _max_token_id: u32,
+) -> MappedArtifact<DWA> {
+    let maps = inputs.iter().map(MappedArtifact::id_map).collect::<Vec<_>>();
+    let common = crate::compiler::stages::mapped_artifact::joint_observation_id_map(&maps);
+    let (dwa, _) = merge_parser_dwas_in_common(inputs, &common, false);
+    MappedArtifact::new(dwa, common)
+}
+
+#[cfg(test)]
+fn merge_mapped_parser_dwas_with_top_accept(
+    inputs: Vec<MappedArtifact<DWA>>,
+    _num_tokenizer_states: usize,
+    _max_token_id: u32,
 ) -> (MappedArtifact<DWA>, BTreeMap<i32, Weight>) {
-    assert!(
-        !inputs.is_empty(),
-        "merge_mapped_parser_dwas_with_top_accept called with empty inputs"
-    );
-    if inputs.len() == 1 {
-        return (inputs.into_iter().next().unwrap(), BTreeMap::new());
-    }
-
-    if inputs.len() > 2 {
-        let input_count = inputs.len();
-        let immediate_count = inputs
-            .iter()
-            .filter(|input| immediate_dwa_accepting_edges(input.artifact()).is_some())
-            .count();
-        if immediate_count > 0 && immediate_count < input_count {
-            let total_started_at = Instant::now();
-            let mut primaries = Vec::with_capacity(input_count - immediate_count);
-            let mut overlay: Option<MappedArtifact<BTreeMap<i32, Weight>>> = None;
-            for input in inputs {
-                if immediate_dwa_accepting_edges(input.artifact()).is_some() {
-                    let (dwa, id_map) = input.into_parts();
-                    let mapped = MappedArtifact::new(
-                        immediate_dwa_accepting_edges(&dwa)
-                            .expect("immediate parser shape was checked above")
-                            .into_iter()
-                            .collect::<BTreeMap<_, _>>(),
-                        id_map,
-                    );
-                    overlay = Some(match overlay.take() {
-                        None => mapped,
-                        Some(existing) => {
-                            let ((mut left, right), id_map) =
-                                existing.pair_forced_common(mapped).into_parts();
-                            for (label, weight) in right {
-                                left.entry(label)
-                                    .and_modify(|existing| *existing = existing.union(&weight))
-                                    .or_insert(weight);
-                            }
-                            MappedArtifact::new(left, id_map)
-                        }
-                    });
-                } else {
-                    primaries.push(input);
-                }
-            }
-            let primary = if primaries.len() == 1 {
-                primaries.pop().unwrap()
-            } else {
-                merge_mapped_parser_dwas(primaries, num_tokenizer_states, max_token_id)
-            };
-            let overlay = overlay.expect("at least one immediate parser family was counted");
-            let ((primary_dwa, top_accept), common_id_map) =
-                primary.pair_forced_common(overlay).into_parts();
-            if compile_profile_enabled() {
-                eprintln!(
-                    "[glrmask/profile][parser_dwa_merge] inputs={} mode=multi_top_accept_overlay overlay_families={} primary_families={} overlay_labels={} states={} transitions={} total_ms={:.3}",
-                    input_count,
-                    immediate_count,
-                    input_count - immediate_count,
-                    top_accept.len(),
-                    primary_dwa.num_states(),
-                    primary_dwa.num_transitions(),
-                    total_started_at.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-            return (
-                MappedArtifact::new(primary_dwa, common_id_map),
-                top_accept,
-            );
-        }
-    }
-
-    if inputs.len() == 2 {
-        let total_started_at = Instant::now();
-        let mut iter = inputs.into_iter();
-        let left = iter.next().unwrap();
-        let right = iter.next().unwrap();
-        let left_is_immediate = immediate_dwa_accepting_edges(left.artifact()).is_some();
-        let right_is_immediate = immediate_dwa_accepting_edges(right.artifact()).is_some();
-
-        if left_is_immediate || right_is_immediate {
-            let (primary, immediate) = if left_is_immediate {
-                (right, left)
-            } else {
-                (left, right)
-            };
-            let (immediate_dwa, immediate_id_map) = immediate.into_parts();
-            let top_accept: BTreeMap<i32, Weight> =
-                immediate_dwa_accepting_edges(&immediate_dwa)
-                    .expect("immediate parser shape was checked above")
-                    .into_iter()
-                    .collect();
-            let reconciled = primary
-                .pair_forced_common(MappedArtifact::new(top_accept, immediate_id_map));
-            let ((primary_dwa, top_accept), common_id_map) = reconciled.into_parts();
-            if compile_profile_enabled() {
-                eprintln!(
-                    "[glrmask/profile][parser_dwa_merge] inputs=2 mode=top_accept_overlay overlay_labels={} states={} transitions={} total_ms={:.3}",
-                    top_accept.len(),
-                    primary_dwa.num_states(),
-                    primary_dwa.num_transitions(),
-                    total_started_at.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-            return (
-                MappedArtifact::new(primary_dwa, common_id_map),
-                top_accept,
-            );
-        }
-
-        return (
-            merge_mapped_parser_dwas(
-                vec![left, right],
-                num_tokenizer_states,
-                max_token_id,
-            ),
-            BTreeMap::new(),
-        );
-    }
-
-    (
-        merge_mapped_parser_dwas(inputs, num_tokenizer_states, max_token_id),
-        BTreeMap::new(),
-    )
+    let maps = inputs.iter().map(MappedArtifact::id_map).collect::<Vec<_>>();
+    let common = crate::compiler::stages::mapped_artifact::joint_observation_id_map(&maps);
+    let (dwa, overlay) = merge_parser_dwas_in_common(inputs, &common, true);
+    (MappedArtifact::new(dwa, common), overlay)
 }
 
 /// Build the ordinary global NWA union and determinize it. This is used only
