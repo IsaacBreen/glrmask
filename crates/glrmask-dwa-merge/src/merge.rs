@@ -67,8 +67,10 @@ fn token_domains_disjoint<'a>(
 ) -> bool {
     let mut occupied = vec![false; original_token_count];
     for map in maps {
-        for (original, &local) in map.vocab_tokens.original_to_internal.iter().enumerate() {
-            if local != u32::MAX && std::mem::replace(&mut occupied[original], true) {
+        if map.deferred_vocab_singleton_original_ids.is_some() { return false; }
+        for &original in map.vocab_tokens.internal_to_originals.iter().flatten() {
+            let Some(slot) = occupied.get_mut(original as usize) else { return false };
+            if std::mem::replace(slot, true) {
                 return false;
             }
         }
@@ -193,18 +195,14 @@ fn try_merge_disjoint_token_domain_dwas(
     inputs: &[LocalIdMapTerminalDwa],
     global_id_map: &InternalIdMap,
     direct_local_to_global_token_maps: Option<&Vec<Vec<u32>>>,
-    max_token_id: u32,
 ) -> Option<DWA> {
-    if !inputs_have_disjoint_token_domains(inputs, max_token_id) {
-        return None;
-    }
+    let direct_local_to_global_token_maps = direct_local_to_global_token_maps?;
 
     let profiling = compile_profile_enabled();
     let lift_started_at = profiling.then(Instant::now);
     let mut remapped = Vec::with_capacity(inputs.len());
     for (input_index, input) in inputs.iter().enumerate() {
-        let direct = direct_local_to_global_token_maps
-            .and_then(|maps| maps.get(input_index)).map(Vec::as_slice);
+        let direct = Some(direct_local_to_global_token_maps[input_index].as_slice());
         let mut dwa = input.dwa.clone();
         let (tsids, tokens) = source_axes(&input.id_map, global_id_map, direct);
         remap_dwa(&mut dwa, tsids, tokens, global_id_map);
@@ -241,13 +239,13 @@ pub fn merge_local_id_maps_and_terminal_dwas(
     let input_refs: Vec<&LocalIdMapTerminalDwa> = inputs.iter().collect();
     let id_map_refs: Vec<&InternalIdMap> = input_refs.iter().map(|input| &input.id_map).collect();
     let (global_id_map, direct_local_to_global_token_maps) =
-        build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+        build_merge_coordinates(&id_map_refs, num_tokenizer_states, max_token_id,
+            StateClassOrder::Canonical, TokenMeet::PreferDisjoint).expect("common terminal coordinates");
 
     let pre_minimize = try_merge_disjoint_token_domain_dwas(
         &inputs,
         &global_id_map,
         direct_local_to_global_token_maps.as_ref(),
-        max_token_id,
     )
     .unwrap_or_else(|| {
         let global_nwa = union_lifted_terminal_nwa(
@@ -1100,8 +1098,6 @@ fn try_merge_id_maps_and_token_deterministic_nwa_impl(
                 "caller-proven token-NWA merge received overlapping vocabulary domains",
             );
         }
-    } else if !inputs_have_disjoint_token_domains(inputs, max_token_id) {
-        return None;
     }
 
     let total_started_at = Instant::now();
@@ -1109,14 +1105,14 @@ fn try_merge_id_maps_and_token_deterministic_nwa_impl(
         .filter(|source| *source < inputs.len());
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
     let id_map_started_at = Instant::now();
-    let (global_id_map, direct_local_to_global_token_maps) =
+    let (global_id_map, direct_local_to_global_token_maps) = build_merge_coordinates(
+        &id_map_refs, num_tokenizer_states, max_token_id,
         if token_domains_proven_disjoint {
-            build_unified_global_id_map_fast(
-                &id_map_refs, num_tokenizer_states, max_token_id, primary_tsid_source, true,
-            )
-        } else {
-            build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id)
-        };
+            primary_tsid_source.map_or(StateClassOrder::FirstSeen, StateClassOrder::Anchor)
+        } else { StateClassOrder::Canonical },
+        if token_domains_proven_disjoint { TokenMeet::ProvenDisjoint }
+        else { TokenMeet::RequireDisjoint },
+    )?;
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
     let remap_started_at = Instant::now();
     let profiling = compile_profile_enabled();
@@ -1226,7 +1222,10 @@ fn merge_id_maps_and_terminal_dwas_impl(
     let build_unified_global_id_map_started_at = Instant::now();
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
     let (global_id_map, direct_local_to_global_token_maps) =
-        build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
+        build_merge_coordinates(&id_map_refs, num_tokenizer_states, max_token_id,
+            StateClassOrder::Canonical, if token_domains_proven_disjoint {
+                TokenMeet::ProvenDisjoint
+            } else { TokenMeet::PreferDisjoint }).expect("common terminal coordinates");
     let build_unified_global_id_map_ms =
         build_unified_global_id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -1238,7 +1237,6 @@ fn merge_id_maps_and_terminal_dwas_impl(
         &inputs,
         &global_id_map,
         direct_local_to_global_token_maps.as_ref(),
-        max_token_id,
     );
     let used_direct_global = direct_global.is_some();
     let profiling = compile_profile_enabled();
@@ -1396,14 +1394,11 @@ fn try_merge_immediate_terminal_dwas(
     let id_map_started_at = Instant::now();
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
     // Preserve any caller-proven disjointness and lift directly from the meet.
-    let (global_id_map, direct_maps) =
-        build_unified_global_id_map_fast(
-            &id_map_refs,
-            num_tokenizer_states,
-            max_token_id,
-            None,
-            token_domains_proven_disjoint,
-        );
+    let (global_id_map, direct_maps) = build_merge_coordinates(
+        &id_map_refs, num_tokenizer_states, max_token_id, StateClassOrder::FirstSeen,
+        if token_domains_proven_disjoint { TokenMeet::ProvenDisjoint }
+        else { TokenMeet::SourceOrder },
+    )?;
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let remap_started_at = Instant::now();
@@ -1463,44 +1458,70 @@ fn try_merge_immediate_terminal_dwas(
     })
 }
 
-/// Fast exact global map construction for an already-proven disjoint token
-/// partition. The input order and original-state order are deterministic, so
-/// first-seen class IDs are stable for this merge and avoid a costly sort and
-/// relabel pass used only for cross-order canonicalization.
-fn build_unified_global_id_map_fast(
+#[derive(Clone, Copy)]
+enum StateClassOrder {
+    Canonical,
+    FirstSeen,
+    Anchor(usize),
+}
+
+#[derive(Clone, Copy)]
+enum TokenMeet {
+    ProvenDisjoint,
+    RequireDisjoint,
+    PreferDisjoint,
+    SourceOrder,
+}
+
+/// One exact meet for every terminal merge. Ordering is a numbering policy,
+/// not a second definition of the common observation relation.
+fn build_merge_coordinates(
     inputs: &[&InternalIdMap],
     num_tokenizer_states: usize,
     max_token_id: u32,
-    primary_source: Option<usize>,
-    require_direct_token_maps: bool,
-) -> (InternalIdMap, Option<Vec<Vec<u32>>>) {
+    order: StateClassOrder,
+    token_meet: TokenMeet,
+) -> Option<(InternalIdMap, Option<Vec<Vec<u32>>>)> {
+    let direct = match token_meet {
+        TokenMeet::SourceOrder => None,
+        TokenMeet::ProvenDisjoint => Some(build_disjoint_token_classes(inputs, max_token_id, false)
+            .expect("proven disjoint token domains")),
+        TokenMeet::RequireDisjoint | TokenMeet::PreferDisjoint =>
+            build_disjoint_token_classes(inputs, max_token_id, true),
+    };
+    if direct.is_none() && matches!(token_meet, TokenMeet::RequireDisjoint) {
+        return None;
+    }
+    let (vocab_tokens, token_maps) = if let Some((map, injection)) = direct {
+        (map, Some(injection))
+    } else {
+        let maps = inputs.iter().map(|input| &input.vocab_tokens).collect::<Vec<_>>();
+        let map = if matches!(token_meet, TokenMeet::SourceOrder) {
+            refine_sparse_memberships(&maps, max_token_id as usize + 1, false, false).0
+        } else {
+            refine_observation_classes(&maps, max_token_id as usize + 1, true, true)
+        };
+        (map, None)
+    };
+
     let mut state_maps = inputs.iter().map(|input| &input.tokenizer_states).collect::<Vec<_>>();
-    let primary = primary_source.filter(|&source| source < inputs.len());
-    if let Some(source) = primary {
+    if let StateClassOrder::Anchor(source) = order {
         let anchor = state_maps.remove(source);
         state_maps.insert(0, anchor);
     }
     let tokenizer_states = refine_observation_classes(
-        &state_maps, num_tokenizer_states, false, primary.is_some(),
+        &state_maps, num_tokenizer_states, false, !matches!(order, StateClassOrder::FirstSeen),
     );
-    let (vocab_tokens, token_maps) = if require_direct_token_maps {
-        let (map, direct) = build_unified_global_token_id_map_assume_disjoint(inputs, max_token_id);
-        (map, Some(direct))
-    } else {
-        let maps = inputs.iter().map(|input| &input.vocab_tokens).collect::<Vec<_>>();
-        (refine_sparse_memberships(&maps, max_token_id as usize + 1, false, false).0, None)
-    };
-    let common = InternalIdMap {
-        tokenizer_states, vocab_tokens,
-        deferred_vocab_singleton_original_ids: None,
-    };
-    (common, token_maps)
+    Some((InternalIdMap {
+        tokenizer_states, vocab_tokens, deferred_vocab_singleton_original_ids: None,
+    }, token_maps))
 }
 
-fn build_unified_global_token_id_map_assume_disjoint(
+fn build_disjoint_token_classes(
     inputs: &[&InternalIdMap],
     max_token_id: u32,
-) -> (ManyToOneIdMap, Vec<Vec<u32>>) {
+    check_disjoint: bool,
+) -> Option<(ManyToOneIdMap, Vec<Vec<u32>>)> {
     let mut token_o2i = vec![u32::MAX; max_token_id as usize + 1];
     let token_class_count: usize = inputs
         .iter()
@@ -1511,6 +1532,7 @@ fn build_unified_global_token_id_map_assume_disjoint(
     let mut direct_local_to_global_token_maps = Vec::with_capacity(inputs.len());
 
     for input in inputs {
+        assert!(input.deferred_vocab_singleton_original_ids.is_none(), "terminal merge requires materialized token coordinates");
         let mut local_to_global = vec![u32::MAX; input.num_internal_tokens() as usize];
         for (local_class, originals) in input.vocab_tokens.internal_to_originals.iter().enumerate() {
             if originals.is_empty() {
@@ -1521,46 +1543,22 @@ fn build_unified_global_token_id_map_assume_disjoint(
             token_reps.push(input.vocab_tokens.representative_original_ids[local_class]);
             token_i2o.push(originals.clone());
             for &token_id in originals {
-                token_o2i[token_id as usize] = global_class;
+                let slot = &mut token_o2i[token_id as usize];
+                if check_disjoint && *slot != u32::MAX { return None; }
+                *slot = global_class;
             }
         }
         direct_local_to_global_token_maps.push(local_to_global);
     }
 
-    (
+    Some((
         ManyToOneIdMap {
             original_to_internal: token_o2i,
             internal_to_originals: token_i2o,
             representative_original_ids: token_reps,
         },
         direct_local_to_global_token_maps,
-    )
-}
-
-/// Fast exact global map construction for an already-proven disjoint token
-/// partition. The input order and original-state order are deterministic, so
-/// first-seen class IDs are stable for this merge and avoid a costly sort and
-/// relabel pass used only for cross-order canonicalization.
-fn build_unified_global_id_map(
-    inputs: &[&InternalIdMap],
-    num_tokenizer_states: usize,
-    max_token_id: u32,
-) -> (InternalIdMap, Option<Vec<Vec<u32>>>) {
-    let state_maps = inputs.iter().map(|input| &input.tokenizer_states).collect::<Vec<_>>();
-    let tokenizer_states = refine_observation_classes(
-        &state_maps, num_tokenizer_states, false, true,
-    );
-    let (vocab_tokens, direct_local_to_global_token_maps) =
-        build_unified_global_token_id_map_disjoint(inputs, max_token_id)
-            .unwrap_or_else(|| (build_unified_global_token_id_map_generic(inputs, max_token_id), None));
-    (
-        InternalIdMap {
-            tokenizer_states,
-            vocab_tokens,
-            deferred_vocab_singleton_original_ids: None,
-        },
-        direct_local_to_global_token_maps,
-    )
+    ))
 }
 
 /// Build only the unified exact ID map used by terminal-DWA merging, without
@@ -1574,7 +1572,8 @@ pub fn merge_internal_id_maps_only(
     if inputs.len() == 1 {
         return inputs[0].clone();
     }
-    build_unified_global_id_map(inputs, num_tokenizer_states, max_token_id).0
+    build_merge_coordinates(inputs, num_tokenizer_states, max_token_id,
+        StateClassOrder::Canonical, TokenMeet::PreferDisjoint).expect("common terminal coordinates").0
 }
 
 #[cfg(test)]
@@ -1587,23 +1586,13 @@ fn build_unified_global_token_id_map_sparse_generic(
     (map, fanout.expect("requested sparse membership fanout"))
 }
 
+#[cfg(test)]
 fn build_unified_global_token_id_map_generic(
     inputs: &[&InternalIdMap],
     max_token_id: u32,
 ) -> ManyToOneIdMap {
     let maps = inputs.iter().map(|input| &input.vocab_tokens).collect::<Vec<_>>();
     refine_observation_classes(&maps, max_token_id as usize + 1, true, true)
-}
-
-fn build_unified_global_token_id_map_disjoint(
-    inputs: &[&InternalIdMap],
-    max_token_id: u32,
-) -> Option<(ManyToOneIdMap, Option<Vec<Vec<u32>>>)> {
-    if !token_domains_disjoint(inputs.iter().copied(), max_token_id as usize + 1) {
-        return None;
-    }
-    let (map, direct) = build_unified_global_token_id_map_assume_disjoint(inputs, max_token_id);
-    Some((map, Some(direct)))
 }
 
 fn build_direct_local_to_global_token_map(local_to_global: &[u32]) -> Vec<Vec<u32>> {
@@ -2088,8 +2077,8 @@ mod tests {
         );
         let inputs = [&first, &second];
         let (assumed, assumed_maps) =
-            build_unified_global_token_id_map_assume_disjoint(&inputs, 5);
-        let (checked, checked_maps) = build_unified_global_token_id_map_disjoint(&inputs, 5)
+            build_disjoint_token_classes(&inputs, 5, false).unwrap();
+        let (checked, checked_maps) = build_disjoint_token_classes(&inputs, 5, true)
             .expect("fixture token domains are disjoint");
 
         assert_eq!(assumed.original_to_internal, checked.original_to_internal);
@@ -2098,7 +2087,14 @@ mod tests {
             assumed.representative_original_ids,
             checked.representative_original_ids
         );
-        assert_eq!(assumed_maps, checked_maps.expect("checked path returns direct maps"));
+        assert_eq!(assumed_maps, checked_maps);
+    }
+
+    #[test]
+    fn checked_disjoint_publication_declines_overlapping_domains() {
+        let first = id_map_with_vocab_partition(vec![0, u32::MAX, 0], 1);
+        let second = id_map_with_vocab_partition(vec![u32::MAX, 0, 0], 1);
+        assert!(build_disjoint_token_classes(&[&first, &second], 2, true).is_none());
     }
 
     #[test]
