@@ -88,27 +88,3 @@ fn runtime_section_length_corruption_remains_an_error() {
     }
 }
 
-#[test]
-fn ordinary_composition_metadata_unwrap_has_identical_bytes() {
-    let vocab = crate::Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
-    let constraint = crate::Grammar::glrm("start root; nt root = 'a' 'b'?;")
-        .compile_with_build_options(
-            &vocab,
-            MaskMode::B.build_options(),
-        )
-        .unwrap();
-
-    let base = encode_composition_metadata_base_for_save(&constraint);
-    let expected = if let Some(wire) =
-        crate::compiler::boundary_precomputed_completion::saved_wire(&constraint)
-    {
-        crate::compiler::boundary_precomputed_completion::wrap_envelope(base, wire)
-            .unwrap()
-    } else {
-        crate::compiler::boundary_precomputed_completion::split_envelope(&base)
-            .unwrap()
-            .0
-            .to_vec()
-    };
-    assert_eq!(encode_composition_metadata_for_save(&constraint), expected);
-}

@@ -213,14 +213,6 @@ fn build_boundary_terminal_dwa_with_shared(
     inputs: &BoundaryWalkInputs,
     shared: Option<&tdwa::ScopedBoundarySharedContext<'_>>,
 ) -> Option<BoundaryWalkOutput> {
-    build_boundary_terminal_dwa_with_prepared(inputs, shared, None)
-}
-
-fn build_boundary_terminal_dwa_with_prepared(
-    inputs: &BoundaryWalkInputs,
-    shared: Option<&tdwa::ScopedBoundarySharedContext<'_>>,
-    prepared: Option<&super::boundary_precomputed_completion::PreparedSourceSpan>,
-) -> Option<BoundaryWalkOutput> {
     let tile_size = crate::compiler::boundary_env::bounded_usize(
         "GLRMASK_BOUNDARY_QUERY_TILE_SIZE", 32, 1, 4096,
     );
@@ -229,16 +221,9 @@ fn build_boundary_terminal_dwa_with_prepared(
     let identity = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_IDENTITY_REFINEMENT");
     let first_started = Instant::now();
     let use_first = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_FIRST_COMPLETION_REFINEMENT");
-    let precomputed = (use_first
-        && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_PRECOMPUTED_COMPLETION"))
-        .then(|| prepared.and_then(|span| span.refine(inputs.merged_tokenizer, inputs.vocab, inputs.scope)))
-        .flatten();
-    let precomputed_selected = precomputed.is_some();
-    let first = precomputed.or_else(|| use_first.then(|| inputs.flat_trans.and_then(|flat|
-        super::boundary_first_completion::prepare(inputs.merged_tokenizer, inputs.vocab, inputs.scope, flat))).flatten());
-    if compose_profile_enabled() && prepared.is_some() {
-        eprintln!("[glrmask/profile][boundary_precomputed_completion] component={} selected={precomputed_selected}", inputs.scope.start_component().0);
-    }
+    let first = use_first.then(|| inputs.flat_trans.and_then(|flat|
+        super::boundary_first_completion::prepare(inputs.merged_tokenizer, inputs.vocab, inputs.scope, flat)
+    )).flatten();
     let narrowed = first.as_ref().and_then(|plan|
         inputs.scope.intersect_initial_support(&plan.representatives));
     let scoped = BoundaryWalkInputs {
@@ -1096,7 +1081,6 @@ fn map_boundary_shard_walks_with<R, F>(
     inputs: &BoundaryShardLinkInputs,
     consume: &F,
     early_adjacency: Option<&BTreeMap<u32,BitSet>>,
-    prepared_first: Option<&[Option<super::boundary_precomputed_completion::PreparedSourceSpan>]>,
 ) -> Result<Option<(Vec<(usize, R)>, BoundaryShardLinkProfile)>, String>
 where
     R: Send,
@@ -1243,37 +1227,17 @@ where
             && crate::env::var_os("GLRMASK_DISABLE_BOUNDARY_PREFIX_SEEDS").is_none()
         {
             let started = Instant::now();
-            let prepared_support = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_PRECOMPUTED_PREFIX_SEEDS")
-                .then_some(prepared_first).flatten()
-                .and_then(|spans| spans.get(plan.start_component))
-                .and_then(Option::as_ref)
-                .and_then(|span| span.prefix_seed_support(
-                    inputs.merged_tokenizer,candidate_vocab,&seed_mask,&ownership,plan.crossing_owner,
-                ));
-            let precomputed = prepared_support.is_some();
-            if let Some(support) = &prepared_support
-                && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PRECOMPUTED_PREFIX_SEEDS").is_some()
-            {
-                let (reference, _) = tdwa::scope::crossing_prefix_seed_support(
-                    inputs.merged_tokenizer,candidate_vocab,&flat,&ownership,plan.crossing_owner,
-                ).expect("original prefix-seed validator must run for this covered input");
-                let expected = reference.iter().zip(&seed_mask).map(|(a,b)|*a&&*b).collect::<Vec<_>>();
-                assert_eq!(support,&expected,"prepared prefix-seed query changed original source bits");
-            }
-            // No reverse-trie observation states are visited by the prepared
-            // query. Zero is marked as not collected in the profile below.
-            let supported = prepared_support.map(|support| (support,0)).or_else(||
-                tdwa::scope::crossing_prefix_seed_support(
-                    inputs.merged_tokenizer,candidate_vocab,&flat,&ownership,plan.crossing_owner,
-                ));
+            let supported = tdwa::scope::crossing_prefix_seed_support(
+                inputs.merged_tokenizer, candidate_vocab, &flat, &ownership, plan.crossing_owner,
+            );
             if let Some((support, observation_states)) = supported {
                 let before = seed_mask.iter().filter(|&&keep| keep).count();
                 for (keep, supported) in seed_mask.iter_mut().zip(support) { *keep &= supported; }
                 let after = seed_mask.iter().filter(|&&keep| keep).count();
                 if compose_profile_enabled() {
-                    eprintln!("[glrmask/profile][boundary_prefix_seed_support] component={} tokens={} seeds_before={} seeds_after={} observation_states={} observation_states_collected={} precomputed={} elapsed_ms={:.3}",
+                    eprintln!("[glrmask/profile][boundary_prefix_seed_support] component={} tokens={} seeds_before={} seeds_after={} observation_states={} elapsed_ms={:.3}",
                         plan.start_component, candidate_vocab.len(), before, after,
-                        observation_states, !precomputed, precomputed, started.elapsed().as_secs_f64() * 1000.0);
+                        observation_states, started.elapsed().as_secs_f64() * 1000.0);
                 }
                 if after == 0 { return None; }
             }
@@ -1305,24 +1269,12 @@ where
             let follow_aware = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_TOKEN_FOLLOWS");
             let cut = (follow_aware && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_CUT_SUPPORT"))
                 .then(|| {
-                    let prepared=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_PREPARED_CUT")
-                        .then_some(prepared_first).flatten().and_then(|spans|super::boundary_precomputed_completion::cut_support(
-                            spans,inputs.merged_tokenizer,candidate_vocab,scope.initial_states().keep_raw(),
-                            &ownership,plan.crossing_owner,inputs.disallowed_follows,
-                            inputs.ignore_terminal,inputs.follow_transparent_ignores,early_adjacency,
-                        ));
-                    let ordinary=|| super::boundary_cut_support::crossing_support_with_transitions(
-                        inputs.merged_tokenizer,candidate_vocab,scope.initial_states().keep_raw(),
-                        &ownership,plan.crossing_owner,inputs.disallowed_follows,
-                        inputs.ignore_terminal,inputs.follow_transparent_ignores,early_adjacency,support_transitions.as_ref(),
-                    );
-                    if let Some(candidate)=prepared.as_ref()
-                        && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREPARED_CUT").is_some(){
-                            let reference=ordinary().expect("ordinary necessary-cut reference must finish");
-                            assert_eq!(candidate.tokens,reference.tokens,"prepared cut changed original token IDs");
-                            eprintln!("[glrmask/validate][boundary_prepared_cut] component={} exact_ids=true",plan.start_component);
-                        }
-                    prepared.or_else(ordinary)
+                    super::boundary_cut_support::crossing_support_with_transitions(
+                        inputs.merged_tokenizer, candidate_vocab, scope.initial_states().keep_raw(),
+                        &ownership, plan.crossing_owner, inputs.disallowed_follows,
+                        inputs.ignore_terminal, inputs.follow_transparent_ignores, early_adjacency,
+                        support_transitions.as_ref(),
+                    )
                 }).flatten();
             let used_cut = cut.is_some();
             let support = if let Some(cut) = cut {
@@ -1406,7 +1358,7 @@ where
                 crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(inputs.merged_tokenizer))
                 .expect("write boundary input tokenizer");
         }
-        let mut output = build_boundary_terminal_dwa_with_prepared(&BoundaryWalkInputs {
+        let mut output = build_boundary_terminal_dwa_with_shared(&BoundaryWalkInputs {
             merged_tokenizer: inputs.merged_tokenizer,
             vocab: candidate_vocab,
             grammar: inputs.grammar,
@@ -1416,7 +1368,7 @@ where
             scope: &scope,
             flat_trans: Some(&flat),
             retain_non_crossing_paths: plan.retain_non_crossing_paths,
-        }, shared.as_ref(), prepared_first.and_then(|spans| spans.get(plan.start_component)).and_then(Option::as_ref))
+        }, shared.as_ref())
         .expect("nonempty candidate-vocab shard walks must produce a DWA");
         if live_vocab.is_some()
             && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TOKEN_LIVENESS").is_some()
@@ -1577,7 +1529,7 @@ where
 pub(crate) fn build_boundary_shard_walks(
     inputs: &BoundaryShardLinkInputs,
 ) -> Option<(Vec<BuiltBoundaryShardWalk>, BoundaryShardLinkProfile)> {
-    map_boundary_shard_walks_with(inputs, &|shard| Ok(shard), None, None)
+    map_boundary_shard_walks_with(inputs, &|shard| Ok(shard), None)
         .expect("identity boundary-walk consumer cannot fail")
         .map(|(built, profile)| {
             (
@@ -1590,9 +1542,8 @@ pub(crate) fn build_boundary_shard_walks(
 pub(crate) fn build_boundary_shard_walks_with_support(
     inputs: &BoundaryShardLinkInputs,
     adjacency: Option<&BTreeMap<u32, BitSet>>,
-    prepared_first: Option<&[Option<super::boundary_precomputed_completion::PreparedSourceSpan>]>,
 ) -> Option<(Vec<BuiltBoundaryShardWalk>, BoundaryShardLinkProfile)> {
-    map_boundary_shard_walks_with(inputs, &|shard| Ok(shard), adjacency, prepared_first)
+    map_boundary_shard_walks_with(inputs, &|shard| Ok(shard), adjacency)
         .expect("identity boundary-walk consumer cannot fail")
         .map(|(built, profile)| (built.into_iter().map(|(_, shard)| shard).collect(), profile))
 }
@@ -2238,17 +2189,6 @@ fn compile_leaf_boundary_link(
             "merged tokenizer must place the fresh reset fan-out at state 0".to_string(),
         );
     }
-    // Prepared source spans describe one intact component. Nested block
-    // queries still use exact on-the-fly transport.
-    let prepared_first = (!expansion.nested
-        && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_PRECOMPUTED_COMPLETION"))
-        .then(|| leaves.iter().zip(tokenizer_offsets.iter().copied())
-            .zip(expansion.leaf_terminal_offsets.iter().copied())
-            .map(|((leaf, offset), terminal_offset)| {
-                super::boundary_precomputed_completion::PreparedSourceSpan::for_component(
-                    leaf, offset, terminal_offset,
-                )
-            }).collect::<Vec<_>>());
     if merged.terminal_exprs().is_none()
         && let Some(exprs) = merged_retained_terminal_exprs(
             leaves,
@@ -2599,7 +2539,6 @@ fn compile_leaf_boundary_link(
         },
         &process_shard,
         crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_SCOPED_ADJACENCY_EARLY").then_some(scoped_adjacent.as_ref()).flatten(),
-        prepared_first.as_deref(),
     )? else {
         return Ok(empty_output());
     };

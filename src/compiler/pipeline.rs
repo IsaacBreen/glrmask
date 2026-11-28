@@ -5060,7 +5060,6 @@ fn compile_prepared_with_profile_and_table_construction(
             table: crate::runtime::parser_backend::ParserExecutable::Native(Arc::new(prepared_parser.parser)),
             terminal_display_names: analyzed_grammar.terminal_display_names.clone(),
             tokenizer: tokenizer.into(),
-            boundary_completion_index: None,
             tokenizer_has_epsilon_transitions: false,
             ignore_terminal: prepared_grammar.ignore_terminal,
             special_token_terminals,

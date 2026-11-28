@@ -1639,7 +1639,6 @@ fn build_recursive_coordinator(
         table: crate::runtime::parser_backend::ParserExecutable::LinkedLr(parser),
         terminal_display_names,
         tokenizer,
-        boundary_completion_index: None,
         tokenizer_has_epsilon_transitions,
         ignore_terminal: None,
         special_token_terminals,

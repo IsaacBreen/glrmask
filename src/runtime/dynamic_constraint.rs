@@ -361,7 +361,6 @@ impl DynamicConstraint {
             table: payload.table,
             terminal_display_names: payload.terminal_display_names,
             tokenizer: payload.tokenizer.into(),
-            boundary_completion_index: None,
             tokenizer_has_epsilon_transitions: false,
             ignore_terminal: payload.ignore_terminal,
             special_token_terminals: payload.special_token_terminals,

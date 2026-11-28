@@ -277,9 +277,6 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
         metadata.and_then(|grammar| super::boundary_scoped_follow::optimized_scoped_follow_relation(
             &context, grammar.component_nonterminals(), grammar.scoped_ignores()))
     } else { None };
-    let prepared_first = (!projected).then(|| leaves.iter().enumerate().map(|(index, leaf)|
-        super::boundary_precomputed_completion::PreparedSourceSpan::for_component(leaf,
-            tokenizer_offsets[index], layout.leaf_terminal_offsets[index])).collect::<Vec<_>>());
     if profile { eprintln!("[glrmask/profile][static_template_boundary] phase=follow_support rows={} excluded_pairs={} elapsed_ms={:.3}",
         follows.len(), excluded_pairs, follow_started.elapsed().as_secs_f64() * 1000.0); }
     if profile { eprintln!("[glrmask/profile][static_template_boundary] phase=scoped_adjacency metadata={} rows={} excluded_pairs={}",
@@ -296,7 +293,7 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
     let early_adjacency = super::boundary_env::enabled("GLRMASK_BOUNDARY_SCOPED_ADJACENCY_EARLY")
         .then_some(scoped_adjacent.as_ref()).flatten();
     let (mut walks, _) = super::boundary_walk::build_boundary_shard_walks_with_support(&inputs,
-        early_adjacency, prepared_first.as_deref())
+        early_adjacency)
         .ok_or_else(|| fail("static template boundary lexical walk could not certify its scope"))?;
     if let Some(relation) = &scoped_adjacent {
         for walk in &mut walks {
