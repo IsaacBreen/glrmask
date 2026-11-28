@@ -134,7 +134,7 @@ Arguments of the wrong type throw `TypeError`. Native GLRMask errors throw a
 | `GLRMASK_STRATEGY_UNSUPPORTED` | The chosen strategy does not support the grammar. |
 | `GLRMASK_SERIALIZATION` | Saved bytes could not be loaded. |
 | `GLRMASK_VOCAB_MISMATCH` | Compiled for a different vocabulary. |
-| `GLRMASK_INTERNAL` | An internal error; discard the affected object and please report it. |
+| `GLRMASK_INTERNAL` | |
 | `GLRMASK_BUFFER_TOO_SMALL` | The array passed to `fillMask` is shorter than `Math.ceil(maskBitLength / 32)`. |
 | `GLRMASK_CLOSED` | The object was disposed. |
 

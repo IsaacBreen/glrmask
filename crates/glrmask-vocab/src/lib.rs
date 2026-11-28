@@ -32,7 +32,6 @@ impl fmt::Debug for TokenSet {
 }
 
 impl TokenSet {
-    /// Panics if a token ID is outside the supported range (0 to 2^24 - 1).
     pub fn new(ids: impl IntoIterator<Item = u32>) -> Self {
         Self::from_pairs(ids.into_iter().map(|id| {
             assert!(id <= MAX_TOKEN_ID, "token ID {id} is outside the supported range");
@@ -41,7 +40,6 @@ impl TokenSet {
     }
 
     /// Builds a set from half-open ranges. Empty ranges contribute no IDs.
-    /// Panics if an included token ID is outside the supported range (0 to 2^24 - 1).
     pub fn from_ranges(ranges: impl IntoIterator<Item = Range<u32>>) -> Self {
         Self::from_pairs(ranges.into_iter().filter(|r| !r.is_empty()).map(|r| {
             let last = r.end - 1;

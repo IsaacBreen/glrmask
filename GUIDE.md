@@ -225,12 +225,12 @@ See the quickstart above for the sampling loop and unpacking the packed mask.
 
 
 Masks indicate which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i // 32`.
-Python `mask_bit_len` (a method in Rust and C++, `maskBitLength` in Node) is the mask's length in bits: the largest token ID in the constraint plus one.
+Python `mask_bit_len` (a method in Rust and C++, `maskBitLength` in Node) is the mask's length in bits (max token ID plus one).
 Allocate `(c.mask_bit_len + 31) // 32` words for `fill_mask`, which writes into reusable storage and zeros surplus words.
 Python `mask()` returns packed uint32 words. Use `mask().view(np.int32)` for signed packed words without copying.
 The constraint and each state have the same constant mask bit length.
 For a wider packed mask, allocate the required words and use `fill_mask`. It accepts writable contiguous
-1-D aligned, native-endian NumPy uint32 arrays (including rows of C-contiguous matrices); for an int32 buffer, pass `buf.view(np.uint32)`; all words are written, and surplus words are zeroed on success. Buffer validation errors leave it unchanged; an unexpected internal failure may have partially written it. Mask computation may release the GIL. Compile and precompile run native compilation without the GIL. Concurrent calls must use different states and nonoverlapping buffers; do not access or resize the buffer (including aliases) during the call.
+1-D aligned, native-endian NumPy uint32 arrays (including rows of C-contiguous matrices); for an int32 buffer, pass `buf.view(np.uint32)`; all words are written, and surplus words are zeroed on success. Buffer validation errors leave it unchanged. Mask computation may release the GIL. Compile and precompile run native compilation without the GIL. Concurrent calls must use different states and nonoverlapping buffers; do not access or resize the buffer (including aliases) during the call.
 
 For PyTorch serving with V equal to the logits width (at least every state mask bit length):
 
@@ -354,7 +354,7 @@ constraint = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASK
 
 ## Errors
 
-Creating, binding, compiling and loading grammars can fail. Commits return `false` only on rejection; internal failures panic in Rust and surface as errors in foreign bindings. Discard a state after an internal failure.
+Creating, binding, compiling and loading grammars can fail. Commits return `false` on rejection.
 Each error message says what went wrong. It may also include a location in the grammar source.
 In Rust, `Error::kind()` gives the kind of error: `Syntax`, `InvalidInput`, `Compilation`, `ResourceLimit`, `StrategyUnsupported`, `Serialization`, `VocabMismatch`, `BufferTooSmall` or `Internal`.
 Python raises `GLRMaskError` (an `Exception`) with a `kind` string: one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"vocab_mismatch"`, `"buffer_too_small"`, `"internal"`. Node.js throws a `GLRMaskError` with a `code`, C returns a status and sets `glrmask_error_message()`, and C++ throws `glrmask::Error`.

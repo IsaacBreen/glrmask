@@ -122,7 +122,7 @@ export declare class Constraint implements Disposable {
   private readonly __constraintBrand: void;
   /** Starts a new sequence. */
   start(): ConstraintState;
-  /** The mask's length in bits: the largest token ID in the constraint plus one. */
+  /** The mask's length in bits (max token ID plus one). */
   readonly maskBitLength: number;
 
   save(): Promise<Uint8Array>;
@@ -146,7 +146,7 @@ export declare class ConstraintState implements Disposable {
   mask(): Uint32Array;
   /** Like `mask()`, but writes the words into `output`. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `Math.ceil(maskBitLength / 32)` elements. */
   fillMask(output: Uint32Array): void;
-  /** The mask's length in bits: the largest token ID in the constraint plus one. */
+  /** The mask's length in bits (max token ID plus one). */
   readonly maskBitLength: number;
   /** Advances the state by the token. If it isn't allowed, returns `false` and terminates the state. */
   commitToken(id: number): boolean;

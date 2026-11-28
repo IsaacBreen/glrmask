@@ -22,8 +22,7 @@
  *
  * Fallible functions return a status and set output handles to NULL on
  * failure. glrmask_error_message() describes the last failure on the current
- * thread. After GLRMASK_INTERNAL, discard the handle involved. Aborts, including
- * out-of-memory, can't be recovered.
+ * thread.
  */
 
 #include <stddef.h>
@@ -55,7 +54,7 @@ enum {
     GLRMASK_RESOURCE_LIMIT=4,
     GLRMASK_STRATEGY_UNSUPPORTED=5, ///< The chosen strategy does not support the grammar.
     GLRMASK_SERIALIZATION=6, ///< Saved bytes could not be loaded.
-    GLRMASK_INTERNAL=7, ///< An internal error; discard the affected handle and please report it.
+    GLRMASK_INTERNAL=7,
     GLRMASK_BUFFER_TOO_SMALL=8, ///< The buffer is too small; nothing was written.
     GLRMASK_VOCAB_MISMATCH=10, ///< Artifact or precompiled module is for another vocabulary.
     GLRMASK_CLOSED=9 ///< Closed handle (reported by managed wrappers; raw dangling pointers are invalid).
@@ -189,7 +188,7 @@ GLRMASK_API glrmask_status glrmask_constraint_clone(const glrmask_constraint* co
 GLRMASK_API void glrmask_constraint_free(glrmask_constraint* constraint);
 /// Starts a new sequence.
 GLRMASK_API glrmask_status glrmask_constraint_start(const glrmask_constraint* constraint,glrmask_state** out);
-/// The mask's length in bits: the largest token ID in the constraint plus one.
+/// The mask's length in bits (max token ID plus one).
 GLRMASK_API glrmask_status glrmask_constraint_mask_bit_len(const glrmask_constraint* constraint,size_t* out);
 
 GLRMASK_API glrmask_status glrmask_constraint_save(const glrmask_constraint* constraint,glrmask_bytes** out);
@@ -198,7 +197,7 @@ GLRMASK_API glrmask_status glrmask_constraint_load(const uint8_t* bytes,size_t n
 
 GLRMASK_API glrmask_status glrmask_state_clone(const glrmask_state* state,glrmask_state** out);
 GLRMASK_API void glrmask_state_free(glrmask_state* state);
-/// The mask's length in bits: the largest token ID in the constraint plus one.
+/// The mask's length in bits (max token ID plus one).
 GLRMASK_API glrmask_status glrmask_state_mask_bit_len(const glrmask_state* state,size_t* out);
 /// Whether the output so far could end here. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* state,uint32_t* out);
@@ -210,11 +209,11 @@ GLRMASK_API glrmask_status glrmask_state_fill_mask(const glrmask_state* state,ui
 /// Whether nothing more can be committed. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_terminated(const glrmask_state* state,uint32_t* out);
 /// Advances the state by the token. If it isn't allowed, writes 0 to `accepted` and terminates the state.
-/// Returns `GLRMASK_OK` on ordinary rejection; a non-OK status reports a native failure.
+/// Returns `GLRMASK_OK` on ordinary rejection; a non-OK status reports a failure.
 GLRMASK_API glrmask_status glrmask_state_commit_token(glrmask_state* state,uint32_t id,uint32_t* accepted);
 
 /// Advances the state by the bytes. If they aren't allowed, writes 0 to `accepted` and terminates the state.
-/// Returns `GLRMASK_OK` on ordinary rejection; a non-OK status reports a native failure.
+/// Returns `GLRMASK_OK` on ordinary rejection; a non-OK status reports a failure.
 GLRMASK_API glrmask_status glrmask_state_commit_bytes(glrmask_state* state,const uint8_t* bytes,size_t n,uint32_t* accepted);
 /// The bytes that must come next.
 GLRMASK_API glrmask_status glrmask_state_forced_bytes(const glrmask_state* state,glrmask_bytes** out);

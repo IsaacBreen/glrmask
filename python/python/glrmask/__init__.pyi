@@ -205,7 +205,7 @@ class Constraint:
         ...
     @property
     def mask_bit_len(self) -> int:
-        """The mask's length in bits: the largest token ID in the constraint plus one."""
+        """The mask's length in bits (max token ID plus one)."""
         ...
     def save(self) -> bytes:
         ...
@@ -226,7 +226,7 @@ class ConstraintState:
         ...
     @property
     def mask_bit_len(self) -> int:
-        """The mask's length in bits: the largest token ID in the constraint plus one."""
+        """The mask's length in bits (max token ID plus one)."""
         ...
     def commit_token(self, token_id: int, /) -> bool:
         """Advances the state by the token. If it isn't allowed, returns `False` and terminates the state."""

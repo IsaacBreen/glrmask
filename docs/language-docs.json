@@ -39,14 +39,14 @@
     "Constraint": "",
     "Constraint.__repr__": "",
     "Constraint.start": "Starts a new sequence.",
-    "Constraint.mask_bit_len": "The mask's length in bits: the largest token ID in the constraint plus one.",
+    "Constraint.mask_bit_len": "The mask's length in bits (max token ID plus one).",
     "Constraint.save": "",
     "Constraint.load": "May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with.",
     "ConstraintState": "",
     "ConstraintState.__repr__": "",
     "ConstraintState.mask": "Packed uint32 words: token i is bit i % 32 of word i // 32.",
     "ConstraintState.fill_mask": "Like `mask()`, but writes the words into `bitmask`. May release the GIL.",
-    "ConstraintState.mask_bit_len": "The mask's length in bits: the largest token ID in the constraint plus one.",
+    "ConstraintState.mask_bit_len": "The mask's length in bits (max token ID plus one).",
     "ConstraintState.commit_token": "Advances the state by the token. If it isn't allowed, returns `False` and terminates the state.",
     "ConstraintState.commit_bytes": "Advances the state by the bytes. If they aren't allowed, returns `False` and terminates the state.",
     "ConstraintState.forced_bytes": "The bytes that must come next.",
@@ -169,8 +169,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "58c2e973708478fc2064d112070a602f8c9a74091e43b62e5b65aea7d8d87f06",
-    "bindings/node/README.md": "f89d4a9c956c76b2a2a6894acfbc864b6f117fbfd7045477b8b4e220ff1d5897",
+    "bindings/cpp/README.md": "020aead859fa9c5c61d2805b019d88721befe8cd82476e7d03d58bdcd0df15f7",
+    "bindings/node/README.md": "ee589ea6cf07bf5493290f19316607b76f6e497deec7f3189c94cf301011f773",
     "docs/content/releases/0.3/cpp.md": "be210c50b92906fe2a988af24d798b46585857275b1072d9ae874a918ec8be7c",
     "docs/content/releases/0.3/javascript.md": "4a8891a7013c9e1461b7818759705f1ca8d2a594838701f160aa556663c4cace"
   },
@@ -178,5 +178,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "0408e045bbd9e39a3633776d642dfb7cfd045165eccd55b4129c5a606ae02499"
+  "content_sha256": "41b2913641fe5ce3ca4ec8ef488d6d5ffa04b9052945b0a56b5fac43415a56cb"
 }

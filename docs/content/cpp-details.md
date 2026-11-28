@@ -130,7 +130,7 @@ Operations that can fail throw `glrmask::Error`, a `std::runtime_error`. `what()
 | `GLRMASK_STRATEGY_UNSUPPORTED` | The chosen strategy does not support the grammar. |
 | `GLRMASK_SERIALIZATION` | Saved bytes could not be loaded. |
 | `GLRMASK_VOCAB_MISMATCH` | Compiled for a different vocabulary. |
-| `GLRMASK_INTERNAL` | An internal error; discard the affected object and please report it. |
+| `GLRMASK_INTERNAL` | |
 | `GLRMASK_BUFFER_TOO_SMALL` | The buffer passed to `fill_mask` is shorter than `(mask_bit_len() + 31) / 32`. |
 | `GLRMASK_CLOSED` | The object was moved from. |
 

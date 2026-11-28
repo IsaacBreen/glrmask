@@ -8713,7 +8713,7 @@ impl ConstraintState {
         }
     }
 
-    /// The mask's length in bits: the largest token ID in the constraint plus one.
+    /// The mask's length in bits (max token ID plus one).
     pub fn mask_bit_len(&self) -> usize {
         self.constraint.mask_bit_len()
     }

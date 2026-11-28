@@ -9144,7 +9144,6 @@ impl ConstraintState {
     }
 
     /// Advances the state by the token. If it isn't allowed, returns `false` and terminates the state.
-    /// Panics on an internal failure; discard the affected state.
     #[must_use]
     pub fn commit_token(
         &mut self,
@@ -9440,7 +9439,6 @@ impl ConstraintState {
     }
 
     /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
-    /// Panics on an internal failure; discard the affected state.
     #[must_use]
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> bool {
         if bytes.is_empty() {
