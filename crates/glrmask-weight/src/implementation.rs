@@ -2715,7 +2715,7 @@ impl Weight {
         overrides: &[(u32, u32, SharedTokenSet)],
         domain: &Weight,
     ) -> Self {
-        if self.is_empty() || domain.is_empty() {
+        if domain.is_empty() {
             return Self::empty();
         }
         if self.is_full() {
@@ -4165,6 +4165,17 @@ mod tests {
         let actual =
             base.with_sparse_tsid_range_overrides_intersection(&range_overrides, &domain);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn sparse_range_overlay_can_introduce_support_into_an_empty_base() {
+        let tokens = shared_rangeset(RangeSetBlaze::from_iter([4..=9]));
+        let domain = Weight::from_uniform(1..=3, RangeSetBlaze::from_iter([6..=12]));
+        let base = Weight::empty();
+        let actual = base.with_sparse_tsid_range_overrides_intersection(
+            &[(0, 2, Arc::clone(&tokens))], &domain,
+        );
+        assert_eq!(actual, Weight::from_uniform(1..=2, RangeSetBlaze::from_iter([6..=9])));
     }
 
     fn small_exhaustive_weights() -> Vec<Weight> {

@@ -3188,7 +3188,8 @@ struct PostDwaWeightLifter {
     group_lifts: FxHashMap<(usize, usize, usize), Weight>,
     // Coordinate plans depend only on the exact transport-mode set, not on
     // the core state whose entry domain happens to reach that set.
-    group_coordinate_plans: FxHashMap<Vec<usize>, GroupCoordinatePlan>,
+    group_coordinate_plans: FxHashMap<usize, GroupCoordinatePlan>,
+    member_entry_weights: Vec<Weight>,
     profile_base_lift_ms: f64,
     profile_plan_ms: f64,
     profile_signature_ms: f64,
@@ -3196,20 +3197,17 @@ struct PostDwaWeightLifter {
     profile_apply_ms: f64,
 }
 
-#[derive(Clone)]
-struct GroupCoordinateSignature {
-    base_coordinate_index: usize,
-    alternate_coordinate_indices: Box<[usize]>,
+/// A sparse override to the ordinary pullback. Each changed coordinate
+/// carries the exact first-edge token domain of the modes which read it.
+struct GatedCoordinateSignature {
+    ordinary_coordinate: usize,
+    displaced: SharedTokenSet,
+    alternatives: Vec<(usize, SharedTokenSet)>,
 }
 
 struct GroupCoordinatePlan {
-    #[cfg(debug_assertions)]
-    reference_overrides: Vec<(u32, u32)>,
-    signatures: Vec<GroupCoordinateSignature>,
-    // Final TSIDs are grouped by the exact `(ordinary coordinate, alternate
-    // coordinates)` signature that determines both their base and transported
-    // token sets for every lifted core weight.
-    final_tsid_runs_by_signature: Vec<Box<[(u32, u32)]>>,
+    signatures: Vec<GatedCoordinateSignature>,
+    final_tsid_runs_by_signature: Vec<Vec<(u32, u32)>>,
     coordinates: Vec<u32>,
 }
 
@@ -3393,6 +3391,7 @@ impl PostDwaWeightLifter {
             mode_lifts: FxHashMap::default(),
             group_lifts: FxHashMap::default(),
             group_coordinate_plans: FxHashMap::default(),
+            member_entry_weights: vec![Weight::empty(); modes.len()],
             profile_base_lift_ms: 0.0,
             profile_plan_ms: 0.0,
             profile_signature_ms: 0.0,
@@ -3461,105 +3460,102 @@ impl PostDwaWeightLifter {
         lifted
     }
 
-    fn prepare_group_coordinate_plan(&mut self, mode_indices: &[usize]) {
-        if mode_indices.len() <= 1 || self.group_coordinate_plans.contains_key(mode_indices) {
+    fn prepare_group_coordinate_plan(&mut self, mode_set_id: usize, mode_indices: &[usize]) {
+        if self.group_coordinate_plans.contains_key(&mode_set_id) {
             return;
         }
-
-        let mut alternates_by_final_tsid = vec![Vec::<u32>::new(); self.ordinary_coordinates.len()];
-        for &mode_index in mode_indices {
-            for &(final_tsid, coordinate) in &self.mode_deviations[mode_index] {
-                let alternates = &mut alternates_by_final_tsid[final_tsid as usize];
-                if !alternates.contains(&coordinate) {
-                    alternates.push(coordinate);
+        // Only changed coordinates can need an override. Unlike the old
+        // dense per-TSID temporary, this scales with the actual deviations.
+        let mut changed = Vec::<(u32, u32, SharedTokenSet)>::new();
+        for &mode in mode_indices {
+            let gate = &self.member_entry_weights[mode];
+            // A full member gate cannot coexist with another nonempty gate
+            // in a proven-disjoint group.
+            debug_assert!(!gate.is_full());
+            for &(tsid, coordinate) in &self.mode_deviations[mode] {
+                let tokens = gate.shared_tokens_for_tsid(tsid);
+                if !tokens.is_empty() {
+                    changed.push((tsid, coordinate, tokens));
                 }
             }
         }
+        changed.sort_unstable_by_key(|(tsid, coordinate, _)| (*tsid, *coordinate));
 
-        let mut signature_for_key = FxHashMap::<(u32, Vec<u32>), u32>::default();
-        let mut signatures = Vec::<GroupCoordinateSignature>::new();
-        let mut overrides = Vec::<(u32, u32)>::new();
-        for (final_tsid, alternates) in alternates_by_final_tsid.iter_mut().enumerate() {
-            if alternates.is_empty() {
-                continue;
-            }
-            alternates.sort_unstable();
-            alternates.dedup();
-            let base_coordinate = self.ordinary_coordinates[final_tsid];
-            let key = (base_coordinate, alternates.clone());
-            let signature = match signature_for_key.entry(key) {
-                Entry::Occupied(entry) => *entry.get(),
-                Entry::Vacant(entry) => {
-                    let signature = signatures.len() as u32;
-                    let (base_coordinate, alternate_coordinates) = entry.key();
-                    signatures.push(GroupCoordinateSignature {
-                        base_coordinate_index: *base_coordinate as usize,
-                        alternate_coordinate_indices: alternate_coordinates.iter().map(|&coordinate| coordinate as usize).collect::<Vec<_>>().into_boxed_slice(),
-                    });
-                    entry.insert(signature);
-                    signature
+        let mut signature_ids = FxHashMap::<(u32, Vec<(u32, usize)>), usize>::default();
+        let mut signatures = Vec::<GatedCoordinateSignature>::new();
+        let mut runs = Vec::<Vec<(u32, u32)>>::new();
+        let mut cursor = 0;
+        while cursor < changed.len() {
+            let tsid = changed[cursor].0;
+            let ordinary = self.ordinary_coordinates[tsid as usize];
+            let mut alternatives = Vec::<(u32, SharedTokenSet)>::new();
+            while cursor < changed.len() && changed[cursor].0 == tsid {
+                let coordinate = changed[cursor].1;
+                let mut tokens = changed[cursor].2.as_ref().clone();
+                cursor += 1;
+                while cursor < changed.len()
+                    && changed[cursor].0 == tsid
+                    && changed[cursor].1 == coordinate
+                {
+                    tokens = &tokens | changed[cursor].2.as_ref();
+                    cursor += 1;
                 }
-            };
-            overrides.push((final_tsid as u32, signature));
+                alternatives.push((coordinate, shared_rangeset(tokens)));
+            }
+            let key = (
+                ordinary,
+                alternatives.iter().map(|(coordinate, tokens)| {
+                    (*coordinate, Arc::as_ptr(tokens) as usize)
+                }).collect(),
+            );
+            let signature = *signature_ids.entry(key).or_insert_with(|| {
+                let mut displaced = range_set_blaze::RangeSetBlaze::new();
+                for (_, tokens) in &alternatives {
+                    displaced = &displaced | tokens.as_ref();
+                }
+                let id = signatures.len();
+                signatures.push(GatedCoordinateSignature {
+                    ordinary_coordinate: ordinary as usize,
+                    displaced: shared_rangeset(displaced),
+                    alternatives: alternatives.into_iter().map(|(coordinate, tokens)| {
+                        (coordinate as usize, tokens)
+                    }).collect(),
+                });
+                runs.push(Vec::new());
+                id
+            });
+            let signature_runs = &mut runs[signature];
+            if let Some((_, end)) = signature_runs.last_mut()
+                && end.checked_add(1) == Some(tsid)
+            {
+                *end = tsid;
+            } else {
+                signature_runs.push((tsid, tsid));
+            }
         }
 
-        let mut coordinates = signatures
-            .iter()
-            .flat_map(|signature| {
-                std::iter::once(signature.base_coordinate_index as u32).chain(
-                    signature
-                        .alternate_coordinate_indices
-                        .iter()
-                        .map(|&coordinate| coordinate as u32),
-                )
-            })
-            .collect::<Vec<_>>();
+        let mut coordinates = signatures.iter().flat_map(|signature| {
+            std::iter::once(signature.ordinary_coordinate as u32).chain(
+                signature.alternatives.iter().map(|(coordinate, _)| *coordinate as u32),
+            )
+        }).collect::<Vec<_>>();
         coordinates.sort_unstable();
         coordinates.dedup();
         for signature in &mut signatures {
-            let raw_base = signature.base_coordinate_index as u32;
-            signature.base_coordinate_index = coordinates
-                .binary_search(&raw_base)
-                .expect("group-plan base coordinate must be retained");
-            for coordinate_index in signature.alternate_coordinate_indices.iter_mut() {
-                let raw_coordinate = *coordinate_index as u32;
-                *coordinate_index = coordinates
-                    .binary_search(&raw_coordinate)
-                    .expect("group-plan alternate coordinate must be retained");
+            signature.ordinary_coordinate = coordinates.binary_search(
+                &(signature.ordinary_coordinate as u32),
+            ).expect("ordinary coordinate belongs to the gated plan");
+            for (coordinate, _) in &mut signature.alternatives {
+                *coordinate = coordinates.binary_search(&(*coordinate as u32))
+                    .expect("transport coordinate belongs to the gated plan");
             }
         }
 
-        let mut final_tsids_by_signature = vec![Vec::<u32>::new(); signatures.len()];
-        for &(final_tsid, signature) in &overrides {
-            final_tsids_by_signature[signature as usize].push(final_tsid);
-        }
-        let final_tsid_runs_by_signature = final_tsids_by_signature
-            .into_iter()
-            .map(|final_tsids| {
-                let mut runs = Vec::<(u32, u32)>::new();
-                for final_tsid in final_tsids {
-                    if let Some((_, end)) = runs.last_mut()
-                        && end.checked_add(1) == Some(final_tsid)
-                    {
-                        *end = final_tsid;
-                    } else {
-                        runs.push((final_tsid, final_tsid));
-                    }
-                }
-                runs.into_boxed_slice()
-            })
-            .collect();
-
-        self.group_coordinate_plans.insert(
-            mode_indices.to_vec(),
-            GroupCoordinatePlan {
-                #[cfg(debug_assertions)]
-                reference_overrides: overrides,
-                signatures,
-                final_tsid_runs_by_signature,
-                coordinates,
-            },
-        );
+        self.group_coordinate_plans.insert(mode_set_id, GroupCoordinatePlan {
+            signatures,
+            final_tsid_runs_by_signature: runs,
+            coordinates,
+        });
     }
 
     /// Union the exact lifted weight over one proven-disjoint transport group.
@@ -3590,98 +3586,36 @@ impl PostDwaWeightLifter {
             self.profile_base_lift_ms += started_at.elapsed().as_secs_f64() * 1000.0;
         }
         let started_at = profile_timing.then(Instant::now);
-        self.prepare_group_coordinate_plan(mode_indices);
+        self.prepare_group_coordinate_plan(mode_set_id, mode_indices);
         if let Some(started_at) = started_at {
             self.profile_plan_ms += started_at.elapsed().as_secs_f64() * 1000.0;
         }
         let started_at = profile_timing.then(Instant::now);
         let overrides = {
-            let plan = self
-                .group_coordinate_plans
-                .get(mode_indices)
-                .expect("prepared group coordinate plan must be retained");
-            let mut union_for_token_signature = FxHashMap::<Vec<usize>, SharedTokenSet>::default();
+            let plan = &self.group_coordinate_plans[&mode_set_id];
             let coordinate_tokens = weight.shared_tokens_for_sorted_tsids(&plan.coordinates);
-            let transformed_tokens: Vec<SharedTokenSet> = plan
-                .signatures
-                .iter()
-                .map(|signature| {
-                    let mut token_sets = Vec::with_capacity(signature.alternate_coordinate_indices.len() + 1);
-                    token_sets.push(Arc::clone(&coordinate_tokens[signature.base_coordinate_index]));
-                    for &coordinate_index in &signature.alternate_coordinate_indices {
-                        token_sets.push(Arc::clone(&coordinate_tokens[coordinate_index]));
-                    }
-                    let mut token_signature: Vec<usize> = token_sets
-                        .iter()
-                        .filter(|tokens| !tokens.is_empty())
-                        .map(|tokens| Arc::as_ptr(tokens) as usize)
-                        .collect();
-                    token_signature.sort_unstable();
-                    token_signature.dedup();
-                    if let Some(tokens) = union_for_token_signature.get(&token_signature) {
-                        return Arc::clone(tokens);
-                    }
-
-                    let mut tokens = shared_rangeset(range_set_blaze::RangeSetBlaze::new());
-                    for candidate in token_sets {
-                        if candidate.is_empty() || candidate.as_ref() == tokens.as_ref() {
-                            continue;
-                        }
-                        tokens = shared_rangeset(tokens.as_ref() | candidate.as_ref());
-                    }
-                    union_for_token_signature.insert(token_signature, Arc::clone(&tokens));
-                    tokens
-                })
-                .collect();
-            let mut overrides = Vec::<(u32, u32, SharedTokenSet)>::new();
-            for (signature_index, signature) in plan.signatures.iter().enumerate() {
-                let tokens = &transformed_tokens[signature_index];
-                let base_tokens = &coordinate_tokens[signature.base_coordinate_index];
-                if Arc::ptr_eq(tokens, base_tokens) || tokens.as_ref() == base_tokens.as_ref() {
+            let mut overrides = Vec::new();
+            for (index, signature) in plan.signatures.iter().enumerate() {
+                let base_tokens = &coordinate_tokens[signature.ordinary_coordinate];
+                // Each entry token belongs to at most one mode. Remove the
+                // changed modes' gates from the ordinary coordinate, and
+                // admit those tokens only through their own target coordinate.
+                // The final intersection supplies the remaining entry domain.
+                let mut tokens = base_tokens.as_ref().clone()
+                    - signature.displaced.as_ref().clone();
+                for (coordinate, gate) in &signature.alternatives {
+                    let admitted = coordinate_tokens[*coordinate].as_ref() & gate.as_ref();
+                    tokens = &tokens | &admitted;
+                }
+                if &tokens == base_tokens.as_ref() {
                     continue;
                 }
-                overrides.extend(
-                    plan.final_tsid_runs_by_signature[signature_index]
-                        .iter()
-                        .map(|&(start, end)| (start, end, Arc::clone(tokens))),
-                );
+                let tokens = shared_rangeset(tokens);
+                overrides.extend(plan.final_tsid_runs_by_signature[index].iter().map(
+                    |&(start, end)| (start, end, Arc::clone(&tokens)),
+                ));
             }
-            // The ranged sparse-override helper consumes a TSID stream in
-            // ascending coordinate order. Grouping by signature above changes
-            // only construction order, so restore canonical final-TSID order
-            // before applying the exact same overrides.
             overrides.sort_unstable_by_key(|&(start, _, _)| start);
-
-            #[cfg(debug_assertions)]
-            {
-                let reference = plan
-                    .reference_overrides
-                    .iter()
-                    .zip(base.shared_tokens_for_sorted_tsids(
-                        &plan
-                            .reference_overrides
-                            .iter()
-                            .map(|&(final_tsid, _)| final_tsid)
-                            .collect::<Vec<_>>(),
-                    ))
-                    .filter_map(|(&(final_tsid, signature), base_tokens)| {
-                        let tokens = &transformed_tokens[signature as usize];
-                        let differs = !Arc::ptr_eq(tokens, &base_tokens)
-                            && tokens.as_ref() != base_tokens.as_ref();
-                        differs.then(|| (final_tsid, Arc::clone(tokens)))
-                    })
-                    .collect::<Vec<_>>();
-                let expanded = overrides
-                    .iter()
-                    .flat_map(|(start, end, tokens)| {
-                        (*start..=*end).map(move |final_tsid| {
-                            (final_tsid, Arc::clone(tokens))
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                debug_assert_eq!(expanded, reference);
-            }
-
             overrides
         };
         if let Some(started_at) = started_at {
@@ -3779,23 +3713,15 @@ pub fn expand_representative_dwa_after_minimization(
             !lifter.lift_for_mode(weight, mode_index).is_empty()
         })
         .collect();
-    if active_mode_indices != candidate_mode_indices {
-        lifter = PostDwaWeightLifter::new(
-            core_state_map,
-            final_state_map,
-            modes,
-            &active_mode_indices,
-        );
-    }
     let active_filter_ms = active_filter_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
 
     let grouping_started_at = profile_timing.then(Instant::now);
     // Modes can share one suffix graph only when their first-edge domains are
-    // disjoint. That domain is retained by DWA weight intersection after the
-    // dispatcher, so merging their suffix weights by union cannot leak one
-    // member's transported behavior into another member's execution.
+    // disjoint. Every suffix coefficient is gated by its own first-edge
+    // domain before union, so a token retains its unique transport mode
+    // throughout execution.
     // The ordinary representative mode remains a singleton deliberately: it
     // has multiple possible first labels rather than one stable gate.
     let mut mode_groups = vec![vec![0usize]];
@@ -3818,6 +3744,10 @@ pub fn expand_representative_dwa_after_minimization(
             (mode_index, *target, lifter.lift_for_mode(start_weight, mode_index))
         })
         .collect();
+
+    for (mode_index, _, entry_weight) in &member_entry_weights {
+        lifter.member_entry_weights[*mode_index] = entry_weight.clone();
+    }
 
     let all_member_entry_union =
         Weight::union_all(member_entry_weights.iter().map(|(_, _, weight)| weight));
@@ -3987,6 +3917,9 @@ pub fn expand_representative_dwa_after_minimization(
         }
         for (core_state, reachable) in core_reachable_from[*target as usize].iter().enumerate() {
             if *reachable {
+                if mode_indices_at_core_state[0][core_state].is_empty() {
+                    mode_indices_at_core_state[0][core_state].push(0);
+                }
                 entry_weights_at_core_state[0][core_state].push(entry_weight.clone());
             }
         }
@@ -3999,11 +3932,6 @@ pub fn expand_representative_dwa_after_minimization(
                 mode_indices_at_core_state[group_index][core_state].push(*mode_index);
                 entry_weights_at_core_state[group_index][core_state].push(entry_weight.clone());
             }
-        }
-    }
-    for core_state in 0..core_states.len() {
-        if !entry_weights_at_core_state[0][core_state].is_empty() {
-            mode_indices_at_core_state[0][core_state].push(0);
         }
     }
     // Member entry domains are determined solely by the exact active mode
@@ -5020,6 +4948,58 @@ mod tests {
         );
         assert!(ordinary_word.tokens_for_tsid(0).contains(10));
         assert!(!ordinary_word.tokens_for_tsid(0).contains(20));
+    }
+
+    #[test]
+    fn shared_transport_group_preserves_each_mode_entry_gate() {
+        let state_map = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            vec![0, 1, 2],
+            3,
+            vec![0, 1, 2],
+        );
+        let modes = vec![
+            TerminalNwaTransportMode::ordinary(3),
+            TerminalNwaTransportMode::member(
+                TransportScannerStateMap::Explicit(vec![1, 0, 2].into()), 0, 1,
+            ),
+            TerminalNwaTransportMode::member(
+                TransportScannerStateMap::Explicit(vec![2, 1, 0].into()), 0, 2,
+            ),
+        ];
+        let mut lifter = PostDwaWeightLifter::new(&state_map, &state_map, &modes, &[0, 1, 2]);
+        let row = |tokens: &[u32]| -> Weight {
+            Weight::from_uniform(
+                0..=2, tokens.iter().copied().collect::<range_set_blaze::RangeSetBlaze<_>>(),
+            )
+        };
+        let ordinary_gate = row(&[30]);
+        let member_one_gate = row(&[10]);
+        let member_two_gate = row(&[20]);
+        lifter.member_entry_weights[1] = member_one_gate.clone();
+        lifter.member_entry_weights[2] = member_two_gate.clone();
+        let weight = Weight::from_per_tsid_token_sets([
+            (0, [10, 20, 30].into_iter().collect()),
+            (1, [20, 30].into_iter().collect()),
+            (2, [10, 30].into_iter().collect()),
+        ]);
+
+        for (mode_set_id, indices) in [[0, 1, 2].as_slice(), [1, 2].as_slice()].into_iter().enumerate() {
+            let gates = [&ordinary_gate, &member_one_gate, &member_two_gate];
+            let domain = Weight::union_all(indices.iter().map(|&index| gates[index]));
+            let actual = lifter.lift_over_disjoint_group(&weight, mode_set_id, indices, &domain);
+            // Literal pointwise pullback and gate membership, independent of
+            // the sparse plan, base lift, and range override implementation.
+            for tsid in 0..3 {
+                for token in [10, 20, 30] {
+                    let expected = indices.iter().any(|&mode| {
+                        let target = modes[mode].scanner_state_for_original.scanner_state(tsid);
+                        gates[mode].tokens_for_tsid(tsid).contains(token)
+                            && weight.tokens_for_tsid(target).contains(token)
+                    });
+                    assert_eq!(actual.tokens_for_tsid(tsid).contains(token), expected);
+                }
+            }
+        }
     }
 
     #[test]
