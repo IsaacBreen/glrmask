@@ -2424,32 +2424,9 @@ impl Weight {
             return self.clone();
         }
 
-        let mut ranges = Vec::<(std::ops::RangeInclusive<u32>, SharedTokenSet)>::new();
-        for (start, end, tokens) in self.range_entries() {
-            let mapped = remap(tokens);
-            if mapped.is_empty() {
-                continue;
-            }
-            if let Some((previous_range, previous_tokens)) = ranges.last_mut()
-                && previous_range.end().checked_add(1) == Some(start)
-                && same_shared_token_set(previous_tokens, &mapped)
-            {
-                let previous_start = *previous_range.start();
-                *previous_range = previous_start..=end;
-            } else {
-                ranges.push((start..=end, mapped));
-            }
-        }
-        if ranges.is_empty() {
-            return Self::empty();
-        }
-
-        let map = WeightMap::from_sorted_disjoint_map(CheckSortedDisjointMap::new(
-            ranges
-                .iter()
-                .map(|(range, tokens)| (range.clone(), tokens)),
-        ));
-        finalize_weight_map(map)
+        Self::from_tsid_runs_shared(self.range_entries().map(|(start, end, tokens)| {
+            (start, end, remap(tokens))
+        }))
     }
 
     pub fn empty() -> Self {
@@ -2498,31 +2475,44 @@ impl Weight {
         builder.finish()
     }
 
-    /// Build a weight from ordered inclusive TSID ranges that already share
-    /// one interned token set. Retained as the general range-oriented name;
-    /// `from_tsid_runs_shared` is the equivalent run-oriented spelling.
-    pub fn from_tsid_ranges_shared(
-        entries: impl IntoIterator<Item = (u32, u32, SharedTokenSet)>,
-    ) -> Self {
-        Self::from_tsid_runs_shared(entries)
-    }
-
-    /// Like `from_per_tsid_shared` but accepts pre-grouped, sorted inclusive
-    /// `(start_tsid, end_tsid)` runs that each share one Arc token set. This is
-    /// byte-identical to pushing every TSID in `start..=end` individually (the
-    /// builder merges same-Arc contiguous TSIDs anyway) but skips the per-TSID
-    /// iteration when the caller already knows the contiguous coordinate runs.
+    /// Build a weight from sorted disjoint inclusive TSID runs, skipping
+    /// empty sets and coalescing equal adjacent values. Small streams use
+    /// the incremental builder; larger streams build the tree in bulk.
     pub fn from_tsid_runs_shared(
         runs: impl IntoIterator<Item = (u32, u32, SharedTokenSet)>,
     ) -> Self {
-        let mut builder = CompactRangeBuilder::new();
+        let runs = runs.into_iter();
+        if runs.size_hint().1.is_some_and(|maximum| maximum <= 16) {
+            let mut builder = CompactRangeBuilder::new();
+            for (start, end, tokens) in runs {
+                if !tokens.is_empty() {
+                    builder.push(start, end, tokens);
+                }
+            }
+            return builder.finish();
+        }
+
+        let mut ranges = Vec::<(std::ops::RangeInclusive<u32>, SharedTokenSet)>::new();
         for (start, end, tokens) in runs {
             if tokens.is_empty() {
                 continue;
             }
-            builder.push(start, end, tokens);
+            if let Some((previous, previous_tokens)) = ranges.last_mut()
+                && previous.end().checked_add(1) == Some(start)
+                && same_shared_token_set(previous_tokens, &tokens)
+            {
+                *previous = *previous.start()..=end;
+            } else {
+                ranges.push((start..=end, tokens));
+            }
         }
-        builder.finish()
+        if ranges.is_empty() {
+            return Self::empty();
+        }
+        let map = WeightMap::from_sorted_disjoint_map(CheckSortedDisjointMap::new(
+            ranges.iter().map(|(range, tokens)| (range.clone(), tokens)),
+        ));
+        finalize_weight_map(map)
     }
 
     /// Lift a set of final-TSID runs whose `coordinate` field is sorted
@@ -4016,7 +4006,7 @@ mod tests {
             (6, 6, Arc::clone(&alpha)),
             (8, 10, Arc::clone(&gamma)),
         ];
-        let ranged = Weight::from_tsid_ranges_shared(ranges.iter().cloned());
+        let ranged = Weight::from_tsid_runs_shared(ranges.iter().cloned());
         let points = Weight::from_per_tsid_shared(ranges.iter().flat_map(|(start, end, tokens)| {
             (*start..=*end).map(move |tsid| (tsid, Arc::clone(tokens)))
         }));
@@ -4068,12 +4058,12 @@ mod tests {
         let beta = shared_rangeset(RangeSetBlaze::from_iter([4..=7]));
         let gamma = shared_rangeset(RangeSetBlaze::from_iter([2..=6]));
         let delta = shared_rangeset(RangeSetBlaze::from_iter([8..=10]));
-        let base = Weight::from_tsid_ranges_shared([
+        let base = Weight::from_tsid_runs_shared([
             (0, 3, Arc::clone(&alpha)),
             (5, 9, Arc::clone(&beta)),
             (12, 15, Arc::clone(&gamma)),
         ]);
-        let domain = Weight::from_tsid_ranges_shared([
+        let domain = Weight::from_tsid_runs_shared([
             (1, 6, Arc::clone(&gamma)),
             (8, 13, Arc::clone(&delta)),
             (15, 18, Arc::clone(&alpha)),
@@ -4116,12 +4106,12 @@ mod tests {
     fn sparse_overlay_literal_endpoints() {
         let original = shared_rangeset(RangeSetBlaze::from_iter([1..=3]));
         let replacement = shared_rangeset(RangeSetBlaze::from_iter([3..=5]));
-        let base = Weight::from_tsid_ranges_shared([
+        let base = Weight::from_tsid_runs_shared([
             (0, 2, Arc::clone(&original)),
             (4, 6, Arc::clone(&original)),
             (u32::MAX - 2, u32::MAX, Arc::clone(&original)),
         ]);
-        let domain = Weight::from_tsid_ranges_shared([
+        let domain = Weight::from_tsid_runs_shared([
             (1, 8, shared_rangeset(RangeSetBlaze::from_iter([2..=4]))),
             (u32::MAX - 1, u32::MAX, Arc::clone(&original)),
         ]);
@@ -4130,7 +4120,7 @@ mod tests {
             (7, 9, Arc::clone(&replacement)),
             (u32::MAX, u32::MAX, Arc::clone(&EMPTY_RANGESET)),
         ];
-        let expected = Weight::from_tsid_ranges_shared([
+        let expected = Weight::from_tsid_runs_shared([
             (1, 5, shared_rangeset(RangeSetBlaze::from_iter([3..=4]))),
             (6, 6, shared_rangeset(RangeSetBlaze::from_iter([2..=3]))),
             (7, 8, shared_rangeset(RangeSetBlaze::from_iter([3..=4]))),
@@ -4142,7 +4132,7 @@ mod tests {
         );
         assert_eq!(
             base.with_sparse_tsid_overrides(&[(u32::MAX, Arc::clone(&EMPTY_RANGESET))]),
-            Weight::from_tsid_ranges_shared([
+            Weight::from_tsid_runs_shared([
                 (0, 2, Arc::clone(&original)),
                 (4, 6, Arc::clone(&original)),
                 (u32::MAX - 2, u32::MAX - 1, original),

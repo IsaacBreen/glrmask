@@ -4,12 +4,16 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
-use range_set_blaze::{CheckSortedDisjointMap, RangeMapBlaze, RangeSetBlaze};
+use range_set_blaze::RangeSetBlaze;
+#[cfg(test)]
+use range_set_blaze::RangeMapBlaze;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::ds::weight::{SharedTokenSet, Weight, finalize_weight_map, shared_rangeset};
+use crate::ds::weight::{SharedTokenSet, Weight, shared_rangeset};
+#[cfg(test)]
+use crate::ds::weight::finalize_weight_map;
 
 #[cfg(test)]
 fn reconcile_weight_id_maps(
@@ -693,40 +697,6 @@ fn build_local_to_common_token_map_from_common_classes(
     local_to_refined_classes(&local.vocab_tokens, &common.vocab_tokens)
 }
 
-/// The maps used by the fast remappers are injective or disjoint expansions,
-/// so sorted destination runs cannot overlap. Coalesce the same adjacent runs
-/// as CompactRangeBuilder, then build the tree from the ordered stream once.
-/// The final interning boundary and identifier numbering remain unchanged.
-fn weight_from_sorted_disjoint_runs(
-    runs: impl IntoIterator<Item = (u32, u32, SharedTokenSet)>,
-) -> Weight {
-    let runs = runs.into_iter();
-    // The ordinary builder is cheaper than an extra buffer for tiny weights.
-    if runs.size_hint().1.is_some_and(|maximum| maximum <= 16) {
-        return Weight::from_tsid_runs_shared(runs);
-    }
-    let mut ranges: Vec<(std::ops::RangeInclusive<u32>, SharedTokenSet)> = Vec::new();
-    for (start, end, tokens) in runs {
-        if tokens.is_empty() {
-            continue;
-        }
-        if let Some((previous, previous_tokens)) = ranges.last_mut()
-            && previous.end().checked_add(1) == Some(start)
-            && (Arc::ptr_eq(previous_tokens, &tokens)
-                || previous_tokens.as_ref() == tokens.as_ref())
-        {
-            let first = *previous.start();
-            *previous = first..=end;
-        } else {
-            ranges.push((start..=end, tokens));
-        }
-    }
-    let map = RangeMapBlaze::from_sorted_disjoint_map(CheckSortedDisjointMap::new(
-        ranges.iter().map(|(range, tokens)| (range.clone(), tokens)),
-    ));
-    finalize_weight_map(map)
-}
-
 /// A token-coordinate image can be supplied without allocating one vector
 /// per token for the common disjoint-partition offset case.
 #[derive(Clone, Copy)]
@@ -1143,7 +1113,7 @@ fn remap_relation(
         if !states.monotone() {
             runs.sort_unstable_by_key(|(start, _, _)| *start);
         }
-        return weight_from_sorted_disjoint_runs(runs);
+        return Weight::from_tsid_runs_shared(runs);
     }
 
     let mut rows = vec![None::<SharedTokenSet>; common_tsid_count];
@@ -1164,7 +1134,7 @@ fn remap_relation(
             }
         });
     }
-    weight_from_sorted_disjoint_runs(rows.into_iter().enumerate().filter_map(|(q, set)| {
+    Weight::from_tsid_runs_shared(rows.into_iter().enumerate().filter_map(|(q, set)| {
         set.map(|set| (q as u32, q as u32, set))
     }))
 }
@@ -1271,7 +1241,7 @@ impl WeightBatch {
                 Weight::all()
             } else {
                 let all_tokens = shared_rangeset(tokens.full_image());
-                weight_from_sorted_disjoint_runs(states.full_image().ranges().map(|r| {
+                Weight::from_tsid_runs_shared(states.full_image().ranges().map(|r| {
                     (*r.start(), *r.end(), Arc::clone(&all_tokens))
                 }))
             }
@@ -1692,8 +1662,10 @@ mod tests {
                     runs.push((start, end, Arc::new(tokens)));
                     start = end + 1 + (seed >> 16) % 3;
                 }
-                let reference = Weight::from_tsid_ranges_shared(runs.clone());
-                let candidate = weight_from_sorted_disjoint_runs(runs);
+                let reference = Weight::from_per_tsid_shared(runs.iter().flat_map(|(start, end, set)| {
+                    (*start..=*end).map(move |id| (id, Arc::clone(set)))
+                }));
+                let candidate = Weight::from_tsid_runs_shared(runs);
                 assert_eq!(entries_key(&candidate), entries_key(&reference));
                 assert_eq!(candidate, reference);
             }
@@ -1703,13 +1675,13 @@ mod tests {
             let point = u32::MAX - 64 + i * 2;
             (point, point, Arc::clone(&tokens))
         }).collect::<Vec<_>>();
-        assert_eq!(weight_from_sorted_disjoint_runs(runs.clone()),
-            Weight::from_tsid_ranges_shared(runs));
+        assert_eq!(Weight::from_tsid_runs_shared(runs.clone()),
+            Weight::from_per_tsid_shared(runs.into_iter().map(|(start, _, set)| (start, set))));
     }
 
     #[test]
     fn shared_token_precomputation_matches_uncached_projection() {
-        let weight = Weight::from_tsid_ranges_shared([
+        let weight = Weight::from_tsid_runs_shared([
             (0, 1, Arc::new(RangeSetBlaze::from_iter([0..=1]))),
             (2, 3, Arc::new(RangeSetBlaze::from_iter([1..=1, 3..=3]))),
         ]);
@@ -1729,7 +1701,7 @@ mod tests {
     #[test]
     fn quotient_batch_preserves_shared_images_and_universal_weight() {
         let source = shared_rangeset(RangeSetBlaze::from_iter([0..=2]));
-        let original = Weight::from_tsid_ranges_shared([
+        let original = Weight::from_tsid_runs_shared([
             (0, 0, Arc::clone(&source)),
             (2, 2, Arc::clone(&source)),
         ]);
@@ -1764,7 +1736,7 @@ mod tests {
     fn contiguous_disjoint_tsid_range_remap_matches_general() {
         let tokens_a = Arc::new(RangeSetBlaze::from_iter([0..=1]));
         let tokens_b = Arc::new(RangeSetBlaze::from_iter([2..=3]));
-        let weight = Weight::from_tsid_ranges_shared([
+        let weight = Weight::from_tsid_runs_shared([
             (0, 1, Arc::clone(&tokens_a)),
             (3, 3, Arc::clone(&tokens_b)),
         ]);
@@ -1787,7 +1759,7 @@ mod tests {
 
     #[test]
     fn identity_tsid_remap_matches_general_with_split_token_class() {
-        let weight = Weight::from_tsid_ranges_shared([
+        let weight = Weight::from_tsid_runs_shared([
             (
                 0,
                 2,
