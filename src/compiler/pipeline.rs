@@ -4929,124 +4929,60 @@ fn build_dynamic_tokenizer_lane(
     ))
 }
 
-fn compile_dynamic_owned_early_overlap(
-    grammar: GrammarDef,
-    vocab: &Vocab,
-    default_table_construction: GlrTableConstruction,
-    finalize_runtime: bool,
-    start_nullable: bool,
+/// Dynamic preparation may normalize the parser after the lexer starts.
+/// Both schedules use the same table builder and publish only the final
+/// grammar's terminal domain.
+fn build_dynamic_parser_table(
+    grammar: &GrammarDef,
+    direct_state_count: Option<usize>,
+    construction: GlrTableConstruction,
     use_lr: bool,
-) -> crate::Result<DynamicConstraint> {
-    let remainder_trace =
-        crate::dynamic_constraint::remainder_trace::Session::new("dynamic.early_overlap");
-    let remainder_parent = remainder_trace.id();
-    let profile = compile_profile_enabled();
-    let total_started = profile.then(Instant::now);
-    let shared_started = profile.then(Instant::now);
-    let shared_grammar = prepare_dynamic_shared_terminal_domain(grammar);
-    let shared_ms = shared_started.map_or(0.0, elapsed_ms);
-    let clone_started = profile.then(Instant::now);
-    let lexer_grammar = shared_grammar.clone();
-    let clone_ms = clone_started.map_or(0.0, elapsed_ms);
-
-    run_with_dynamic_compile_thread_pool(false, || -> crate::Result<DynamicConstraint> {
-        let (tokenizer_result, parser_result) = macro_join_if(
-            true,
-            "dynamic_early_tokenizer_and_parser",
-            || -> crate::Result<(DynamicTokenizerLaneResult, f64, f64)> {
-                let _span = crate::dynamic_constraint::remainder_trace::Span::new(
-                    "dynamic.early_tokenizer.worker", remainder_parent);
-                let (result, factor_ms) = prepare_dynamic_lexer_lane(
-                    &lexer_grammar, None, vocab, finalize_runtime, profile,
-                );
-                let (result, tokenizer_ms) = result?;
-                Ok((result, factor_ms, tokenizer_ms))
-            },
-            || -> crate::Result<(GrammarDef, GLRTable, bool, f64, f64, f64)> {
-                let _span = crate::dynamic_constraint::remainder_trace::Span::new(
-                    "dynamic.early_parser.worker", remainder_parent);
-                let prepare_started = profile.then(Instant::now);
-                let (prepared_grammar, terminal_domain_changed) =
-                    if use_lr {
-                        prepare_dynamic_parser_after_terminal_domain_lr(shared_grammar)
-                    } else {
-                        prepare_dynamic_parser_after_terminal_domain(shared_grammar)
-                    };
-                let parser_prepare_ms = prepare_started.map_or(0.0, elapsed_ms);
-                let analysis_started = profile.then(Instant::now);
-                let analyzed = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
-                if let Err(message) = analyzed.check_dynamic_table_build_normal_form() {
-                    return Err(crate::Error::StrategyUnsupported(format!(
-                        "grammar precondition violations:\n{message}"
-                    )));
-                }
-                let analysis_ms = analysis_started.map_or(0.0, elapsed_ms);
-                let table_started = Instant::now();
-                let table = GLRTable::build_with_default_construction(
-                    &analyzed,
-                    default_table_construction,
-                );
-                let table_ms = elapsed_ms(table_started);
-                {
-                    let _span = crate::dynamic_constraint::remainder_trace::Span::new(
-                        "temporary_grammar_analysis.destroy", remainder_parent);
-                    drop(analyzed);
-                }
-                Ok((
-                    prepared_grammar,
-                    table,
-                    terminal_domain_changed,
-                    parser_prepare_ms,
-                    analysis_ms,
-                    table_ms,
-                ))
-            },
-        );
-        crate::dynamic_constraint::remainder_trace::mark(
-            "dynamic.early_join.return", remainder_parent);
-        let (
-            mut lexer,
-            mut factor_ms,
-            mut tokenizer_ms,
-        ) = tokenizer_result?;
-        let (
-            prepared_grammar,
-            table,
-            terminal_domain_changed,
-            parser_prepare_ms,
-            analysis_ms,
-            table_ms,
-        ) = parser_result?;
-        if terminal_domain_changed {
-            let (rebuilt, rebuild_factor_ms) = prepare_dynamic_lexer_lane(
-                &prepared_grammar, None, vocab, finalize_runtime, profile,
-            );
-            factor_ms += rebuild_factor_ms;
-            let (rebuilt, rebuilt_ms) = rebuilt?;
-            lexer = rebuilt;
-            tokenizer_ms += rebuilt_ms;
+    remainder_parent: Option<u64>,
+) -> crate::Result<(GLRTable, f64, f64)> {
+    let (analyzed, analysis) = measure_stage(|| -> crate::Result<_> {
+        if direct_state_count.is_some() {
+            return Ok(None);
         }
-        let dynamic_vocab_started = profile.then(Instant::now);
-        let dynamic_mask_vocab = if finalize_runtime {
+        let analyzed = AnalyzedGrammar::from_grammar_def(grammar);
+        analyzed.check_dynamic_table_build_normal_form().map_err(|message|
+            crate::Error::StrategyUnsupported(format!("grammar precondition violations:\n{message}")))?;
+        Ok(Some(analyzed))
+    });
+    let analyzed = analyzed?;
+    let (table, span) = measure_stage(|| {
+        if let Some(state_count) = direct_state_count {
+            GLRTable::direct_regular_runtime_stub(
+                state_count.saturating_add(1) as u32, grammar.num_terminals(),
+            )
+        } else {
+            let analyzed = analyzed.as_ref().expect("generic grammar was analyzed");
+            if use_lr {
+                GLRTable::build_executable_with_default_construction(analyzed, construction)
+            } else {
+                GLRTable::build_with_default_construction(analyzed, construction)
+            }
+        }
+    });
+    {
+        let _span = crate::dynamic_constraint::remainder_trace::Span::new(
+            "temporary_grammar_analysis.destroy", remainder_parent);
+        drop(analyzed);
+    }
+    Ok((table, span.duration(), analysis.duration()))
+}
+
+fn prepare_dynamic_vocab(
+    vocab: &Vocab,
+    finalize_runtime: bool,
+) -> (crate::runtime::DynamicMaskVocab, f64) {
+    let (artifact, span) = measure_stage(|| {
+        if finalize_runtime {
             crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab)
         } else {
             crate::runtime::DynamicMaskVocab::default()
-        };
-        let dynamic_vocab_ms = dynamic_vocab_started.map_or(0.0, elapsed_ms);
-        let finalize_started = profile.then(Instant::now);
-        let constraint = finish_dynamic_compile(
-            prepared_grammar, table, lexer, None, dynamic_mask_vocab, vocab,
-            finalize_runtime, start_nullable, use_lr, remainder_parent,
-        )?;
-        if profile {
-            eprintln!(
-                "[glrmask/profile][dynamic_early_overlap] shared_ms={shared_ms:.3} clone_ms={clone_ms:.3} terminal_domain_changed={terminal_domain_changed} factor_ms={factor_ms:.3} parser_prepare_ms={parser_prepare_ms:.3} analysis_ms={analysis_ms:.3} tokenizer_ms={tokenizer_ms:.3} table_ms={table_ms:.3} dynamic_vocab_ms={dynamic_vocab_ms:.3} finalize_ms={:.3} total_ms={:.3}",
-                finalize_started.map_or(0.0, elapsed_ms),
-                total_started.map_or(0.0, elapsed_ms),
-            );
         }
-        Ok(constraint)
-    })
+    });
+    (artifact, span.duration())
 }
 
 fn compile_dynamic_owned_impl(
@@ -5073,57 +5009,57 @@ fn compile_dynamic_owned_impl(
     let early_overlap_enabled = crate::env::var("GLRMASK_DISABLE_DYNAMIC_EARLY_OVERLAP")
         .ok()
         .is_none_or(|value| !matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
-    if early_overlap_enabled
+    let early_overlap = early_overlap_enabled
         && !macro_parallelism_disabled()
         && grammar.direct_regular_automaton.is_none()
         && grammar.rules.len() > 64
         && !terminal_domain_too_large_for_early_overlap(&grammar)
-        && crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK_QUOTIENT").is_none()
-    {
-        return compile_dynamic_owned_early_overlap(
-            grammar,
-            vocab,
-            default_table_construction,
-            finalize_runtime,
-            start_nullable,
-            use_lr,
-        );
-    }
+        && crate::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK_QUOTIENT").is_none();
+    let early_trace = early_overlap.then(||
+        crate::dynamic_constraint::remainder_trace::Session::new("dynamic.early_overlap"));
+    let remainder_parent = early_trace.as_ref().map_or(remainder_parent, |trace| trace.id());
     let profile = compile_profile_enabled();
     let total_started_at = profile.then(Instant::now);
     let prepare_started_at = profile.then(Instant::now);
-    // A direct-regular frontend result already contains the complete parser
-    // language. Generic CFG normalization cannot improve that automaton and is
-    // unnecessary for the dynamic backend, which consumes the retained
-    // automaton directly. Keep the terminal definitions untouched for lexer
-    // construction.
-    let force_cfg_runtime = crate::env::var_os("GLRMASK_DYNAMIC_FORCE_CFG_RUNTIME").is_some();
-    if profile {
-        eprintln!(
-            "[glrmask/profile][dynamic_path] input_direct_regular={} force_cfg_runtime={}",
-            grammar.direct_regular_automaton.is_some(),
-            force_cfg_runtime,
-        );
-    }
-    let mut prepared_grammar = if grammar.direct_regular_automaton.is_some() && !force_cfg_runtime {
-        grammar
+
+    // Only the speculative overlap path has a separate parser continuation.
+    // Its lexer consumes the stable shared prefix; if parser normalization
+    // changes the domain, discard that lexer and rebuild from the final grammar.
+    let (mut prepared_grammar, parser_continuation, prepare_ms, clone_ms) = if early_overlap {
+        let shared = prepare_dynamic_shared_terminal_domain(grammar);
+        let prepare_ms = prepare_started_at.map_or(0.0, elapsed_ms);
+        let clone_started = profile.then(Instant::now);
+        let lexer = shared.clone();
+        (lexer, Some(shared), prepare_ms, clone_started.map_or(0.0, elapsed_ms))
     } else {
-        let mut grammar = grammar;
-        if force_cfg_runtime {
-            grammar.direct_regular_automaton = None;
+        // Direct-regular input already has the complete parser language.
+        let force_cfg_runtime = crate::env::var_os("GLRMASK_DYNAMIC_FORCE_CFG_RUNTIME").is_some();
+        if profile {
+            eprintln!(
+                "[glrmask/profile][dynamic_path] input_direct_regular={} force_cfg_runtime={}",
+                grammar.direct_regular_automaton.is_some(), force_cfg_runtime,
+            );
         }
-        if use_lr {
-            prepare_dynamic_glr_transforms_only_lr(grammar)
+        let prepared = if grammar.direct_regular_automaton.is_some() && !force_cfg_runtime {
+            grammar
         } else {
-            prepare_dynamic_glr_transforms_only(grammar)
-        }
+            let mut grammar = grammar;
+            if force_cfg_runtime {
+                grammar.direct_regular_automaton = None;
+            }
+            if use_lr {
+                prepare_dynamic_glr_transforms_only_lr(grammar)
+            } else {
+                prepare_dynamic_glr_transforms_only(grammar)
+            }
+        };
+        (prepared, None, prepare_started_at.map_or(0.0, elapsed_ms), 0.0)
     };
-    let prepare_ms = prepare_started_at.map_or(0.0, elapsed_ms);
     const TINY_DYNAMIC_MAX_TERMINALS: usize = 16;
     const TINY_DYNAMIC_MAX_RULES: usize = 64;
     const TINY_DYNAMIC_MAX_TOTAL_STATE_ESTIMATE: u128 = 4_096;
     const TINY_DYNAMIC_MAX_TERMINAL_STATE_ESTIMATE: u128 = 2_048;
-    let structurally_tiny = prepared_grammar.terminals.len() <= TINY_DYNAMIC_MAX_TERMINALS
+    let structurally_tiny = !early_overlap && prepared_grammar.terminals.len() <= TINY_DYNAMIC_MAX_TERMINALS
         && prepared_grammar.rules.len() <= TINY_DYNAMIC_MAX_RULES
         && prepared_grammar
             .direct_regular_automaton
@@ -5247,7 +5183,6 @@ fn compile_dynamic_owned_impl(
         let direct_state_count = direct_regular_automaton
             .as_ref()
             .map(|automaton| automaton.states.len());
-        let num_terminals = prepared_grammar.num_terminals();
         // Rayon scheduling is a measurable fraction of total build time for
         // genuinely tiny dynamic grammars. Keep those cores sequential; a
         // large lexer can still arise from a compact grammar, but in that case
@@ -5266,78 +5201,81 @@ fn compile_dynamic_owned_impl(
             );
         }
 
-        // Both lanes consume the same immutable, fully normalized grammar.
-        // Regex factoring is a prerequisite of lexer construction, not of LR
-        // analysis or table construction. Keep each prerequisite in its own
-        // lane instead of joining factoring/analysis before starting the table.
-        // This avoids a serial factoring barrier for large pattern grammars
-        // without changing either compiled artifact or cloning the grammar.
-        // Tiny grammars retain their prefactored expressions and serial lane.
-        let ((tokenizer_result, factor_ms), (table_result, (dynamic_mask_vocab, dynamic_vocab_ms))) = macro_join_if(
+        // The lexer and parser lanes share the immutable terminal domain.
+        // A parser continuation exists only for early overlap. The normal
+        // path also prepares the vocabulary concurrently; the speculative
+        // path retains its deferred vocabulary allocation until the final
+        // terminal domain and lexer have been accepted.
+        let ((tokenizer_result, mut factor_ms), (parser_result, vocab_result)) = macro_join_if(
             parallel_dynamic_core,
-            "dynamic_tokenizer_and_table_vocab",
+            if early_overlap { "dynamic_early_tokenizer_and_parser" } else { "dynamic_tokenizer_and_table_vocab" },
             || {
+                let _span = early_overlap.then(|| crate::dynamic_constraint::remainder_trace::Span::new(
+                    "dynamic.early_tokenizer.worker", remainder_parent));
                 prepare_dynamic_lexer_lane(
                     &prepared_grammar, prefactored_expressions, vocab, finalize_runtime, profile,
                 )
             },
             || macro_join_if(
-                parallel_dynamic_core,
+                parallel_dynamic_core && !early_overlap,
                 "dynamic_table_and_vocab",
                 || {
-                    let analysis_started_at = profile.then(Instant::now);
-                    let analyzed_grammar = if direct_regular_automaton.is_none() {
-                        let analyzed = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
-                        if let Err(message) = analyzed.check_dynamic_table_build_normal_form() {
-                            return Err(crate::Error::StrategyUnsupported(format!(
-                                "grammar precondition violations:\n{message}"
-                            )));
-                        }
-                        Some(analyzed)
-                    } else {
-                        None
-                    };
-                    let analysis_ms = analysis_started_at.map_or(0.0, elapsed_ms);
-                    let started_at = Instant::now();
-                    let table = if let Some(state_count) = direct_state_count {
-                    GLRTable::direct_regular_runtime_stub(
-                        state_count.saturating_add(1) as u32,
-                        num_terminals,
-                    )
-                } else if use_lr {
-                    GLRTable::build_executable_with_default_construction(
-                        analyzed_grammar.as_ref().expect("generic grammar was analyzed"),
-                        default_table_construction,
-                    )
-                } else {
-                    GLRTable::build_with_default_construction(
-                        analyzed_grammar.as_ref().expect("generic grammar was analyzed"),
-                        default_table_construction,
-                    )
-                };
-                    let table_ms = elapsed_ms(started_at);
-                    {
-                        let _span = crate::dynamic_constraint::remainder_trace::Span::new(
-                            "temporary_grammar_analysis.destroy", remainder_parent);
-                        drop(analyzed_grammar);
-                    }
-                    Ok((table, table_ms, analysis_ms))
+                    let _span = early_overlap.then(|| crate::dynamic_constraint::remainder_trace::Span::new(
+                        "dynamic.early_parser.worker", remainder_parent));
+                    let (replacement, terminal_domain_changed, parser_prepare_ms) =
+                        if let Some(shared) = parser_continuation {
+                            let ((grammar, changed), span) = measure_stage(|| {
+                                if use_lr {
+                                    prepare_dynamic_parser_after_terminal_domain_lr(shared)
+                                } else {
+                                    prepare_dynamic_parser_after_terminal_domain(shared)
+                                }
+                            });
+                            (Some(grammar), changed, span.duration())
+                        } else {
+                            (None, false, 0.0)
+                        };
+                    let (table, table_ms, analysis_ms) = build_dynamic_parser_table(
+                        replacement.as_ref().unwrap_or(&prepared_grammar),
+                        direct_state_count, default_table_construction, use_lr, remainder_parent,
+                    )?;
+                    Ok::<_, crate::Error>((
+                        replacement, terminal_domain_changed, parser_prepare_ms,
+                        table, table_ms, analysis_ms,
+                    ))
                 },
-                || {
-                    let started_at = Instant::now();
-                    let dynamic_vocab = if finalize_runtime {
-                        crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab)
-                    } else {
-                        crate::runtime::DynamicMaskVocab::default()
-                    };
-                    (dynamic_vocab, elapsed_ms(started_at))
-                },
+                || (!early_overlap).then(|| prepare_dynamic_vocab(vocab, finalize_runtime)),
             ),
         );
-        let (table, table_ms, analysis_ms) = table_result?;
-        let (lexer, tokenizer_ms) =
-            tokenizer_result?;
-        if profile && defer_factoring {
+        if early_overlap {
+            crate::dynamic_constraint::remainder_trace::mark("dynamic.early_join.return", remainder_parent);
+        }
+        // Preserve each schedule's original error precedence when both
+        // workers decline.
+        let (parser, (mut lexer, mut tokenizer_ms)) = if early_overlap {
+            let lexer = tokenizer_result?;
+            (parser_result?, lexer)
+        } else {
+            let parser = parser_result?;
+            (parser, tokenizer_result?)
+        };
+        let (replacement, terminal_domain_changed, parser_prepare_ms, table, table_ms, analysis_ms) = parser;
+        if let Some(grammar) = replacement {
+            prepared_grammar = grammar;
+        }
+        if terminal_domain_changed {
+            drop(lexer);
+            let (rebuilt, rebuild_factor_ms) = prepare_dynamic_lexer_lane(
+                &prepared_grammar, None, vocab, finalize_runtime, profile,
+            );
+            factor_ms += rebuild_factor_ms;
+            let (rebuilt, rebuilt_ms) = rebuilt?;
+            lexer = rebuilt;
+            tokenizer_ms += rebuilt_ms;
+        }
+        let (dynamic_mask_vocab, dynamic_vocab_ms) =
+            vocab_result.unwrap_or_else(|| prepare_dynamic_vocab(vocab, finalize_runtime));
+        if profile && defer_factoring && !early_overlap {
             eprintln!(
                 "[glrmask/profile][dynamic_factor_overlap] factor_ms={factor_ms:.3} analysis_ms={analysis_ms:.3} table_overlap=true"
             );
@@ -5349,18 +5287,21 @@ fn compile_dynamic_owned_impl(
             dynamic_mask_vocab, vocab, finalize_runtime, start_nullable, use_lr, remainder_parent,
         )?;
         if let Some(total_started_at) = total_started_at {
-            eprintln!(
-                "[glrmask/profile][dynamic_compile] finalize_runtime={} prepare_ms={:.3} analysis_ms={:.3} tokenizer_ms={:.3} table_ms={:.3} dynamic_vocab_ms={:.3} finalize_ms={:.3} parallel_core_wall_ms={:.3} total_ms={:.3}",
-                finalize_runtime,
-                prepare_ms,
-                analysis_ms,
-                tokenizer_ms,
-                table_ms,
-                dynamic_vocab_ms,
-                finalize_started_at.map_or(0.0, elapsed_ms),
-                (factor_ms + tokenizer_ms).max((analysis_ms + table_ms).max(dynamic_vocab_ms)),
-                elapsed_ms(total_started_at),
-            );
+            let finalize_ms = finalize_started_at.map_or(0.0, elapsed_ms);
+            if early_overlap {
+                eprintln!(
+                    "[glrmask/profile][dynamic_early_overlap] shared_ms={prepare_ms:.3} clone_ms={clone_ms:.3} terminal_domain_changed={terminal_domain_changed} factor_ms={factor_ms:.3} parser_prepare_ms={parser_prepare_ms:.3} analysis_ms={analysis_ms:.3} tokenizer_ms={tokenizer_ms:.3} table_ms={table_ms:.3} dynamic_vocab_ms={dynamic_vocab_ms:.3} finalize_ms={finalize_ms:.3} total_ms={:.3}",
+                    elapsed_ms(total_started_at),
+                );
+            } else {
+                eprintln!(
+                    "[glrmask/profile][dynamic_compile] finalize_runtime={} prepare_ms={:.3} analysis_ms={:.3} tokenizer_ms={:.3} table_ms={:.3} dynamic_vocab_ms={:.3} finalize_ms={:.3} parallel_core_wall_ms={:.3} total_ms={:.3}",
+                    finalize_runtime, prepare_ms, analysis_ms, tokenizer_ms, table_ms,
+                    dynamic_vocab_ms, finalize_ms,
+                    (factor_ms + tokenizer_ms).max((analysis_ms + table_ms).max(dynamic_vocab_ms)),
+                    elapsed_ms(total_started_at),
+                );
+            }
         }
         Ok(constraint)
     })
