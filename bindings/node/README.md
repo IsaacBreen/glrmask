@@ -167,8 +167,7 @@ complete generation loop.
 
 ## Async and sync
 
-`compile`, `precompile`, `save` and `load` return promises and run off the main thread. `compileSync`, `precompileSync`,
-`saveSync` and `loadSync` do the same work and block. Everything else is synchronous.
+`compile`, `precompile`, `save` and `load` return promises and run off the main thread. Everything else is synchronous.
 
 An async call works on a snapshot of its inputs, so changing or disposing them afterwards doesn't affect it. If a module
 is bound while its `precompile` is running, the promise rejects; precompile it again.
@@ -209,7 +208,7 @@ Arguments of the wrong type throw `TypeError`. Native GLRMask errors throw a
 | `GLRMASK_BUFFER_TOO_SMALL` | The array passed to `fillMask` is shorter than `Math.ceil(maskBitLength / 32)`. |
 | `GLRMASK_CLOSED` | The object was disposed. |
 
-A lost asynchronous precompile race reports `GLRMASK_PRECOMPILE_RACE`. Async methods reject with the same errors. Out-of-u32 commit arguments raise RangeError without changing the state.
+If the module changes during asynchronous precompile, it rejects with `GLRMASK_INVALID_INPUT`. Async methods reject with the same errors. Out-of-u32 commit arguments raise RangeError without changing the state.
 
 ## Freeing memory
 

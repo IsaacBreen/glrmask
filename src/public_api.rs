@@ -27,14 +27,14 @@ mod artifact_limits;
 pub(crate) mod module;
 mod expr;
 mod stack;
-pub use module::{Module, CompileOptions, IntoBinding};
+pub use module::{Module, CompileOptions};
 pub use expr::Expr;
 pub(crate) use stack::with_deep_stack;
 #[allow(unused_imports)]
 pub(crate) use stack::{DEEP_STACK_RED_ZONE, DEEP_STACK_SIZE};
 
 /// Controls how the constraint is compiled.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct MaskStrategy(MaskPreference);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

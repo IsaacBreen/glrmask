@@ -663,7 +663,7 @@ fn grammar_expressions_reject_modules_at_any_depth_but_module_bind_accepts_them(
     }
 }
 
-fn module_expr(value: impl glrmask::IntoBinding) -> glrmask::Result<glrmask::Module> {
+fn module_expr(value: impl Into<glrmask::Expr>) -> glrmask::Result<glrmask::Module> {
     let grammar = glrmask::Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE")?;
     let mut module = glrmask::Module::new(&grammar);
     module.bind("VALUE", value)?;

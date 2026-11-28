@@ -171,7 +171,7 @@
   },
   "native_guides": {
     "bindings/cpp/README.md": "020aead859fa9c5c61d2805b019d88721befe8cd82476e7d03d58bdcd0df15f7",
-    "bindings/node/README.md": "ee589ea6cf07bf5493290f19316607b76f6e497deec7f3189c94cf301011f773",
+    "bindings/node/README.md": "f4fd0ffdc74c85f985a4deecf7a2747ad934973a760640599551628a69b7d6cc",
     "docs/content/releases/0.3/cpp.md": "be210c50b92906fe2a988af24d798b46585857275b1072d9ae874a918ec8be7c",
     "docs/content/releases/0.3/javascript.md": "4a8891a7013c9e1461b7818759705f1ca8d2a594838701f160aa556663c4cace"
   },
@@ -179,5 +179,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "61ceaf8e5e74f68954e87e2a3484f95f2ffe64498192268cb6033f3e7d453d0e"
+  "content_sha256": "2c79d15800a8e732c41f39da89c651ae4b80651cba60a2ae3194f4d704433b37"
 }

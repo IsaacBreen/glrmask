@@ -151,15 +151,6 @@ class Grammar extends Owned {
   static fromExpr(value) {
     return wrap(Grammar, invoke(() => native.NativeGrammar.fromExpr(handle(value, Expr))));
   }
-  compileSync(vocab, options) {
-    const s = compileSettings(options);
-    const mod = new Module(this);
-    try {
-      return wrap(Constraint, invoke(() => handle(mod, Module).compileSync(handle(vocab, Vocab), s.mode)));
-    } finally {
-      mod.dispose();
-    }
-  }
   async compile(vocab, options) {
     const s = compileSettings(options);
     const mod = new Module(this);
@@ -254,30 +245,18 @@ class Module extends Owned {
     return formatExterns(rawAll, invoke(() => target.unboundExterns()));
   }
 
-  precompileSync(vocab, options) {
-    const s = compileSettings(options);
-    invoke(() => handle(this, Module).precompileSync(handle(vocab, Vocab), s.mode));
-  }
   async precompile(vocab, options) {
     const s = compileSettings(options);
     await invokeAsync(() => handle(this, Module).precompile(handle(vocab, Vocab), s.mode));
   }
 
-  compileSync(vocab, options) {
-    const s = compileSettings(options);
-    return wrap(Constraint, invoke(() => handle(this, Module).compileSync(handle(vocab, Vocab), s.mode)));
-  }
   async compile(vocab, options) {
     const s = compileSettings(options);
     return wrap(Constraint, await invokeAsync(() => handle(this, Module).compile(handle(vocab, Vocab), s.mode)));
   }
 
-  saveSync() { return invoke(() => handle(this, Module).saveSync()); }
   async save() { return invokeAsync(() => handle(this, Module).save()); }
 
-  static loadSync(data) {
-    bytes(data); return wrap(Module, invoke(() => native.loadModuleSync(data)));
-  }
   static async load(data) {
     bytes(data); return wrap(Module, await invokeAsync(() => native.loadModule(data)));
   }
@@ -288,11 +267,7 @@ class Constraint extends Owned {
   get maskBitLength() { return invoke(() => handle(this, Constraint).maskBitLen); }
   clone() { return wrap(Constraint, invoke(() => handle(this, Constraint).clone())); }
   start() { return wrap(ConstraintState, invoke(() => handle(this, Constraint).start())); }
-  saveSync() { return invoke(() => handle(this, Constraint).saveSync()); }
   async save() { return invokeAsync(() => handle(this, Constraint).save()); }
-  static loadSync(data, vocab) {
-    bytes(data); return wrap(Constraint, invoke(() => native.loadConstraintSync(data, handle(vocab, Vocab))));
-  }
   static async load(data, vocab) {
     bytes(data); const copy = Uint8Array.from(data);
     return wrap(Constraint, await invokeAsync(() => native.loadConstraint(copy, handle(vocab, Vocab))));

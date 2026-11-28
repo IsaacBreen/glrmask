@@ -33,7 +33,6 @@ fn status(kind: core::ErrorKind) -> i32 {
         core::ErrorKind::StrategyUnsupported => 5,
         core::ErrorKind::Serialization => 6,
         core::ErrorKind::VocabMismatch => 10,
-        core::ErrorKind::PrecompileRace => 11,
         core::ErrorKind::Internal => 7,
         core::ErrorKind::BufferTooSmall => 8,
         core::ErrorKind::Closed => 9,
@@ -77,7 +76,7 @@ unsafe fn produce<T>(out: *mut *mut T, f: impl FnOnce() -> Result<T>) -> Result<
     *out = Box::into_raw(Box::new(f()?)); Ok(())
 }
 
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); 8 }
+#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); 9 }
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_version() -> *const c_char { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast() }
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_error_message() -> *const c_char { LAST_ERROR.with(|s| s.borrow().as_ref().map_or(c"".as_ptr(), |(_, s)| s.as_ptr())) }
 
@@ -136,19 +135,17 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
         ))
     }) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_token_set_equal(a: *const glrmask_token_set, b: *const glrmask_token_set, out: *mut u32) -> i32 {
-    ffi(|| unsafe { let out = write(out)?; *out = 0; *out = u32::from(read(a)?.0 == read(b)?.0); Ok(()) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_token_set_equal(a: *const glrmask_token_set, b: *const glrmask_token_set, out: *mut bool) -> i32 {
+    ffi(|| unsafe { valid(out)?; out.write(false); out.write(read(a)?.0 == read(b)?.0); Ok(()) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_from_source(format: u32, source: *const c_char, n: usize, out: *mut *mut glrmask_grammar) -> i32 {
-    ffi(|| unsafe { produce(out, || {
-        let source = text(source, n)?.to_owned();
-        let grammar = match format {
-            1 => g::Grammar::from_glrm(&source)?,
-            2 => g::Grammar::from_json_schema(&source)?,
-            3 => g::Grammar::from_lark(&source)?,
-            _ => return Err(Error::invalid("unknown source format")),
-        }; Ok(glrmask_grammar(grammar))
-    }) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_from_glrm(source: *const c_char, n: usize, out: *mut *mut glrmask_grammar) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_grammar(g::Grammar::from_glrm(text(source, n)?)?))) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_from_lark(source: *const c_char, n: usize, out: *mut *mut glrmask_grammar) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_grammar(g::Grammar::from_lark(text(source, n)?)?))) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_from_json_schema(source: *const c_char, n: usize, out: *mut *mut glrmask_grammar) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_grammar(g::Grammar::from_json_schema(text(source, n)?)?))) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_from_expr(expr: *const crate::module_api::glrmask_expr, out: *mut *mut glrmask_grammar) -> i32 {
     ffi(|| unsafe { produce(out, || Ok(glrmask_grammar(g::Grammar::from_expr(&read(expr)?.0)?))) })
@@ -210,17 +207,17 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_fill_mask(p: *const glrmask_state, out: *mut u32, n: usize) -> i32 {
     ffi(|| unsafe { read(p)?.0.fill_mask(output(out, n)?) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_token(p: *mut glrmask_state, id: u32, accepted: *mut u32) -> i32 {
-    ffi(|| unsafe { let accepted = write(accepted)?; *accepted = 0; *accepted = u32::from(write(p)?.0.commit_token(id)?); Ok(()) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_token(p: *mut glrmask_state, id: u32, allowed: *mut bool) -> i32 {
+    ffi(|| unsafe { valid(allowed)?; allowed.write(false); allowed.write(write(p)?.0.commit_token(id)?); Ok(()) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_bytes(p: *mut glrmask_state, bytes: *const u8, n: usize, accepted: *mut u32) -> i32 {
-    ffi(|| unsafe { let accepted = write(accepted)?; *accepted = 0; *accepted = u32::from(write(p)?.0.commit_bytes(input(bytes, n)?)?); Ok(()) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_bytes(p: *mut glrmask_state, bytes: *const u8, n: usize, allowed: *mut bool) -> i32 {
+    ffi(|| unsafe { valid(allowed)?; allowed.write(false); allowed.write(write(p)?.0.commit_bytes(input(bytes, n)?)?); Ok(()) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_accepting(p: *const glrmask_state, out: *mut u32) -> i32 {
-    ffi(|| unsafe { let out = write(out)?; *out = 0; *out = u32::from(read(p)?.0.is_accepting()?); Ok(()) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_accepting(p: *const glrmask_state, out: *mut bool) -> i32 {
+    ffi(|| unsafe { valid(out)?; out.write(false); out.write(read(p)?.0.is_accepting()?); Ok(()) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_terminated(p: *const glrmask_state, out: *mut u32) -> i32 {
-    ffi(|| unsafe { let out = write(out)?; *out = 0; *out = u32::from(read(p)?.0.is_terminated()?); Ok(()) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_terminated(p: *const glrmask_state, out: *mut bool) -> i32 {
+    ffi(|| unsafe { valid(out)?; out.write(false); out.write(read(p)?.0.is_terminated()?); Ok(()) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_forced_bytes(p: *const glrmask_state, out: *mut *mut glrmask_bytes) -> i32 {
     ffi(|| unsafe {

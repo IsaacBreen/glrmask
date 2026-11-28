@@ -363,7 +363,7 @@ n3: "c" |  | n3 n0 "a" | n1 n2
     check_positive_word(lark, b"cccb", 3810);
 }
 
-fn module_expr(value: impl glrmask::IntoBinding) -> glrmask::Result<glrmask::Module> {
+fn module_expr(value: impl Into<glrmask::Expr>) -> glrmask::Result<glrmask::Module> {
     let grammar = glrmask::Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE")?;
     let mut module = glrmask::Module::new(&grammar);
     module.bind("VALUE", value)?;

@@ -16,8 +16,8 @@ const allowed=(m,id)=>(m[Math.floor(id/32)] & (1<<(id%32)))!==0;
 const closed=fn=>assert.throws(fn,e=>e instanceof GLRMaskError && e.code==='GLRMASK_CLOSED');
 
 for(const {label:maskStrategy,options} of strategies) {
-  test(`${maskStrategy}: packed masks, sparse IDs, aliases, forcing, clone and owner disposal`,()=>{
-    const v=vocab(),g=simple(),c=g.compileSync(v,{...options}),s=c.start();
+  test(`${maskStrategy}: packed masks, sparse IDs, aliases, forcing, clone and owner disposal`,async()=>{
+    const v=vocab(),g=simple(),c=(await g.compile(v,{...options})),s=c.start();
     assert.equal(version,require('../package.json').version);assert.equal(c.maskBitLength,66);assert.equal(s.maskBitLength,66);
     const initial=s.mask();assert.ok(types.isUint32Array(initial));
     assert.ok(allowed(initial,0));assert.ok(allowed(initial,31));assert.ok(allowed(initial,32));
@@ -44,45 +44,44 @@ for(const {label:maskStrategy,options} of strategies) {
     s.dispose();s.dispose();closed(()=>s.mask());closed(()=>s.commitToken(0));
     copy[Symbol.dispose]();closed(()=>copy.isAccepting());
   });
-  test(`${maskStrategy}: raw bytes, partial UTF-8 and exact-only events`,()=>{
+  test(`${maskStrategy}: raw bytes, partial UTF-8 and exact-only events`,async()=>{
     const v=new Vocab([[0,Buffer.from([0xc3])],[1,Buffer.from([0xa9])],[31,b('é')],[32,b('é')],[40,Buffer.from([0,255])]],);
-    const c=Grammar.fromLark('start: "é"').compileSync(v,{...options}),s=c.start();
+    const c=(await Grammar.fromLark('start: "é"').compile(v,{...options})),s=c.start();
     assert.ok(allowed(s.mask(),0));assert.ok(allowed(s.mask(),31));assert.ok(s.commitBytes(Buffer.from([0xc3])));
     assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),1));assert.ok(s.commitBytes(Buffer.from([0xa9])));assert.ok(s.isAccepting());
     const host=Grammar.fromGlrm('glrm 1; start root; extern token T; nt root = T;');
     for(const id of [31,40,99]) {
       const m=new Module(host);
       m.bind('T',new TokenSet([id]));
-      const e=m.compileSync(v,{...options}).start();
+      const e=(await m.compile(v,{...options})).start();
       assert.ok(allowed(e.mask(),id));assert.ok(!allowed(e.mask(),32));assert.ok(e.commitToken(id));assert.ok(e.isAccepting());
     }
   });
-  test(`${maskStrategy}: end-token policy is separate from acceptance`,()=>{
+  test(`${maskStrategy}: end-token policy is separate from acceptance`,async()=>{
     const v=new Vocab([[0,b('a')]]);
     const m=new Module(Grammar.fromGlrm('extern grammar VALUE start root nt root = VALUE'));
     m.bind('VALUE',Expr.sequence(Grammar.fromLark('start: "a"'),new TokenSet([99])));
-    const s=m.compileSync(v,{...options}).start();
+    const s=(await m.compile(v,{...options})).start();
     assert.ok(!allowed(s.mask(),99));assert.ok(s.commitToken(0));assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),99));
     assert.ok(s.commitToken(99));assert.ok(s.isAccepting());assert.ok(s.mask().every(w=>w===0));
     assert.ok(s.clone().isAccepting());assert.equal(s.commitToken(99),false);
   });
-  test(`${maskStrategy}: synchronous and asynchronous persistence`,async()=>{
+  test(`${maskStrategy}: asynchronous persistence`,async()=>{
     const v=vocab(),c=await simple().compile(v,{...options});
     const expected=c.start().mask();
     const bytes=await c.save();assert.ok(types.isUint8Array(bytes));
     const copied=Buffer.from(bytes);const pending=Constraint.load(bytes,v);bytes.fill(0);
     assert.deepEqual((await pending).start().mask(),expected);
-    assert.deepEqual(Constraint.loadSync(copied,v).start().mask(),expected);
     assert.deepEqual((await Constraint.load(copied,v)).start().mask(),expected);
     const wrong=new Vocab([[0,b('WRONG')],[1,b('b')],[31,b('ab')],[32,b('a')],[65,b('z')]]);
     await assert.rejects(Constraint.load(copied,wrong));
-    assert.throws(()=>Constraint.loadSync(bytes));
+    await assert.rejects(async()=>(await Constraint.load(bytes)));
     const saving=c.save();c.dispose();assert.ok((await saving).length>0);
-    assert.throws(()=>Constraint.loadSync(Buffer.from('not an artifact')));
+    await assert.rejects(async()=>(await Constraint.load(Buffer.from('not an artifact'))));
   });
 }
 
-test('token sets normalize ranges and expose no inspection accessors',()=>{
+test('token sets normalize ranges and expose no inspection accessors',async()=>{
   const v=vocab(),t=TokenSet.fromRanges([{start:31,end:33},{start:32,end:33}]);
   assert.equal(t.toString(),'TokenSet[31..=32]');
   assert.ok(t.equals(TokenSet.fromRanges([{start:31,end:33}])));
@@ -124,7 +123,7 @@ test('frontends and input validation preserve the public contracts',async()=>{
   const j=new Vocab([[0,b('null')],[1,b('true')]]);
   const s=(await Grammar.fromJsonSchema({type:'null'}).compile(j)).start();assert.ok(allowed(s.mask(),0));assert.ok(!allowed(s.mask(),1));
   assert.throws(()=>new Vocab({0:b('a')}),TypeError);
-  assert.ok(simple().compileSync(new Vocab(new Map([[0,b('a')]]))).start().commitToken(0));
+  assert.ok((await simple().compile(new Vocab(new Map([[0,b('a')]])))).start().commitToken(0));
   assert.throws(()=>new Vocab([[0,'a']]),TypeError);assert.throws(()=>new Vocab([[0,b('a')],[0,b('b')]]),GLRMaskError);
   for(const bad of [-1,0.5,NaN,Infinity,4294967296,'1',1n,null]) assert.throws(()=>new TokenSet([bad]),RangeError);
   for(const bad of [-1,0.5,NaN,Infinity,4294967296]) {
@@ -135,47 +134,47 @@ test('frontends and input validation preserve the public contracts',async()=>{
     assert.throws(()=>s.commitToken(bad),TypeError);
   }
   for(const Class of [Constraint,ConstraintState,Grammar,Module]) assert.throws(()=>new Class(),TypeError);
-  assert.throws(()=>simple().compileSync(v,{optimisation:'auto'}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{maskStrategy:'bogus'}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{boundaryMaskStrategy:'bogus'}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{maskStrategy:'token_class_trie'}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{maskStrategy:'TokenTrie'}),TypeError);
+  await assert.rejects(async()=>(await simple().compile(v,{optimisation:'auto'})),TypeError);
+  await assert.rejects(async()=>(await simple().compile(v,{maskStrategy:'bogus'})),TypeError);
+  await assert.rejects(async()=>(await simple().compile(v,{boundaryMaskStrategy:'bogus'})),TypeError);
+  await assert.rejects(async()=>(await simple().compile(v,{maskStrategy:'token_class_trie'})),TypeError);
+  await assert.rejects(async()=>(await simple().compile(v,{maskStrategy:'TokenTrie'})),TypeError);
   // The TokenTrie object form validates its own keys and values.
-  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'token-trie',parserBackend:'nope'}}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'token-trie',mergeEquivalentTokens:'yes'}}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'lr-table'}}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{maskStrategy:{kind:'token-trie',bogus:true}}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{parserBackend:'lr-table'}),TypeError);
-  assert.throws(()=>simple().compileSync(v,{mergeEquivalentTokens:true}),TypeError);
+  await assert.rejects(async()=>(await simple().compile(v,{maskStrategy:{kind:'token-trie',parserBackend:'nope'}})),TypeError);
+  await assert.rejects(async()=>(await simple().compile(v,{maskStrategy:{kind:'token-trie',mergeEquivalentTokens:'yes'}})),TypeError);
+  await assert.rejects(async()=>(await simple().compile(v,{maskStrategy:{kind:'lr-table'}})),TypeError);
+  await assert.rejects(async()=>(await simple().compile(v,{maskStrategy:{kind:'token-trie',bogus:true}})),TypeError);
+  await assert.rejects(async()=>(await simple().compile(v,{parserBackend:'lr-table'})),TypeError);
+  await assert.rejects(async()=>(await simple().compile(v,{mergeEquivalentTokens:true})),TypeError);
   for(const obsolete of ['parser-dwa','token-trie',1,2,{kind:'token-trie',mergeEquivalentTokens:true}])
-    assert.throws(()=>simple().compileSync(v,{maskStrategy:obsolete}),TypeError);
+    await assert.rejects(async()=>(await simple().compile(v,{maskStrategy:obsolete})),TypeError);
   assert.equal(Object.keys(MaskStrategy).length,3);
   assert.equal(new Set(Object.values(MaskStrategy)).size,3);
   assert.equal(require("../index.cjs").BoundaryMaskStrategy,undefined);
   assert.equal(require('../index.cjs').ParserBackend,undefined);
   for(const maskStrategy of Object.values(MaskStrategy)){
-    const c=simple().compileSync(v,{maskStrategy}), state=c.start();
+    const c=(await simple().compile(v,{maskStrategy})), state=c.start();
     assert.equal(state.mask().length,Math.ceil(state.maskBitLength/32));
     assert.equal(state.maskBitLength,c.maskBitLength);
     const words=new Uint32Array(Math.ceil(state.maskBitLength/32));
     state.fillMask(words); assert.deepEqual(words,state.mask());
   }
-  assert.throws(()=>simple().compileSync(v,{endTokens:[-1]}),TypeError);
+  await assert.rejects(async()=>(await simple().compile(v,{endTokens:[-1]})),TypeError);
   assert.throws(()=>s.fillMask(new Float32Array(3)),TypeError);
   assert.throws(()=>s.commitBytes('a'),TypeError);
   assert.throws(()=>Grammar.fromLark('this is not a grammar'),GLRMaskError);
 });
 
-test('raw native arguments reject truncation and unsafe typed-array backing',()=>{
+test('raw native arguments reject truncation and unsafe typed-array backing',async()=>{
   const v=raw.NativeVocab.fromEntries([0,1,31],[b('a'),b('b'),b('ab')],[]);
-  const g=raw.NativeGrammar.fromSource('lark','start: "a" "b"');const s=g.compileSync(v,0,0).start();
+  const g=raw.NativeGrammar.fromSource('lark','start: "a" "b"');const s=(await g.compile(v,0,0)).start();
   const initial=s.mask();
-  const c=g.compileSync(v,0,0);
+  const c=(await g.compile(v,0,0));
   for(const bad of [-1,0.1,NaN,Infinity,4294967296]) {
     const badArg=e=>e instanceof RangeError || /GLRMASK_INVALID_INPUT/.test(String(e));
     assert.throws(()=>c.start().commitToken(bad),badArg);
     assert.throws(()=>new TokenSet([bad]),badArg);
-    assert.throws(()=>g.compileSync(v,bad,0),badArg);
+    await assert.rejects(async()=>(await g.compile(v,bad,0)),badArg);
   }
   assert.deepEqual(s.mask(),initial);
   const sharedWords=new Uint32Array(new SharedArrayBuffer(16));
@@ -192,17 +191,17 @@ test('raw native arguments reject truncation and unsafe typed-array backing',()=
   assert.deepEqual(s.mask(),initial);
 });
 
-test('garbage collection cannot invalidate a retained state or materialized mask',()=>{
+test('garbage collection cannot invalidate a retained state or materialized mask',async()=>{
   assert.equal(typeof global.gc,'function','run tests with --expose-gc');
-  function stateOnly(){const v=vocab(),g=simple(),c=g.compileSync(v);return c.start();}
-  const s=stateOnly(),mask=s.mask();global.gc();global.gc();
+  async function stateOnly(){const v=vocab(),g=simple(),c=(await g.compile(v));return c.start();}
+  const s=await stateOnly(),mask=s.mask();global.gc();global.gc();
   assert.ok(allowed(mask,31));assert.ok(s.commitToken(31));assert.ok(s.isAccepting());
   const kept=s.clone();s.dispose();global.gc();assert.ok(kept.isAccepting());assert.ok(allowed(mask,31));
 });
 
-test('isTerminated tracks commit admission',()=>{
+test('isTerminated tracks commit admission',async()=>{
   const v=new Vocab([[0,b('a')]]);
-  const s=Grammar.fromLark('start: "a"').compileSync(v).start();
+  const s=(await Grammar.fromLark('start: "a"').compile(v)).start();
   assert.equal(s.isTerminated(),false);
   assert.equal(s.commitToken(0),true);assert.equal(s.isTerminated(),true);
   assert.equal(s.commitToken(0),false);assert.equal(s.isTerminated(),true);
@@ -227,7 +226,7 @@ test('named Lark special tokens use explicit mappings, not byte aliases',async()
   await assert.rejects(Grammar.fromLark('start: <|missing|>').compile(v));
 });
 
-test('source constructors reject invalid source',()=>{
+test('source constructors reject invalid source',async()=>{
   assert.throws(()=>Grammar.fromLark('start: ('));
   for (const atom of ['<[1]>', '<[1,3-8]>', '<[]>', '<[^0]>', '<[*]>', '@token(7)']) {
     assert.throws(()=>Grammar.fromLark('start: '+atom), /token IDs can't appear in grammar source/);
@@ -236,16 +235,16 @@ test('source constructors reject invalid source',()=>{
   assert.throws(()=>Grammar.fromGlrm('invalid source'));
 });
 
-test('out-of-range token IDs throw without mutating state',()=>{
+test('out-of-range token IDs throw without mutating state',async()=>{
   const v=vocab();
   for(const bad of [-1,2**32,1.5,NaN,Infinity]) {
-    const s=simple().compileSync(v).start();
+    const s=(await simple().compile(v)).start();
     const initial=s.mask();
     assert.throws(()=>s.commitToken(bad),RangeError);
     assert.deepEqual(s.mask(),initial);
     assert.equal(s.isTerminated(),false);
     assert.equal(s.commitToken(0),true);
-    const list=simple().compileSync(v).start();
+    const list=(await simple().compile(v)).start();
     assert.equal(list.commitToken(0),true);
     const next=list.mask();
     assert.throws(()=>list.commitToken(bad),RangeError);
@@ -253,19 +252,19 @@ test('out-of-range token IDs throw without mutating state',()=>{
     assert.equal(list.commitToken(1),true);
     assert.equal(list.isAccepting(),true);
   }
-  const s=simple().compileSync(v).start();
+  const s=(await simple().compile(v)).start();
   assert.throws(()=>s.commitToken('0'),TypeError);
   assert.equal(s.commitTokens,undefined);
-  const ok=simple().compileSync(v).start();
+  const ok=(await simple().compile(v)).start();
   assert.equal(ok.commitToken(0),true);
   assert.equal(ok.commitToken(1),true);
   assert.equal(ok.isAccepting(),true);
 });
 
-test('mask bit extent includes gaps, empty and non-word-aligned domains',()=>{
+test('mask bit extent includes gaps, empty and non-word-aligned domains',async()=>{
   for(const n of [0,33,63,64]){
     const v=new Vocab(n?[[n-1,b('a')]]:[]);
-    const c=Grammar.fromLark('start: "a"').compileSync(v);
+    const c=(await Grammar.fromLark('start: "a"').compile(v));
     const s=c.start(), w=Math.ceil(n/32);
     assert.equal(c.maskBitLength,n);assert.equal(s.maskBitLength,n);
     const packed=s.mask();
@@ -287,11 +286,11 @@ test('mask bit extent includes gaps, empty and non-word-aligned domains',()=>{
   }
 });
 
-test('forced byte query stops at choices, acceptance and exact events',()=>{
+test('forced byte query stops at choices, acceptance and exact events',async()=>{
   const v=new Vocab([[0,b('a')],[1,b('b')],[2,b('c')],[9,b('')]]);
   const m=new Module(Grammar.fromGlrm('extern token MARK start r nt r="a" MARK ("b"|"c")'));
   m.bind('MARK',new TokenSet([9]));
-  const s=m.compileSync(v).start();
+  const s=(await m.compile(v)).start();
   const before=s.mask();
   assert.deepEqual(s.forcedBytes(),new Uint8Array([97]));
   assert.deepEqual(s.mask(),before);
@@ -306,9 +305,9 @@ test('forced byte query stops at choices, acceptance and exact events',()=>{
 });
 
 
-test('rejected commits terminate live states for every strategy',()=>{
+test('rejected commits terminate live states for every strategy',async()=>{
   for(const {options} of strategies) {
-    const c=simple().compileSync(vocab(),options);
+    const c=(await simple().compile(vocab(),options));
     for(const [reject,expected] of [[s=>s.commitToken(65),false],
                                    [s=>{assert.ok(s.commitToken(0));return s.commitToken(65);},false],
                                    [s=>s.commitBytes(b('az')),false]]) {
@@ -325,21 +324,21 @@ test('rejected commits terminate live states for every strategy',()=>{
 });
 
 
-test('removed record bind and null mask strategy are rejected',()=>{
+test('removed record bind and null mask strategy are rejected',async()=>{
   const g=Grammar.fromGlrm('extern grammar A start r nt r=A');
   const m=new Module(g);
   for(const obj of [g,m]) assert.throws(()=>obj.bind({A:simple()}),TypeError);
-  assert.throws(()=>simple().compileSync(vocab(),{maskStrategy:null}),TypeError);
+  await assert.rejects(async()=>simple().compile(vocab(),{maskStrategy:null}),TypeError);
 });
 
 
-test('commit outcome reports post-state viability',()=>{
+test('commit outcome reports post-state viability',async()=>{
   const v=new Vocab([[0,b('a')],[1,b('b')],[2,b('z')],[3,b('')]]);
   const empty=new Module(Grammar.fromGlrm('extern token T start root nt root=T'));
   empty.bind('T',new TokenSet([]));
   for(const {options} of strategies){
     for(const [m,isEmpty] of [[new Module(simple()),false],[empty,true]]){
-      const c=m.compileSync(v,options);
+      const c=(await m.compile(v,options));
       assert.equal(c.start().isTerminated(),isEmpty);
       for(const prefix of ['','a','ab','z']){
         for(const [method,inputs] of [['commitToken',[0,1,2,3,999,0xffffffff]],['commitBytes',['','a','b','z','ab'].map(b)]]){

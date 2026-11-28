@@ -52,7 +52,7 @@ pub struct NativeModule { inner: Arc<Handle<ModuleSlot>> }
 impl NativeModule {
     pub(super) fn new(module: g::Module) -> Self { Self { inner: Arc::new(Handle::new(ModuleSlot { module, revision: 0 })) } }
     pub(super) fn snapshot(&self) -> core::Result<g::Module> { Ok(live(&self.inner)?.module.clone()) }
-    fn bind_value(&self, name: &str, value: impl g::IntoBinding) -> core::Result<()> {
+    fn bind_value(&self, name: &str, value: impl Into<g::Expr>) -> core::Result<()> {
         let mut target = live(&self.inner)?;
         target.module.bind(name, value)?;
         target.revision += 1;
@@ -123,17 +123,6 @@ impl NativeModule {
     }
 
     #[napi]
-    pub fn precompile_sync(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<()> {
-        call(|| {
-            let vocab = live(&vocab.inner)?.clone();
-            let options = Self::options(mode)?;
-            let mut target = live(&self.inner)?;
-            target.module.precompile_with(&vocab, options)?;
-            target.revision += 1;
-            Ok(())
-        })
-    }
-    #[napi]
     pub fn precompile(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<AsyncTask<ModulePrecompileTask>> {
         call(|| {
             let target = live(&self.inner)?;
@@ -148,12 +137,6 @@ impl NativeModule {
     }
 
     #[napi]
-    pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<NativeConstraint> {
-        call(|| Ok(NativeConstraint {
-            inner: Handle::new(Arc::new(self.snapshot()?.compile_with(&*live(&vocab.inner)?, Self::options(mode)?)?)),
-        }))
-    }
-    #[napi]
     pub fn compile(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<AsyncTask<ModuleCompileTask>> {
         call(|| Ok(AsyncTask::new(ModuleCompileTask {
             module: self.snapshot()?,
@@ -162,8 +145,6 @@ impl NativeModule {
         })))
     }
 
-    #[napi]
-    pub fn save_sync(&self) -> napi::Result<Buffer> { call(|| Ok(self.snapshot()?.save().into())) }
     #[napi]
     pub fn save(&self) -> napi::Result<AsyncTask<SaveTask>> {
         call(|| Ok(AsyncTask::new(SaveTask { object: SaveObject::Module(self.snapshot()?) })))
@@ -188,7 +169,7 @@ impl Task for ModulePrecompileTask {
     fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<()> {
         call(|| {
             let mut target = live(&self.owner)?;
-            if target.revision != self.revision { return Err(core::Error::new(core::ErrorKind::PrecompileRace, "Module changed during precompile; retry with its current snapshot")); }
+            if target.revision != self.revision { return Err(core::Error::invalid("Module changed during precompile; retry with its current snapshot")); }
             target.module = value;
             target.revision += 1;
             Ok(())
@@ -210,9 +191,4 @@ impl Task for LoadModuleTask {
 #[napi]
 pub fn load_module(env: Env, bytes: Unknown<'_>) -> napi::Result<AsyncTask<LoadModuleTask>> {
     call(|| Ok(AsyncTask::new(LoadModuleTask { bytes: arrays::bytes(&env, &bytes)? })))
-}
-#[napi]
-pub fn load_module_sync(env: Env, bytes: Unknown<'_>) -> napi::Result<NativeModule> {
-    let mut task = call(|| Ok(LoadModuleTask { bytes: arrays::bytes(&env, &bytes)? }))?;
-    let value = task.compute()?; task.resolve(env, value)
 }

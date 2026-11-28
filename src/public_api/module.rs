@@ -2,7 +2,7 @@
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 use super::*;
-use super::expr::check_expr_unbound;
+use super::expr::{check_expr_unbound, ExprNode, ExprLeaf};
 use std::collections::{HashMap, BTreeMap, BTreeSet};
 mod artifact;
 #[cfg(test)]
@@ -47,7 +47,7 @@ impl CompileOptions {
     }
 
     fn selected_strategy(&self) -> InternalMaskStrategy {
-        self.internal_mask.or(self.retry_mask).unwrap_or_else(|| self.mask_strategy.into())
+        self.internal_mask.or(self.retry_mask).unwrap_or_else(|| self.mask_strategy.clone().into())
     }
 
     fn selected_boundary(&self) -> InternalBoundaryMaskStrategy {
@@ -101,60 +101,13 @@ impl InternalMaskStrategy {
     }
 }
 
-/// A value accepted by [Module::bind].
-#[diagnostic::on_unimplemented(message = "`{Self}` cannot be bound on a Module; use a Grammar, Module, Constraint, Expr or TokenSet")]
-pub trait IntoBinding: sealed::ModuleValue {}
-
-pub(super) mod sealed {
-    use super::{CompiledPart, Constraint, Expr, Grammar, Module, TokenSet};
-
-    pub enum Binding {
-        Module(Module),
-        Constraint(CompiledPart),
-        Grammar(Grammar),
-        Expr(Expr),
-        TokenSet(TokenSet),
-    }
-
-    pub trait ModuleValue {
-        fn into_binding(self) -> Binding;
-    }
-
-    macro_rules! module_value {
-        ($ty:ident) => {
-            impl ModuleValue for $ty {
-                fn into_binding(self) -> Binding { Binding::$ty(self) }
-            }
-            impl ModuleValue for &$ty {
-                fn into_binding(self) -> Binding { Binding::$ty(self.clone()) }
-            }
-        };
-    }
-    module_value!(Module);
-    module_value!(Grammar);
-    module_value!(Expr);
-    module_value!(TokenSet);
-    impl ModuleValue for Constraint {
-        fn into_binding(self) -> Binding { Binding::Expr(Expr::from(self)) }
-    }
-    impl ModuleValue for &Constraint {
-        fn into_binding(self) -> Binding { Binding::Expr(Expr::from(self)) }
-    }
-
+pub(super) enum Binding {
+    Module(Module),
+    Constraint(CompiledPart),
+    Grammar(Grammar),
+    Expr(Expr),
+    TokenSet(TokenSet),
 }
-
-use sealed::Binding;
-
-impl IntoBinding for Module {}
-impl IntoBinding for &Module {}
-impl IntoBinding for Constraint {}
-impl IntoBinding for &Constraint {}
-impl IntoBinding for Grammar {}
-impl IntoBinding for &Grammar {}
-impl IntoBinding for Expr {}
-impl IntoBinding for &Expr {}
-impl IntoBinding for TokenSet {}
-impl IntoBinding for &TokenSet {}
 
 #[derive(Debug, Clone)]
 pub(crate) enum BoundValue {
@@ -491,8 +444,20 @@ impl Module {
     }
 
     /// Binds an extern by name.
-    pub fn bind(&mut self, name: &str, value: impl IntoBinding) -> Result<()> {
-        let next = self.bound(name, sealed::ModuleValue::into_binding(value))?;
+    pub fn bind(&mut self, name: &str, value: impl Into<Expr>) -> Result<()> {
+        let expr = value.into();
+        let mut leaf = &expr;
+        while let ExprNode::Sequence(parts) = leaf.0.as_ref() {
+            if parts.len() != 1 { break; }
+            leaf = &parts[0];
+        }
+        let binding = match leaf.0.as_ref() {
+            ExprNode::Leaf(ExprLeaf::Grammar(g)) => Binding::Grammar(g.clone()),
+            ExprNode::Leaf(ExprLeaf::Module(m)) => Binding::Module(m.clone()),
+            ExprNode::Leaf(ExprLeaf::TokenSet(t)) => Binding::TokenSet(t.clone()),
+            _ => Binding::Expr(expr),
+        };
+        let next = self.bound(name, binding)?;
         *self = next;
         Ok(())
     }

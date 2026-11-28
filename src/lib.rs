@@ -113,7 +113,7 @@ pub use runtime::ConstraintInner;
 pub use runtime::markers::{MarkerEvent, MarkerId};
 pub use glrmask_vocab::{TokenSet, Vocab};
 pub use error::{Error, ErrorKind, Result};
-pub use public_api::{Grammar, Module, CompileOptions, IntoBinding, Expr, MaskStrategy, Extern, Externs};
+pub use public_api::{Grammar, Module, CompileOptions, Expr, MaskStrategy, Extern, Externs};
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use public_api::{InternalMaskStrategy, InternalBoundaryMaskStrategy, ParserBackend, TokenTrie};

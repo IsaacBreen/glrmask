@@ -341,7 +341,7 @@ fn compile_succeeds_on_threads_with_small_stacks() {
     assert!(accepts(&constraint, &[17]));
 }
 
-fn module_expr(value: impl glrmask::IntoBinding) -> glrmask::Result<glrmask::Module> {
+fn module_expr(value: impl Into<glrmask::Expr>) -> glrmask::Result<glrmask::Module> {
     let grammar = glrmask::Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE")?;
     let mut module = glrmask::Module::new(&grammar);
     module.bind("VALUE", value)?;
@@ -355,7 +355,7 @@ fn compiled_expr_preserves_explicit_trailing_event_across_strategies() {
     let modes = [MaskStrategy::AUTO, MaskStrategy::FAST_COMPILE, MaskStrategy::FAST_MASKS];
     let mut body = Module::new(&Grammar::from_glrm(OPEN).unwrap());
     body.bind("item", Expr::sequence([Expr::from(a()), Expr::from(TokenSet::new([99]))])).unwrap();
-    for child_mode in modes {
+    for child_mode in modes.iter().cloned() {
         let child = body.compile_with(&v, CompileOptions::default().mask_strategy(child_mode)).unwrap();
         assert!(accepts(&child, &[1, 99]));
         let loaded = Constraint::load(&child.save(), &v).unwrap();
@@ -369,10 +369,10 @@ fn compiled_expr_preserves_explicit_trailing_event_across_strategies() {
         let saved = Module::load(&host.save()).unwrap();
         let wrong = Vocab::new(vec![(0, b"z".to_vec())]).unwrap();
         assert_eq!(saved.compile(&wrong).unwrap_err().kind(), glrmask::ErrorKind::VocabMismatch);
-        for parent_mode in modes {
-            let baseline = host.compile_with(&v, CompileOptions::default().mask_strategy(parent_mode)).unwrap();
+        for parent_mode in modes.iter().cloned() {
+            let baseline = host.compile_with(&v, CompileOptions::default().mask_strategy(parent_mode.clone())).unwrap();
             for m in [&host, &saved, &direct, &owned] {
-                let compiled = m.compile_with(&v, CompileOptions::default().mask_strategy(parent_mode)).unwrap();
+                let compiled = m.compile_with(&v, CompileOptions::default().mask_strategy(parent_mode.clone())).unwrap();
                 assert!(accepts(&compiled, &[0, 1, 99, 3]));
                 assert!(!accepts(&compiled, &[0, 1, 3]));
                 assert!(!accepts(&compiled, &[0, 1, 99]));
@@ -386,4 +386,39 @@ fn compiled_expr_preserves_explicit_trailing_event_across_strategies() {
             }
         }
     }
+}
+
+#[test]
+fn singleton_expr_binding_matches_direct() {
+    let v = vocab();
+    fn parity(host: &Grammar, name: &str, value: impl Into<Expr> + Clone, v: &Vocab, ids: &[u32]) {
+        let mut direct = Module::new(host);
+        direct.bind(name, value.clone()).unwrap();
+        for expr in [value.clone().into(), Expr::sequence([value.clone().into()])] {
+            let mut wrapped = Module::new(host);
+            wrapped.bind(name, expr).unwrap();
+            let ca = direct.compile(v).unwrap();
+            let cb = wrapped.compile(v).unwrap();
+            let (mut a, mut b) = (ca.start(), cb.start());
+            for &id in ids {
+                assert_eq!(a.mask(), b.mask());
+                assert!(a.commit_token(id));
+                assert!(b.commit_token(id));
+            }
+            assert_eq!(a.mask(), b.mask());
+            assert!(a.is_accepting() && b.is_accepting());
+        }
+    }
+    let host = Grammar::from_glrm(OPEN).unwrap();
+    let grammar = a();
+    let module = Module::new(&grammar);
+    let constraint = module.compile(&v).unwrap();
+    parity(&host, "item", &grammar, &v, &[1]);
+    parity(&host, "item", &module, &v, &[1]);
+    parity(&host, "item", &constraint, &v, &[1]);
+    let literal = Expr::literal(b"a");
+    parity(&host, "item", &literal, &v, &[1]);
+    let tokens = TokenSet::new([99]);
+    let token_host = Grammar::from_glrm("extern token T start root nt root=T").unwrap();
+    parity(&token_host, "T", &tokens, &v, &[99]);
 }

@@ -1,6 +1,6 @@
 //! Expression operators have no source, lexical scope or path segment of their own.
 use super::*;
-use super::module::{CompiledPart, sealed::Binding};
+use super::module::{CompiledPart, Binding};
 
 /// A grammar expression.
 #[derive(Debug, Clone)]

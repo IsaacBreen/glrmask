@@ -169,3 +169,24 @@ def test_grammar_compile_sugar():
     assert hasattr(g, "externs")
     assert not hasattr(g, "clone")
     assert not hasattr(g, "exact")
+
+def test_singleton_expression_binding_matches_direct():
+    v = glrmask.Vocab({0: b"a"})
+    g = glrmask.Grammar.from_lark('start: "a"')
+    m = glrmask.Module(g)
+    c = m.compile(v)
+    for value, kind, token in [(g, "grammar", 0), (m, "grammar", 0),
+                               (c, "grammar", 0), (glrmask.Expr.literal(b"a"), "grammar", 0),
+                               (glrmask.TokenSet([99]), "token", 99)]:
+        host = glrmask.Grammar.from_glrm(f"extern {kind} T start root nt root=T")
+        direct = glrmask.Module(host)
+        direct.bind("T", value)
+        for expr in [glrmask.Expr.choice(value), glrmask.Expr.sequence(value)]:
+            wrapped = glrmask.Module(host)
+            wrapped.bind("T", expr)
+            a = direct.compile(v).start()
+            b = wrapped.compile(v).start()
+            assert list(a.mask()) == list(b.mask())
+            assert a.commit_token(token) and b.commit_token(token)
+            assert list(a.mask()) == list(b.mask())
+            assert a.is_accepting() and b.is_accepting()

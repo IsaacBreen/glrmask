@@ -19,7 +19,6 @@ fn error(e: core::Error) -> napi::Error {
         core::ErrorKind::StrategyUnsupported => "GLRMASK_STRATEGY_UNSUPPORTED",
         core::ErrorKind::Serialization => "GLRMASK_SERIALIZATION",
         core::ErrorKind::VocabMismatch => "GLRMASK_VOCAB_MISMATCH",
-        core::ErrorKind::PrecompileRace => "GLRMASK_PRECOMPILE_RACE",
         core::ErrorKind::Internal => "GLRMASK_INTERNAL",
     };
     napi::Error::new(napi::Status::GenericFailure, format!("{code}: {}", e.message))
@@ -172,14 +171,6 @@ impl NativeGrammar {
         call(|| Ok(Self { inner: Handle::new(g::Grammar::from_expr(&*live(&value.inner)?)?) }))
     }
     #[napi]
-    pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<NativeConstraint> {
-        call(|| {
-            let m = g::Module::new(&*live(&self.inner)?);
-            let options = grammar_compile_options(mode)?;
-            Ok(NativeConstraint { inner: Handle::new(Arc::new(m.compile_with(&*live(&vocab.inner)?, options)?)) })
-        })
-    }
-    #[napi]
     pub fn compile(&self, vocab: &NativeVocab, mode: f64) -> napi::Result<AsyncTask<CompileTask>> {
         call(|| {
             let m = g::Module::new(&*live(&self.inner)?);
@@ -200,10 +191,6 @@ impl NativeConstraint {
     pub fn start(&self) -> napi::Result<NativeState> { call(|| Ok(NativeState { inner: Handle::new(core::State::start(live(&self.inner)?.clone())?) })) }
     #[napi(getter)]
     pub fn mask_bit_len(&self) -> napi::Result<f64> { call(|| Ok(live(&self.inner)?.mask_bit_len() as f64)) }
-    #[napi]
-    pub fn save_sync(&self) -> napi::Result<Buffer> {
-        call(|| Ok(live(&self.inner)?.save().into()))
-    }
     #[napi]
     pub fn save(&self) -> napi::Result<AsyncTask<SaveTask>> {
         call(|| Ok(AsyncTask::new(SaveTask { object: SaveObject::Constraint(live(&self.inner)?.clone()) })))
@@ -295,11 +282,6 @@ impl Task for LoadConstraintTask {
 #[napi]
 pub fn load_constraint(env: Env, bytes: Unknown<'_>, vocab: &NativeVocab) -> napi::Result<AsyncTask<LoadConstraintTask>> {
     call(|| Ok(AsyncTask::new(LoadConstraintTask { bytes: arrays::bytes(&env, &bytes)?, vocab: live(&vocab.inner)?.clone() })))
-}
-#[napi]
-pub fn load_constraint_sync(env: Env, bytes: Unknown<'_>, vocab: &NativeVocab) -> napi::Result<NativeConstraint> {
-    let mut task = call(|| Ok(LoadConstraintTask { bytes: arrays::bytes(&env, &bytes)?, vocab: live(&vocab.inner)?.clone() }))?;
-    let value = task.compute()?; task.resolve(env, value)
 }
 
 #[napi]

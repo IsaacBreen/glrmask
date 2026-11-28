@@ -19,27 +19,28 @@ const vocab=new api.Vocab([[0,Buffer.from('a')],[1,Buffer.from('b')],[31,Buffer.
 const grammar=api.Grammar.fromLark('start: "a" "b"');
 const modes=[...new Set(Object.values(api.MaskStrategy))];
 const expected=JSON.parse(run(['--parity']));
-const actual=modes.map((maskStrategy,mode)=>{
-  const c=grammar.compileSync(vocab,{maskStrategy}),s=c.start(),states=[];
+async function main() {
+const actual=await Promise.all(modes.map(async(maskStrategy,mode)=>{
+  const c=await grammar.compile(vocab,{maskStrategy}),s=c.start(),states=[];
   for (let step=0;step<3;++step) {
     if(step) s.commitToken(step-1);
     states.push({mask:Array.from(s.mask()),accepting:s.isAccepting(),terminated:s.isTerminated(),maskBitLength:s.maskBitLength});
   }
   s.dispose();c.dispose();return {mode,states};
-});
+}));
 assert.deepEqual(actual,expected,'C++ and Node mask/commit/state results differ');
 run(['--save',output]);
-// `Constraint.saveSync()` takes no arguments, so there is one artifact per
+// `Constraint.save()` takes no arguments, so there is one artifact per
 // mode. Each mode is checked in both directions: Node loads the C++ bytes and
 // the C++ `--check` run loads the bytes Node writes.
 let artifactChecks=0;
 for (const [mode,maskStrategy] of modes.entries()) {
-  const reference=grammar.compileSync(vocab,{maskStrategy});
+  const reference=await grammar.compile(vocab,{maskStrategy});
   const stem='mode-'+mode+'.glr';
   const cppBytes=fs.readFileSync(path.join(output,'cpp-'+stem));
-  const c=api.Constraint.loadSync(cppBytes,vocab),s=c.start();
+  const c=await api.Constraint.load(cppBytes,vocab),s=c.start();
   assert.deepEqual(s.mask(),reference.start().mask());s.commitToken(31);assert.ok(s.isAccepting());
-  fs.writeFileSync(path.join(output,'node-'+stem),reference.saveSync());
+  fs.writeFileSync(path.join(output,'node-'+stem),await reference.save());
   artifactChecks+=2;
   s.dispose();c.dispose();
   reference.dispose();
@@ -47,3 +48,6 @@ for (const [mode,maskStrategy] of modes.entries()) {
 run(['--check',output]);
 fs.writeFileSync(path.join(output,'parity-report.json'),JSON.stringify({schema:1,version:api.version,modes:actual,artifactChecks},null,2)+'\n');
 console.log(`C++/Node: ${modes.length}-mode masks and state transitions match; ${artifactChecks} artifact loads (Node reads C++, C++ reads Node) passed.`);
+
+}
+main().catch(e=>{console.error(e);process.exitCode=1;});

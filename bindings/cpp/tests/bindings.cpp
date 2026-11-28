@@ -22,7 +22,7 @@ template<class F> void throws(F&& fn, glrmask_status status=-1) {
 bool allowed(const std::vector<TokenId>& m, TokenId id) { return id/32<m.size() && (m[id/32]&(TokenId{1}<<(id%32)))!=0; }
 CompileOptions strategy_options(unsigned mode) {
     CompileOptions options;
-    options.mask_strategy = static_cast<MaskStrategy>(mode);
+    options.mask_strategy = (mode == 0 ? MaskStrategy::Auto : mode == 3 ? MaskStrategy::FastCompile : MaskStrategy::FastMasks);
     return options;
 }
 Vocab vocabulary() { return Vocab({{0,"a"},{1,"b"},{31,"ab"},{32,"a"},{65,"z"}}); }
@@ -130,7 +130,7 @@ void end_tokens() {
     Vocab v({{0,"a"}});
     for (unsigned i=0; i<3; ++i) {
         CompileOptions o;
-        o.mask_strategy = static_cast<MaskStrategy>(i==0?0:i==1?3:4);
+        o.mask_strategy = (i==0 ? MaskStrategy::Auto : i==1 ? MaskStrategy::FastCompile : MaskStrategy::FastMasks);
         auto m = Module(Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE"));
         m.bind("VALUE", Expr::sequence({Grammar::from_lark(R"(start: "a")"), TokenSet({99})}));
         auto s = m.compile(v, o).start();
@@ -221,7 +221,7 @@ void threads_and_errors() {
     for (auto& thread : threads) thread.join(); CHECK(okay);
     std::size_t ignored = 0; CHECK(glrmask_constraint_mask_bit_len(nullptr, &ignored)==GLRMASK_INVALID_INPUT);
     const std::string main_error = glrmask_error_message();
-    std::thread other([]{ glrmask_grammar* p = nullptr; const char invalid[] = {char(0xff)}; glrmask_grammar_from_source(0, invalid, 1, &p); }); other.join();
+    std::thread other([]{ glrmask_grammar* p = nullptr; const char invalid[] = {char(0xff)}; CHECK(glrmask_grammar_from_lark(invalid, 1, &p) == GLRMASK_INVALID_INPUT); }); other.join();
     CHECK(main_error==glrmask_error_message());
     throws([&]{ Vocab duplicate({{0,"a"},{0,"b"}}); }, GLRMASK_INVALID_INPUT);
     throws([]{ Grammar::from_lark("start: ("); });
@@ -231,7 +231,7 @@ void threads_and_errors() {
     throws([]{ Grammar::from_json_schema("{"); });
     throws([]{ Grammar::from_glrm("invalid source"); });
     glrmask_grammar* invalid_source = nullptr;
-    CHECK(glrmask_grammar_from_source(GLRMASK_LARK, "start: (", 9, &invalid_source) == GLRMASK_SYNTAX);
+    CHECK(glrmask_grammar_from_lark("start: (", 9, &invalid_source) == GLRMASK_SYNTAX);
     CHECK(invalid_source == nullptr);
 }
 
@@ -319,18 +319,18 @@ void commit_contract() {
             }
         }
     }
-    // A negative outcome is OK with accepted=0; null state is an error.
-    uint32_t accepted=99;
-    CHECK(glrmask_state_commit_token(nullptr, 0, &accepted) == GLRMASK_INVALID_INPUT && accepted == 0);
-    CHECK(glrmask_state_commit_bytes(nullptr, nullptr, 0, &accepted) == GLRMASK_INVALID_INPUT && accepted == 0);
+    // A negative outcome is OK with allowed=0; null state is an error.
+    bool allowed=true;
+    CHECK(glrmask_state_commit_token(nullptr, 0, &allowed) == GLRMASK_INVALID_INPUT && allowed == 0);
+    CHECK(glrmask_state_commit_bytes(nullptr, nullptr, 0, &allowed) == GLRMASK_INVALID_INPUT && allowed == 0);
     auto c = Module(simple()).compile(v);
     glrmask_state* raw = nullptr;
     CHECK(glrmask_constraint_start(c.native_handle(), &raw) == GLRMASK_OK);
-    CHECK(glrmask_state_commit_token(raw, 1, &accepted) == GLRMASK_OK && accepted == 0);
-    uint32_t accepting = 1;
+    CHECK(glrmask_state_commit_token(raw, 1, &allowed) == GLRMASK_OK && allowed == 0);
+    bool accepting = 1;
     CHECK(glrmask_state_is_accepting(raw, &accepting) == GLRMASK_OK); CHECK(accepting == 0);
     const uint8_t* bytes = reinterpret_cast<const uint8_t*>("a");
-    CHECK(glrmask_state_commit_bytes(raw, bytes, 1, &accepted) == GLRMASK_OK && accepted == 0);
+    CHECK(glrmask_state_commit_bytes(raw, bytes, 1, &allowed) == GLRMASK_OK && allowed == 0);
     glrmask_state_free(raw);
 }
 
@@ -386,8 +386,7 @@ void canonical_modules() {
 
     auto child = Module(Grammar::from_lark("start: \"a\""));
     CHECK(MaskStrategy::Auto != MaskStrategy::FastCompile);
-    CompileOptions child_options = strategy_options(
-        static_cast<unsigned>(MaskStrategy::FastMasks));
+    CompileOptions child_options = strategy_options(4);
     child.precompile(v, child_options); parent.bind("child", child);
 
     auto loaded = Module::load(parent.save());
@@ -467,11 +466,11 @@ void canonical_modules() {
 
     auto open_host = Module(host); open_host.precompile(v);
     auto precompiled_child = Module(Grammar::from_lark("start: \"a\""));
-    precompiled_child.precompile(v, strategy_options(static_cast<unsigned>(MaskStrategy::FastMasks)));
+    precompiled_child.precompile(v, strategy_options(4));
     CHECK(precompiled_child.save().size() > Module(Grammar::from_lark("start: \"a\"")).save().size());
     open_host.bind("child", precompiled_child);
     auto precompiled_state = open_host.compile(
-        v, strategy_options(static_cast<unsigned>(MaskStrategy::FastCompile))).start();
+        v, strategy_options(3)).start();
     CHECK(allowed(precompiled_state.mask(), 3));
     CHECK(precompiled_state.commit_token(3)); CHECK(precompiled_state.is_accepting());
 
@@ -483,9 +482,7 @@ void canonical_modules() {
             CHECK(allowed(state.mask(), 1));
             CHECK(state.mask().size()==(state.mask_bit_len()+31)/32 && state.mask_bit_len()==c.mask_bit_len());
         }
-    CompileOptions wrong;
-    wrong.mask_strategy = static_cast<MaskStrategy>(1);
-    throws([&]{ Grammar::from_lark("start: \"a\"").compile(v, wrong); },GLRMASK_INVALID_INPUT);
+    CHECK(std::hash<MaskStrategy>{}(MaskStrategy::Auto) == std::hash<MaskStrategy>{}(MaskStrategy::Auto));
 
 }
 
@@ -533,6 +530,25 @@ void direct_constraint_binding() {
     }
 }
 
+void singleton_expression_binding() {
+    Vocab v({{0,"a"}});
+    auto g=Grammar::from_lark(R"(start: "a")");
+    auto m=Module(g); auto c=m.compile(v);
+    auto literal=Expr::literal("a"); auto tokens=TokenSet({99});
+    auto parity=[&](const auto& value, const char* kind, TokenId id) {
+        auto h=Grammar::from_glrm(std::string("extern ")+kind+" T start root nt root=T");
+        Module direct(h); direct.bind("T",value);
+        for (auto expr : {Expr::choice({value}), Expr::sequence({value})}) {
+            Module wrapped(h); wrapped.bind("T",expr);
+            auto a=direct.compile(v).start(), b=wrapped.compile(v).start();
+            CHECK(a.mask()==b.mask()); CHECK(a.commit_token(id)); CHECK(b.commit_token(id));
+            CHECK(a.mask()==b.mask() && a.is_accepting() && b.is_accepting());
+        }
+    };
+    parity(g,"grammar",0); parity(m,"grammar",0); parity(c,"grammar",0);
+    parity(literal,"grammar",0); parity(tokens,"token",99);
+}
+
 void mask_bit_domain_lengths() {
     for (std::size_t n : {0u,33u,63u,64u}) {
         std::vector<VocabEntry> entries;
@@ -565,6 +581,7 @@ int main(int argc, char** argv) {
         CHECK(argc==1);
         canonical_modules();
         direct_constraint_binding();
+        singleton_expression_binding();
         precompile_vocab_lock();
         basic();
         mask_bit_domain_lengths();

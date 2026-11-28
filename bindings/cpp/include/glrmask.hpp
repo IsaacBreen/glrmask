@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -20,14 +21,35 @@ using TokenRange = glrmask_token_range;
 using Bytes = std::vector<std::uint8_t>;
 
 /// Controls how the constraint is compiled.
-enum class MaskStrategy : std::uint32_t {
+class MaskStrategy {
+    std::uint32_t value_;
+    explicit constexpr MaskStrategy(std::uint32_t value) noexcept : value_(value) {}
+    friend struct CompileOptions;
+    friend struct std::hash<MaskStrategy>;
+public:
     /// The default; currently `FastMasks`.
-    Auto = 0,
+    static const MaskStrategy Auto;
     /// Faster compilation, slower masks.
-    FastCompile = 3,
+    static const MaskStrategy FastCompile;
     /// Faster masks, slower compilation.
-    FastMasks = 4
+    static const MaskStrategy FastMasks;
+    constexpr bool operator==(const MaskStrategy& other) const noexcept { return value_ == other.value_; }
+    constexpr bool operator!=(const MaskStrategy& other) const noexcept { return !(*this == other); }
 };
+inline constexpr MaskStrategy MaskStrategy::Auto{GLRMASK_MASK_STRATEGY_AUTO};
+inline constexpr MaskStrategy MaskStrategy::FastCompile{GLRMASK_MASK_STRATEGY_FAST_COMPILE};
+inline constexpr MaskStrategy MaskStrategy::FastMasks{GLRMASK_MASK_STRATEGY_FAST_MASKS};
+} // namespace glrmask
+
+namespace std {
+template<> struct hash<glrmask::MaskStrategy> {
+    size_t operator()(const glrmask::MaskStrategy& strategy) const noexcept {
+        return hash<uint32_t>{}(strategy.value_);
+    }
+};
+} // namespace std
+
+namespace glrmask {
 
 /// What an extern can be bound to.
 enum class ExternKind : std::uint32_t {
@@ -109,8 +131,8 @@ struct CompileOptions {
     MaskStrategy mask_strategy = MaskStrategy::Auto;
     glrmask_compile_options native() const noexcept {
         glrmask_compile_options options{};
-        (void)glrmask_compile_options_init(&options, sizeof(options));
-        options.mask_strategy = static_cast<std::uint32_t>(mask_strategy);
+        options.struct_size = sizeof(options);
+        options.mask_strategy = mask_strategy.value_;
         return options;
     }
 };
@@ -183,9 +205,9 @@ public:
         glrmask_token_set* p = nullptr; detail::check(glrmask_token_set_from_ranges(ranges.data(), ranges.size(), &p)); return TokenSet(p);
     }
     friend bool operator==(const TokenSet& a, const TokenSet& b) {
-        std::uint32_t equal = 0;
+        bool equal = false;
         detail::check(glrmask_token_set_equal(a.native_handle(), b.native_handle(), &equal));
-        return equal != 0;
+        return equal;
     }
     friend bool operator!=(const TokenSet& a, const TokenSet& b) { return !(a == b); }
 private:
@@ -212,16 +234,16 @@ public:
 class Grammar : public detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone> {
     using Base = detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone>;
     explicit Grammar(glrmask_grammar* p) : Base(p) {}
-    static Grammar source(std::uint32_t format, std::string_view text) {
-        glrmask_grammar* p = nullptr; detail::check(glrmask_grammar_from_source(format, text.data(), text.size(), &p)); return Grammar(p);
+    static Grammar source(glrmask_status (*parse)(const char*, std::size_t, glrmask_grammar**), std::string_view text) {
+        glrmask_grammar* p = nullptr; detail::check(parse(text.data(), text.size(), &p)); return Grammar(p);
     }
 public:
     /// Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source.
-    static Grammar from_glrm(std::string_view text) { return source(GLRMASK_GLRM, text); }
+    static Grammar from_glrm(std::string_view text) { return source(glrmask_grammar_from_glrm, text); }
     /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats) source.
-    static Grammar from_lark(std::string_view text) { return source(GLRMASK_LARK, text); }
+    static Grammar from_lark(std::string_view text) { return source(glrmask_grammar_from_lark, text); }
     /// Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats), given as JSON text.
-    static Grammar from_json_schema(std::string_view text) { return source(GLRMASK_JSON_SCHEMA, text); }
+    static Grammar from_json_schema(std::string_view text) { return source(glrmask_grammar_from_json_schema, text); }
 
     /// Builds a grammar from an `Expr`.
     static Grammar from_expr(const Expr& value);
@@ -395,9 +417,9 @@ public:
     /// The mask's length in bits (max token ID plus one).
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_bit_len(native_handle(), &n)); return n; }
     /// Advances the state by the token. If it isn't allowed, returns `false` and terminates the state.
-    [[nodiscard]] bool commit_token(TokenId id) { uint32_t accepted = 0; detail::check(glrmask_state_commit_token(native_handle(), id, &accepted)); return accepted != 0; }
+    [[nodiscard]] bool commit_token(TokenId id) { bool allowed = false; detail::check(glrmask_state_commit_token(native_handle(), id, &allowed)); return allowed; }
     /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
-    [[nodiscard]] bool commit_bytes(const std::uint8_t* bytes, std::size_t size) { uint32_t accepted = 0; detail::check(glrmask_state_commit_bytes(native_handle(), bytes, size, &accepted)); return accepted != 0; }
+    [[nodiscard]] bool commit_bytes(const std::uint8_t* bytes, std::size_t size) { bool allowed = false; detail::check(glrmask_state_commit_bytes(native_handle(), bytes, size, &allowed)); return allowed; }
     /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
     [[nodiscard]] bool commit_bytes(const Bytes& bytes) { return commit_bytes(bytes.data(), bytes.size()); }
     /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
@@ -405,9 +427,9 @@ public:
     /// The bytes that must come next.
     Bytes forced_bytes() const { glrmask_bytes* p = nullptr; detail::check(glrmask_state_forced_bytes(native_handle(), &p)); return detail::take_bytes(p); }
     /// Whether the output so far could end here.
-    bool is_accepting() const { std::uint32_t value = 0; detail::check(glrmask_state_is_accepting(native_handle(), &value)); return value != 0; }
+    bool is_accepting() const { bool value = false; detail::check(glrmask_state_is_accepting(native_handle(), &value)); return value; }
     /// Whether nothing more can be committed.
-    bool is_terminated() const { std::uint32_t value = 0; detail::check(glrmask_state_is_terminated(native_handle(), &value)); return value != 0; }
+    bool is_terminated() const { bool value = false; detail::check(glrmask_state_is_terminated(native_handle(), &value)); return value; }
 };
 
 inline Constraint Grammar::compile(const Vocab& vocab, const CompileOptions& options) const {

@@ -36,8 +36,6 @@ export declare class Grammar implements Disposable {
 
   /** Compiles the grammar into a constraint. */
   compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
-  /** Compiles the grammar into a constraint. */
-  compileSync(vocab: Vocab, options?: CompileOptions): Constraint;
   clone(): Grammar;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
@@ -99,19 +97,12 @@ export declare class Module implements Disposable {
   bind(name: string, value: ExprPart): void;
   /** Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`. */
   precompile(vocab: Vocab, options?: CompileOptions): Promise<void>;
-  /** Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`. */
-  precompileSync(vocab: Vocab, options?: CompileOptions): void;
   /** Finishes compiling the module into a constraint. */
   compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
-  /** Finishes compiling the module into a constraint. */
-  compileSync(vocab: Vocab, options?: CompileOptions): Constraint;
   save(): Promise<Uint8Array>;
-  saveSync(): Uint8Array;
   /** May fail if saved by a different GLRMask version. */
   static load(data: Uint8Array): Promise<Module>;
 
-  /** May fail if saved by a different GLRMask version. */
-  static loadSync(data: Uint8Array): Module;
   clone(): Module;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
@@ -128,11 +119,8 @@ export declare class Constraint implements Disposable {
 
   save(): Promise<Uint8Array>;
 
-  saveSync(): Uint8Array;
   /** May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. */
   static load(data: Uint8Array, vocab: Vocab): Promise<Constraint>;
-  /** May fail if saved by a different GLRMask version. Fails if `vocab` differs from the one it was compiled with. */
-  static loadSync(data: Uint8Array, vocab: Vocab): Constraint;
   clone(): Constraint;
   /** Frees the native handle now instead of at garbage collection. */
   dispose(): void;
@@ -188,10 +176,9 @@ export interface Extern {
   readonly kind: 'token' | 'grammar';
 }
 
-export type KnownErrorCode = 'GLRMASK_SYNTAX' | 'GLRMASK_INVALID_INPUT' | 'GLRMASK_COMPILATION' | 'GLRMASK_RESOURCE_LIMIT' | 'GLRMASK_STRATEGY_UNSUPPORTED' | 'GLRMASK_SERIALIZATION' | 'GLRMASK_INTERNAL' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED' | 'GLRMASK_VOCAB_MISMATCH' | 'GLRMASK_PRECOMPILE_RACE';
-export type ErrorCode = KnownErrorCode;
+export type ErrorCode = 'GLRMASK_SYNTAX' | 'GLRMASK_INVALID_INPUT' | 'GLRMASK_COMPILATION' | 'GLRMASK_RESOURCE_LIMIT' | 'GLRMASK_STRATEGY_UNSUPPORTED' | 'GLRMASK_SERIALIZATION' | 'GLRMASK_INTERNAL' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED' | 'GLRMASK_VOCAB_MISMATCH';
 export declare class GLRMaskError extends Error {
-  /** One of `GLRMASK_SYNTAX`, `GLRMASK_INVALID_INPUT`, `GLRMASK_COMPILATION`, `GLRMASK_RESOURCE_LIMIT`, `GLRMASK_STRATEGY_UNSUPPORTED`, `GLRMASK_SERIALIZATION`, `GLRMASK_INTERNAL`, `GLRMASK_BUFFER_TOO_SMALL`, `GLRMASK_CLOSED`, `GLRMASK_VOCAB_MISMATCH`, `GLRMASK_PRECOMPILE_RACE`. */
+  /** One of `GLRMASK_SYNTAX`, `GLRMASK_INVALID_INPUT`, `GLRMASK_COMPILATION`, `GLRMASK_RESOURCE_LIMIT`, `GLRMASK_STRATEGY_UNSUPPORTED`, `GLRMASK_SERIALIZATION`, `GLRMASK_INTERNAL`, `GLRMASK_BUFFER_TOO_SMALL`, `GLRMASK_CLOSED`, `GLRMASK_VOCAB_MISMATCH`. */
   readonly code: ErrorCode;
   constructor(code: ErrorCode, message: string, options?: ErrorOptions);
 }

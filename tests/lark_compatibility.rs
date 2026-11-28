@@ -121,7 +121,7 @@ fn ignored_terminals_remain_distinct_under_maximal_munch() {
     assert!(Grammar::from_lark("%ignore \"a\"\n%ignore /b*/\nstart: \"b\"").unwrap().compile(&v).is_err());
 }
 
-fn module_expr(value: impl glrmask::IntoBinding) -> glrmask::Result<glrmask::Module> {
+fn module_expr(value: impl Into<glrmask::Expr>) -> glrmask::Result<glrmask::Module> {
     let grammar = glrmask::Grammar::from_glrm("extern grammar VALUE start root nt root = VALUE")?;
     let mut module = glrmask::Module::new(&grammar);
     module.bind("VALUE", value)?;

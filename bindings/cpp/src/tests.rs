@@ -10,7 +10,7 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
     unsafe {
         let (mut vocab, mut grammar) = (ptr::null_mut(), ptr::null_mut());
         assert_eq!(glrmask_vocab_new(ffi_entries.as_ptr(), ffi_entries.len(), &mut vocab), 0);
-        assert_eq!(glrmask_grammar_from_source(3, source.as_ptr().cast(), source.len(), &mut grammar), 0);
+        assert_eq!(glrmask_grammar_from_lark(source.as_ptr().cast(), source.len(), &mut grammar), 0);
         for strategy in [0,3,4] {
             let rust_g = g::Grammar::from_lark(source).unwrap();
             let rust_m = g::Module::new(&rust_g);
@@ -35,10 +35,10 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
                 let mut words = vec![u32::MAX; rust.mask_bit_len().div_ceil(32)];
                 assert_eq!(glrmask_state_fill_mask(state, words.as_mut_ptr(), words.len()), 0);
                 assert_eq!(words, reference.mask(), "strategy {strategy}");
-                let mut accepting = 99;
+                let mut accepting = true;
                 assert_eq!(glrmask_state_is_accepting(state, &mut accepting), 0);
-                assert_eq!(accepting != 0, reference.is_accepting());
-                if let Some(token) = token { let mut accepted = 0; assert_eq!(glrmask_state_commit_token(state, token, &mut accepted), 0); assert_eq!(accepted, 1); assert!(reference.commit_token(token)); }
+                assert_eq!(accepting, reference.is_accepting());
+                if let Some(token) = token { let mut accepted = false; assert_eq!(glrmask_state_commit_token(state, token, &mut accepted), 0); assert!(accepted); assert!(reference.commit_token(token)); }
             }
             glrmask_state_free(state);
         }
@@ -74,8 +74,8 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         let host = "glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";";
         let leaf = "start: \"a\"";
         let (mut grammar, mut child) = (ptr::null_mut(), ptr::null_mut());
-        assert_eq!(glrmask_grammar_from_source(1, host.as_ptr().cast(), host.len(), &mut grammar), 0);
-        assert_eq!(glrmask_grammar_from_source(3, leaf.as_ptr().cast(), leaf.len(), &mut child), 0);
+        assert_eq!(glrmask_grammar_from_glrm(host.as_ptr().cast(), host.len(), &mut grammar), 0);
+        assert_eq!(glrmask_grammar_from_lark(leaf.as_ptr().cast(), leaf.len(), &mut child), 0);
         let (mut parent, mut clone, mut prepared) = (ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
         assert_eq!(glrmask_module_new(grammar, &mut parent), 0);
         assert_eq!(glrmask_module_precompile(parent, vocab, ptr::null()), 0);
@@ -118,7 +118,7 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         let mut state = ptr::null_mut(); assert_eq!(glrmask_constraint_start(constraint, &mut state), 0);
         glrmask_constraint_free(constraint); glrmask_module_free(loaded);
         let mut words = [0u32; 1]; assert_eq!(glrmask_state_fill_mask(state, words.as_mut_ptr(), 1), 0); assert_ne!(words[0] & (1 << 3), 0);
-        let mut accepted = 0; assert_eq!(glrmask_state_commit_token(state, 3, &mut accepted), 0); assert_eq!(accepted, 1); let mut accepting = 0; assert_eq!(glrmask_state_is_accepting(state, &mut accepting), 0); assert_eq!(accepting, 1); glrmask_state_free(state);
+        let mut accepted = false; assert_eq!(glrmask_state_commit_token(state, 3, &mut accepted), 0); assert!(accepted); let mut accepting = false; assert_eq!(glrmask_state_is_accepting(state, &mut accepting), 0); assert!(accepting); glrmask_state_free(state);
 
         // Expr literal test
         let mut lit_expr = ptr::null_mut();
@@ -161,7 +161,7 @@ fn older_shorter_compile_options_default_the_new_switches_to_zero() {
 
 #[test]
 fn status_codes_distinguish_error_kinds() {
-    assert_eq!(glrmask_abi_version(), 8);
+    assert_eq!(glrmask_abi_version(), 9);
     assert_eq!(status(core::ErrorKind::Syntax), 1);
     assert_eq!(status(core::ErrorKind::InvalidInput), 2);
     assert_eq!(status(core::ErrorKind::Compilation), 3);
@@ -174,7 +174,7 @@ fn status_codes_distinguish_error_kinds() {
     let source = "start: (";
     unsafe {
         let mut grammar = ptr::null_mut();
-        assert_eq!(glrmask_grammar_from_source(3, source.as_ptr().cast(), source.len(), &mut grammar), 1);
+        assert_eq!(glrmask_grammar_from_lark(source.as_ptr().cast(), source.len(), &mut grammar), 1);
         assert!(grammar.is_null());
     }
 }
