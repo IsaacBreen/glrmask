@@ -119,11 +119,100 @@ def website_svg(record, spec, dark, label, guide=False):
     import copy
     spec = copy.deepcopy(spec)
     spec['display_modes'] = ['static', 'dynamic', 'llguidance', 'xgrammar'] if guide else ['static', 'llguidance', 'xgrammar']
-    for palette in spec['palette'].values():
-        palette['xgrammar'] = '#267b56' if not dark else '#72c39a'
+    spec['palette']['light']['xgrammar'] = '#267b56'
+    spec['palette']['dark'].update(static='#ff6b7d', llguidance='#75bfff',
+                                  xgrammar='#69d3ae', text='#b9c1c9', rule='#353d47')
     if label == 'JavaScript':
         spec['latency_us']['max'] = 1000000
     return svg(record['tail'], spec, dark, label, 'javascript' if label == 'JavaScript' else 'json', website=True)
+
+
+# Conservative text bounds in the unchanged 14px semibold system font.
+# Include descenders and extra horizontal room for fallback fonts.
+LABEL_WIDTHS = {"GLRMask": 64, "GLRMask dynamic": 124, "llguidance": 71, "XGrammar": 75}
+
+
+def label_box(name, x, baseline):
+    return (x - LABEL_WIDTHS[name], baseline - 12, x + 1, baseline + (4 if name in ("llguidance", "GLRMask dynamic") else 1))
+
+
+def curve_span(points, x0, x1):
+    # Monotonic x/y: extrema on an interval occur at its two endpoints.
+    def at(x):
+        lo, hi = 0, len(points)-1
+        while hi-lo > 1:
+            mid = (lo+hi)//2
+            if points[mid][0] >= x:
+                lo = mid
+            else:
+                hi = mid
+        a,b = points[lo],points[hi]
+        if x >= a[0]: return a[1]
+        if x <= b[0]: return b[1]
+        return a[1] + (b[1]-a[1])*(x-a[0])/(b[0]-a[0])
+    return at(x1), at(x0)
+
+
+def boxes_overlap(a, b, pad=2):
+    return not (a[2]+pad < b[0] or b[2]+pad < a[0] or a[3]+pad < b[1] or b[3]+pad < a[1])
+
+
+def website_labels(curves, left, right, top, bottom, line_width):
+    # Search within a small vertical band around the measured endpoint.
+    # Stagger anchors horizontally only when a right-edge placement collides.
+    margin = line_width/2 + 1
+    # Four closely spaced JSON curves do not admit rectangular labels
+    # at the right edge within 18px of all endpoints. Prefer proximity
+    # to the correct curve over a misleading association in that case.
+    choices = []
+    for end_y, mode, name, points in curves:
+        candidates = []
+        allowance = 32 if len(curves)==4 and name in ("GLRMask dynamic", "llguidance") else 18
+        for xx in range(int(right-6), int(left+LABEL_WIDTHS[name])-1, -2):
+            x0 = xx-LABEL_WIDTHS[name]
+            spans = [curve_span(p, x0-margin, xx+margin) for _,_,_,p in curves]
+            own = curve_span(points, x0, xx)
+            for yy in range(max(math.ceil(top+12), math.ceil(end_y-allowance-4)),
+                            min(math.floor(bottom-4), math.floor(end_y+allowance+12))+1):
+                box = label_box(name, xx, yy)
+                if any(box[3]+margin >= low and box[1]-margin <= high for low,high in spans):
+                    continue
+                gap = max(own[0]-box[3], box[1]-own[1], 0)
+                distance = max(end_y-box[3], box[1]-end_y, 0)
+                gaps = [max(lo-box[3], box[1]-hi, 0) for lo,hi in spans]
+                own_gap = gaps[next(i for i,c in enumerate(curves) if c[1]==mode)]
+                if own_gap > min(gaps)+.1: continue
+                cost = (right-6-xx)*.45 + distance + gap*2
+                candidates.append((cost, xx, yy, box))
+        choices.append(sorted(candidates))
+    # Global selection rather than moving one label down arbitrarily.
+    order = sorted(range(len(curves)), key=lambda i: len(choices[i]))
+    if any(not c for c in choices):
+        raise ValueError('No collision-free endpoint label candidate')
+    lower = [0] * (len(order)+1)
+    for k in range(len(order)-1, -1, -1):
+        lower[k] = lower[k+1] + choices[order[k]][0][0]
+    best_cost = float('inf')
+    best = None
+    selected = {}
+    def visit(k, cost):
+        nonlocal best, best_cost
+        if k == len(order):
+            best, best_cost = dict(selected), cost
+            return
+        i = order[k]
+        for c, xx, yy, box in choices[i]:
+            if cost+c+lower[k+1] >= best_cost:
+                break
+            if any(boxes_overlap(box, b) for _,_,b in selected.values()):
+                continue
+            selected[i] = (xx, yy, box)
+            visit(k+1, cost+c)
+            del selected[i]
+    visit(0, 0)
+    if best is None:
+        raise ValueError("No collision-free endpoint label placement")
+    return {curves[i][1]: (xx,yy) for i,(xx,yy,_) in best.items()}
 
 
 def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dynamic=False, website=False):
@@ -180,6 +269,7 @@ def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dyn
             a=points[len(points)-len(visible)-1]; b=visible[0]
             end_y=a[1]+(b[1]-a[1])*(right-a[0])/(b[0]-a[0])
         curves.append((end_y,mode,name,points))
+    positions = website_labels(curves, left, right, top, bottom, spec["line_width"]) if website else {}
     previous=-100
     for end_y,mode,name,points in sorted(curves):
         baseline=end_y-10
@@ -187,10 +277,13 @@ def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dyn
             region=[yy for xx,yy in points if right-155<=xx<=right]
             baseline=max(previous+24,max(region)+21)
         baseline=min(bottom-8,max(top+16,baseline)); previous=baseline
-        if abs(baseline-(end_y-10))>2:
+        # Website series labels have no leader: a vertical leader at the
+        # last sample can look like a spurious latency jump.
+        if not website and abs(baseline-(end_y-10))>2:
             out.append(f'<path d="M{right},{end_y:.2f} V{baseline-6:.2f}" stroke="{palette[mode]}" stroke-width="0.8" opacity="0.65"/>')
+        xx, baseline = positions.get(mode, (right-6, baseline))
         fade=f' opacity="{spec["dynamic_preview"]["static_opacity"]}"' if include_dynamic and mode=='static' else ''
-        out.append(f'<text x="{right-6}" y="{baseline:.2f}" fill="{palette[mode]}" font-size="14" font-weight="600" text-anchor="end"{fade}>{name}</text>')
+        out.append(f'<text x="{xx}" y="{baseline:.2f}" fill="{palette[mode]}" font-size="14" font-weight="600" text-anchor="end"{fade}>{name}</text>')
     return '\n'.join(out+['</g>','</svg>',''])
 
 

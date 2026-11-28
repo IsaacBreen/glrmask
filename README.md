@@ -16,8 +16,8 @@ Time between masks. Lower is better.
 
 <p align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-json-2026-10-19-dark.svg">
-  <img src="docs/assets/benchmark-tbm-json-2026-10-19.svg" alt="JSON Schema time between masks: measured GLRMask, llguidance 1.9.1 and XGrammar 0.2.8 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-json-2026-10-19-dark.svg?v=f35571b99009">
+  <img src="docs/assets/benchmark-tbm-json-2026-10-19.svg?v=ef49163deb02" alt="JSON Schema time between masks: measured GLRMask, llguidance 1.9.1 and XGrammar 0.2.8 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480">
 </picture>
 </p>
 
@@ -49,8 +49,8 @@ Time between masks. Lower is better.
 
 <p align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-javascript-2026-10-19-dark.svg?v=06169e60e086">
-  <img src="docs/assets/benchmark-tbm-javascript-2026-10-19.svg?v=d00fb41c72e3" alt="JavaScript time between masks: measured GLRMask, llguidance 1.9.1 and XGrammar 0.2.8 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-javascript-2026-10-19-dark.svg?v=b816a8c9ed27">
+  <img src="docs/assets/benchmark-tbm-javascript-2026-10-19.svg?v=34912ef48c0f" alt="JavaScript time between masks: measured GLRMask, llguidance 1.9.1 and XGrammar 0.2.8 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480">
 </picture>
 </p>
 
@@ -137,11 +137,65 @@ while True:
     output.append(token)
 ```
 
+<details>
+<summary>Full example</summary>
+
+```python
+from glrmask import Grammar, Vocab
+import numpy as np
+
+# Replace with your tokenizer's token bytes
+token_bytes = {i: bytes([i]) for i in range(256)}
+EOS = 256
+rng = np.random.default_rng(0)
+def model(output):
+    return rng.standard_normal(257)
+def sample(logits, mask, accepting):
+    allowed = np.zeros(len(logits), dtype=bool)
+    bits = np.unpackbits(mask.astype('<u4').view(np.uint8), bitorder='little')
+    allowed[:EOS] = bits[:EOS]
+    allowed[EOS] = accepting
+    if not allowed.any():
+        raise RuntimeError('no allowed token and cannot stop')
+    return int(np.argmax(np.where(allowed, logits, -np.inf)))
+grammar = Grammar.from_json_schema({
+    "type": "object",
+    "properties": {
+        "color": {
+            "enum": ["red", "green", "blue"]
+        }
+    },
+    "required": ["color"],
+    "additionalProperties": False,
+})
+
+# Token ID -> exact bytes from tokenizer
+vocab = Vocab(token_bytes)
+state = grammar.compile(vocab).start()
+
+output = []
+while True:
+    logits = model(output)
+    mask = state.mask()
+    token = sample(
+        logits, mask, state.is_accepting()
+    )
+    if token == EOS:
+        break
+    if not state.commit_token(token):
+        raise RuntimeError("Rejected token")
+    output.append(token)
+assert state.is_accepting()
+print(bytes(output).decode())
+```
+
+</details>
+
 ### Rust quickstart
 
 ```rust
-let grammar = Grammar::from_json_schema(
-    r#"{
+let grammar = Grammar::from_json_schema(r#"
+    {
         "type": "object",
         "properties": {
             "color": {
@@ -152,8 +206,8 @@ let grammar = Grammar::from_json_schema(
         },
         "required": ["color"],
         "additionalProperties": false
-    }"#,
-)?;
+    }
+"#)?;
 
 // Token ID -> exact bytes from tokenizer
 let vocab = Vocab::new(token_bytes)?;
@@ -172,6 +226,62 @@ loop {
     output.push(token);
 }
 ```
+
+<details>
+<summary>Full example</summary>
+
+```rust
+use glrmask::{Grammar, Vocab};
+const EOS: u32 = 256;
+fn model(output: &[u32]) -> Vec<f32> {
+    (0..257).map(|t| ((t * 7919 + output.len() * 104_729) % 1000) as f32).collect()
+}
+fn sample(logits: &[f32], mask: &[u32], accepting: bool) -> u32 {
+    (0..=EOS).filter(|&id| if id == EOS { accepting } else { mask[id as usize / 32] >> (id % 32) & 1 == 1 })
+        .max_by(|&a, &b| logits[a as usize].total_cmp(&logits[b as usize])).expect("no allowed token and cannot stop")
+}
+fn main() -> glrmask::Result<()> {
+// Replace with your tokenizer's token bytes
+let token_bytes = (0..256u32).map(|id| (id, vec![id as u8]));
+let grammar = Grammar::from_json_schema(r#"
+    {
+        "type": "object",
+        "properties": {
+            "color": {
+                "enum": [
+                    "red", "green", "blue"
+                ]
+            }
+        },
+        "required": ["color"],
+        "additionalProperties": false
+    }
+"#)?;
+
+// Token ID -> exact bytes from tokenizer
+let vocab = Vocab::new(token_bytes)?;
+let constraint = grammar.compile(&vocab)?;
+let mut state = constraint.start();
+
+let mut output = Vec::new();
+loop {
+    let logits = model(&output);
+    let mask = state.mask();
+    let token = sample(
+        &logits, &mask, state.is_accepting()
+    );
+    if token == EOS { break; }
+    assert!(state.commit_token(token));
+    output.push(token);
+}
+assert!(state.is_accepting());
+let bytes: Vec<u8> = output.into_iter().map(|t| t as u8).collect();
+println!("{}", String::from_utf8_lossy(&bytes));
+Ok(())
+}
+```
+
+</details>
 
 ## Composing grammars
 
@@ -205,20 +315,52 @@ call.bind("ARGS", weather)
 constraint = call.compile(vocab)
 ```
 
+<details>
+<summary>Full example</summary>
+
+```python
+from glrmask import Grammar, Module, Vocab
+# Replace with your tokenizer's token bytes
+token_bytes = {i: bytes([i]) for i in range(256)}
+# Token ID -> exact bytes from tokenizer
+vocab = Vocab(token_bytes)
+
+weather = Grammar.from_json_schema({
+    "type": "object",
+    "properties": {
+        "city": {"type": "string"}
+    },
+    "required": ["city"],
+    "additionalProperties": False,
+}).compile(vocab)
+
+parent = Grammar.from_glrm('''
+    extern grammar ARGS
+    start call
+    nt call = "<weather>" ARGS
+              "</weather>"
+''')
+call = Module(parent)
+call.bind("ARGS", weather)
+constraint = call.compile(vocab)
+```
+
+</details>
+
 ```rust
 // Token ID -> exact bytes from tokenizer
 let vocab = Vocab::new(token_bytes)?;
 
-let weather = Grammar::from_json_schema(
-    r#"{
+let weather = Grammar::from_json_schema(r#"
+    {
         "type": "object",
         "properties": {
             "city": {"type": "string"}
         },
         "required": ["city"],
         "additionalProperties": false
-    }"#,
-)?.compile(&vocab)?;
+    }
+"#)?.compile(&vocab)?;
 
 let parent = Grammar::from_glrm(r#"
     extern grammar ARGS
@@ -230,6 +372,46 @@ let mut call = Module::new(&parent);
 call.bind("ARGS", &weather)?;
 let constraint = call.compile(&vocab)?;
 ```
+
+<details>
+<summary>Full example</summary>
+
+```rust
+use glrmask::{Grammar, Module, Vocab};
+fn main() -> glrmask::Result<()> {
+// Replace with your tokenizer's token bytes
+let token_bytes = (0..256u32).map(|id| (id, vec![id as u8]));
+// Token ID -> exact bytes from tokenizer
+let vocab = Vocab::new(token_bytes)?;
+
+let weather = Grammar::from_json_schema(r#"
+    {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string"}
+        },
+        "required": ["city"],
+        "additionalProperties": false
+    }
+"#)?.compile(&vocab)?;
+
+let parent = Grammar::from_glrm(r#"
+    extern grammar ARGS
+    start call
+    nt call = "<weather>" ARGS
+              "</weather>"
+"#)?;
+let mut call = Module::new(&parent);
+call.bind("ARGS", &weather)?;
+let constraint = call.compile(&vocab)?;
+let mut state = constraint.start();
+assert!(state.commit_bytes(b"<weather>{\"city\": \"Perth\"}</weather>"));
+assert!(state.is_accepting());
+Ok(())
+}
+```
+
+</details>
 
 See the [guide](https://github.com/IsaacBreen/glrmask/blob/v1.0.0-rc.1/GUIDE.md#composing-grammars) for the API.
 

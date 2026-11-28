@@ -4,22 +4,23 @@
 #include <cassert>
 using namespace glrmask;
 int main() {
+// Replace with your tokenizer's token bytes
 std::vector<VocabEntry> token_bytes;
 for (TokenId id=0; id<256; ++id) token_bytes.emplace_back(id, Bytes{static_cast<std::uint8_t>(id)});
 // [/hidden]
 // Token ID -> exact bytes from tokenizer
 Vocab vocab(token_bytes);
 
-auto weather = Grammar::from_json_schema(
-    R"({
+auto weather = Grammar::from_json_schema(R"(
+    {
         "type": "object",
         "properties": {
             "city": {"type": "string"}
         },
         "required": ["city"],
         "additionalProperties": false
-    })"
-).compile(vocab);
+    }
+)").compile(vocab);
 
 auto parent = Grammar::from_glrm(R"(
     extern grammar ARGS

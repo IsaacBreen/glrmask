@@ -22,6 +22,23 @@ In the quickstart, supply the tokenizer's exact token bytes and the model's EOS 
 ## Quickstart
 
 ```python
+from glrmask import Grammar, Vocab
+import numpy as np
+
+# Replace with your tokenizer's token bytes
+token_bytes = {i: bytes([i]) for i in range(256)}
+EOS = 256
+rng = np.random.default_rng(0)
+def model(output):
+    return rng.standard_normal(257)
+def sample(logits, mask, accepting):
+    allowed = np.zeros(len(logits), dtype=bool)
+    bits = np.unpackbits(mask.astype('<u4').view(np.uint8), bitorder='little')
+    allowed[:EOS] = bits[:EOS]
+    allowed[EOS] = accepting
+    if not allowed.any():
+        raise RuntimeError('no allowed token and cannot stop')
+    return int(np.argmax(np.where(allowed, logits, -np.inf)))
 grammar = Grammar.from_json_schema({
     "type": "object",
     "properties": {
@@ -49,6 +66,8 @@ while True:
     if not state.commit_token(token):
         raise RuntimeError("Rejected token")
     output.append(token)
+assert state.is_accepting()
+print(bytes(output).decode())
 ```
 
 ## Composing grammars
@@ -60,6 +79,9 @@ A server compiles its main grammar once as a `Module` with named externs. Each t
 Resolving the interactions between them requires some extra *boundary* work. However, this work is usually small compared with compiling the grammars themselves, so composition remains cheap even when the grammars are large.
 
 ```python
+from glrmask import Grammar, Module, Vocab
+# Replace with your tokenizer's token bytes
+token_bytes = {i: bytes([i]) for i in range(256)}
 # Token ID -> exact bytes from tokenizer
 vocab = Vocab(token_bytes)
 

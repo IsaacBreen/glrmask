@@ -3,6 +3,7 @@
 from glrmask import Grammar, Vocab
 import numpy as np
 
+# Replace with your tokenizer's token bytes
 token_bytes = {i: bytes([i]) for i in range(256)}
 EOS = 256
 rng = np.random.default_rng(0)

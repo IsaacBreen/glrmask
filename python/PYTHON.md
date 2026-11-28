@@ -57,6 +57,60 @@ while True:
     output.append(token)
 ```
 
+<details>
+<summary>Full example</summary>
+
+```python
+from glrmask import Grammar, Vocab
+import numpy as np
+
+# Replace with your tokenizer's token bytes
+token_bytes = {i: bytes([i]) for i in range(256)}
+EOS = 256
+rng = np.random.default_rng(0)
+def model(output):
+    return rng.standard_normal(257)
+def sample(logits, mask, accepting):
+    allowed = np.zeros(len(logits), dtype=bool)
+    bits = np.unpackbits(mask.astype('<u4').view(np.uint8), bitorder='little')
+    allowed[:EOS] = bits[:EOS]
+    allowed[EOS] = accepting
+    if not allowed.any():
+        raise RuntimeError('no allowed token and cannot stop')
+    return int(np.argmax(np.where(allowed, logits, -np.inf)))
+grammar = Grammar.from_json_schema({
+    "type": "object",
+    "properties": {
+        "color": {
+            "enum": ["red", "green", "blue"]
+        }
+    },
+    "required": ["color"],
+    "additionalProperties": False,
+})
+
+# Token ID -> exact bytes from tokenizer
+vocab = Vocab(token_bytes)
+state = grammar.compile(vocab).start()
+
+output = []
+while True:
+    logits = model(output)
+    mask = state.mask()
+    token = sample(
+        logits, mask, state.is_accepting()
+    )
+    if token == EOS:
+        break
+    if not state.commit_token(token):
+        raise RuntimeError("Rejected token")
+    output.append(token)
+assert state.is_accepting()
+print(bytes(output).decode())
+```
+
+</details>
+
 ## Composing grammars
 
 In a typical serving setup, a grammar constraint is one main grammar with smaller grammars nested inside it, some of which, like tool schemas, change from request to request. GLRMask is built to make this kind of composition cheap. Like modules in a program, grammars can be written and compiled as separate parts and combined later.
@@ -88,6 +142,38 @@ call = Module(parent)
 call.bind("ARGS", weather)
 constraint = call.compile(vocab)
 ```
+
+<details>
+<summary>Full example</summary>
+
+```python
+from glrmask import Grammar, Module, Vocab
+# Replace with your tokenizer's token bytes
+token_bytes = {i: bytes([i]) for i in range(256)}
+# Token ID -> exact bytes from tokenizer
+vocab = Vocab(token_bytes)
+
+weather = Grammar.from_json_schema({
+    "type": "object",
+    "properties": {
+        "city": {"type": "string"}
+    },
+    "required": ["city"],
+    "additionalProperties": False,
+}).compile(vocab)
+
+parent = Grammar.from_glrm('''
+    extern grammar ARGS
+    start call
+    nt call = "<weather>" ARGS
+              "</weather>"
+''')
+call = Module(parent)
+call.bind("ARGS", weather)
+constraint = call.compile(vocab)
+```
+
+</details>
 
 ## Learn more
 
