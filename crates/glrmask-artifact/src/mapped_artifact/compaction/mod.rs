@@ -17,7 +17,7 @@ use std::time::Instant;
 use rayon::prelude::*;
 use range_set_blaze::RangeSetBlaze;
 
-use crate::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::equiv_types::InternalIdMap;
 use crate::ds::weight::{SharedTokenSet, Weight, shared_rangeset};
 
 mod default_layout;
@@ -329,14 +329,10 @@ pub(super) fn apply_compaction_plan_to_weight_refs(
     let apply_weights_ms = apply_weights_started_at.map_or(0.0, elapsed_ms);
     let apply_id_map_started_at = profile_compaction.then(Instant::now);
     if !plan.tsid_perm_is_identity(num_tsids) {
-        apply_perm_to_id_map(
-            &mut id_map.tokenizer_states,
-            &plan.tsid_perm,
-            plan.ordered_num_tsids,
-        );
+        id_map.tokenizer_states.relabel_classes(&plan.tsid_perm, plan.ordered_num_tsids);
     }
     if !plan.token_perm_is_identity(num_tokens) {
-        apply_perm_to_id_map(&mut id_map.vocab_tokens, &plan.token_perm, plan.ordered_num_tokens);
+        id_map.vocab_tokens.relabel_classes(&plan.token_perm, plan.ordered_num_tokens);
     }
     let apply_id_map_ms = apply_id_map_started_at.map_or(0.0, elapsed_ms);
 
@@ -1020,96 +1016,6 @@ fn permute_rangeset_with_runs(set: &RangeSetBlaze<u32>, runs: &[PermRun]) -> Ran
     }
     ranges.push(start..=end);
     RangeSetBlaze::from_iter(ranges)
-}
-
-fn apply_perm_to_id_map(id_map: &mut ManyToOneIdMap, perm: &[u32], new_count: usize) {
-    let old_internal_to_originals = std::mem::take(&mut id_map.internal_to_originals);
-    let old_representatives = std::mem::take(&mut id_map.representative_original_ids);
-    let old_classes_are_singletons =
-        old_internal_to_originals.len() == old_representatives.len()
-            && old_internal_to_originals
-                .iter()
-                .all(|originals| originals.len() <= 1);
-
-    for internal in &mut id_map.original_to_internal {
-        if *internal == u32::MAX {
-            continue;
-        }
-        if let Some(&new_id) = perm.get(*internal as usize) {
-            *internal = new_id;
-        }
-    }
-
-    if old_classes_are_singletons {
-        let mut new_sizes = vec![0usize; new_count];
-        for (old_internal, originals) in old_internal_to_originals.iter().enumerate() {
-            if originals.is_empty() {
-                continue;
-            }
-            let Some(&new_internal) = perm.get(old_internal) else {
-                continue;
-            };
-            let new_internal = new_internal as usize;
-            if new_internal < new_count {
-                new_sizes[new_internal] += 1;
-            }
-        }
-
-        let mut new_internal_to_originals: Vec<Vec<u32>> =
-            new_sizes.into_iter().map(Vec::with_capacity).collect();
-        let mut new_representatives = vec![u32::MAX; new_count];
-        for (old_internal, originals) in old_internal_to_originals.into_iter().enumerate() {
-            let Some(&original) = originals.first() else {
-                continue;
-            };
-            let Some(&new_internal) = perm.get(old_internal) else {
-                continue;
-            };
-            let new_internal = new_internal as usize;
-            if new_internal >= new_count {
-                continue;
-            }
-            new_internal_to_originals[new_internal].push(original);
-            if new_representatives[new_internal] == u32::MAX {
-                new_representatives[new_internal] = old_representatives[old_internal];
-            }
-        }
-
-        id_map.internal_to_originals = new_internal_to_originals;
-        id_map.representative_original_ids = new_representatives;
-        return;
-    }
-
-    let mut new_sizes = vec![0usize; new_count];
-    for (old_internal, originals) in old_internal_to_originals.iter().enumerate() {
-        let Some(&new_internal) = perm.get(old_internal) else {
-            continue;
-        };
-        let new_internal = new_internal as usize;
-        if new_internal < new_count {
-            new_sizes[new_internal] += originals.len();
-        }
-    }
-
-    let mut new_internal_to_originals: Vec<Vec<u32>> =
-        new_sizes.into_iter().map(Vec::with_capacity).collect();
-    let mut new_representatives = vec![u32::MAX; new_count];
-    for (old_internal, originals) in old_internal_to_originals.into_iter().enumerate() {
-        let Some(&new_internal) = perm.get(old_internal) else {
-            continue;
-        };
-        let new_internal = new_internal as usize;
-        if new_internal >= new_count {
-            continue;
-        }
-        new_internal_to_originals[new_internal].extend(originals);
-        if new_representatives[new_internal] == u32::MAX {
-            new_representatives[new_internal] = old_representatives[old_internal];
-        }
-    }
-
-    id_map.internal_to_originals = new_internal_to_originals;
-    id_map.representative_original_ids = new_representatives;
 }
 
 fn collect_unique_weights_from_refs(weights: &[&mut Weight]) -> Vec<Weight> {

@@ -340,9 +340,7 @@ pub fn refine_observation_classes(
         if allow_unmapped { Unobserved::Omit } else { Unobserved::Merge },
     );
     if lexicographic {
-        reorder_common_classes(signatures, &mut result.original_to_internal,
-            &mut result.internal_to_originals, &mut result.representative_original_ids,
-            allow_unmapped);
+        reorder_common_classes(signatures, &mut result);
     }
     result
 }
@@ -710,56 +708,30 @@ fn build_common_many_to_one_id_map_pair_hashed(
         internal_to_originals[class_id as usize].push(original as u32);
     }
 
-    reorder_common_classes(
-        composite_to_class,
-        &mut original_to_internal,
-        &mut internal_to_originals,
-        &mut representatives,
-        allow_unmapped,
-    );
-
-    ManyToOneIdMap {
+    let mut result = ManyToOneIdMap {
         original_to_internal,
         internal_to_originals,
         representative_original_ids: representatives,
-    }
+    };
+    reorder_common_classes(composite_to_class, &mut result);
+    result
 }
 
 fn reorder_common_classes<K: Ord>(
     composite_to_class: impl IntoIterator<Item = (K, u32)>,
-    original_to_internal: &mut [u32],
-    internal_to_originals: &mut Vec<Vec<u32>>,
-    representatives: &mut Vec<u32>,
-    allow_unmapped: bool,
+    result: &mut ManyToOneIdMap,
 ) {
-    let num_classes = internal_to_originals.len();
-    if num_classes <= 1 {
+    let count = result.internal_to_originals.len();
+    if count <= 1 {
         return;
     }
-
     let mut sorted = composite_to_class.into_iter().collect::<Vec<_>>();
     sorted.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-
-    let mut old_to_new = vec![0u32; num_classes];
-    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
-        old_to_new[*old_id as usize] = new_id as u32;
+    let mut perm = vec![0u32; count];
+    for (new_id, (_, old_id)) in sorted.into_iter().enumerate() {
+        perm[old_id as usize] = new_id as u32;
     }
-
-    for value in original_to_internal.iter_mut() {
-        if *value == u32::MAX && allow_unmapped {
-            continue;
-        }
-        *value = old_to_new[*value as usize];
-    }
-
-    let mut new_internal_to_originals = vec![Vec::new(); num_classes];
-    let mut new_representatives = vec![u32::MAX; num_classes];
-    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
-        new_internal_to_originals[new_id] = std::mem::take(&mut internal_to_originals[*old_id as usize]);
-        new_representatives[new_id] = representatives[*old_id as usize];
-    }
-    *internal_to_originals = new_internal_to_originals;
-    *representatives = new_representatives;
+    result.relabel_classes(&perm, count);
 }
 
 /// Project a local observation coordinate onto an exact refinement. One

@@ -134,21 +134,44 @@ impl ManyToOneIdMap {
         for (new_internal, &old_internal) in order.iter().enumerate() {
             perm[old_internal] = new_internal as u32;
         }
-        for internal in self.original_to_internal.iter_mut() {
-            if (*internal as usize) < n {
-                *internal = perm[*internal as usize];
+        self.relabel_classes(&perm, n);
+    }
+
+    /// Apply a total class quotient or permutation without changing the
+    /// original domain. Preserve the first source representative of each
+    /// nonempty destination class, including directional representatives.
+    pub(crate) fn relabel_classes(&mut self, perm: &[u32], count: usize) {
+        assert_eq!(perm.len(), self.internal_to_originals.len());
+        assert_eq!(perm.len(), self.representative_original_ids.len());
+        for class in &mut self.original_to_internal {
+            if *class != u32::MAX {
+                *class = perm[*class as usize];
             }
         }
-        let mut new_internal_to_originals = vec![Vec::new(); n];
-        let mut new_representative_original_ids = vec![0u32; n];
-        for (new_internal, &old_internal) in order.iter().enumerate() {
-            new_internal_to_originals[new_internal] =
-                std::mem::take(&mut self.internal_to_originals[old_internal]);
-            new_representative_original_ids[new_internal] =
-                self.representative_original_ids[old_internal];
+        let old_groups = std::mem::take(&mut self.internal_to_originals);
+        let old_reps = std::mem::take(&mut self.representative_original_ids);
+        let mut sizes = vec![0usize; count];
+        for (group, &dest) in old_groups.iter().zip(perm) {
+            sizes[dest as usize] += group.len();
         }
-        self.internal_to_originals = new_internal_to_originals;
-        self.representative_original_ids = new_representative_original_ids;
+        let mut groups = vec![Vec::new(); count];
+        let mut reps = vec![u32::MAX; count];
+        for ((mut group, rep), &dest) in old_groups.into_iter().zip(old_reps).zip(perm) {
+            if group.is_empty() {
+                continue;
+            }
+            let dest = dest as usize;
+            let members = &mut groups[dest];
+            if members.is_empty() {
+                reps[dest] = rep;
+                group.reserve_exact(sizes[dest] - group.len());
+                *members = group;
+            } else {
+                members.extend(group);
+            }
+        }
+        self.internal_to_originals = groups;
+        self.representative_original_ids = reps;
     }
 
     pub fn internal_to_originals_vecs(&self) -> Vec<Vec<u32>> {
@@ -306,4 +329,34 @@ impl InternalIdMap {
             .filter(|&internal| internal != u32::MAX)
     }
 
+}
+
+#[cfg(test)]
+mod relabel_tests {
+    use super::*;
+
+    #[test]
+    fn relabel_preserves_directional_representatives_and_sparse_membership() {
+        let absent = u32::MAX;
+        let dense = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            vec![0, 1, absent, 0, 2, 1], 3, vec![3, 5, 4],
+        );
+        for sparse in [false, true] {
+            let mut map = dense.clone();
+            if sparse {
+                map.original_to_internal.clear();
+            }
+            map.relabel_classes(&[1, 0, 1], 2);
+            assert_eq!(map.internal_to_originals, vec![vec![1, 5], vec![0, 3, 4]]);
+            assert_eq!(map.representative_original_ids, vec![5, 3]);
+            if sparse {
+                assert!(map.original_to_internal.is_empty());
+            } else {
+                assert_eq!(map.original_to_internal, vec![1, 0, absent, 1, 1, 0]);
+            }
+            map.reorder_internal_by_representative_key(|id| id);
+            assert_eq!(map.internal_to_originals, vec![vec![0, 3, 4], vec![1, 5]]);
+            assert_eq!(map.representative_original_ids, vec![3, 5]);
+        }
+    }
 }
