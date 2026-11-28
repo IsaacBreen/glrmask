@@ -110,7 +110,7 @@ def main() -> None:
             assert path.is_relative_to(root) and path.exists(),target
     header=(root/'bindings/cpp/include/glrmask.h').read_text(encoding='utf-8')
     symbols=set(re.findall(r'GLRMASK_API[^;]+?\b(glrmask_\w+)\(',header))
-    assert len(symbols)==58,len(symbols)
+    assert len(symbols)==59,len(symbols)
     if args.library:
         verify_runtime_dependencies(args.library.resolve(), args.platform)
         # Library verification runs on the target runtime (inside its Linux
