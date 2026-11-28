@@ -422,3 +422,34 @@ fn singleton_expr_binding_matches_direct() {
     let token_host = Grammar::from_glrm("extern token T start root nt root=T").unwrap();
     parity(&token_host, "T", &tokens, &v, &[99]);
 }
+
+#[test]
+fn compiled_leaf_preserves_scoped_ignores_and_artifacts() {
+    use glrmask::{Constraint, MaskStrategy};
+    let v = Vocab::new([b"x".as_slice(), b"a", b"b", b"y", b"~", b"_", b"x_aby", b"x~a_by"].into_iter().enumerate().map(|(i,b)| (i as u32,b.to_vec()))).unwrap();
+    let host = Grammar::from_glrm(r#"start root; ignore WS; t WS = "~"+; extern grammar child; nt root = "x" child "y";"#).unwrap();
+    let source = Grammar::from_glrm(r#"start root; ignore WS; t WS = "_"+; nt root = "a" "b"?;"#).unwrap();
+    for mode in [MaskStrategy::AUTO, MaskStrategy::FAST_COMPILE, MaskStrategy::FAST_MASKS] {
+        let options = CompileOptions::default().mask_strategy(mode);
+        let child = source.compile_with(&v, options.clone()).unwrap();
+        let loaded = Constraint::load(&child.save(), &v).unwrap();
+        let mut reference = Module::new(&host);
+        reference.bind("child", &source).unwrap();
+        let reference = reference.compile_with(&v, options.clone()).unwrap();
+        let mut parent = Module::new(&host);
+        parent.bind("child", &loaded).unwrap();
+        let restored = Module::load(&parent.save()).unwrap();
+        for m in [&parent, &restored] {
+            let result = m.compile_with(&v, options.clone()).unwrap();
+            for prefix in [b"".as_slice(), b"x", b"x~", b"x_", b"x_a", b"x_a_b", b"x_a_by", b"x_a~by", b"x__a__b__y", b"~x_a_by~", b"x~a_by"] {
+                let (mut a,mut b) = (reference.start(), result.start());
+                let valid = a.commit_bytes(prefix);
+                assert_eq!(b.commit_bytes(prefix), valid, "{prefix:?}");
+                if valid {
+                    assert_eq!(a.mask(), b.mask(), "{prefix:?}");
+                    assert_eq!(a.is_accepting(), b.is_accepting(), "{prefix:?}");
+                }
+            }
+        }
+    }
+}

@@ -454,6 +454,7 @@ impl Module {
         let binding = match leaf.0.as_ref() {
             ExprNode::Leaf(ExprLeaf::Grammar(g)) => Binding::Grammar(g.clone()),
             ExprNode::Leaf(ExprLeaf::Module(m)) => Binding::Module(m.clone()),
+            ExprNode::Leaf(ExprLeaf::Constraint(c)) => Binding::Constraint(c.clone()),
             ExprNode::Leaf(ExprLeaf::TokenSet(t)) => Binding::TokenSet(t.clone()),
             _ => Binding::Expr(expr),
         };
@@ -1546,6 +1547,27 @@ mod precompile_boundary_tests {
         match &constraint.boundary_trigger {
             crate::runtime::BoundaryTrigger::TokenSet(tokens) => Some(Arc::clone(tokens)),
             _ => None,
+        }
+    }
+
+    #[test]
+    fn compiled_leaf_binding_does_not_prepare_a_wrapper() {
+        let vocab = vocab();
+        let child = Grammar::from_glrm(r#"start root; nt root = "x";"#).unwrap().compile(&vocab).unwrap();
+        let mut parent = Module::new(&Grammar::from_glrm("extern grammar child start root nt root = child").unwrap());
+        parent.precompile(&vocab).unwrap();
+        let before = static_build_probe::builds(&parent);
+        for expr in [Expr::from(&child), Expr::sequence([Expr::from(&child)])] {
+            let mut request = parent.clone();
+            request.bind("child", expr).unwrap();
+            assert!(matches!(request.node.bindings.get("child"), Some(BoundValue::Compiled(_))));
+            // The preparation traversal sees only the already-prepared parent.
+            assert_eq!(request.index().unwrap().len(), 1);
+            let result = request.compile(&vocab).unwrap();
+            let mut state = result.start();
+            assert!(state.commit_token(0));
+            assert!(state.is_accepting());
+            assert_eq!(static_build_probe::builds(&request), before);
         }
     }
 
