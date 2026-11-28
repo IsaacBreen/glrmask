@@ -13,6 +13,7 @@ use crate::automata::lexer::{
     DFA as LexerDfa, Lexer,
     tokenizer::{TerminalProjectedQuotient, Tokenizer},
 };
+use crate::automata::lexer::observation::ByteRows;
 use crate::automata::lexer::runtime_repeat_product::VirtualBinaryRepeatIntersectionMaskProjection;
 use crate::automata::lexer::tokenizer::VirtualResidualMaskProjection;
 use crate::automata::lexer::runtime_unit_repeat::VirtualZeroMinUnitRepeatMaskProjection;
@@ -1270,21 +1271,20 @@ pub(crate) type IndexedDagDenseTransitions = Vec<IndexedDagDenseTransitionRow>;
 
 #[derive(Debug, Clone)]
 pub(crate) enum FastTokenizerTransitions {
-    Dense(Vec<[u32; 256]>),
-    Classed(crate::automata::lexer::observation::ByteRows),
-    /// Compact exact dense DFA rows for tokenizers with fewer than 32,768
+    Classed(ByteRows),
+    /// Compact exact byte-class DFA rows for tokenizers with fewer than 32,768
     /// states. The high bit marks a target state with at least one finalizer;
     /// u16::MAX is the dead-transition sentinel.
     Flat16 {
-        transitions: Arc<[u16]>,
+        transitions: ByteRows<u16>,
         finalizer_code: Arc<[u32]>,
         single_finalizer_continues: Arc<[u8]>,
     },
-    /// Exact dense DFA rows for the strict full-vocabulary walker when the
+    /// Exact byte-class DFA rows for the strict full-vocabulary walker when the
     /// tokenizer no longer fits the 15-bit Flat16 coordinate. The high bit
     /// marks a target state with at least one finalizer; u32::MAX is dead.
     Flat32 {
-        transitions: Arc<[u32]>,
+        transitions: ByteRows,
         finalizer_code: Arc<[u32]>,
         single_finalizer_continues: Arc<[u8]>,
     },
@@ -1299,7 +1299,7 @@ pub(crate) enum FastTokenizerTransitions {
 
 impl Default for FastTokenizerTransitions {
     fn default() -> Self {
-        Self::Dense(Vec::new())
+        Self::Fallback(0)
     }
 }
 
@@ -1340,99 +1340,50 @@ impl FastTokenizerTransitions {
         )
     }
 
-    pub(crate) fn flat16_for(tokenizer: &Tokenizer) -> Option<Self> {
-        let num_states = tokenizer.num_states();
-        if num_states >= 0x8000 {
-            return None;
-        }
-        // Build finalizer metadata once per state before populating transition
-        // cells. The old implementation called `matched_terminals_slice()` for
-        // every edge merely to set the high-bit hint, then scanned every state
-        // again below to construct these exact metadata arrays. Fresh compiler
-        // DFAs make that per-edge lookup materially more expensive than loaded
-        // packed tokenizers.
-        let (finalizer_code, single_finalizer_continues) =
-            Self::full_walk_finalizer_metadata(tokenizer);
-        let mut flat = vec![u16::MAX; num_states as usize * 256];
-        let fill_row = |(state, row): (usize, &mut [u16])| {
-            for (byte, target) in tokenizer.transitions_from(state as u32) {
-                let mut encoded = u16::try_from(target)
-                    .expect("flat16 tokenizer target exceeds 15-bit state coordinate");
-                if finalizer_code[target as usize] != u32::MAX {
-                    encoded |= 0x8000;
-                }
-                row[byte as usize] = encoded;
-            }
-        };
-        if num_states >= 1_024 && rayon::current_num_threads() > 1 {
-            flat.par_chunks_mut(256).enumerate().for_each(fill_row);
-        } else {
-            flat.chunks_mut(256).enumerate().for_each(fill_row);
-        }
-        Some(Self::Flat16 {
-            transitions: Arc::from(flat),
-            finalizer_code,
-            single_finalizer_continues,
+    fn packed_rows<C: Copy + PartialEq + TryFrom<u32>>(
+        tokenizer: &Tokenizer,
+        finalizer_code: &[u32],
+        dead: C,
+        finalizer_bit: u32,
+    ) -> ByteRows<C> {
+        ByteRows::from_tokenizer_mapped(tokenizer, |target| {
+            if target == u32::MAX { return dead; }
+            let encoded = target | if finalizer_code.get(target as usize)
+                .is_some_and(|&code| code != u32::MAX) { finalizer_bit } else { 0 };
+            C::try_from(encoded).ok().expect("target exceeds packed state coordinate")
         })
     }
 
-    /// Dense u16 transition slab for ordinary tokenizer execution. Unlike the
-    /// strict full-vocabulary walker, commit/scan only asks this object for the
-    /// target state, so constructing per-state finalizer certificates (and
-    /// probing finalizers for every transition target) is pure load-time waste.
-    pub(crate) fn flat16_transitions_only_for(tokenizer: &Tokenizer) -> Option<Self> {
-        let num_states = tokenizer.num_states();
-        if num_states >= 0x8000 {
+    pub(crate) fn flat16_for(tokenizer: &Tokenizer) -> Option<Self> {
+        if tokenizer.num_states() >= 0x8000 || tokenizer.has_any_virtual_runtime() {
             return None;
         }
-        let mut flat = vec![u16::MAX; num_states as usize * 256];
-        let fill_row = |(state, row): (usize, &mut [u16])| {
-            for (byte, target) in tokenizer.transitions_from(state as u32) {
-                row[byte as usize] = u16::try_from(target)
-                    .expect("flat16 tokenizer target exceeds 15-bit state coordinate");
-            }
-        };
-        if num_states >= 1_024 && rayon::current_num_threads() > 1 {
-            flat.par_chunks_mut(256).enumerate().for_each(fill_row);
-        } else {
-            flat.chunks_mut(256).enumerate().for_each(fill_row);
+        let (finalizer_code, single_finalizer_continues) =
+            Self::full_walk_finalizer_metadata(tokenizer);
+        let transitions = Self::packed_rows(tokenizer, &finalizer_code, u16::MAX, 0x8000);
+        Some(Self::Flat16 { transitions, finalizer_code, single_finalizer_continues })
+    }
+
+    pub(crate) fn flat16_transitions_only_for(tokenizer: &Tokenizer) -> Option<Self> {
+        if tokenizer.num_states() >= 0x8000 || tokenizer.has_any_virtual_runtime() {
+            return None;
         }
+        let transitions = Self::packed_rows(tokenizer, &[], u16::MAX, 0x8000);
         Some(Self::Flat16 {
-            transitions: Arc::from(flat),
+            transitions,
             finalizer_code: Arc::from([]),
             single_finalizer_continues: Arc::from([]),
         })
     }
 
     pub(crate) fn flat32_for(tokenizer: &Tokenizer) -> Option<Self> {
-        let num_states = tokenizer.num_states();
-        if num_states >= 0x8000_0000 {
+        if tokenizer.num_states() >= 0x8000_0000 || tokenizer.has_any_virtual_runtime() {
             return None;
         }
         let (finalizer_code, single_finalizer_continues) =
             Self::full_walk_finalizer_metadata(tokenizer);
-        let cell_count = (num_states as usize).checked_mul(256)?;
-        let mut flat = vec![u32::MAX; cell_count];
-        let fill_row = |(state, row): (usize, &mut [u32])| {
-            for (byte, target) in tokenizer.transitions_from(state as u32) {
-                debug_assert!(target < 0x8000_0000);
-                let mut encoded = target;
-                if finalizer_code[target as usize] != u32::MAX {
-                    encoded |= 0x8000_0000;
-                }
-                row[byte as usize] = encoded;
-            }
-        };
-        if num_states >= 1_024 && rayon::current_num_threads() > 1 {
-            flat.par_chunks_mut(256).enumerate().for_each(fill_row);
-        } else {
-            flat.chunks_mut(256).enumerate().for_each(fill_row);
-        }
-        Some(Self::Flat32 {
-            transitions: Arc::from(flat),
-            finalizer_code,
-            single_finalizer_continues,
-        })
+        let transitions = Self::packed_rows(tokenizer, &finalizer_code, u32::MAX, 0x8000_0000);
+        Some(Self::Flat32 { transitions, finalizer_code, single_finalizer_continues })
     }
 
     /// Build the dense transition representation used only by the strict full
@@ -1464,12 +1415,6 @@ impl FastTokenizerTransitions {
         byte: u8,
     ) -> u32 {
         match self {
-            Self::Dense(rows) => rows
-                .get(state as usize)
-                .map_or_else(
-                    || tokenizer.get_transition(state, byte),
-                    |row| row[byte as usize],
-                ),
             Self::Classed(rows) => {
                 if (state as usize) < rows.num_states() {
                     rows.trans(state as usize, byte as usize)
@@ -1477,36 +1422,20 @@ impl FastTokenizerTransitions {
                     tokenizer.get_transition(state, byte)
                 }
             },
-            Self::Flat16 { transitions, .. } => state
-                .try_into()
-                .ok()
-                .and_then(|state: usize| state.checked_mul(256))
-                .and_then(|offset| offset.checked_add(byte as usize))
-                .and_then(|index| transitions.get(index))
-                .copied()
-                .map(|target| {
-                    if target == u16::MAX {
-                        u32::MAX
-                    } else {
-                        u32::from(target & 0x7fff)
-                    }
-                })
-                .unwrap_or_else(|| tokenizer.get_transition(state, byte)),
-            Self::Flat32 { transitions, .. } => state
-                .try_into()
-                .ok()
-                .and_then(|state: usize| state.checked_mul(256))
-                .and_then(|offset| offset.checked_add(byte as usize))
-                .and_then(|index| transitions.get(index))
-                .copied()
-                .map(|target| {
-                    if target == u32::MAX {
-                        u32::MAX
-                    } else {
-                        target & 0x7fff_ffff
-                    }
-                })
-                .unwrap_or_else(|| tokenizer.get_transition(state, byte)),
+            Self::Flat16 { transitions, .. } => {
+                if state as usize >= transitions.num_states() {
+                    return tokenizer.get_transition(state, byte);
+                }
+                let cell = transitions.trans(state as usize, byte as usize);
+                if cell == u16::MAX { u32::MAX } else { u32::from(cell & 0x7fff) }
+            }
+            Self::Flat32 { transitions, .. } => {
+                if state as usize >= transitions.num_states() {
+                    return tokenizer.get_transition(state, byte);
+                }
+                let cell = transitions.trans(state as usize, byte as usize);
+                if cell == u32::MAX { u32::MAX } else { cell & 0x7fff_ffff }
+            }
             Self::Fallback(_) => tokenizer.get_transition(state, byte),
             Self::Hybrid {
                 state_to_dense_row,
@@ -1527,113 +1456,14 @@ impl FastTokenizerTransitions {
 
     pub(crate) fn len(&self) -> usize {
         match self {
-            Self::Dense(rows) => rows.len(),
             Self::Classed(rows) => rows.num_states(),
-            Self::Flat16 { transitions, .. } => transitions.len() / 256,
-            Self::Flat32 { transitions, .. } => transitions.len() / 256,
+            Self::Flat16 { transitions, .. } => transitions.num_states(),
+            Self::Flat32 { transitions, .. } => transitions.num_states(),
             Self::Fallback(len) => *len,
             Self::Hybrid {
                 state_to_dense_row,
                 ..
             } => state_to_dense_row.len(),
-        }
-    }
-
-    /// Reuse the consumed parent's fast transition rows and append rebased
-    /// child rows. Compressed child states remain sparse and fall back to the
-    /// merged tokenizer, whose compressed segments have already been rebased.
-    pub(crate) fn append_rebased_children(
-        self,
-        children: &[(&FastTokenizerTransitions, u32)],
-    ) -> Option<Self> {
-        fn physical_rows(rows: &crate::automata::lexer::observation::ByteRows) -> impl Iterator<Item = [u32; 256]> + '_ {
-            (0..rows.num_states()).map(|state| std::array::from_fn(|byte| rows.trans(state, byte)))
-        }
-
-        fn rebased_row(row: &[u32; 256], offset: u32) -> [u32; 256] {
-            let mut rebased = *row;
-            for target in rebased.iter_mut() {
-                if *target != u32::MAX {
-                    *target = target.checked_add(offset)
-                        .expect("composed tokenizer fast-transition target overflow");
-                }
-            }
-            rebased
-        }
-
-        let all_dense = children
-            .iter()
-            .all(|(child, _)| matches!(child, FastTokenizerTransitions::Dense(_)));
-        match self {
-            Self::Dense(mut rows) if all_dense => {
-                for (child, offset) in children {
-                    if *offset as usize != rows.len() {
-                        return None;
-                    }
-                    let Self::Dense(child_rows) = child else { unreachable!() };
-                    rows.extend(child_rows.iter().map(|row| rebased_row(row, *offset)));
-                }
-                Some(Self::Dense(rows))
-            }
-            parent => {
-                let (mut state_to_dense_row, mut dense_rows) = match parent {
-                    Self::Dense(rows) => {
-                        let state_to_dense_row = (0..rows.len() as u32).collect::<Vec<_>>();
-                        (state_to_dense_row, rows)
-                    }
-                    Self::Classed(classed) => {
-                        let rows = physical_rows(&classed).collect::<Vec<_>>();
-                        let state_to_dense_row = (0..rows.len() as u32).collect::<Vec<_>>();
-                        (state_to_dense_row, rows)
-                    }
-                    Self::Flat16 { .. } | Self::Flat32 { .. } | Self::Fallback(_) => return None,
-                    Self::Hybrid {
-                        state_to_dense_row,
-                        dense_rows,
-                    } => (state_to_dense_row, dense_rows),
-                };
-                for (child, offset) in children {
-                    if *offset as usize != state_to_dense_row.len() {
-                        return None;
-                    }
-                    match child {
-                        Self::Flat16 { .. } | Self::Flat32 { .. } | Self::Fallback(_) => return None,
-                        Self::Dense(rows) => {
-                            for row in rows {
-                                let dense = dense_rows.len() as u32;
-                                dense_rows.push(rebased_row(row, *offset));
-                                state_to_dense_row.push(dense);
-                            }
-                        }
-                        Self::Classed(classed) => {
-                            for row in physical_rows(classed) {
-                                let dense = dense_rows.len() as u32;
-                                dense_rows.push(rebased_row(&row, *offset));
-                                state_to_dense_row.push(dense);
-                            }
-                        }
-                        Self::Hybrid {
-                            state_to_dense_row: child_mapping,
-                            dense_rows: child_rows,
-                        } => {
-                            for &child_dense in child_mapping {
-                                if child_dense == u32::MAX {
-                                    state_to_dense_row.push(u32::MAX);
-                                } else {
-                                    let row = child_rows.get(child_dense as usize)?;
-                                    let dense = dense_rows.len() as u32;
-                                    dense_rows.push(rebased_row(row, *offset));
-                                    state_to_dense_row.push(dense);
-                                }
-                            }
-                        }
-                    }
-                }
-                Some(Self::Hybrid {
-                    state_to_dense_row,
-                    dense_rows,
-                })
-            }
         }
     }
 }
@@ -9134,6 +8964,34 @@ mod dynamic_mask_vocab_cache_boundary_tests {
     use super::*;
 
     #[test]
+    fn packed_byte_rows_encode_every_physical_edge_and_finalizer() {
+        use crate::automata::lexer::{ast::{bytes, plus}, compile::build_regex_monolithic};
+        let tokenizer = build_regex_monolithic(&[bytes(b"abc"), plus(bytes(b"a"))])
+            .into_tokenizer(2, None);
+        let packed = FastTokenizerTransitions::flat16_for(&tokenizer).unwrap();
+        let FastTokenizerTransitions::Flat16 { transitions, .. } = &packed else {
+            unreachable!()
+        };
+        assert!(transitions.width < 256);
+        for state in 0..tokenizer.num_states() {
+            for byte in 0..=u8::MAX {
+                let target = tokenizer.get_transition(state, byte);
+                assert_eq!(packed.transition(&tokenizer, state, byte), target);
+                let encoded = if target == u32::MAX {
+                    u16::MAX
+                } else {
+                    target as u16 | if tokenizer.matched_terminals_slice(target).is_empty() {
+                        0
+                    } else {
+                        0x8000
+                    }
+                };
+                assert_eq!(transitions.trans(state as usize, byte as usize), encoded);
+            }
+        }
+    }
+
+    #[test]
     fn full_walk_flat32_covers_tokenizers_beyond_flat16_state_space() {
         const TARGET: u32 = 32_768;
         let tokenizer = crate::automata::lexer::tokenizer::arbitrary_flat32_test_tokenizer();
@@ -9147,7 +9005,7 @@ mod dynamic_mask_vocab_cache_boundary_tests {
         let FastTokenizerTransitions::Flat32 { transitions, .. } = flat32 else {
             panic!("wide tokenizer unexpectedly used a non-Flat32 representation");
         };
-        let encoded = transitions[b'a' as usize];
+        let encoded = transitions.trans(0, b'a' as usize);
         assert_ne!(encoded & 0x8000_0000, 0, "finalizer bit was not encoded");
         assert_eq!(encoded & 0x7fff_ffff, TARGET);
     }

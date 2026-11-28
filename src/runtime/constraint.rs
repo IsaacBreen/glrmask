@@ -8366,13 +8366,9 @@ impl Constraint {
         let has_compressed =
             (0..num_states).any(|state| tokenizer.has_compressed_transition_state(state));
         if !has_compressed {
-            let build = |state| *tokenizer.transition_row(state);
-            let rows = if rayon::current_num_threads() == 1 {
-                (0..num_states).map(build).collect()
-            } else {
-                (0..num_states).into_par_iter().map(build).collect()
-            };
-            return FastTokenizerTransitions::Dense(rows);
+            return FastTokenizerTransitions::Classed(
+                crate::automata::lexer::observation::ByteRows::from_tokenizer(tokenizer),
+            );
         }
 
         let dense_states = (0..num_states)

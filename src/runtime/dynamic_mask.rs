@@ -11,6 +11,7 @@ use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use smallvec::SmallVec;
 
 use crate::automata::lexer::Lexer;
+use crate::automata::lexer::observation::ByteRows;
 use crate::automata::lexer::tokenizer::{
     TerminalResidualDirectCoordinate, Tokenizer, TokenizerExecResult, TokenizerMatch,
     TokenizerStateSet, VirtualResidualDirectCoordinate,
@@ -415,7 +416,7 @@ impl FlatWalkCell for u32 {
 
 #[derive(Clone, Copy)]
 struct FullWalkFlat<'a, C> {
-    transitions: &'a [C],
+    transitions: &'a ByteRows<C>,
     finalizer_code: &'a [u32],
     single_finalizer_continues: &'a [u8],
     tokenizer: &'a Tokenizer,
@@ -427,11 +428,7 @@ impl<C: FlatWalkCell> FullWalkTransitionTable for FullWalkFlat<'_, C> {
 
     #[inline(always)]
     fn cell(&mut self, state: u32, byte: u8) -> C {
-        unsafe {
-            *self
-                .transitions
-                .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
-        }
+        self.transitions.trans(state as usize, byte as usize)
     }
 
     #[inline(always)]
@@ -3036,7 +3033,7 @@ fn try_full_walk_mask_in_output_scope(
                     finalizer_code,
                     single_finalizer_continues,
                 }) => (
-                    Some(transitions.as_ref()),
+                    Some(transitions),
                     None,
                     Some(finalizer_code.as_ref()),
                     Some(single_finalizer_continues.as_ref()),
@@ -3047,7 +3044,7 @@ fn try_full_walk_mask_in_output_scope(
                     single_finalizer_continues,
                 }) => (
                     None,
-                    Some(transitions.as_ref()),
+                    Some(transitions),
                     Some(finalizer_code.as_ref()),
                     Some(single_finalizer_continues.as_ref()),
                 ),
@@ -3088,7 +3085,7 @@ fn try_full_walk_mask_in_output_scope(
                         root_branches,
                         lexer_scan_cache,
                         buf,
-                        transitions.as_ref(),
+                        transitions,
                         finalizer_code.as_ref(),
                         single_finalizer_continues.as_ref(),
                     )
@@ -3100,7 +3097,7 @@ fn try_full_walk_mask_in_output_scope(
                         root_branches,
                         lexer_scan_cache,
                         buf,
-                        transitions.as_ref(),
+                        transitions,
                         finalizer_code.as_ref(),
                         single_finalizer_continues.as_ref(),
                     )
@@ -3112,7 +3109,7 @@ fn try_full_walk_mask_in_output_scope(
                 return result;
             }
             let mut table = FullWalkFlat {
-                transitions: transitions.as_ref(),
+                transitions: transitions,
                 finalizer_code: finalizer_code.as_ref(),
                 single_finalizer_continues: single_finalizer_continues.as_ref(),
                 tokenizer,
@@ -3134,7 +3131,7 @@ fn try_full_walk_mask_in_output_scope(
                         root_branches,
                         lexer_scan_cache,
                         buf,
-                        transitions.as_ref(),
+                        transitions,
                         finalizer_code.as_ref(),
                         single_finalizer_continues.as_ref(),
                     )
@@ -3146,7 +3143,7 @@ fn try_full_walk_mask_in_output_scope(
                         root_branches,
                         lexer_scan_cache,
                         buf,
-                        transitions.as_ref(),
+                        transitions,
                         finalizer_code.as_ref(),
                         single_finalizer_continues.as_ref(),
                     )
@@ -3158,7 +3155,7 @@ fn try_full_walk_mask_in_output_scope(
                 return result;
             }
             let mut table = FullWalkFlat {
-                transitions: transitions.as_ref(),
+                transitions: transitions,
                 finalizer_code: finalizer_code.as_ref(),
                 single_finalizer_continues: single_finalizer_continues.as_ref(),
                 tokenizer,
@@ -5490,7 +5487,7 @@ fn flat16_mask_vocab_terminal_matches(
             transitions,
             finalizer_code,
             ..
-        }) => Some((transitions.as_ref(), finalizer_code.as_ref())),
+        }) => Some((transitions, finalizer_code.as_ref())),
         _ => None,
     };
     if mask_state >= tokenizer.num_states()
@@ -5582,11 +5579,7 @@ fn flat16_mask_vocab_terminal_matches(
             }
             if op.consumes_byte() {
                 let target = if let Some((transitions, _)) = dense {
-                    let cell = unsafe {
-                        *transitions.get_unchecked(
-                            (current_state as usize).wrapping_mul(256) + op.byte() as usize,
-                        )
-                    };
+                    let cell = transitions.trans(current_state as usize, op.byte() as usize);
                     (cell != u16::MAX).then_some(u32::from(cell & 0x7fff))
                 } else {
                     let slot = local_rows.get_mut(current_state as usize)?;
@@ -5727,10 +5720,7 @@ fn flat16_mask_vocab_terminal_matches(
             let edge_bytes = trie.edge_bytes(edge);
             for (byte_index, &byte) in edge_bytes.iter().enumerate() {
                 state = if let Some((transitions, _)) = dense {
-                    let cell = unsafe {
-                        *transitions
-                            .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
-                    };
+                    let cell = transitions.trans(state as usize, byte as usize);
                     if cell == u16::MAX {
                         alive = false;
                         break;

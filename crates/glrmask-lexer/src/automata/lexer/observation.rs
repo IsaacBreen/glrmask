@@ -6,8 +6,8 @@ use smallvec::SmallVec;
 /// finite-vocabulary quotient rows differ only in their column map. The rows
 /// always exist; derived transposes must never stand in for missing topology.
 #[derive(Debug, Clone)]
-pub struct ByteRows {
-    pub values: Arc<[u32]>,
+pub struct ByteRows<C = u32> {
+    pub values: Arc<[C]>,
     pub byte_to_column: [u8; 256],
     pub width: usize,
 }
@@ -107,31 +107,42 @@ pub fn compute_tokenizer_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
 impl ByteRows {
     /// Exact physical action, independent of any finite token alphabet.
     pub fn from_tokenizer(tokenizer: &Tokenizer) -> Self {
-        // Virtual rows have their own coordinate semantics. Preserve the
-        // exact physical fill contract rather than quotienting those rows
-        // using an ordinary transition observation.
-        if tokenizer.has_any_virtual_runtime() {
-            let mut values = vec![u32::MAX; tokenizer.num_states() as usize * 256];
-            for (state, row) in values.as_chunks_mut::<256>().0.iter_mut().enumerate() {
-                tokenizer.fill_transition_row(state as u32, row);
-            }
-            return Self::dense(Arc::from(values));
-        }
-        let classes = compute_tokenizer_byte_classes(tokenizer);
+        ByteRows::from_tokenizer_mapped(tokenizer, |target| target)
+    }
+}
+
+impl<C: Copy + PartialEq> ByteRows<C> {
+    /// Encode the exact physical action in a different cell width without
+    /// materializing a second u32 slab. The encoding must be a function of
+    /// the target (including the dead sentinel), never of the source byte.
+    pub fn from_tokenizer_mapped(tokenizer: &Tokenizer, mut encode: impl FnMut(u32) -> C) -> Self {
+        let virtual_rows = tokenizer.has_any_virtual_runtime();
+        let classes = if virtual_rows {
+            std::array::from_fn(|byte| byte as u8)
+        } else {
+            compute_tokenizer_byte_classes(tokenizer)
+        };
         let representatives = column_representatives(&classes);
         let width = representatives.len();
         let mut values = Vec::with_capacity(tokenizer.num_states() as usize * width);
         for state in 0..tokenizer.num_states() {
-            values.extend(representatives.iter().map(|&byte| tokenizer.get_transition(state, byte)));
+            if virtual_rows {
+                // Preserve the existing physical fill contract for virtual rows.
+                let mut row = [u32::MAX; 256];
+                tokenizer.fill_transition_row(state, &mut row);
+                values.extend(row.into_iter().map(&mut encode));
+            } else {
+                values.extend(representatives.iter().map(|&byte| encode(tokenizer.get_transition(state, byte))));
+            }
         }
         Self::new(Arc::from(values), classes)
     }
 
-    pub fn dense(values: Arc<[u32]>) -> Self {
+    pub fn dense(values: Arc<[C]>) -> Self {
         Self::new(values, std::array::from_fn(|byte| byte as u8))
     }
 
-    pub fn new(values: Arc<[u32]>, byte_to_column: [u8; 256]) -> Self {
+    pub fn new(values: Arc<[C]>, byte_to_column: [u8; 256]) -> Self {
         let width = column_count(&byte_to_column);
         assert_eq!(values.len() % width, 0, "invalid byte rows");
         Self { values, byte_to_column, width }
@@ -142,13 +153,13 @@ impl ByteRows {
     }
 
     #[inline]
-    pub fn row(&self, state: usize) -> &[u32] {
+    pub fn row(&self, state: usize) -> &[C] {
         let base = state * self.width;
         &self.values[base..base + self.width]
     }
 
     #[inline]
-    pub fn trans(&self, state: usize, byte: usize) -> u32 {
+    pub fn trans(&self, state: usize, byte: usize) -> C {
         self.values[state * self.width + self.byte_to_column[byte] as usize]
     }
 
@@ -156,7 +167,9 @@ impl ByteRows {
         self.byte_to_column == other.byte_to_column
             && (Arc::ptr_eq(&self.values, &other.values) || self.values == other.values)
     }
+}
 
+impl ByteRows {
     /// Repack the entire represented action. The caller must have proved
     /// equality of the source columns for every pair of bytes in a class.
     /// This does not turn a finite-alphabet source into a physical lexer.

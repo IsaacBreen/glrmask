@@ -158,43 +158,37 @@ trait FullWalkTransitionTable {
 }
 
 #[derive(Clone, Copy)]
-struct FullWalkFlat16<'a> {
-    transitions: &'a [u16],
+struct FullWalkPacked<'a, C> {
+    transitions: &'a ByteRows<C>,
 }
 
-impl FullWalkTransitionTable for FullWalkFlat16<'_> {
-    type Cell = u16;
+impl<C: FlatWalkCell> FullWalkTransitionTable for FullWalkPacked<'_, C> {
+    type Cell = C;
 
     #[inline(always)]
-    fn cell(&self, state: u32, byte: u8) -> u16 {
-        unsafe {
-            *self
-                .transitions
-                .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
-        }
+    fn cell(&self, state: u32, byte: u8) -> C {
+        self.transitions.trans(state as usize, byte as usize)
     }
 
     #[inline(always)]
-    fn cell_is_dead(cell: u16) -> bool {
-        cell == u16::MAX
+    fn cell_is_dead(cell: C) -> bool {
+        cell == C::DEAD
     }
 
     #[inline(always)]
-    fn cell_has_finalizer(cell: u16) -> bool {
-        cell & 0x8000 != 0
+    fn cell_has_finalizer(cell: C) -> bool {
+        cell.into() & C::FINALIZER_BIT != 0
     }
 
     #[inline(always)]
-    fn cell_target(cell: u16) -> u32 {
-        u32::from(cell & 0x7fff)
+    fn cell_target(cell: C) -> u32 {
+        cell.into() & (C::FINALIZER_BIT - 1)
     }
-
 }
-
 
 struct FullWalkLazyUnion<'a> {
-    base_transitions16: Option<&'a [u16]>,
-    base_transitions32: Option<&'a [u32]>,
+    base_transitions16: Option<&'a ByteRows<u16>>,
+    base_transitions32: Option<&'a ByteRows>,
     base_state_count: u32,
     tokenizer: Arc<Tokenizer>,
     overflowed: &'a std::cell::Cell<bool>,
@@ -210,8 +204,8 @@ impl<'a> FullWalkLazyUnion<'a> {
 
     fn new(
         tokenizer: &Arc<Tokenizer>,
-        base_transitions16: Option<&'a [u16]>,
-        base_transitions32: Option<&'a [u32]>,
+        base_transitions16: Option<&'a ByteRows<u16>>,
+        base_transitions32: Option<&'a ByteRows>,
         mut cache: std::sync::MutexGuard<'a, DynamicLazyUnionCache>,
         root_states: &[u32],
         overflowed: &'a std::cell::Cell<bool>,
@@ -417,10 +411,7 @@ impl<'a> FullWalkLazyUnion<'a> {
     #[inline(always)]
     fn uncached_base_cell(&self, state: u32, byte: u8) -> u32 {
         if let Some(base_transitions) = self.base_transitions16 {
-            let cell = unsafe {
-                *base_transitions
-                    .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
-            };
+            let cell = base_transitions.trans(state as usize, byte as usize);
             return if cell == u16::MAX {
                 u32::MAX
             } else {
@@ -429,10 +420,7 @@ impl<'a> FullWalkLazyUnion<'a> {
             };
         }
         if let Some(base_transitions) = self.base_transitions32 {
-            return unsafe {
-                *base_transitions
-                    .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
-            };
+            return base_transitions.trans(state as usize, byte as usize);
         }
         let tokenizer = self.tokenizer.as_ref();
         let target = tokenizer.dynamic_direct_transition(state, byte);
@@ -905,40 +893,6 @@ impl FullWalkTransitionTable for FullWalkLazyUnion<'_> {
     }
 }
 
-#[derive(Clone, Copy)]
-struct FullWalkFlat32<'a> {
-    transitions: &'a [u32],
-}
-
-impl FullWalkTransitionTable for FullWalkFlat32<'_> {
-    type Cell = u32;
-
-    #[inline(always)]
-    fn cell(&self, state: u32, byte: u8) -> u32 {
-        unsafe {
-            *self
-                .transitions
-                .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
-        }
-    }
-
-    #[inline(always)]
-    fn cell_is_dead(cell: u32) -> bool {
-        cell == u32::MAX
-    }
-
-    #[inline(always)]
-    fn cell_has_finalizer(cell: u32) -> bool {
-        cell & 0x8000_0000 != 0
-    }
-
-    #[inline(always)]
-    fn cell_target(cell: u32) -> u32 {
-        cell & 0x7fff_ffff
-    }
-
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 struct LlgMasterDecision {
     /// Exact whole-token safe-string radius proved at the current lexer/parser
@@ -1401,8 +1355,8 @@ pub(super) fn try_scalar_dispatch(
     root_branches: &DynamicBranches,
     lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
     buf: &mut [u32],
-    transitions16: Option<&[u16]>,
-    transitions32: Option<&[u32]>,
+    transitions16: Option<&ByteRows<u16>>,
+    transitions32: Option<&ByteRows>,
     finalizer_code: Option<&[u32]>,
     single_finalizer_continues: Option<&[u8]>,
     ignored_output: Option<&[u32]>,
@@ -1495,22 +1449,20 @@ pub(super) fn try_scalar_dispatch(
                     continue;
                 }
                 if let Some(transitions) = transitions16 {
-                    let row = (raw_state as usize).wrapping_mul(256);
-                    if row + 256 > transitions.len() {
+                    if raw_state as usize >= transitions.num_states() {
                         continue;
                     }
                     for byte in 0u16..=255 {
-                        if unsafe { *transitions.get_unchecked(row + byte as usize) } != u16::MAX {
+                        if transitions.trans(raw_state as usize, byte as usize) != u16::MAX {
                             root_first_bytes.insert(byte as u8);
                         }
                     }
                 } else if let Some(transitions) = transitions32 {
-                    let row = (raw_state as usize).wrapping_mul(256);
-                    if row + 256 > transitions.len() {
+                    if raw_state as usize >= transitions.num_states() {
                         continue;
                     }
                     for byte in 0u16..=255 {
-                        if unsafe { *transitions.get_unchecked(row + byte as usize) } != u32::MAX {
+                        if transitions.trans(raw_state as usize, byte as usize) != u32::MAX {
                             root_first_bytes.insert(byte as u8);
                         }
                     }
@@ -1696,7 +1648,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
     root_branches: &DynamicBranches,
     lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
     buf: &mut [u32],
-    transitions: &[u16],
+    transitions: &ByteRows<u16>,
     finalizer_code: &[u32],
     single_finalizer_continues: &[u8],
 ) -> Result<bool, String> {
@@ -1823,7 +1775,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
                     root_branches,
                     lexer_scan_cache,
                     buf,
-                    FullWalkFlat16 { transitions },
+                    FullWalkPacked::<u16> { transitions },
                     finalizer_code,
                     single_finalizer_continues,
                 );
@@ -1887,7 +1839,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
                     root_branches,
                     lexer_scan_cache,
                     buf,
-                    FullWalkFlat16 { transitions },
+                    FullWalkPacked::<u16> { transitions },
                     finalizer_code,
                     single_finalizer_continues,
                 );
@@ -1904,7 +1856,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
         root_branches,
         lexer_scan_cache,
         buf,
-        FullWalkFlat16 { transitions },
+        FullWalkPacked::<u16> { transitions },
         finalizer_code,
         single_finalizer_continues,
     );
@@ -1925,7 +1877,7 @@ pub(super) fn try_flat32<const HOT_SINGLE_ROOT: bool>(
     root_branches: &DynamicBranches,
     lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
     buf: &mut [u32],
-    transitions: &[u32],
+    transitions: &ByteRows,
     finalizer_code: &[u32],
     single_finalizer_continues: &[u8],
 ) -> Result<bool, String> {
@@ -1937,7 +1889,7 @@ pub(super) fn try_flat32<const HOT_SINGLE_ROOT: bool>(
         root_branches,
         lexer_scan_cache,
         buf,
-        FullWalkFlat32 { transitions },
+        FullWalkPacked::<u32> { transitions },
         finalizer_code,
         single_finalizer_continues,
     )
@@ -3478,7 +3430,8 @@ mod full_walk_acceleration_tests {
                     | if finals[target as usize] != u32::MAX { 0x8000_0000 } else { 0 };
             }
         }
-        let transitions = FullWalkFlat32 { transitions: &rows };
+        let rows = ByteRows::dense(Arc::from(rows));
+        let transitions = FullWalkPacked::<u32> { transitions: &rows };
         let mut adapter = DenseProductTransitions {
             table: &transitions, tokenizer, vocab: &walk_vocab,
             finalizers: &finals, continuing: &continues, ignored_output: None,
@@ -3491,9 +3444,9 @@ mod full_walk_acceleration_tests {
         let alphabet = U8Set::single(b'a').to_words();
         let lexer = (0..states as u32).find(|&lexer| {
             let cell = transitions.cell(lexer, b'a');
-            !FullWalkFlat32::cell_is_dead(cell)
-                && FullWalkFlat32::cell_target(cell) == lexer
-                && FullWalkFlat32::cell_has_finalizer(cell)
+            !FullWalkPacked::<u32>::cell_is_dead(cell)
+                && FullWalkPacked::<u32>::cell_target(cell) == lexer
+                && FullWalkPacked::<u32>::cell_has_finalizer(cell)
                 && cache.physical_token_boundary_allowed_table(constraint, &mut adapter, parser, lexer)
         }).expect("fixture must exercise a live finalizing self-edge");
         let mut root = FullWalkProduct::default();
@@ -3600,7 +3553,8 @@ mod full_walk_acceleration_tests {
             for dynamic in [&compiled, &loaded] {
                 let constraint = &dynamic.inner;
                 // These predicates read terminal metadata, never byte cells.
-                let transitions = FullWalkFlat32 { transitions: &[] };
+                let empty = ByteRows::dense(Arc::from([]));
+                let transitions = FullWalkPacked::<u32> { transitions: &empty };
                 let mut adapter = DenseProductTransitions {
                     table: &transitions, tokenizer: &constraint.tokenizer,
                     vocab: constraint.dynamic_mask_vocab_for_runtime(),
@@ -3804,7 +3758,8 @@ mod full_walk_acceleration_tests {
         for state in 0..65 {
             rows[state * 256 + b'a' as usize] = state as u16;
         }
-        let table = FullWalkFlat16 { transitions: &rows };
+        let rows = ByteRows::dense(Arc::from(rows));
+        let table = FullWalkPacked::<u16> { transitions: &rows };
         let mut cache = FullWalkIdentityProofCache::default();
         for state in 0..64 {
             let classes = cache.get(&table, &tokenizer, state).unwrap();
