@@ -24,7 +24,8 @@ pub(super) struct QueryView {
     pub state_steps:usize,
 }
 
-pub(super) fn prepare(tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope)->Option<QueryView>{
+#[cfg(test)]
+fn prepare_reference(tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope)->Option<QueryView>{
     let n=tokenizer.num_states() as usize;
     if !(256..=200_000).contains(&n) || tokenizer.has_virtual_residual_runtime() || !scope.require_crossing(){return None;}
     let started=Instant::now();
@@ -69,28 +70,12 @@ pub(super) fn prepare(tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisS
     Some(QueryView{view,scope,footprint_ms,materialize_ms,first_states,reset_states,state_steps})
 }
 
-/// Uses only the direct table of this exact immutable source, as built by the
-/// caller at the link's disjoint-union boundary. A declined optimization uses
-/// the original traversal and its original resource/coverage decisions.
-pub(super) fn prepare_with_policy(
+/// One factored footprint recurrence, with a source-pinned table when one
+/// already exists and direct lexer transitions otherwise.
+pub(super) fn prepare(
     tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:Option<&ByteRows>,
 )->Option<QueryView>{
-    if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_FACTORED_QUERY_VIEW")
-        && let Some(candidate)=flat.and_then(|flat|fast::prepare(tokenizer,vocab,scope,flat)) {
-            if crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_FACTORED_QUERY_VIEW").is_some(){
-                let reference=prepare(tokenizer,vocab,scope).expect("factored query view changed reference eligibility");
-                assert_eq!(candidate.view.original_to_view,reference.view.original_to_view);
-                assert_eq!(candidate.scope.initial_states().keep_raw(),reference.scope.initial_states().keep_raw());
-                assert_eq!(candidate.scope.reset_states(),reference.scope.reset_states());
-                assert_eq!((candidate.first_states,candidate.reset_states,candidate.state_steps),
-                    (reference.first_states,reference.reset_states,reference.state_steps));
-                assert_eq!(crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(&candidate.view.tokenizer),
-                    crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(&reference.view.tokenizer));
-                eprintln!("[glrmask/validate][factored_query_view] exact=true states={}",candidate.view.tokenizer.num_states());
-            }
-            return Some(candidate);
-        }
-    prepare(tokenizer,vocab,scope)
+    fast::prepare(tokenizer,vocab,scope,flat)
 }
 
 pub(super) struct BorrowedQuery {
@@ -99,7 +84,7 @@ pub(super) struct BorrowedQuery {
     pub first_states:usize,pub reset_states:usize,pub state_steps:usize,
 }
 pub(super) fn prepare_borrowed(tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:&ByteRows)->Option<BorrowedQuery>{
-    let footprint=fast::footprint(tokenizer,vocab,scope,flat)?;
+    let footprint=fast::footprint(tokenizer,vocab,scope,Some(flat))?;
     let began=Instant::now();let n=tokenizer.num_states()as usize;let mut keep=footprint.keep;
     let closures=tokenizer.all_singleton_epsilon_closures();let start=tokenizer.initial_state_id();
     keep[start as usize]=true;let mut closure_work=0usize;
@@ -136,7 +121,7 @@ mod tests {
             let mut keep=vec![false;tokenizer.num_states() as usize];for &q in &initial{keep[q as usize]=true;}
             let scope=BoundaryAnalysisScope::new(InitialStateDomain::from_mask(keep.len(),keep).unwrap(),
                 resets.clone(),Arc::new(BoundaryOwnership::flat(&[0,1],3).unwrap()),ImmediateComponentId(0),true,None).unwrap();
-            let q=prepare(&tokenizer,&vocab,&scope).expect("fixture must select a nontrivial query view");
+            let q=prepare(&tokenizer,&vocab,&scope,None).expect("fixture must select a nontrivial query view");
             assert!(q.view.tokenizer.num_states()*10<tokenizer.num_states());
             let compare=|sources:&[u32],word:&[u8]| {
                 let mut original=sources.to_vec();let mut view=sources.iter().map(|&raw|{
@@ -153,7 +138,7 @@ mod tests {
                 compare(&initial,word);
                 for start in 0..word.len(){for end in start+1..=word.len(){compare(&resets,&word[start..end]);}}
             }
-            let empty=Vocab::from_entries_unchecked(vec![(99,vec![])]);assert!(prepare(&tokenizer,&empty,&scope).is_none());
+            let empty=Vocab::from_entries_unchecked(vec![(99,vec![])]);assert!(prepare(&tokenizer,&empty,&scope,None).is_none());
         }
     }
 }

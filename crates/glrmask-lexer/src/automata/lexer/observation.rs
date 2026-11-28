@@ -631,6 +631,21 @@ impl EpsilonImageScratch {
         source_closed: bool,
         closures: &super::dfa::SingletonEpsilonClosures,
         active: Option<&[bool]>,
+        transition: impl FnMut(u32, u8) -> u32,
+    ) -> &[u32] {
+        self.step_union(config, &[], byte, source_closed, closures, active, transition)
+    }
+
+    /// Union the already-closed additional image, not its preimage. This
+    /// factors repeated reset transitions without changing the recurrence.
+    pub fn step_union(
+        &mut self,
+        config: &[u32],
+        extra: &[u32],
+        byte: u8,
+        source_closed: bool,
+        closures: &super::dfa::SingletonEpsilonClosures,
+        active: Option<&[bool]>,
         mut transition: impl FnMut(u32, u8) -> u32,
     ) -> &[u32] {
         self.generation = self.generation.wrapping_add(1);
@@ -639,6 +654,14 @@ impl EpsilonImageScratch {
             self.generation = 1;
         }
         self.targets.clear();
+        for &state in extra {
+            if active.is_some_and(|a| !a[state as usize]) { continue; }
+            let mark = &mut self.marks[state as usize];
+            if *mark != self.generation {
+                *mark = self.generation;
+                self.targets.push(state);
+            }
+        }
         for &source in config {
             let sources = if source_closed {
                 std::slice::from_ref(&source)

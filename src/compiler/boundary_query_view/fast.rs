@@ -1,44 +1,11 @@
-//! Exact query-view reachability using an already source-certified direct
-//! transition table. The selected raw states, induced tokenizer and its ID
-//! layout must match `boundary_query_view::prepare`; only the traversal changes.
-use crate::automata::lexer::observation::ByteRows;
+//! Exact factored query-view reachability using source-pinned byte actions.
+//! The independent scalar recurrence is retained as a test oracle.
+use crate::automata::lexer::observation::{ByteRows, EpsilonImageScratch};
 use super::QueryView;
-use crate::automata::lexer::tokenizer::{Lexer, Tokenizer, SingletonEpsilonClosures};
+use crate::automata::lexer::tokenizer::{Lexer, Tokenizer};
 use crate::compiler::stages::id_map_and_terminal_dwa::scope::BoundaryAnalysisScope;
 use crate::Vocab;
-use std::{sync::Arc, time::Instant};
-
-struct Stepper<'a> {
-    flat: &'a ByteRows,
-    closures: Arc<SingletonEpsilonClosures>,
-    marks: Vec<u32>,
-    epoch: u32,
-}
-impl Stepper<'_> {
-    fn step(&mut self, states: &[u32], byte: u8, extra: &[u32]) -> Option<Vec<u32>> {
-        self.epoch = self.epoch.wrapping_add(1);
-        if self.epoch == 0 { self.marks.fill(0); self.epoch = 1; }
-        let stamp = self.epoch;
-        let mut out = Vec::with_capacity(states.len().min(4096) + extra.len());
-        for &q in extra {
-            let mark = self.marks.get_mut(q as usize)?;
-            if *mark != stamp { *mark = stamp; out.push(q); }
-        }
-        // `states` and `extra` are epsilon-closed. Byte movement followed by
-        // target closure is exactly the ordinary NFA step, with one dedup pass.
-        for &q in states {
-            if q as usize >= self.flat.num_states() { return None; }
-            let target = self.flat.trans(q as usize, byte as usize);
-            if target == u32::MAX { continue; }
-            for &next in self.closures.get(target as usize)?.iter() {
-                let mark = self.marks.get_mut(next as usize)?;
-                if *mark != stamp { *mark = stamp; out.push(next); }
-            }
-        }
-        out.sort_unstable();
-        Some(out)
-    }
-}
+use std::time::Instant;
 
 // Both inputs are sorted and unique. This counts the reference traversal's
 // logical work without allocating its repeated reset-union vector.
@@ -58,7 +25,7 @@ fn union_len(a: &[u32], b: &[u32]) -> usize {
 /// boundary linker. Never pass a table belonging to a different source/view.
 pub(super) struct Footprint {pub keep:Vec<bool>,pub footprint_ms:f64,pub first_states:usize,pub reset_states:usize,pub state_steps:usize}
 pub(super) fn prepare(
-    tokenizer: &Tokenizer, vocab: &Vocab, scope: &BoundaryAnalysisScope, flat: &ByteRows,
+    tokenizer: &Tokenizer, vocab: &Vocab, scope: &BoundaryAnalysisScope, flat: Option<&ByteRows>,
 ) -> Option<QueryView> {
     let Footprint{keep,footprint_ms,first_states,reset_states,state_steps}=footprint(tokenizer,vocab,scope,flat)?;
     let began = Instant::now();
@@ -70,11 +37,11 @@ pub(super) fn prepare(
         first_states, reset_states, state_steps })
 }
 pub(super) fn footprint(
-    tokenizer: &Tokenizer, vocab: &Vocab, scope: &BoundaryAnalysisScope, flat: &ByteRows,
+    tokenizer: &Tokenizer, vocab: &Vocab, scope: &BoundaryAnalysisScope, flat: Option<&ByteRows>,
 ) -> Option<Footprint> {
     let n = tokenizer.num_states() as usize;
-    if !(256..=200_000).contains(&n) || tokenizer.has_virtual_residual_runtime()
-        || !scope.require_crossing() || flat.num_states() != n
+    if !(256..=200_000).contains(&n) || tokenizer.has_any_virtual_runtime()
+        || !scope.require_crossing() || flat.is_some_and(|rows| rows.num_states() != n)
         || scope.initial_states().keep_raw().len() != n
     { return None; }
     let began = Instant::now();
@@ -98,7 +65,10 @@ pub(super) fn footprint(
         for &r in closures.get(q as usize)?.iter() { *continuation.get_mut(r as usize)? = true; }
     }
     let closed_reset = continuation.iter().enumerate().filter_map(|(q, &on)| on.then_some(q as u32)).collect::<Vec<_>>();
-    let mut stepper = Stepper { flat, closures, marks: vec![0; n], epoch: 0 };
+    let mut image = EpsilonImageScratch::new(n);
+    let transition = |source: u32, byte: u8| flat.map_or_else(
+        || tokenizer.get_transition(source, byte),
+        |rows| rows.trans(source as usize, byte as usize));
     let mut reset_next = (0..256).map(|_| None).collect::<Vec<Option<Vec<u32>>>>();
     let mut frames = vec![(initial, Vec::<u32>::new())];
     let mut stored = frames[0].0.len();
@@ -115,10 +85,10 @@ pub(super) fn footprint(
             state_steps = state_steps.checked_add(old_first.len() + union_len(old_reset, &reset))?;
             if state_steps > 30_000_000 { return None; }
             if reset_next[byte as usize].is_none() {
-                reset_next[byte as usize] = Some(stepper.step(&closed_reset, byte, &[])?);
+                reset_next[byte as usize] = Some(image.step(&closed_reset, byte, true, &closures, None, transition).to_vec());
             }
-            let f = stepper.step(old_first, byte, &[])?;
-            let c = stepper.step(old_reset, byte, reset_next[byte as usize].as_ref()?)?;
+            let f = image.step(old_first, byte, true, &closures, None, transition).to_vec();
+            let c = image.step_union(old_reset, reset_next[byte as usize].as_ref()?, byte, true, &closures, None, transition).to_vec();
             for &q in &f { first[q as usize] = true; }
             for &q in &c { continuation[q as usize] = true; }
             stored = stored.checked_add(f.len() + c.len())?;
@@ -138,6 +108,7 @@ pub(super) fn footprint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use crate::automata::lexer::{ast::{bytes,choice,plus},compile::{build_regex_monolithic,build_regex_partitioned}};
     use glrmask_terminal_dwa::__private::terminal_dwa::scope::{BoundaryOwnership,InitialStateDomain,ImmediateComponentId};
     #[test]
@@ -157,8 +128,10 @@ mod tests {
                 let mut entries=vec![(0,b"ab!".to_vec()),(13,b"ba".to_vec()),(47,b"ab!".to_vec())];
                 for i in 0..24 {let n=1+next()%12;entries.push((100+i*11,(0..n).map(|_|b"ab! q"[next()%5]).collect()));}
                 let vocab=Vocab::from_entries_unchecked(entries);
-                let a=super::super::prepare(&tok,&vocab,&scope);
-                let b=prepare(&tok,&vocab,&scope,&flat);
+                let a=super::super::prepare_reference(&tok,&vocab,&scope);
+                let b=prepare(&tok,&vocab,&scope,Some(&flat));
+                let direct=prepare(&tok,&vocab,&scope,None);
+                assert_eq!(direct.as_ref().map(|q| &q.view.original_to_view),b.as_ref().map(|q| &q.view.original_to_view));
                 assert_eq!(a.is_some(),b.is_some(),"case={case} partitioned={partitioned}");
                 if let (Some(a),Some(b))=(a,b) {
                     assert_eq!(a.view.original_to_view,b.view.original_to_view);
@@ -169,7 +142,7 @@ mod tests {
                         crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(&b.view.tokenizer));
                     checked+=1;
                 }
-                assert!(prepare(&tok,&vocab,&scope,&ByteRows::dense(Arc::from([]))).is_none());
+                assert!(prepare(&tok,&vocab,&scope,Some(&ByteRows::dense(Arc::from([])))).is_none());
             }
         }
         assert!(checked>=64,"insufficient accepted-view coverage: {checked}");

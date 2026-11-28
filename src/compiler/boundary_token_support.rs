@@ -401,7 +401,7 @@ mod tests {
                 assert_eq!(reference.state_steps,candidate.state_steps);
                 assert_eq!(reference.max_frontier,candidate.max_frontier);
             }
-            assert!(PreparedSupportTransitions::new(&tokenizer,&[0]).is_none());
+            assert!(PreparedSupportTransitions::new(&tokenizer,&ByteRows::dense(Arc::from([]))).is_none());
         }
     }
 

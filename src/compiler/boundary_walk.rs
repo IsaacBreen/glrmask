@@ -291,7 +291,7 @@ fn build_boundary_terminal_dwa_query_reference(
     tile_size:Option<usize>, terminal_support:bool, query_view:bool, identity:bool,
 ) -> Option<BoundaryWalkOutput> {
     if query_view
-        && let Some(prepared)=super::boundary_query_view::prepare_with_policy(inputs.merged_tokenizer,inputs.vocab,inputs.scope,inputs.flat_trans)
+        && let Some(prepared)=super::boundary_query_view::prepare(inputs.merged_tokenizer,inputs.vocab,inputs.scope,inputs.flat_trans)
     {
         let view=&prepared.view;
         let mut output=build_boundary_terminal_dwa_query_jobs(&BoundaryWalkInputs{
