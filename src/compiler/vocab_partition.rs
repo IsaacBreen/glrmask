@@ -431,7 +431,6 @@ pub(crate) fn compile_vocab_partition_owned(
                 Arc::clone(&flat_trans),
                 &global_max_length_state_map,
                 None,
-                None,
                 partition_local_synthesis_plan.as_deref(),
                 None,
             )

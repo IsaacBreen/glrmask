@@ -205,7 +205,7 @@ fn build_identity_common(
         "boundary_identity_refinement", tokenizer, vocab,
         &TerminalColoring::identity(active.len()), false, ignore_terminal, grammar,
         &always, &active, disallowed_follows,
-        None, None, None, None, None, None, None, Some(&flat_trans), None,
+        None, None, None, None, None, None, Some(&flat_trans), None,
         Some(&shared.id_map.tokenizer_states), false,
         Some(scope.initial_states().keep_raw()), Some(&options),
         )

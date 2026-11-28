@@ -1,7 +1,6 @@
 //! Flattened tokenizer-DFA views for the equivalence-analysis passes.
 
 use crate::automata::lexer::Lexer;
-use crate::ds::u8set::U8Set;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -64,18 +63,6 @@ pub struct FlatDfa {
 
 const BYTE_COLUMN_HASH_MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
 
-/// Transition-only data needed to construct the shared equivalence base.
-///
-/// This is created lazily only when an unsimplified L2P partition is built.
-/// The dense transition table already exists for terminal construction; we
-/// derive byte-column hashes and self-loop masks from the tokenizer's sparse
-/// edge rows, then retain exact full-column checks for hash collisions.
-pub struct FlatTransitionCache {
-    pub transitions: Arc<[u32]>,
-    pub byte_to_class: [u8; 256],
-    pub self_loop_bytes: Arc<[U8Set]>,
-}
-
 fn byte_classes_from_column_hashes(
     transitions: &[u32],
     num_states: usize,
@@ -122,10 +109,7 @@ fn byte_classes_from_column_hashes(
     byte_to_class
 }
 
-pub fn derive_flat_transition_cache(
-    tokenizer: &Tokenizer,
-    transitions: Arc<[u32]>,
-) -> FlatTransitionCache {
+pub fn compute_physical_byte_classes(tokenizer: &Tokenizer, transitions: &[u32]) -> [u8; 256] {
     let num_states = tokenizer.num_states() as usize;
     let dead = u32::MAX;
     assert_eq!(transitions.len(), num_states * 256);
@@ -145,10 +129,8 @@ pub fn derive_flat_transition_cache(
             .wrapping_add(dead as u64);
     }
     let mut column_hashes = [all_dead_hash; 256];
-    let mut self_loop_bytes = Vec::with_capacity(num_states);
 
     for state in 0..num_states {
-        let mut self_loops = U8Set::empty();
         let base = state * 256;
         for (byte, target) in tokenizer.transitions_from(state as u32) {
             let actual = transitions[base + byte as usize];
@@ -156,18 +138,10 @@ pub fn derive_flat_transition_cache(
             let delta = (target as u64).wrapping_sub(dead as u64);
             column_hashes[byte as usize] = column_hashes[byte as usize]
                 .wrapping_add(delta.wrapping_mul(row_weight[state]));
-            if target == state as u32 {
-                self_loops.insert(byte);
-            }
         }
-        self_loop_bytes.push(self_loops);
     }
 
-    FlatTransitionCache {
-        byte_to_class: byte_classes_from_column_hashes(&transitions, num_states, &column_hashes),
-        transitions,
-        self_loop_bytes: Arc::from(self_loop_bytes),
-    }
+    byte_classes_from_column_hashes(transitions, num_states, &column_hashes)
 }
 
 

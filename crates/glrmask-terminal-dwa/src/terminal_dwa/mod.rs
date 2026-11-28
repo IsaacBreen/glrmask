@@ -1701,9 +1701,6 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
     flat_trans: Arc<[u32]>,
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
-    external_transition_cache: Option<
-        &OnceLock<l2p::equivalence_analysis::compat::FlatTransitionCache>,
-    >,
     partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
     prepared_partition_local_tokenizers: Option<&PreparedPartitionLocalTokenizers>,
     active_terminal_filter: Option<&[bool]>,
@@ -1720,7 +1717,6 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
         flat_trans,
         global_max_length_state_map,
         external_classify_cache,
-        external_transition_cache,
         partition_local_synthesis_plan,
         prepared_partition_local_tokenizers,
         None,
@@ -1741,9 +1737,6 @@ pub fn build_vocab_partition_from_static_id_maps(
     flat_trans: Arc<[u32]>,
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
-    external_transition_cache: Option<
-        &OnceLock<l2p::equivalence_analysis::compat::FlatTransitionCache>,
-    >,
     partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
     prepared_partition_local_tokenizers: Option<&PreparedPartitionLocalTokenizers>,
 ) -> ManyToOneIdMap {
@@ -1759,7 +1752,6 @@ pub fn build_vocab_partition_from_static_id_maps(
         flat_trans,
         global_max_length_state_map,
         external_classify_cache,
-        external_transition_cache,
         partition_local_synthesis_plan,
         prepared_partition_local_tokenizers,
         None,
@@ -1952,9 +1944,6 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     flat_trans: Arc<[u32]>,
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
-    external_transition_cache: Option<
-        &OnceLock<l2p::equivalence_analysis::compat::FlatTransitionCache>,
-    >,
     partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
     prepared_partition_local_tokenizers: Option<&PreparedPartitionLocalTokenizers>,
     terminal_filter: Option<&[bool]>,
@@ -2288,8 +2277,6 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
     let shared_original_vocab_analysis_dfa_cache =
         l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
-    let owned_transition_cache = OnceLock::new();
-    let shared_transition_cache = external_transition_cache.unwrap_or(&owned_transition_cache);
     // Grammar-wide and identical for every L2P vocabulary partition. Compute
     // once before parallel partition construction rather than repeating the
     // same FIRST/FOLLOW occurrence traversal in each partition.
@@ -2333,7 +2320,6 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 Some(&shared_vocab_dfa_cache),
                 Some(&shared_original_vocab_dfa_cache),
                 Some(&shared_original_vocab_analysis_dfa_cache),
-                Some(shared_transition_cache),
                 Some(&shared_ti_output_cache),
                 Some(shared_classify_cache),
                 terminal_filter,
@@ -2493,7 +2479,6 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
             let local_original_vocab_analysis_dfa_cache =
                 l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
-            let local_transition_cache = OnceLock::new();
             let local_ti_output_cache = ready
                 .classify_cache
                 .get()
@@ -2516,7 +2501,6 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 Some(&local_vocab_dfa_cache),
                 Some(&local_original_vocab_dfa_cache),
                 Some(&local_original_vocab_analysis_dfa_cache),
-                Some(&local_transition_cache),
                 Some(&local_ti_output_cache),
                 Some(&ready.classify_cache),
                 terminal_filter,
@@ -2577,7 +2561,6 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 Some(&shared_vocab_dfa_cache),
                 Some(&shared_original_vocab_dfa_cache),
                 Some(&shared_original_vocab_analysis_dfa_cache),
-                Some(shared_transition_cache),
                 Some(&shared_ti_output_cache),
                 Some(shared_classify_cache),
                 terminal_filter,
@@ -2603,7 +2586,6 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 Some(&shared_vocab_dfa_cache),
                 Some(&shared_original_vocab_dfa_cache),
                 Some(&shared_original_vocab_analysis_dfa_cache),
-                Some(shared_transition_cache),
                 Some(&shared_ti_output_cache),
                 Some(shared_classify_cache),
                 terminal_filter,
@@ -3038,7 +3020,6 @@ pub fn build_restricted_id_map_and_terminal_dwa_with_precomputed_global_max_leng
             external_classify_cache,
             None,
             None,
-            None,
             active_terminal_filter,
         );
     let family_count = families.len();
@@ -3114,13 +3095,12 @@ pub struct ScopedBoundarySharedContext<'a> {
     tokenizer: &'a Tokenizer,
     grammar: &'a AnalyzedGrammar,
     classify: classify::SharedClassifyCache,
-    transitions: OnceLock<l2p::equivalence_analysis::compat::FlatTransitionCache>,
     always_allowed: OnceLock<Vec<Vec<TerminalID>>>,
 }
 
 impl<'a> ScopedBoundarySharedContext<'a> {
     pub fn new(tokenizer: &'a Tokenizer, grammar: &'a AnalyzedGrammar) -> Self {
-        Self { tokenizer, grammar, classify: OnceLock::new(), transitions: OnceLock::new(),
+        Self { tokenizer, grammar, classify: OnceLock::new(),
             always_allowed: OnceLock::new() }
     }
     fn validate(&self, tokenizer: &Tokenizer, grammar: &AnalyzedGrammar) {
@@ -3208,7 +3188,6 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa_with_filter(
             flat_trans,
             scope.initial_states().exact_singleton_map(),
             shared.map(|context| &context.classify),
-            shared.map(|context| &context.transitions),
             None,
             None,
             terminal_filter,

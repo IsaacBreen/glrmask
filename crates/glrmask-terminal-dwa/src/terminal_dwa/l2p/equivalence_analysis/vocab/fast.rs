@@ -3,7 +3,7 @@
 //! Each token is classified by its match positions, suffix structure, and end
 //! states across all tokenizer starts.
 
-use super::super::compat::{compute_byte_classes, FlatDfa, FlatTransitionCache, TokenizerView};
+use super::super::compat::{compute_byte_classes, FlatDfa, TokenizerView};
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
@@ -277,33 +277,6 @@ impl SharedVocabDfaBase {
             }
         }
         Arc::from(transitions)
-    }
-
-    /// Build from transition data derived from sparse lexer rows. Byte classes
-    /// and self-loop bytes are shared immediately; the two dense layouts remain
-    /// lazy until a caller actually needs their access pattern.
-    pub fn build_from_flat_transition_cache(cache: &FlatTransitionCache) -> Self {
-        let byte_to_class = cache.byte_to_class;
-        let num_classes = byte_to_class
-            .iter()
-            .copied()
-            .max()
-            .map_or(0usize, |max_class| max_class as usize + 1);
-        let none_completion_hash = {
-            let mut h = new_hasher();
-            h.write_u8(0);
-            h.finish()
-        };
-        Self {
-            byte_to_class,
-            num_classes,
-            class_representatives: Self::class_representatives(&byte_to_class, num_classes),
-            trans_by_class: OnceLock::new(),
-            trans_by_state_class: OnceLock::new(),
-            self_loop_bytes: Arc::clone(&cache.self_loop_bytes),
-            none_completion_hash,
-            source_transitions: Arc::clone(&cache.transitions),
-        }
     }
 
     /// Build from a FlatDfa. Called lazily via OnceLock on first use.

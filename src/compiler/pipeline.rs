@@ -3331,11 +3331,6 @@ struct RuntimeTokenizerDagResult {
 
 struct FlatGlobalDagLane {
     flat_trans: Arc<[u32]>,
-    shared_transition_cache: Arc<
-        std::sync::OnceLock<
-            crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::FlatTransitionCache,
-        >,
-    >,
     flat_trans_ms: f64,
     global_max_length_state_map: ManyToOneIdMap,
     global_max_length_ms: f64,
@@ -4017,7 +4012,6 @@ fn build_static_terminal_families(
             Arc::clone(&flat_global.flat_trans),
             &flat_global.global_max_length_state_map,
             Some(&classify.shared_classify_cache),
-            Some(flat_global.shared_transition_cache.as_ref()),
             tokenizer.partition_local_synthesis_plan.as_deref(),
             tokenizer.prepared_partition_local_tokenizers.as_deref(),
             None,
@@ -4083,9 +4077,6 @@ fn build_static_parser(
 
 struct FlatTransitionsStage {
     flat_trans: Arc<[u32]>,
-    shared_transition_cache: Arc<std::sync::OnceLock<
-        crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::FlatTransitionCache,
-    >>,
     flat_trans_ms: f64,
     started_ms: f64,
 }
@@ -4098,7 +4089,7 @@ impl FlatTransitionsStage {
             crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table(tokenizer),
         );
         Self {
-            flat_trans, shared_transition_cache: Arc::new(std::sync::OnceLock::new()),
+            flat_trans,
             flat_trans_ms: elapsed_ms(started), started_ms,
         }
     }
@@ -4111,7 +4102,6 @@ impl FlatTransitionsStage {
             );
         FlatGlobalDagLane {
             flat_trans: Arc::clone(&self.flat_trans),
-            shared_transition_cache: Arc::clone(&self.shared_transition_cache),
             flat_trans_ms: self.flat_trans_ms, global_max_length_state_map,
             global_max_length_ms: elapsed_ms(started),
             started_ms: self.started_ms, finished_ms: elapsed_ms(compile_started_at),
@@ -4122,11 +4112,7 @@ impl FlatTransitionsStage {
         &self, tokenizer: &Tokenizer, vocab: &Vocab, eager: bool,
     ) -> cpm::ConstraintPossibleMatchesComputation {
         if eager {
-            let classes = self.shared_transition_cache.get_or_init(|| {
-                crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::derive_flat_transition_cache(
-                    tokenizer, Arc::clone(&self.flat_trans),
-                )
-            }).byte_to_class;
+            let classes = crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::compute_physical_byte_classes(tokenizer, &self.flat_trans);
             cpm::compute_constraint_possible_matches_for_vocab_with_byte_observations(
                 tokenizer, vocab, cpm::ConstraintPossibleMatchesConfig::EAGER, &classes, &self.flat_trans,
             )
