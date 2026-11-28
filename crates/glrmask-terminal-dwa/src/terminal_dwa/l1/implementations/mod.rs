@@ -29,7 +29,7 @@ pub struct BuildInput<'a> {
     pub grammar: &'a AnalyzedGrammar,
     pub active_terminals: &'a [bool],
     pub flat_trans: &'a Arc<[u32]>,
-    pub transitions_by_byte: Option<&'a [u32]>,
+    pub transitions_by_byte: Option<&'a crate::terminal_dwa::classify::ByteTransitionIndex>,
     pub initial_state_map: Option<&'a ManyToOneIdMap>,
     /// `u32::MAX` in `initial_state_map` means excluded from the complete
     /// token-start domain, rather than an unclassified raw state that an L1

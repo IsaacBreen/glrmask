@@ -148,7 +148,7 @@ pub fn build_l1_id_map_and_terminal_dwa(
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
     flat_trans: &Arc<[u32]>,
-    transitions_by_byte: Option<&[u32]>,
+    transitions_by_byte: Option<&crate::terminal_dwa::classify::ByteTransitionIndex>,
     initial_state_map: Option<&ManyToOneIdMap>,
     shared_generic_nfa_topology: Option<
         &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,
@@ -188,7 +188,7 @@ pub fn build_l1_id_map_and_terminal_dwa_mode(
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
     flat_trans: &Arc<[u32]>,
-    transitions_by_byte: Option<&[u32]>,
+    transitions_by_byte: Option<&crate::terminal_dwa::classify::ByteTransitionIndex>,
     initial_state_map: Option<&ManyToOneIdMap>,
     shared_generic_nfa_topology: Option<
         &super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology,

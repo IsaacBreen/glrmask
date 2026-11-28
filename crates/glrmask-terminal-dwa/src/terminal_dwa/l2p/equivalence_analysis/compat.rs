@@ -106,7 +106,7 @@ fn physical_column_hashes(tokenizer: &Tokenizer, flat: Option<&[u32]>) -> [u64; 
 }
 
 /// Same physical observation without allocating a dense table.
-pub(super) fn compute_tokenizer_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
+pub(crate) fn compute_tokenizer_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
     byte_classes_from_column_hashes(tokenizer.num_states() as usize,
         &physical_column_hashes(tokenizer, None), &[true; 256],
         |state, byte| tokenizer.get_transition(state as u32, byte as u8))

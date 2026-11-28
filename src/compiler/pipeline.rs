@@ -4171,7 +4171,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 }
             }
         }
-        let LexicalObservationSource { tokenizer, flat_trans } = *source;
+        let LexicalObservationSource { tokenizer, flat_trans, .. } = *source;
         let analyzed_grammar = Arc::try_unwrap(analyzed_grammar)
             .unwrap_or_else(|_| panic!("analyzed grammar references outlived compile DAG"));
 

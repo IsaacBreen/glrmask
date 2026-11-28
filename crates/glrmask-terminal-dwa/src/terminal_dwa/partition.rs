@@ -373,7 +373,7 @@ struct VocabRouting<'a> {
     has_split_l1: bool,
     combine_l1_single: bool,
     combined_l1_mask: Option<Vec<bool>>,
-    transitions_by_byte: Option<&'a [u32]>,
+    transitions_by_byte: Option<&'a crate::terminal_dwa::classify::ByteTransitionIndex>,
     exact_l2p_selected: bool,
 }
 

@@ -879,18 +879,27 @@ fn unique_vocab(input: BuildInput<'_>) -> (Arc<Vec<Vec<u32>>>, Arc<Vec<Arc<[u8]>
 /// transitions from every raw state imply identical `step_all` results from
 /// every epsilon-closed configuration.
 fn quotient_input_bytes(input: BuildInput<'_>, bytes: &[u8]) -> (Vec<u8>, [u8; 256]) {
+    if let Some(index) = input.transitions_by_byte {
+        let mut first = [None; 256];
+        let mut representatives = Vec::new();
+        let mut representative = [0; 256];
+        for &byte in bytes {
+            let first_byte = first[index.class(byte)].get_or_insert_with(|| {
+                representatives.push(byte);
+                byte
+            });
+            representative[byte as usize] = *first_byte;
+        }
+        return (representatives, representative);
+    }
     let states = input.tokenizer.num_states() as usize;
     let mut column_ids = FxHashMap::<Vec<u32>, u8>::default();
     let mut representatives = Vec::<u8>::new();
     let mut representative = [0u8; 256];
     for &byte in bytes {
-        let column = if let Some(by_byte) = input.transitions_by_byte {
-            by_byte[byte as usize * states..(byte as usize + 1) * states].to_vec()
-        } else {
-            (0..states)
-                .map(|state| input.flat_trans[state * 256 + byte as usize])
-                .collect::<Vec<_>>()
-        };
+        let column = (0..states)
+            .map(|state| input.flat_trans[state * 256 + byte as usize])
+            .collect::<Vec<_>>();
         let class = if let Some(&class) = column_ids.get(&column) {
             class
         } else {

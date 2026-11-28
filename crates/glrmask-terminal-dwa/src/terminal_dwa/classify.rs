@@ -13,7 +13,8 @@ use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::Vocab;
 
-use super::l2p::equivalence_analysis::compat::FlatDfa;
+use super::l2p::equivalence_analysis::compat::{FlatDfa, compute_tokenizer_byte_classes};
+use crate::automata::lexer::observation::column_representatives;
 use super::l2p::equivalence_analysis::state_equivalence::nfa::{
     TokenBoundedAnalysisTrie,
     build_bounded_analysis_view_from_combined_starts_prefix_only_with_trie,
@@ -31,9 +32,7 @@ pub struct SharedClassifyBytesets {
     reachable_bytes: Vec<U8Set>,
     first_bytes: Vec<U8Set>,
     last_bytes: Vec<U8Set>,
-    transitions_by_byte: Vec<u32>,
-    sparse_transitions_by_byte: Vec<Vec<(u32, u32)>>,
-    reverse_transitions_by_byte: Vec<ReverseByteTransitions>,
+    byte_index: ByteTransitionIndex,
     matched_terminals_by_state: Arc<[Box<[u32]>]>,
     future_terminals_by_state: Arc<[Box<[u32]>]>,
     matched_states_by_terminal: Arc<[Vec<u32>]>,
@@ -81,6 +80,39 @@ struct ReverseByteTransitions {
     targets: Vec<u32>,
     source_offsets: Vec<u32>,
     sources: Vec<u32>,
+}
+
+/// Physical byte classes share all raw-state transitions, including absence.
+/// All three access paths are indexed by the same exact column coordinate.
+pub struct ByteTransitionIndex {
+    classes: [u8; 256],
+    num_states: usize,
+    dense: Vec<u32>,
+    sparse: Vec<Vec<(u32, u32)>>,
+    reverse: Vec<ReverseByteTransitions>,
+}
+
+impl ByteTransitionIndex {
+    #[inline]
+    pub fn class(&self, byte: u8) -> usize {
+        self.classes[byte as usize] as usize
+    }
+
+    #[inline]
+    pub fn column(&self, byte: u8) -> &[u32] {
+        let start = self.class(byte) * self.num_states;
+        &self.dense[start..start + self.num_states]
+    }
+
+    #[inline]
+    fn sparse(&self, byte: u8) -> &[(u32, u32)] {
+        &self.sparse[self.class(byte)]
+    }
+
+    #[inline]
+    fn reverse(&self, byte: u8) -> &ReverseByteTransitions {
+        &self.reverse[self.class(byte)]
+    }
 }
 
 fn build_reverse_transitions_by_byte(
@@ -639,12 +671,24 @@ impl SharedClassifyBytesets {
     }
 
     #[inline]
-    pub fn transitions_by_byte(&self) -> &[u32] {
-        &self.transitions_by_byte
+    pub fn transitions_by_byte(&self) -> &ByteTransitionIndex {
+        &self.byte_index
     }
 
     /// Scan the DFA to compute per-terminal byte sets.
     pub fn build(tokenizer: &Tokenizer, num_terminals: u32) -> Self {
+        Self::build_with_physical_classes(tokenizer, num_terminals, compute_tokenizer_byte_classes(tokenizer))
+    }
+
+    /// The classes must be the exact unrestricted column partition of this
+    /// tokenizer, not a finite-vocabulary or active-terminal quotient.
+    pub fn build_with_physical_classes(tokenizer: &Tokenizer, num_terminals: u32, classes: [u8; 256]) -> Self {
+        let representatives = column_representatives(&classes);
+        let num_columns = representatives.len();
+        let mut class_bytes = vec![U8Set::empty(); num_columns];
+        for byte in 0u8..=u8::MAX {
+            class_bytes[classes[byte as usize] as usize].insert(byte);
+        }
         let nt = num_terminals as usize;
         // The old implementation expanded target terminal bitsets once per
         // transition. On a large tokenizer this is catastrophic: many
@@ -656,11 +700,11 @@ impl SharedClassifyBytesets {
             || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
         let started_at = std::time::Instant::now();
         let words_per_terminal_set = nt.div_ceil(64);
-        let mut reachable_by_byte = vec![0u64; 256 * words_per_terminal_set];
-        let mut last_by_byte = vec![0u64; 256 * words_per_terminal_set];
+        let mut reachable_by_byte = vec![0u64; num_columns * words_per_terminal_set];
+        let mut last_by_byte = vec![0u64; num_columns * words_per_terminal_set];
         let num_states = tokenizer.num_states() as usize;
-        let mut transitions_by_byte = vec![u32::MAX; 256 * num_states];
-        let mut sparse_transitions_by_byte = vec![Vec::<(u32, u32)>::new(); 256];
+        let mut transitions_by_byte = vec![u32::MAX; num_columns * num_states];
+        let mut sparse_transitions_by_byte = vec![Vec::<(u32, u32)>::new(); num_columns];
         let build_ti_output_index =
             std::env::var_os("GLRMASK_DISABLE_CLASSIFY_TI_OUTPUT_INDEX").is_none();
         let mut matched_terminals_by_state =
@@ -742,9 +786,13 @@ impl SharedClassifyBytesets {
             }
             for (byte, target) in tokenizer.transitions_from(state) {
                 transition_count += 1;
-                transitions_by_byte[byte as usize * num_states + state as usize] = target;
-                sparse_transitions_by_byte[byte as usize].push((state, target));
-                let bucket_offset = byte as usize * words_per_terminal_set;
+                let column = classes[byte as usize] as usize;
+                if representatives[column] != byte {
+                    continue;
+                }
+                transitions_by_byte[column * num_states + state as usize] = target;
+                sparse_transitions_by_byte[column].push((state, target));
+                let bucket_offset = column * words_per_terminal_set;
                 let target_offset = target as usize * words_per_terminal_set;
                 for word_index in 0..words_per_terminal_set {
                     reachable_by_byte[bucket_offset + word_index] |=
@@ -766,15 +814,15 @@ impl SharedClassifyBytesets {
 
         let mut reachable_bytes = vec![U8Set::empty(); nt];
         let mut last_bytes = vec![U8Set::empty(); nt];
-        for byte in 0u8..=u8::MAX {
-            let bucket_offset = byte as usize * words_per_terminal_set;
+        for (column, bytes) in class_bytes.iter().enumerate() {
+            let bucket_offset = column * words_per_terminal_set;
             for word_index in 0..words_per_terminal_set {
                 let base_terminal = word_index * 64;
                 let mut reachable_word = reachable_by_byte[bucket_offset + word_index];
                 while reachable_word != 0 {
                     let terminal = base_terminal + reachable_word.trailing_zeros() as usize;
                     if terminal < nt {
-                        reachable_bytes[terminal].insert(byte);
+                        reachable_bytes[terminal] |= *bytes;
                     }
                     reachable_word &= reachable_word - 1;
                 }
@@ -783,7 +831,7 @@ impl SharedClassifyBytesets {
                 while last_word != 0 {
                     let terminal = base_terminal + last_word.trailing_zeros() as usize;
                     if terminal < nt {
-                        last_bytes[terminal].insert(byte);
+                        last_bytes[terminal] |= *bytes;
                     }
                     last_word &= last_word - 1;
                 }
@@ -794,18 +842,18 @@ impl SharedClassifyBytesets {
         // configuration. The ordinary DFA case naturally has one state.
         let mut first_bytes = vec![U8Set::empty(); nt];
         let reset_states = tokenizer.execute_from_state_end_only(&[], tokenizer.initial_state_id());
-        for byte in 0u8..=u8::MAX {
+        for (column, &byte) in representatives.iter().enumerate() {
             let targets = tokenizer.step_all(&reset_states, byte);
             for target in targets {
                 for terminal in tokenizer.matched_terminal_bitset(target).iter() {
                     if terminal < nt {
-                        first_bytes[terminal].insert(byte);
+                        first_bytes[terminal] |= class_bytes[column];
                     }
                 }
                 for terminal in tokenizer.possible_future_terminals(target).iter() {
                     let t = terminal;
                     if t < nt {
-                        first_bytes[t].insert(byte);
+                        first_bytes[t] |= class_bytes[column];
                     }
                 }
             }
@@ -829,9 +877,13 @@ impl SharedClassifyBytesets {
             reachable_bytes,
             first_bytes,
             last_bytes,
-            transitions_by_byte,
-            sparse_transitions_by_byte,
-            reverse_transitions_by_byte,
+            byte_index: ByteTransitionIndex {
+                classes,
+                num_states,
+                dense: transitions_by_byte,
+                sparse: sparse_transitions_by_byte,
+                reverse: reverse_transitions_by_byte,
+            },
             matched_terminals_by_state: matched_terminals_by_state.into(),
             future_terminals_by_state: future_terminals_by_state.into(),
             matched_states_by_terminal: matched_states_by_terminal.into(),
@@ -2108,8 +2160,7 @@ fn build_active_suffix_start_by_byte(
         return can_start;
     }
     for byte in 0u8..=u8::MAX {
-        let next = bytesets.transitions_by_byte
-            [byte as usize * tokenizer.num_states() as usize + initial as usize];
+        let next = bytesets.byte_index.column(byte)[initial as usize];
         if next == u32::MAX {
             continue;
         }
@@ -2565,33 +2616,6 @@ impl ExactBoundaryDeterministicScanner for FlatExactBoundaryScanner<'_> {
     }
 }
 
-fn build_exact_boundary_transition_index(
-    state_major_transitions: &[u32],
-    num_states: usize,
-) -> (Vec<u32>, Vec<Vec<(u32, u32)>>, Vec<ReverseByteTransitions>) {
-    assert_eq!(state_major_transitions.len(), num_states * 256);
-    let mut transitions_by_byte = vec![u32::MAX; num_states * 256];
-    let mut sparse_transitions_by_byte = vec![Vec::<(u32, u32)>::new(); 256];
-    for state in 0..num_states {
-        let state_base = state * 256;
-        for byte in 0..256usize {
-            let target = state_major_transitions[state_base + byte];
-            if target == u32::MAX {
-                continue;
-            }
-            transitions_by_byte[byte * num_states + state] = target;
-            sparse_transitions_by_byte[byte].push((state as u32, target));
-        }
-    }
-    let reverse_transitions_by_byte =
-        build_reverse_transitions_by_byte(&sparse_transitions_by_byte, num_states);
-    (
-        transitions_by_byte,
-        sparse_transitions_by_byte,
-        reverse_transitions_by_byte,
-    )
-}
-
 #[derive(Default)]
 struct ExactBoundaryPrefixNode {
     children: Vec<(u8, usize)>,
@@ -2620,9 +2644,7 @@ fn insert_exact_boundary_prefix(
 
 fn populate_exact_boundary_prefixes<S: ExactBoundaryDeterministicScanner>(
     scanner: &S,
-    transitions_by_byte: &[u32],
-    sparse_transitions_by_byte: &[Vec<(u32, u32)>],
-    reverse_transitions_by_byte: &[ReverseByteTransitions],
+    index: Option<&ByteTransitionIndex>,
     active_bitset: &BitSet,
     nodes: &mut [ExactBoundaryPrefixNode],
     node: usize,
@@ -2645,7 +2667,7 @@ fn populate_exact_boundary_prefixes<S: ExactBoundaryDeterministicScanner>(
     source_stamps: &mut Vec<u32>,
 ) {
     let num_states = scanner.num_states();
-    let use_state_major_transitions = transitions_by_byte.is_empty();
+    let use_state_major_transitions = index.is_none();
     let child_count = nodes[node].children.len();
     let frontier_is_dense = current_states.len() * 4 >= num_states;
     let source_stamp = if !use_state_major_transitions
@@ -2653,8 +2675,8 @@ fn populate_exact_boundary_prefixes<S: ExactBoundaryDeterministicScanner>(
         .children
         .iter()
         .any(|(byte, _)| {
-            let sparse = &sparse_transitions_by_byte[*byte as usize];
-            let reverse = &reverse_transitions_by_byte[*byte as usize];
+            let sparse = index.unwrap().sparse(*byte);
+            let reverse = index.unwrap().reverse(*byte);
             sparse.len() < current_states.len()
                 || (frontier_is_dense && reverse.targets.len() * 2 < sparse.len())
         })
@@ -2707,8 +2729,8 @@ fn populate_exact_boundary_prefixes<S: ExactBoundaryDeterministicScanner>(
                 next_states.push(next);
             }
         } else {
-        let sparse_transitions = &sparse_transitions_by_byte[byte as usize];
-        let reverse_transitions = &reverse_transitions_by_byte[byte as usize];
+        let sparse_transitions = index.unwrap().sparse(byte);
+        let reverse_transitions = index.unwrap().reverse(byte);
         let use_reverse_transitions = source_stamp.is_some()
             && frontier_is_dense
             && reverse_transitions.targets.len() * 2 < sparse_transitions.len();
@@ -2752,8 +2774,7 @@ fn populate_exact_boundary_prefixes<S: ExactBoundaryDeterministicScanner>(
             }
             } else {
             *states_scanned += current_states.len();
-            let transition_column =
-                &transitions_by_byte[byte as usize * num_states..(byte as usize + 1) * num_states];
+            let transition_column = index.unwrap().column(byte);
             for &state in current_states {
                 let next = transition_column[state as usize];
                 if next == u32::MAX {
@@ -2813,9 +2834,7 @@ fn populate_exact_boundary_prefixes<S: ExactBoundaryDeterministicScanner>(
         if !next_states.is_empty() {
             populate_exact_boundary_prefixes(
                 scanner,
-                transitions_by_byte,
-                sparse_transitions_by_byte,
-                reverse_transitions_by_byte,
+                index,
                 active_bitset,
                 nodes,
                 child,
@@ -2872,9 +2891,7 @@ fn tokens_have_exact_active_l2p_boundary_deterministic<
     S: ExactBoundaryDeterministicScanner,
 >(
     scanner: &S,
-    transitions_by_byte: &[u32],
-    sparse_transitions_by_byte: &[Vec<(u32, u32)>],
-    reverse_transitions_by_byte: &[ReverseByteTransitions],
+    index: Option<&ByteTransitionIndex>,
     tokens: &[&[u8]],
     active_bitset: &BitSet,
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -2937,9 +2954,7 @@ fn tokens_have_exact_active_l2p_boundary_deterministic<
     let mut source_stamps = Vec::<u32>::new();
     populate_exact_boundary_prefixes(
         scanner,
-        transitions_by_byte,
-        sparse_transitions_by_byte,
-        reverse_transitions_by_byte,
+        index,
         active_bitset,
         &mut nodes,
         0,
@@ -3512,7 +3527,7 @@ struct CandidatePrefixPowerset<'a> {
     tokenizer: &'a Tokenizer,
     words_per_mask: usize,
     terminal_to_local: Option<Box<[u32]>>,
-    sparse_transitions_by_byte: Option<&'a [Vec<(u32, u32)>]>,
+    sparse_transitions_by_byte: Option<&'a ByteTransitionIndex>,
     singleton_epsilon_closures: Option<Vec<Option<Box<[u32]>>>>,
     closure_marks: Vec<u32>,
     closure_generation: u32,
@@ -3633,7 +3648,7 @@ impl<'a> CandidatePrefixPowerset<'a> {
         tokenizer: &'a Tokenizer,
         words_per_mask: usize,
         terminal_to_local: Option<Box<[u32]>>,
-        sparse_transitions_by_byte: Option<&'a [Vec<(u32, u32)>]>,
+        sparse_transitions_by_byte: Option<&'a ByteTransitionIndex>,
     ) -> (Self, u32, u32) {
         let mut scanner = Self {
             tokenizer,
@@ -3739,7 +3754,7 @@ impl<'a> CandidatePrefixPowerset<'a> {
         let direct_targets = if let Some(sparse_transitions_by_byte) =
             self.sparse_transitions_by_byte
         {
-            let sparse = &sparse_transitions_by_byte[byte as usize];
+            let sparse = sparse_transitions_by_byte.sparse(byte);
             let config = self.configs[state as usize].as_ref();
             if sparse.len() < config.len() {
                 let membership = self.config_membership_words[state as usize].as_ref();
@@ -4183,7 +4198,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         candidate_tokenizer,
         words_per_mask,
         terminal_to_local,
-        uses_original_tokenizer.then_some(bytesets.sparse_transitions_by_byte.as_slice()),
+        uses_original_tokenizer.then_some(&bytesets.byte_index),
     );
     let owned_split_offsets;
     let split_offsets: &[usize] = if let Some(index) = adjacent_pair_index.as_ref() {
@@ -5727,9 +5742,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
 
 fn exact_terminal_path_two_plus_deterministic<S: ExactBoundaryDeterministicScanner>(
     scanner: &S,
-    transitions_by_byte: &[u32],
-    sparse_transitions_by_byte: &[Vec<(u32, u32)>],
-    reverse_transitions_by_byte: &[ReverseByteTransitions],
+    index: Option<&ByteTransitionIndex>,
     token_entries: &[(u32, &[u8])],
     active: &BitSet,
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -5737,9 +5750,7 @@ fn exact_terminal_path_two_plus_deterministic<S: ExactBoundaryDeterministicScann
 ) -> ExactTerminalPathTwoPlus {
     exact_terminal_path_two_plus_with_suffix(
         scanner,
-        transitions_by_byte,
-        sparse_transitions_by_byte,
-        reverse_transitions_by_byte,
+        index,
         token_entries,
         active,
         disallowed_follows,
@@ -5828,9 +5839,7 @@ fn suffix_terminal_candidates_deterministic<S: ExactBoundaryDeterministicScanner
 
 fn exact_terminal_path_two_plus_with_suffix<S, F>(
     scanner: &S,
-    transitions_by_byte: &[u32],
-    sparse_transitions_by_byte: &[Vec<(u32, u32)>],
-    reverse_transitions_by_byte: &[ReverseByteTransitions],
+    index: Option<&ByteTransitionIndex>,
     token_entries: &[(u32, &[u8])],
     active: &BitSet,
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -5896,9 +5905,7 @@ where
     let mut source_stamps = Vec::<u32>::new();
     populate_exact_boundary_prefixes(
         scanner,
-        transitions_by_byte,
-        sparse_transitions_by_byte,
-        reverse_transitions_by_byte,
+        index,
         active,
         &mut nodes,
         0,
@@ -6177,9 +6184,7 @@ fn exact_terminal_path_two_plus_bounded_view_from_starts(
     view_start_states.dedup();
     let result = exact_terminal_path_two_plus_with_suffix(
         &scanner,
-        &[],
-        &[],
-        &[],
+        None,
         &token_entries,
         active,
         disallowed_follows,
@@ -6295,7 +6300,6 @@ fn tokens_have_exact_active_l2p_boundary(
     tokenizer: &Tokenizer,
     bytesets: &SharedClassifyBytesets,
     flat_trans: &[u32],
-    transitions_by_byte: &[u32],
     tokens: &[&[u8]],
     active_bitset: &BitSet,
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -6306,9 +6310,7 @@ fn tokens_have_exact_active_l2p_boundary(
         let scanner = RawExactBoundaryScanner { tokenizer, flat_trans };
         let result = tokens_have_exact_active_l2p_boundary_deterministic(
             &scanner,
-            transitions_by_byte,
-            &bytesets.sparse_transitions_by_byte,
-            &bytesets.reverse_transitions_by_byte,
+            Some(&bytesets.byte_index),
             tokens,
             active_bitset,
             disallowed_follows,
@@ -6355,9 +6357,7 @@ fn tokens_have_exact_active_l2p_boundary(
     let batch_started_at = std::time::Instant::now();
     let result = tokens_have_exact_active_l2p_boundary_deterministic(
         &scanner,
-        &[],
-        &[],
-        &[],
+        None,
         tokens,
         active_bitset,
         disallowed_follows,
@@ -6524,7 +6524,6 @@ pub fn split_vocab_for_active_l2p_terminals(
             tokenizer,
             bytesets,
             flat_trans,
-            &bytesets.transitions_by_byte,
             &tokens,
             &active_bitset,
             disallowed_follows.as_ref(),
@@ -6926,7 +6925,7 @@ mod tests {
         exact_terminal_path_two_plus_finite_literals,
         parse_exact_l2p_boundary_filter_mode,
         suffix_has_allowed_l2p_follow_from_reset, ExactL2pBoundaryFilterMode,
-        SharedClassifyBytesets,
+        SharedClassifyBytesets, ByteTransitionIndex,
         TokenL2pRouteHint, state_future_intersects_words,
         token_has_active_l2p_boundary_words, token_has_exact_active_l2p_boundary,
         token_l2p_route_hint, tokens_have_exact_active_l2p_boundary,
@@ -7090,9 +7089,7 @@ mod tests {
             reachable_bytes,
             first_bytes,
             last_bytes,
-            transitions_by_byte: Vec::new(),
-            sparse_transitions_by_byte: Vec::new(),
-            reverse_transitions_by_byte: Vec::new(),
+            byte_index: ByteTransitionIndex { classes: [0; 256], num_states: 0, dense: vec![], sparse: vec![], reverse: vec![] },
             matched_terminals_by_state: Arc::from(Vec::<Box<[u32]>>::new()),
             future_terminals_by_state: Arc::from(Vec::<Box<[u32]>>::new()),
             matched_states_by_terminal: Arc::from(Vec::<Vec<u32>>::new()),
@@ -7256,7 +7253,6 @@ mod tests {
             &tokenizer,
             &bytesets,
             &flat_trans,
-            &bytesets.transitions_by_byte,
             &tokens,
             &active,
             &disallowed,
@@ -7719,6 +7715,16 @@ mod tests {
         assert_eq!(actual.reachable_bytes, expected.reachable_bytes);
         assert_eq!(actual.first_bytes, expected.first_bytes);
         assert_eq!(actual.last_bytes, expected.last_bytes);
+        // A class is only shared if every unrestricted raw-state action agrees.
+        for byte in 0u8..=u8::MAX {
+            let literal: Vec<_> = (0..tokenizer.num_states())
+                .map(|state| tokenizer.get_transition(state, byte)).collect();
+            assert_eq!(actual.byte_index.column(byte), literal.as_slice());
+            let sparse: Vec<_> = literal.iter().enumerate()
+                .filter_map(|(state, &target)| (target != u32::MAX).then_some((state as u32, target)))
+                .collect();
+            assert_eq!(actual.byte_index.sparse(byte), sparse.as_slice());
+        }
         for state in 0..tokenizer.num_states() {
             assert_eq!(
                 actual.has_matched_terminal_by_state[state as usize] != 0,
