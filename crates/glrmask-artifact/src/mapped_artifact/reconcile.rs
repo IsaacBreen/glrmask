@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
@@ -916,6 +917,8 @@ fn weight_from_sorted_disjoint_runs(
 #[derive(Clone, Copy)]
 pub enum TokenAxisMap<'a> {
     Explicit(&'a [Vec<u32>]),
+    /// Proven injection, with u32::MAX denoting an absent local class.
+    Injection(&'a [u32]),
     Offset { offset: u32, local_token_count: u32 },
 }
 
@@ -924,7 +927,7 @@ pub enum TokenAxisMap<'a> {
 enum AxisImage<'a> {
     Affine { offset: u32, count: usize },
     Contiguous { first: Vec<u32>, last: Vec<u32> },
-    Singleton { destinations: Vec<u32>, monotone: bool },
+    Singleton { destinations: Cow<'a, [u32]>, monotone: bool },
     Disjoint { offsets: Vec<usize>, runs: Vec<(u32, u32)>, monotone: bool },
     Overlapping { fanout: &'a [Vec<u32>], destination_count: usize },
 }
@@ -996,7 +999,7 @@ impl<'a> AxisImage<'a> {
             Self::Singleton {
                 destinations: fanout.iter().map(|row| {
                     row.first().copied().unwrap_or(u32::MAX)
-                }).collect(),
+                }).collect::<Vec<_>>().into(),
                 monotone,
             }
         } else {
@@ -1007,6 +1010,23 @@ impl<'a> AxisImage<'a> {
     fn tokens(map: TokenAxisMap<'a>, destination_count: usize) -> Self {
         match map {
             TokenAxisMap::Explicit(fanout) => Self::explicit(fanout, destination_count),
+            TokenAxisMap::Injection(destinations) => {
+                if let Some(&offset) = destinations.first() {
+                    if offset != u32::MAX && destinations.iter().enumerate().all(|(local, &target)| {
+                        (target as usize) < destination_count && offset.checked_add(local as u32) == Some(target)
+                    }) {
+                        return Self::Affine { offset, count: destinations.len() };
+                    }
+                }
+                let mut previous = None;
+                let mut monotone = true;
+                for &target in destinations.iter().filter(|&&target| target != u32::MAX) {
+                    assert!((target as usize) < destination_count, "token injection exceeds destination");
+                    monotone &= previous.is_none_or(|last| last < target);
+                    previous = Some(target);
+                }
+                Self::Singleton { destinations: Cow::Borrowed(destinations), monotone }
+            }
             TokenAxisMap::Offset { offset, local_token_count } => {
                 let count = (local_token_count as usize)
                     .min(destination_count.saturating_sub(offset as usize));
