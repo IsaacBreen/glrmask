@@ -915,13 +915,13 @@ impl TokenBoundedAnalysisTrie {
     /// Unknown/virtual transitions also decline rather than become dead edges.
     pub fn prefix_event_sources(
         &self,
-        flat_trans: &[u32],
+        flat_trans: &ByteRows,
         events: &[bool],
         epsilon_closures: &[(usize, Box<[u32]>)],
         initial_events: Option<&[bool]>,
     ) -> Option<(Vec<bool>, usize)> {
         let states = events.len();
-        if flat_trans.len() != states.checked_mul(256)?
+        if flat_trans.num_states() != states
             || initial_events.is_some_and(|events| events.len() != states)
         {
             return None;
@@ -955,9 +955,9 @@ impl TokenBoundedAnalysisTrie {
         // Scan each contiguous raw transition row once, not one strided full
         // lexer pass for every byte. This changes storage order only; each
         // byte column remains sorted by original source-state identity.
-        for (source,row) in flat_trans.as_chunks::<256>().0.iter().enumerate(){
+        for source in 0..states{
             for &byte in &used_bytes{
-                let target=row[byte];
+                let target=flat_trans.trans(source, byte);
                 if target==u32::MAX{continue;}
                 if target as usize>=states{return None;}
                 stored_pairs=stored_pairs.checked_add(1)?;
@@ -1086,7 +1086,7 @@ fn prefix_event_sources_match_independent_forward_execution() {
         let trie = build_token_bounded_analysis_trie_sorted(&borrowed);
         let initial_events = (0..n).map(|_| next() % 5 == 0).collect::<Vec<_>>();
         for initial in [None, Some(initial_events.as_slice())] {
-        let (actual, _) = trie.prefix_event_sources(&flat, &events, &closures, initial).unwrap();
+        let (actual, _) = trie.prefix_event_sources(&ByteRows::dense(Arc::from(flat.clone())), &events, &closures, initial).unwrap();
         let expected = (0..n).map(|source| tokens.iter().any(|token| {
             let mut current = full_closures[source].clone();
             if current.iter().any(|&q| initial.unwrap_or(&events)[q as usize]) { return true; }
@@ -1110,17 +1110,17 @@ fn prefix_event_sources_match_independent_forward_execution() {
 #[test]
 fn prefix_event_sources_declines_unknown_targets_and_bad_domains() {
     let trie = build_token_bounded_analysis_trie_sorted(&[b"ab"]);
-    assert!(trie.prefix_event_sources(&[], &[false], &[], None).is_none());
+    assert!(trie.prefix_event_sources(&ByteRows::dense(Arc::from([])), &[false], &[], None).is_none());
     let mut flat = vec![u32::MAX; 256];
     flat[b'a' as usize] = 3;
-    assert!(trie.prefix_event_sources(&flat, &[false], &[], None).is_none());
+    assert!(trie.prefix_event_sources(&ByteRows::dense(Arc::from(flat.clone())), &[false], &[], None).is_none());
     flat[b'a' as usize] = 0;
-    assert!(trie.prefix_event_sources(&flat, &[false], &[(0, vec![1].into_boxed_slice())], None).is_none());
-    assert_eq!(trie.prefix_event_sources(&flat, &[false], &[], None).unwrap().0, vec![false]);
-    assert_eq!(trie.prefix_event_sources(&flat, &[true], &[], None).unwrap().0, vec![true]);
+    assert!(trie.prefix_event_sources(&ByteRows::dense(Arc::from(flat.clone())), &[false], &[(0, vec![1].into_boxed_slice())], None).is_none());
+    assert_eq!(trie.prefix_event_sources(&ByteRows::dense(Arc::from(flat.clone())), &[false], &[], None).unwrap().0, vec![false]);
+    assert_eq!(trie.prefix_event_sources(&ByteRows::dense(Arc::from(flat.clone())), &[true], &[], None).unwrap().0, vec![true]);
     flat[b'a' as usize] = u32::MAX;
-    assert_eq!(trie.prefix_event_sources(&flat, &[true], &[], Some(&[false])).unwrap().0, vec![false]);
-    assert!(trie.prefix_event_sources(&flat, &[true], &[], Some(&[])).is_none());
+    assert_eq!(trie.prefix_event_sources(&ByteRows::dense(Arc::from(flat.clone())), &[true], &[], Some(&[false])).unwrap().0, vec![false]);
+    assert!(trie.prefix_event_sources(&ByteRows::dense(Arc::from(flat.clone())), &[true], &[], Some(&[])).is_none());
 }
 
 pub fn build_token_bounded_analysis_trie_sorted(
@@ -1202,7 +1202,7 @@ pub struct TokenBoundedAnalysisWorkBudget {
 
 fn ensure_config_transition(
     tokenizer: &Tokenizer,
-    raw_transitions: Option<&[u32]>,
+    raw_transitions: Option<&ByteRows>,
     state: u32,
     byte: u8,
     configs: &mut ConfigInterner,
@@ -1225,7 +1225,7 @@ fn ensure_config_transition(
     {
         let raw_target = raw_transitions.map_or_else(
             || tokenizer.get_transition(*source, byte),
-            |transitions| transitions[*source as usize * 256 + byte as usize],
+            |transitions| transitions.trans(*source as usize, byte as usize),
         );
         if raw_target == u32::MAX {
             return u32::MAX;
@@ -1240,7 +1240,7 @@ fn ensure_config_transition(
         &configs[state as usize], byte, true, singleton_closures,
         active_language, |source, byte| raw_transitions.map_or_else(
             || tokenizer.get_transition(source, byte),
-            |transitions| transitions[source as usize * 256 + byte as usize],
+            |transitions| transitions.trans(source as usize, byte as usize),
         ),
     );
     if targets.is_empty() {
@@ -1260,7 +1260,7 @@ fn ensure_config_transition(
 /// independently of the trie position that first requested it.
 struct BoundedExpansion<'a> {
     tokenizer: &'a Tokenizer,
-    raw_transitions: Option<&'a [u32]>,
+    raw_transitions: Option<&'a ByteRows>,
     configs: &'a mut ConfigInterner,
     transitions: &'a mut Vec<u32>,
     known_transitions: &'a mut Vec<u8>,
@@ -1695,7 +1695,7 @@ impl TokenBoundedAnalysisTopology {
 
 fn build_bounded_analysis_topology_impl(
     tokenizer: &Tokenizer,
-    raw_transitions: Option<&[u32]>,
+    raw_transitions: Option<&ByteRows>,
     raw_start_states: &[usize],
     tokens: &[&[u8]],
     combine_start_states: bool,
@@ -1725,7 +1725,7 @@ fn build_bounded_analysis_topology_impl(
 
 fn build_bounded_analysis_topology_impl_with_expansion(
     tokenizer: &Tokenizer,
-    raw_transitions: Option<&[u32]>,
+    raw_transitions: Option<&ByteRows>,
     raw_start_states: &[usize],
     tokens: &[&[u8]],
     combine_start_states: bool,
@@ -2152,7 +2152,7 @@ pub fn build_token_bounded_analysis_view_projected_sorted(
 
 pub fn build_token_bounded_analysis_view_projected_sorted_with_raw_transitions(
     tokenizer: &Tokenizer,
-    raw_transitions: &[u32],
+    raw_transitions: &ByteRows,
     raw_start_states: &[usize],
     tokens: &[&[u8]],
     active_groups: &[bool],
@@ -2169,7 +2169,7 @@ pub fn build_token_bounded_analysis_view_projected_sorted_with_raw_transitions(
 
 pub fn build_token_bounded_analysis_view_projected_sorted_with_raw_transitions_and_trie(
     tokenizer: &Tokenizer,
-    raw_transitions: &[u32],
+    raw_transitions: &ByteRows,
     raw_start_states: &[usize],
     tokens: &[&[u8]],
     active_groups: &[bool],
@@ -2188,7 +2188,7 @@ pub fn build_token_bounded_analysis_view_projected_sorted_with_raw_transitions_a
 
 fn build_token_bounded_analysis_view_projected_with_order(
     tokenizer: &Tokenizer,
-    raw_transitions: Option<&[u32]>,
+    raw_transitions: Option<&ByteRows>,
     raw_start_states: &[usize],
     tokens: &[&[u8]],
     active_groups: &[bool],
@@ -2253,7 +2253,7 @@ pub fn try_build_token_bounded_analysis_view_projected_sorted(
 
 pub fn try_build_token_bounded_analysis_view_projected_sorted_with_raw_transitions(
     tokenizer: &Tokenizer,
-    raw_transitions: &[u32],
+    raw_transitions: &ByteRows,
     raw_start_states: &[usize],
     tokens: &[&[u8]],
     active_groups: &[bool],
@@ -2272,7 +2272,7 @@ pub fn try_build_token_bounded_analysis_view_projected_sorted_with_raw_transitio
 
 pub fn try_build_token_bounded_analysis_view_projected_sorted_with_raw_transitions_and_trie(
     tokenizer: &Tokenizer,
-    raw_transitions: &[u32],
+    raw_transitions: &ByteRows,
     raw_start_states: &[usize],
     tokens: &[&[u8]],
     active_groups: &[bool],
@@ -2293,7 +2293,7 @@ pub fn try_build_token_bounded_analysis_view_projected_sorted_with_raw_transitio
 
 fn try_build_token_bounded_analysis_view_projected_with_order(
     tokenizer: &Tokenizer,
-    raw_transitions: Option<&[u32]>,
+    raw_transitions: Option<&ByteRows>,
     raw_start_states: &[usize],
     tokens: &[&[u8]],
     active_groups: &[bool],
@@ -3258,7 +3258,7 @@ mod tests {
         let tokenizer =
             crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
         let raw_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
-        let flat_trans = crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table(&tokenizer);
+        let flat_trans = ByteRows::from_tokenizer(&tokenizer);
         let parent_tokens: Vec<&[u8]> = vec![b"", b"a", b"aa", b"ab", b"b", b"ba", b"x"];
         let subset_tokens: Vec<&[u8]> = vec![b"", b"a", b"aa", b"ab", b"b", b"ba"];
         let active = [true, true];
@@ -3455,7 +3455,7 @@ mod tests {
         );
         let dense = build_token_bounded_analysis_view_projected_sorted_with_raw_transitions(
             &tokenizer,
-            &raw_transitions,
+            &ByteRows::dense(Arc::from(raw_transitions.clone())),
             &raw_start_states,
             &tokens,
             &active_groups,

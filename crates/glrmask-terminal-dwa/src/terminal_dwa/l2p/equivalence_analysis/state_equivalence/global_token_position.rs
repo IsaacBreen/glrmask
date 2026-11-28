@@ -35,6 +35,7 @@
 //! the representative extends every positional observation known for each
 //! member, but two members need not extend each other.
 
+use crate::automata::lexer::observation::ByteRows;
 use std::time::Instant;
 
 use rustc_hash::FxHashMap;
@@ -718,7 +719,7 @@ fn advance_active_states_with_flat_trans(
     tokenizer: &Tokenizer,
     active_states: &[bool],
     bytes: &[u8],
-    flat_trans: Option<&[u32]>,
+    flat_trans: Option<&ByteRows>,
 ) -> Vec<bool> {
     let state_count = tokenizer.num_states() as usize;
     let mut next = vec![false; state_count];
@@ -739,7 +740,7 @@ fn advance_active_states_with_flat_trans(
         for &byte in bytes {
             let destination = flat_trans.map_or_else(
                 || tokenizer.get_transition(state as u32, byte),
-                |transitions| transitions[state * 256 + byte as usize],
+                |transitions| transitions.trans(state, byte as usize),
             );
             if destination == u32::MAX {
                 continue;
@@ -773,7 +774,7 @@ fn tail_active_states_with_flat_trans(
     tokenizer: &Tokenizer,
     seed: &[bool],
     tail_bytes: &[u8],
-    flat_trans: Option<&[u32]>,
+    flat_trans: Option<&ByteRows>,
 ) -> Vec<bool> {
     let state_count = tokenizer.num_states() as usize;
     assert_eq!(seed.len(), state_count);
@@ -801,7 +802,7 @@ fn tail_active_states_with_flat_trans(
         for &byte in tail_bytes {
             let destination = flat_trans.map_or_else(
                 || tokenizer.get_transition(state, byte),
-                |transitions| transitions[state as usize * 256 + byte as usize],
+                |transitions| transitions.trans(state as usize, byte as usize),
             );
             if destination == u32::MAX {
                 continue;
@@ -1348,7 +1349,7 @@ fn compute_global_token_position_map_with_tail_start_and_flat_trans(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     tail_start_position: usize,
-    flat_trans: Option<&[u32]>,
+    flat_trans: Option<&ByteRows>,
 ) -> Option<(ManyToOneIdMap, GlobalTokenPositionEquivalenceProfile)> {
     let started_at = Instant::now();
     if vocab.entries_map().values().any(<[u8]>::is_empty) {
@@ -1364,7 +1365,7 @@ fn compute_global_token_position_map_with_tail_start_and_flat_trans(
     }
     let state_count = tokenizer.num_states() as usize;
     let flat_trans = flat_trans.filter(|transitions| {
-        !tokenizer.has_epsilon_transitions() && transitions.len() == state_count * 256
+        !tokenizer.has_epsilon_transitions() && transitions.num_states() == state_count
     });
     let mut active_states = vec![true; state_count];
     let mut partitions = Vec::with_capacity(byte_sets.position_bytes.len());
@@ -1524,7 +1525,7 @@ pub fn compute_global_token_position_state_partition(
 pub fn compute_global_token_position_state_views(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    flat_trans: Option<&[u32]>,
+    flat_trans: Option<&ByteRows>,
 ) -> Option<(
     GlobalScannerStateQuotient,
     GlobalTokenPositionStatePartition,

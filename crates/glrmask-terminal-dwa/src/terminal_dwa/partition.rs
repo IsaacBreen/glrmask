@@ -4,6 +4,7 @@
 //! and L2+, build those two pieces independently, then merge them into a
 //! single `(InternalIdMap, DWA)` for the partition.
 
+use crate::automata::lexer::observation::ByteRows;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Instant;
@@ -381,7 +382,7 @@ fn route_vocab<'a>(
     partition_label: &str,
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    flat_trans: &[u32],
+    flat_trans: &ByteRows,
     token_path_disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
     l1_mask: &[bool],
     l2p_mask: &[bool],
@@ -504,7 +505,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     token_path_disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
     normalized_token_path_disallowed_follows: &Arc<[BitSet]>,
-    flat_trans: &Arc<[u32]>,
+    flat_trans: &ByteRows,
     initial_state_map: Option<&ManyToOneIdMap>,
     shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
@@ -736,7 +737,7 @@ pub(crate) fn build_partition_vocab_map_only(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     token_path_disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
     normalized_token_path_disallowed_follows: &Arc<[BitSet]>,
-    flat_trans: &Arc<[u32]>,
+    flat_trans: &ByteRows,
     initial_state_map: Option<&ManyToOneIdMap>,
     shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
@@ -802,7 +803,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     token_path_disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
     normalized_token_path_disallowed_follows: &Arc<[BitSet]>,
-    flat_trans: &Arc<[u32]>,
+    flat_trans: &ByteRows,
     initial_state_map: Option<&ManyToOneIdMap>,
     shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
@@ -1073,8 +1074,8 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                     })
                     .flatten();
                 let mut result = if let Some(materialized) = materialized.as_ref() {
-                    let branch_flat_trans: Arc<[u32]> =
-                        Arc::from(super::l1::build_flat_transition_table(&materialized.tokenizer));
+                    let branch_flat_trans: ByteRows =
+                        ByteRows::from_tokenizer(&materialized.tokenizer);
                     let mut result = super::l1::build_l1_id_map_and_terminal_dwa_mode(
                         partition_label,
                         &materialized.tokenizer,
@@ -1269,9 +1270,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                 })
                                 .flatten();
                             let mut result = if let Some(materialized) = materialized.as_ref() {
-                                let branch_flat_trans: Arc<[u32]> = Arc::from(
-                                    super::l1::build_flat_transition_table(&materialized.tokenizer),
-                                );
+                                let branch_flat_trans: ByteRows = ByteRows::from_tokenizer(&materialized.tokenizer);
                                 let local_vocab_dfa_cache = super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
                                 let local_original_vocab_dfa_cache = super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
                                 let local_original_vocab_analysis_dfa_cache = super::l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
@@ -1544,7 +1543,7 @@ pub(super) fn build_partition_vocab_equivalence(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     token_path_disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
-    flat_trans: &Arc<[u32]>,
+    flat_trans: &ByteRows,
     initial_state_map: Option<&ManyToOneIdMap>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
 ) -> Option<ManyToOneIdMap> {

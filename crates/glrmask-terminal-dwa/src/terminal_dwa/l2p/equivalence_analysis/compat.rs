@@ -53,19 +53,6 @@ pub(super) use crate::automata::lexer::observation::{
 };
 pub(crate) use crate::automata::lexer::observation::compute_tokenizer_byte_classes;
 
-pub fn compute_physical_byte_classes(tokenizer: &Tokenizer, transitions: &[u32]) -> [u8; 256] {
-    assert_eq!(transitions.len(), tokenizer.num_states() as usize * 256);
-    let mut hashes = [0u64; 256];
-    for row in transitions.chunks_exact(256) {
-        for (byte, &target) in row.iter().enumerate() {
-            hashes[byte] = hashes[byte].wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
-                .wrapping_add(target as u64);
-        }
-    }
-    byte_classes_from_column_hashes(tokenizer.num_states() as usize, &hashes, &[true; 256],
-        |state, byte| transitions[state * 256 + byte])
-}
-
 /// Scan the represented byte action once. Dense physical rows have no
 /// indirection in the inner loop; a finite alphabet visits only its columns.
 pub(super) fn scan_byte_columns(
@@ -107,10 +94,10 @@ pub fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
 pub fn compute_active_physical_byte_classes_from_flat_trans(
     tokenizer: &Tokenizer,
     active_groups: &[bool],
-    flat_trans: &[u32],
+    flat_trans: &ByteRows,
 ) -> [u8; 256] {
     let states = tokenizer.num_states() as usize;
-    assert_eq!(flat_trans.len(), states * 256);
+    assert_eq!(flat_trans.num_states(), states);
     let active_language = (0..states)
         .map(|state| {
             tokenizer
@@ -122,7 +109,7 @@ pub fn compute_active_physical_byte_classes_from_flat_trans(
 
     #[inline]
     fn projected_target(
-        flat_trans: &[u32],
+        flat_trans: &ByteRows,
         active_language: &[bool],
         source: usize,
         byte: usize,
@@ -130,7 +117,7 @@ pub fn compute_active_physical_byte_classes_from_flat_trans(
         if !active_language[source] {
             return u32::MAX;
         }
-        let target = flat_trans[source * 256 + byte];
+        let target = flat_trans.trans(source, byte);
         if target == u32::MAX || !active_language[target as usize] {
             u32::MAX
         } else {
@@ -175,12 +162,12 @@ impl FlatDfa {
         self.transitions.row(state)
     }
 
-    pub fn from_tokenizer_parts(tokenizer: &Tokenizer, active: Option<&[bool]>, flat: Option<&Arc<[u32]>>) -> Self {
+    pub fn from_tokenizer_parts(tokenizer: &Tokenizer, active: Option<&[bool]>, flat: Option<&ByteRows>) -> Self {
         let num_states = tokenizer.num_states() as usize;
         let states: Vec<_> = (0..num_states).map(|state| tokenizer_state(tokenizer, state as u32, active)).collect();
         let source = flat.map_or_else(
             || ByteRows::from_tokenizer(tokenizer),
-            |flat| ByteRows::dense(Arc::clone(flat)),
+            ByteRows::clone,
         );
         let transitions = if active.is_some() {
             let alive: Vec<_> = states.iter().map(state_has_active_language).collect();
@@ -207,7 +194,7 @@ impl FlatDfa {
         Self::from_tokenizer_parts(tokenizer, Some(active_groups), None)
     }
 
-    pub fn new_filtered_from_flat_trans(flat_trans: &Arc<[u32]>, tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
+    pub fn new_filtered_from_flat_trans(flat_trans: &ByteRows, tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
         Self::from_tokenizer_parts(tokenizer, Some(active_groups), Some(flat_trans))
     }
 
@@ -215,7 +202,7 @@ impl FlatDfa {
     /// coordinate or the finite-vocabulary column coordinate. The irrelevant
     /// catch-all is dead; the certificate concerns only the observed alphabet.
     pub fn new_filtered_quotient_from_flat_trans_with_observation_cache(
-        flat_trans: &Arc<[u32]>,
+        flat_trans: &ByteRows,
         tokenizer: &Tokenizer,
         active_groups: &[bool],
         state_map: &ManyToOneIdMap,
@@ -224,7 +211,7 @@ impl FlatDfa {
         relevant_bytes: Option<&[bool; 256]>,
     ) -> (Self, f64) {
         let raw_states = tokenizer.num_states() as usize;
-        assert_eq!(flat_trans.len(), raw_states * 256, "invalid raw transition table");
+        assert_eq!(flat_trans.num_states(), raw_states, "invalid raw transition table");
         assert_eq!(state_map.original_to_internal.len(), raw_states, "invalid state map");
         assert_eq!(raw_observation_ids.len(), raw_states, "invalid observation IDs");
         let started_at = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some().then(Instant::now);
@@ -233,18 +220,18 @@ impl FlatDfa {
         let states: Vec<_> = state_map.representative_original_ids.iter()
             .map(|&state| observations[raw_observation_ids[state as usize] as usize].clone()).collect();
         let compact = relevant_bytes.and_then(conservative_byte_classes);
-        let classes = compact.unwrap_or_else(|| std::array::from_fn(|byte| byte as u8));
+        let classes = compact.unwrap_or(flat_trans.byte_to_column);
         let representatives = column_representatives(&classes);
         let width = representatives.len();
         let alive: Vec<_> = states.iter().map(state_has_active_language).collect();
         let mut rows = vec![u32::MAX; states.len() * width];
         for (internal, &raw) in state_map.representative_original_ids.iter().enumerate() {
             if !alive[internal] { continue; }
-            let source = raw as usize * 256;
+            let source = raw as usize;
             let row = &mut rows[internal * width..(internal + 1) * width];
             for (class, &byte) in representatives.iter().enumerate() {
                 if compact.is_some() && class == 0 { continue; }
-                let target = flat_trans[source + byte as usize];
+                let target = flat_trans.trans(source, byte as usize);
                 if target == u32::MAX { continue; }
                 let mapped = state_map.original_to_internal[target as usize];
                 if mapped != u32::MAX && alive[mapped as usize] {
@@ -467,12 +454,12 @@ mod sparse_transition_cache_tests {
                 assert_eq!(compressed.trans(state, byte), flat_values[state * 256 + byte]);
             }
         }
-        let flat = Arc::<[u32]>::from(flat_values);
+        let flat = ByteRows::dense(Arc::from(flat_values));
         let active = [true, true, false];
         let direct = compute_active_physical_byte_classes_from_flat_trans(
             &tokenizer,
             &active,
-            flat.as_ref(),
+            &flat,
         );
         let materialized = FlatDfa::new_filtered_from_flat_trans(&flat, &tokenizer, &active);
         let materialized_classes = compute_byte_classes(&materialized);

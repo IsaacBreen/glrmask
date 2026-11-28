@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
 use crate::automata::lexer::Lexer;
+use crate::automata::lexer::observation::ByteRows;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -17,7 +18,6 @@ use crate::compiler::stages::id_map_and_terminal_dwa::{
     build_vocab_equivalence_partition_with_precomputed_global_max_length,
     build_vocab_partition_from_static_id_maps,
     classify::{SharedClassifyBytesets, SharedClassifyCache},
-    l1, l2p::equivalence_analysis::compat::compute_physical_byte_classes,
     types::{TerminalColoring, TerminalDwaFamilies, TerminalDwaPhaseProfile},
     PartitionLocalSynthesisPlan, PreparedPartitionLocalTokenizers,
 };
@@ -27,9 +27,8 @@ use crate::Vocab;
 
 pub(crate) struct LexicalObservationSource<'v> {
     pub tokenizer: Tokenizer,
-    pub flat_trans: Arc<[u32]>,
+    pub flat_trans: ByteRows,
     vocab: &'v Vocab,
-    physical_classes: OnceLock<[u8; 256]>,
     global: OnceLock<ManyToOneIdMap>,
     classification: SharedClassifyCache,
     local_synthesis: Option<Arc<PartitionLocalSynthesisPlan>>,
@@ -43,10 +42,10 @@ impl<'v> LexicalObservationSource<'v> {
         local_synthesis: Option<Arc<PartitionLocalSynthesisPlan>>,
         prepared_locals: Option<Arc<PreparedPartitionLocalTokenizers>>,
     ) -> Self {
-        let flat_trans = Arc::from(l1::build_flat_transition_table(&tokenizer));
+        let flat_trans = ByteRows::from_tokenizer(&tokenizer);
         Self {
             tokenizer, flat_trans, vocab, local_synthesis, prepared_locals,
-            physical_classes: OnceLock::new(), global: OnceLock::new(),
+            global: OnceLock::new(),
             classification: SharedClassifyCache::new(),
         }
     }
@@ -56,7 +55,7 @@ impl<'v> LexicalObservationSource<'v> {
     }
 
     fn physical_classes(&self) -> &[u8; 256] {
-        self.physical_classes.get_or_init(|| compute_physical_byte_classes(&self.tokenizer, &self.flat_trans))
+        &self.flat_trans.byte_to_column
     }
 
     pub fn classification(&self, num_terminals: u32) -> &SharedClassifyCache {
@@ -75,7 +74,7 @@ impl<'v> LexicalObservationSource<'v> {
     ) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
         build_terminal_dwa_families_with_precomputed_global_max_length(
             &self.tokenizer, self.vocab, coloring, use_coloring, ignore, grammar,
-            disallowed, always_allowed, Arc::clone(&self.flat_trans),
+            disallowed, always_allowed, self.flat_trans.clone(),
             self.global_map(), Some(self.classification(grammar.num_terminals)),
             self.local_synthesis.as_deref(), self.prepared_locals.as_deref(), None,
         )
@@ -91,7 +90,7 @@ impl<'v> LexicalObservationSource<'v> {
         if dedicated {
             build_vocab_equivalence_partition_with_precomputed_global_max_length(
                 &self.tokenizer, self.vocab, ignore, grammar, disallowed,
-                Arc::clone(&self.flat_trans), self.global_map(),
+                self.flat_trans.clone(), self.global_map(),
                 self.local_synthesis.as_deref(),
                 Some(self.classification(self.tokenizer.num_terminals())),
             )
@@ -99,7 +98,7 @@ impl<'v> LexicalObservationSource<'v> {
             build_vocab_partition_from_static_id_maps(
                 &self.tokenizer, self.vocab,
                 &TerminalColoring::identity(grammar.num_terminals as usize), false,
-                ignore, grammar, disallowed, None, Arc::clone(&self.flat_trans),
+                ignore, grammar, disallowed, None, self.flat_trans.clone(),
                 self.global_map(), Some(&self.classification),
                 self.local_synthesis.as_deref(), self.prepared_locals.as_deref(),
             )
@@ -110,7 +109,7 @@ impl<'v> LexicalObservationSource<'v> {
         if eager {
             cpm::compute_constraint_possible_matches_for_vocab_with_byte_observations(
                 &self.tokenizer, self.vocab, cpm::ConstraintPossibleMatchesConfig::EAGER,
-                self.physical_classes(), &self.flat_trans,
+                &self.flat_trans,
             )
         } else {
             cpm::compute_constraint_possible_matches_for_vocab(

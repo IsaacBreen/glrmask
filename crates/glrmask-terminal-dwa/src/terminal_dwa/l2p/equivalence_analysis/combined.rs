@@ -23,7 +23,7 @@ use super::state_equivalence::nfa::{
     build_relevant_powerset_view_budgeted, powerset_output_class_ids,
 };
 use crate::ds::bitset::BitSet;
-use super::compat::FlatDfa;
+use super::compat::{ByteRows, FlatDfa};
 use super::disallowed_follows::normalize_disallowed_follows;
 use super::shared::{
     TokenDedup,
@@ -975,7 +975,7 @@ fn try_analyze_equivalences_with_token_position_partition(
     active_groups: Option<&[bool]>,
     _shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     _shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
-    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    flat_trans: Option<&ByteRows>,
     token_position_partition: &GlobalTokenPositionStatePartition,
     effective_follows_prepare_ms: f64,
     pre_normalized_disallowed_follows: Option<&[BitSet]>,
@@ -1014,7 +1014,7 @@ fn try_analyze_equivalences_with_token_position_partition(
     }
 
     let compatible_flat_trans = flat_trans.filter(|transitions| {
-        transitions.len() == tokenizer.num_states() as usize * 256
+        transitions.num_states() == tokenizer.num_states() as usize
     });
     let analysis_view_started_at = Instant::now();
     // C is a token-start partition, not an absolute lexer-state equivalence.
@@ -1319,14 +1319,14 @@ fn try_analyze_equivalences_with_raw_quotient(
     effective_disallowed: &BTreeMap<u32, BitSet>,
     ignore_terminal: Option<u32>,
     active_groups: Option<&[bool]>,
-    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    flat_trans: Option<&ByteRows>,
     initial_state_map: Option<&ManyToOneIdMap>,
     effective_follows_prepare_ms: f64,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
 ) -> Option<(InternalIdMap, CombinedEquivalenceProfile)> {
     let active_groups = active_groups?;
     let flat_trans = flat_trans?;
-    if flat_trans.len() != tokenizer.num_states() as usize * 256 {
+    if flat_trans.num_states() != tokenizer.num_states() as usize {
         return None;
     }
 
@@ -1402,7 +1402,7 @@ fn try_analyze_equivalences_with_raw_quotient(
         let mut source_representative = vec![usize::MAX; tokenizer.num_states() as usize];
         let mut target_by_source = vec![u32::MAX; tokenizer.num_states() as usize];
         for source in 0..tokenizer.num_states() as usize {
-            let target = flat_trans[source * 256 + common_first as usize];
+            let target = flat_trans.trans(source, common_first as usize);
             if target == u32::MAX {
                 continue;
             }
@@ -1898,7 +1898,7 @@ pub fn analyze_equivalences_with_group_filter(
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_base_setup_ms: f64,
-    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    flat_trans: Option<&ByteRows>,
     initial_state_map: Option<&ManyToOneIdMap>,
     initial_state_map_has_stable_restricted_observation: bool,
     scoped_domain: Option<ScopedEquivalenceDomain<'_>>,
@@ -1970,7 +1970,7 @@ pub fn analyze_vocab_equivalences_with_group_filter(
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_base_setup_ms: f64,
-    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    flat_trans: Option<&ByteRows>,
     initial_state_map: Option<&ManyToOneIdMap>,
     initial_state_map_has_stable_restricted_observation: bool,
     scoped_domain: Option<ScopedEquivalenceDomain<'_>>,
@@ -2012,7 +2012,7 @@ fn analyze_vocab_first_transition_prepartition(
     active_groups: Option<&[bool]>,
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
-    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    flat_trans: Option<&ByteRows>,
     initial_state_map: Option<&ManyToOneIdMap>,
     prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
@@ -2055,7 +2055,7 @@ fn analyze_vocab_first_transition_prepartition(
         &owned_view
     } else {
         let compatible_flat_trans =
-            flat_trans.filter(|ft| ft.len() == tokenizer.num_states() as usize * 256);
+            flat_trans.filter(|ft| ft.num_states() == tokenizer.num_states() as usize);
         owned_view = FlatDfa::from_tokenizer_parts(tokenizer, active_groups, compatible_flat_trans);
         &owned_view
     };
@@ -2163,7 +2163,7 @@ fn analyze_equivalences_impl(
     shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
     shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_base_setup_ms: f64,
-    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    flat_trans: Option<&ByteRows>,
     initial_state_map: Option<&ManyToOneIdMap>,
     initial_state_map_has_stable_restricted_observation: bool,
     scoped_domain: Option<ScopedEquivalenceDomain<'_>>,
@@ -2228,7 +2228,7 @@ fn analyze_equivalences_impl(
                         super::compat::compute_active_physical_byte_classes_from_flat_trans(
                             tokenizer,
                             active_groups,
-                            flat_trans.as_ref(),
+                            flat_trans,
                         )
                     } else {
                         let view = FlatDfa::new_filtered(tokenizer, active_groups);
@@ -3274,7 +3274,7 @@ fn analyze_equivalences_impl(
     // The raw tokenizer is the only lexer coordinate in L2P. Retain the
     // compatibility check defensively, since this cache is shared by callers.
     let compatible_flat_trans = flat_trans.filter(|ft| {
-        ft.len() == tokenizer.num_states() as usize * 256
+        ft.num_states() == tokenizer.num_states() as usize
     });
     let analysis_view_build_started_at = Instant::now();
     let tokenizer_view = FlatDfa::from_tokenizer_parts(tokenizer, active_groups, compatible_flat_trans);

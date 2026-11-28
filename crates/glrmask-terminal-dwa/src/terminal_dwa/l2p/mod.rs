@@ -8,6 +8,7 @@
 //! The only structural difference from the old code is `active_terminals`
 //! filtering: terminals not in the L2+ set are skipped during the trie walk.
 
+use crate::automata::lexer::observation::ByteRows;
 use crate::compiler::stages::mapped_artifact::CompactLayout;
 use crate::automata::lexer::Lexer;
 pub mod equivalence_analysis;
@@ -840,7 +841,7 @@ pub fn build_l2p_id_map_and_terminal_dwa(
     shared_original_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_analysis_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_ti_output_cache: Option<&SharedTiTokenizerOutputCache>,
-    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    flat_trans: Option<&ByteRows>,
     prebuilt_token_trie: Option<
         &equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
     >,
@@ -890,7 +891,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     shared_original_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
     shared_original_vocab_analysis_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
     shared_ti_output_cache: Option<&SharedTiTokenizerOutputCache>,
-    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    flat_trans: Option<&ByteRows>,
     prebuilt_token_trie: Option<
         &equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
     >,
@@ -932,7 +933,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 compute_global_token_position_state_views(
                     tokenizer,
                     vocab,
-                    flat_trans.map(AsRef::as_ref),
+                    flat_trans,
                 )
             {
                 Some((quotient, partition, _profile)) => (Some(quotient), Some(partition)),
@@ -1532,7 +1533,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                     let mut native=nwa_builder::native_builder::build(
                         tokenizer_for_build,terminal_coloring,ignore_terminal,&nwa,
                         leaf_state,simplified_id_map.num_tsids(),full_tree.root(),&roots,
-                        flat_trans.map(AsRef::as_ref),representative_core_active_terminals)?;
+                        flat_trans,representative_core_active_terminals)?;
                     if validate_native_pipeline {native_pipeline_raw=Some(native.sink.export_raw()?);}
                     let started=Instant::now();
                     let owners=(0..grammar.num_terminals).map(|t|filter.ownership.owner_of_terminal(t).map(|o|o.0)).collect::<Option<Vec<_>>>()?;
@@ -1564,7 +1565,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 full_tree.root(),
                 &roots,
                 &mut pm_computer,
-                flat_trans.map(AsRef::as_ref),
+                flat_trans,
                 representative_core_active_terminals,
             );
             #[cfg(debug_assertions)]

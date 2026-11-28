@@ -1,5 +1,6 @@
 //! Direct scalar semantics oracle for the projected L1 compiler.
 
+#[cfg(test)]
 use std::sync::Arc;
 
 use glrmask_glr::__private::glr::analysis::AnalyzedGrammar;
@@ -8,7 +9,7 @@ use glrmask_lexer::__private::automata::lexer::{Lexer, tokenizer::Tokenizer};
 #[cfg(test)]
 use glrmask_lexer::__private::automata::lexer::{ast::bytes, compile::build_regex};
 use glrmask_terminal_dwa::__private::terminal_dwa::{
-    l1::{build_flat_transition_table, build_l1_id_map_and_terminal_dwa},
+    l1::build_l1_id_map_and_terminal_dwa,
     types::TerminalColoring,
 };
 use glrmask_vocab::Vocab;
@@ -33,7 +34,7 @@ fn grammar() -> AnalyzedGrammar {
 fn check(tokenizer: &Tokenizer, vocab: &Vocab, active: &[bool]) {
     let grammar = grammar();
     let coloring = TerminalColoring::identity(2);
-    let flat = Arc::from(build_flat_transition_table(tokenizer));
+    let flat = glrmask_lexer::__private::automata::lexer::observation::ByteRows::from_tokenizer(tokenizer);
     let result = build_l1_id_map_and_terminal_dwa(
         "reference",
         tokenizer,

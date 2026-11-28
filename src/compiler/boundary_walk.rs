@@ -362,7 +362,7 @@ fn build_boundary_terminal_dwa_query_jobs(
     let outputs=groups.par_iter().map(|vocab|{
         let began=Instant::now();
         let scoped=tdwa::scope::crossing_prefix_seed_support(
-            inputs.merged_tokenizer,vocab,&flat,inputs.scope.ownership(),inputs.scope.start_component(),
+            inputs.merged_tokenizer,vocab,&crate::automata::lexer::observation::ByteRows::dense(Arc::clone(&flat)),inputs.scope.ownership(),inputs.scope.start_component(),
         ).and_then(|(support,_)|inputs.scope.intersect_initial_support(&support));
         // A declined or empty prefilter is not treated as a proof of an empty
         // language. The mature compiler remains the conservative fallback.
@@ -431,7 +431,7 @@ fn build_boundary_terminal_dwa_on_view_policy(
     let walk_started = Instant::now();
     let refined = identity.then(|| tdwa::build_scoped_boundary_identity_with_certificate(
         tokenizer, inputs.vocab, inputs.ignore_terminal, inputs.grammar,
-        inputs.disallowed_follows, Arc::clone(flat), inputs.scope,
+        inputs.disallowed_follows, crate::automata::lexer::observation::ByteRows::dense(Arc::clone(flat)), inputs.scope,
     )).flatten();
     let (mapped, tdwa_profile, native_fixed_point) = refined.unwrap_or_else(|| {
         let (mapped, profile)=tdwa::build_scoped_boundary_id_map_and_terminal_dwa_with_filter(
@@ -441,7 +441,7 @@ fn build_boundary_terminal_dwa_on_view_policy(
         inputs.ignore_terminal,
         inputs.grammar,
         inputs.disallowed_follows,
-        Arc::clone(flat),
+        crate::automata::lexer::observation::ByteRows::dense(Arc::clone(flat)),
         inputs.scope,
         shared,
         terminal_filter,
@@ -1112,7 +1112,7 @@ where
         {
             let started = Instant::now();
             let supported = tdwa::scope::crossing_prefix_seed_support(
-                inputs.merged_tokenizer, candidate_vocab, &flat, &ownership, plan.crossing_owner,
+                inputs.merged_tokenizer, candidate_vocab, &crate::automata::lexer::observation::ByteRows::dense(Arc::clone(&flat)), &ownership, plan.crossing_owner,
             );
             if let Some((support, observation_states)) = supported {
                 let before = seed_mask.iter().filter(|&&keep| keep).count();
@@ -3499,7 +3499,7 @@ mod tests {
             constraint.ignore_terminal,
             &grammar,
             &disallowed,
-            flat,
+            crate::automata::lexer::observation::ByteRows::dense(flat),
             &scope,
         );
     }
@@ -6923,7 +6923,7 @@ fn build_boundary_terminal_dwa_borrowed_query(inputs:&BoundaryWalkInputs)->Optio
     let began=Instant::now();
     let (mapped,profile,certificate)=tdwa::build_scoped_boundary_borrowed_identity_with_certificate(
         inputs.merged_tokenizer,inputs.vocab,inputs.ignore_terminal,inputs.grammar,inputs.disallowed_follows,
-        Arc::clone(flat),&prepared.scope,&prepared.original_to_view,&prepared.view_to_original)?;
+        crate::automata::lexer::observation::ByteRows::dense(Arc::clone(flat)),&prepared.scope,&prepared.original_to_view,&prepared.view_to_original)?;
     let local=BoundaryWalkInputs{merged_tokenizer:inputs.merged_tokenizer,vocab:inputs.vocab,grammar:inputs.grammar,
         disallowed_follows:inputs.disallowed_follows,ignore_terminal:inputs.ignore_terminal,
         follow_transparent_ignores:inputs.follow_transparent_ignores,scope:&prepared.scope,

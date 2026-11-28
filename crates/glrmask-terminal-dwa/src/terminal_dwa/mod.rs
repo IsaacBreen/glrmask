@@ -4,6 +4,7 @@
 //! preserves each partition's L1 and L2P outputs, merges like families across
 //! all partitions in parallel, then merges the two family DWAs.
 
+use crate::automata::lexer::observation::ByteRows;
 use crate::automata::lexer::Lexer;
 use glrmask_invariant::__private::charge_template_build_budget as charge_build_budget;
 use crate::automata::lexer::compile::{
@@ -136,7 +137,7 @@ struct PreparedPartitionLocalTokenizer {
 
 struct ReadyPartitionLocalTokenizer {
     local: PartitionLocalTokenizer,
-    flat_trans: Arc<[u32]>,
+    flat_trans: ByteRows,
     classify_cache: classify::SharedClassifyCache,
 }
 
@@ -302,7 +303,7 @@ pub fn grammar_def_uses_global_single_terminal_l1(grammar: &GrammarDef) -> bool 
 
 impl ReadyPartitionLocalTokenizer {
     fn new(local: PartitionLocalTokenizer) -> Self {
-        let flat_trans = Arc::from(l1::build_flat_transition_table(&local.tokenizer));
+        let flat_trans = ByteRows::from_tokenizer(&local.tokenizer);
         let classify_cache = classify::SharedClassifyCache::new();
         classify::prewarm_shared_classify_cache(
             &local.tokenizer, local.tokenizer.num_terminals(), &classify_cache,
@@ -1419,7 +1420,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     precomputed_always_allowed_follows: Option<&[Vec<TerminalID>]>,
-    flat_trans: Arc<[u32]>,
+    flat_trans: ByteRows,
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
     partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
@@ -1455,7 +1456,7 @@ pub fn build_vocab_partition_from_static_id_maps(
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     precomputed_always_allowed_follows: Option<&[Vec<TerminalID>]>,
-    flat_trans: Arc<[u32]>,
+    flat_trans: ByteRows,
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
     partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
@@ -1495,7 +1496,7 @@ pub fn build_vocab_equivalence_partition_with_precomputed_global_max_length(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
-    flat_trans: Arc<[u32]>,
+    flat_trans: ByteRows,
     global_max_length_state_map: &ManyToOneIdMap,
     partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
@@ -1639,7 +1640,7 @@ fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     precomputed_always_allowed_follows: Option<&[Vec<TerminalID>]>,
-    flat_trans: Arc<[u32]>,
+    flat_trans: ByteRows,
     global_max_length_state_map: &ManyToOneIdMap,
     external_classify_cache: Option<&classify::SharedClassifyCache>,
     partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
@@ -2624,7 +2625,7 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
-    flat_trans: Arc<[u32]>,
+    flat_trans: ByteRows,
     scope: &scope::BoundaryAnalysisScope,
 ) -> (MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile) {
     build_scoped_boundary_id_map_and_terminal_dwa_with_shared(
@@ -2640,7 +2641,7 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa_with_shared(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
-    flat_trans: Arc<[u32]>,
+    flat_trans: ByteRows,
     scope: &scope::BoundaryAnalysisScope,
     shared: Option<&ScopedBoundarySharedContext<'_>>,
 ) -> (MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile) {
@@ -2657,7 +2658,7 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa_with_filter(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
-    flat_trans: Arc<[u32]>,
+    flat_trans: ByteRows,
     scope: &scope::BoundaryAnalysisScope,
     shared: Option<&ScopedBoundarySharedContext<'_>>,
     terminal_filter: Option<&[bool]>,

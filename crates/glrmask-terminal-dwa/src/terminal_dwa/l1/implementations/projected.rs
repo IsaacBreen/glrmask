@@ -221,7 +221,7 @@ impl<'a> Projected<'a> {
         let group = self.configs[state as usize].0;
         match &self.configs[state as usize].1 {
             ConfigStates::One(source) => {
-                let target = self.input.flat_trans[*source as usize * 256 + byte as usize];
+                let target = self.input.flat_trans.trans(*source as usize, byte as usize);
                 if target == DEAD {
                     DEAD
                 } else {
@@ -900,7 +900,7 @@ fn quotient_input_bytes(input: BuildInput<'_>, bytes: &[u8]) -> (Vec<u8>, [u8; 2
     let mut representative = [0u8; 256];
     for &byte in bytes {
         let column = (0..states)
-            .map(|state| input.flat_trans[state * 256 + byte as usize])
+            .map(|state| input.flat_trans.trans(state, byte as usize))
             .collect::<Vec<_>>();
         let class = if let Some(&class) = column_ids.get(&column) {
             class
@@ -956,7 +956,7 @@ fn build_one_byte(
             .iter()
             .map(|&byte| {
                 if let Some(state) = singleton {
-                    let target = input.flat_trans[state as usize * 256 + byte as usize];
+                    let target = input.flat_trans.trans(state as usize, byte as usize);
                     if target == DEAD {
                         0
                     } else {

@@ -15,11 +15,11 @@ pub(super) struct BorrowedScalarCache<'a> {
     pub(super) failed:Cell<bool>,
 }
 impl<'a> BorrowedScalarCache<'a> {
-    pub(super) fn new(source:&'a Tokenizer,map:BorrowedObservation<'a>,bytes:U8Set,flat:Option<&[u32]>)->Option<Self>{
+    pub(super) fn new(source:&'a Tokenizer,map:BorrowedObservation<'a>,bytes:U8Set,flat:Option<&ByteRows>)->Option<Self>{
         let bytes=bytes.iter().collect::<Vec<_>>();
         let cells=map.len().checked_mul(bytes.len())?;
         if bytes.is_empty()||cells>1_000_000{return None;}
-        let flat=flat.filter(|rows|rows.len()==source.num_states()as usize*256)?;
+        let flat=flat.filter(|rows|rows.num_states()==source.num_states()as usize)?;
         let mut byte_column=[u16::MAX;256];for (column,&byte)in bytes.iter().enumerate(){byte_column[byte as usize]=column as u16;}
         let mut transitions=Vec::with_capacity(cells);
         let mut epsilon=Vec::with_capacity(map.len());let mut finalizers=Vec::with_capacity(map.len());
@@ -27,7 +27,7 @@ impl<'a> BorrowedScalarCache<'a> {
             epsilon.push(source.state_has_epsilon_transitions(raw));
             finalizers.push(source.matched_terminal_bitset(raw));
             for &byte in &bytes {
-                let target=flat[raw as usize*256+byte as usize];
+                let target=flat.trans(raw as usize, byte as usize);
                 transitions.push(if map.logical(target).is_some(){target}else{u32::MAX});
             }
         }

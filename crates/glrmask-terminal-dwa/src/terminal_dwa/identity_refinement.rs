@@ -92,7 +92,7 @@ fn native_support_reference(dwa:&crate::automata::weighted_u32::dwa::DWA)->Weigh
 pub fn build_scoped_boundary_identity_refinement(
     tokenizer:&Tokenizer,vocab:&Vocab,ignore_terminal:Option<TerminalID>,
     grammar:&AnalyzedGrammar,disallowed_follows:&BTreeMap<u32,BitSet>,
-    flat_trans:Arc<[u32]>,scope:&scope::BoundaryAnalysisScope,
+    flat_trans:ByteRows,scope:&scope::BoundaryAnalysisScope,
 )->Option<(MappedArtifact<TerminalAutomaton>,TerminalDwaPhaseProfile)>{
     build_scoped_boundary_identity_with_certificate(tokenizer,vocab,ignore_terminal,
         grammar,disallowed_follows,flat_trans,scope).map(|(mapped,profile,_)|(mapped,profile))
@@ -106,7 +106,7 @@ pub fn build_scoped_boundary_identity_with_certificate(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
-    flat_trans: Arc<[u32]>,
+    flat_trans: ByteRows,
     scope: &scope::BoundaryAnalysisScope,
 ) -> Option<(MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile, Option<NativeMinimizationFixedPoint>)> {
     build_identity_common(tokenizer,vocab,ignore_terminal,grammar,disallowed_follows,flat_trans,scope,None)
@@ -115,7 +115,7 @@ pub fn build_scoped_boundary_identity_with_certificate(
 #[doc(hidden)]
 pub fn build_scoped_boundary_borrowed_identity_with_certificate(
     source:&Tokenizer,vocab:&Vocab,ignore_terminal:Option<TerminalID>,grammar:&AnalyzedGrammar,
-    disallowed_follows:&BTreeMap<u32,BitSet>,source_flat:Arc<[u32]>,scope:&scope::BoundaryAnalysisScope,
+    disallowed_follows:&BTreeMap<u32,BitSet>,source_flat:ByteRows,scope:&scope::BoundaryAnalysisScope,
     original_to_view:&[u32],view_to_original:&[u32],
 )->Option<(MappedArtifact<TerminalAutomaton>,TerminalDwaPhaseProfile,Option<NativeMinimizationFixedPoint>)>{
     let borrowed=l2p::nwa_builder::native_builder::BorrowedObservation::new(source,original_to_view,view_to_original)?;
@@ -128,7 +128,7 @@ fn build_identity_common(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     disallowed_follows: &BTreeMap<u32, BitSet>,
-    flat_trans: Arc<[u32]>,
+    flat_trans: ByteRows,
     scope: &scope::BoundaryAnalysisScope,
     borrowed:Option<l2p::nwa_builder::native_builder::BorrowedObservation<'_>>,
 ) -> Option<(MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile, Option<NativeMinimizationFixedPoint>)> {
@@ -140,7 +140,7 @@ fn build_identity_common(
         || vocab.entries_map().values().any(<[u8]>::is_empty)
         || scope.initial_states().keep_raw().len() != n as usize
         || grammar.num_terminals != tokenizer.num_terminals()
-        || flat_trans.len() != (tokenizer.num_states()as usize).checked_mul(256)?
+        || flat_trans.num_states() != tokenizer.num_states() as usize
     {
         return None;
     }
@@ -319,7 +319,7 @@ mod tests {
         for partitioned in [false, true] {
             let tokenizer = if partitioned { build_regex_partitioned(&expressions, &[0, 1, 2, 3]) }
                 else { build_regex_monolithic(&expressions) }.into_tokenizer(4, Some(expressions.clone().into()));
-            let flat: Arc<[u32]> = Arc::from(l1::build_flat_transition_table(&tokenizer));
+            let flat: ByteRows = ByteRows::from_tokenizer(&tokenizer);
             for case in 0..32 {
                 let mut words = vec![b"ab!".to_vec(), b"ba".to_vec(), b"a b".to_vec(), b"!a".to_vec(), b"ab!".to_vec()];
                 for _ in 0..8 { let len = 1 + random() % 5; words.push((0..len).map(|_| b"ab! "[random() % 4]).collect()); }
@@ -335,10 +335,10 @@ mod tests {
                 let mut follows = BTreeMap::new();
                 if case % 4 == 3 { let mut v = BitSet::new(4); v.set(3); follows.insert(0, v); }
                 let (candidate, _) = build_scoped_boundary_identity_refinement(&tokenizer, &vocab,
-                    ignore, &grammar, &follows, Arc::clone(&flat), &scope).unwrap();
+                    ignore, &grammar, &follows, flat.clone(), &scope).unwrap();
                 let (reference, _) = build_scoped_boundary_id_map_and_terminal_dwa(&tokenizer,
                     &vocab, &TerminalColoring::identity(4), ignore, &grammar, &follows,
-                    Arc::clone(&flat), &scope);
+                    flat.clone(), &scope);
                 let parts = |mapped: MappedArtifact<TerminalAutomaton>| {
                     let (automaton, id_map) = mapped.into_parts();
                     let TerminalAutomaton::Dwa(dwa) = automaton else { panic!("DWA expected") };

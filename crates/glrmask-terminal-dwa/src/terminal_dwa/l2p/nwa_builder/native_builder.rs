@@ -152,26 +152,26 @@ pub struct NativeBuild {
 #[allow(clippy::too_many_arguments)]
 pub fn build<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Option<TerminalID>,
  seed:&crate::automata::weighted_u32::nwa::NWA,leaf:u32,num_tsids:u32,
- tree:VocabPrefixTreeNode<'_>,roots:&NodesByTokenizerState,flat:Option<&'a [u32]>,active:&[bool])->Option<NativeBuild>{
+ tree:VocabPrefixTreeNode<'_>,roots:&NodesByTokenizerState,flat:Option<&'a ByteRows>,active:&[bool])->Option<NativeBuild>{
  build_impl(tokenizer,coloring,ignore,NativeSeedInput::Generic(seed),leaf,num_tsids,tree,roots,flat,active,None)
 }
 #[allow(clippy::too_many_arguments)]
 pub fn build_borrowed<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Option<TerminalID>,
  seed:&crate::automata::weighted_u32::nwa::NWA,leaf:u32,num_tsids:u32,
- tree:VocabPrefixTreeNode<'_>,roots:&NodesByTokenizerState,flat:Option<&'a [u32]>,active:&[bool],map:BorrowedObservation<'a>)->Option<NativeBuild>{
+ tree:VocabPrefixTreeNode<'_>,roots:&NodesByTokenizerState,flat:Option<&'a ByteRows>,active:&[bool],map:BorrowedObservation<'a>)->Option<NativeBuild>{
  build_impl(tokenizer,coloring,ignore,NativeSeedInput::Generic(seed),leaf,num_tsids,tree,roots,flat,active,Some(map))
 }
 enum NativeSeedInput<'a>{Generic(&'a crate::automata::weighted_u32::nwa::NWA),Direct{max_token:u32,classes:&'a [u32]}}
 #[allow(clippy::too_many_arguments)]
 pub fn build_borrowed_direct_seed<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Option<TerminalID>,
  classes:&[u32],max_token:u32,num_tsids:u32,tree:VocabPrefixTreeNode<'_>,roots:&NodesByTokenizerState,
- flat:Option<&'a [u32]>,active:&[bool],map:BorrowedObservation<'a>)->Option<NativeBuild>{
+ flat:Option<&'a ByteRows>,active:&[bool],map:BorrowedObservation<'a>)->Option<NativeBuild>{
  build_impl(tokenizer,coloring,ignore,NativeSeedInput::Direct{max_token,classes},0,num_tsids,tree,roots,flat,active,Some(map))
 }
 #[allow(clippy::too_many_arguments)]
 fn build_impl<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Option<TerminalID>,
  seed:NativeSeedInput<'_>,leaf:u32,num_tsids:u32,
- tree:VocabPrefixTreeNode<'_>,roots:&NodesByTokenizerState,flat:Option<&'a [u32]>,active:&[bool],map:Option<BorrowedObservation<'a>>)->Option<NativeBuild>{
+ tree:VocabPrefixTreeNode<'_>,roots:&NodesByTokenizerState,flat:Option<&'a ByteRows>,active:&[bool],map:Option<BorrowedObservation<'a>>)->Option<NativeBuild>{
  let parallel=std::env::var_os("GLRMASK_DISABLE_L2P_PARALLEL_ROOT_TRIE").is_none()
    && std::env::var_os("GLRMASK_ENABLE_L2P_SELF_LOOP_SUBTREE_SKIP").is_none()
    && tree.children().len()>=2 && rayon::current_num_threads()>1
@@ -190,7 +190,7 @@ fn build_impl<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Opti
   builder.borrowed_map=Some(map);
   builder.has_epsilon_transitions=map.has_epsilon;
   builder.scalar_deterministic_dispatch=map.scalar_dispatch;
-  builder.shared_flat_transitions=flat.filter(|rows|rows.len()==tokenizer.num_states()as usize*256);
+  builder.shared_flat_transitions=flat.filter(|rows|rows.num_states()==tokenizer.num_states()as usize);
   builder.cached_reset_roots=builder.reset_roots().into_vec();
   if crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_BORROWED_COMPACT"){
    builder.borrowed_cursor=native_borrowed_cursor::BorrowedScalarCache::new(tokenizer,map,U8Set::from_words(*tree.subtree_bytes()),flat);

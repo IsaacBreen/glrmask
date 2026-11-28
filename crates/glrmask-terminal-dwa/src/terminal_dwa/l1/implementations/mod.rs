@@ -4,9 +4,9 @@ mod common;
 mod projected;
 mod support;
 
+use crate::automata::lexer::observation::ByteRows;
 pub(crate) use projected::{build_projected_vocab_equivalence, prepare_finite_vocab_projection};
 
-use std::sync::Arc;
 
 use super::L1IdentityVocabOrder;
 use crate::automata::lexer::tokenizer::Tokenizer;
@@ -28,7 +28,7 @@ pub struct BuildInput<'a> {
     pub ignore_terminal: Option<TerminalID>,
     pub grammar: &'a AnalyzedGrammar,
     pub active_terminals: &'a [bool],
-    pub flat_trans: &'a Arc<[u32]>,
+    pub flat_trans: &'a ByteRows,
     pub transitions_by_byte: Option<&'a crate::terminal_dwa::classify::ByteTransitionIndex>,
     pub initial_state_map: Option<&'a ManyToOneIdMap>,
     /// `u32::MAX` in `initial_state_map` means excluded from the complete

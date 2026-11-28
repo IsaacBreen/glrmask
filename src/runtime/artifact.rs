@@ -1271,7 +1271,7 @@ pub(crate) type IndexedDagDenseTransitions = Vec<IndexedDagDenseTransitionRow>;
 #[derive(Debug, Clone)]
 pub(crate) enum FastTokenizerTransitions {
     Dense(Vec<[u32; 256]>),
-    Flat(Arc<[u32]>),
+    Classed(crate::automata::lexer::observation::ByteRows),
     /// Compact exact dense DFA rows for tokenizers with fewer than 32,768
     /// states. The high bit marks a target state with at least one finalizer;
     /// u16::MAX is the dead-transition sentinel.
@@ -1470,14 +1470,13 @@ impl FastTokenizerTransitions {
                     || tokenizer.get_transition(state, byte),
                     |row| row[byte as usize],
                 ),
-            Self::Flat(flat) => state
-                .try_into()
-                .ok()
-                .and_then(|state: usize| state.checked_mul(256))
-                .and_then(|offset| offset.checked_add(byte as usize))
-                .and_then(|index| flat.get(index))
-                .copied()
-                .unwrap_or_else(|| tokenizer.get_transition(state, byte)),
+            Self::Classed(rows) => {
+                if (state as usize) < rows.num_states() {
+                    rows.trans(state as usize, byte as usize)
+                } else {
+                    tokenizer.get_transition(state, byte)
+                }
+            },
             Self::Flat16 { transitions, .. } => state
                 .try_into()
                 .ok()
@@ -1529,7 +1528,7 @@ impl FastTokenizerTransitions {
     pub(crate) fn len(&self) -> usize {
         match self {
             Self::Dense(rows) => rows.len(),
-            Self::Flat(flat) => flat.len() / 256,
+            Self::Classed(rows) => rows.num_states(),
             Self::Flat16 { transitions, .. } => transitions.len() / 256,
             Self::Flat32 { transitions, .. } => transitions.len() / 256,
             Self::Fallback(len) => *len,
@@ -1547,12 +1546,8 @@ impl FastTokenizerTransitions {
         self,
         children: &[(&FastTokenizerTransitions, u32)],
     ) -> Option<Self> {
-        fn flat_rows(flat: &[u32]) -> Option<Vec<[u32; 256]>> {
-            let (chunks, remainder) = flat.as_chunks::<256>();
-            if !remainder.is_empty() {
-                return None;
-            }
-            chunks.iter().map(|chunk| Some(*chunk)).collect()
+        fn physical_rows(rows: &crate::automata::lexer::observation::ByteRows) -> impl Iterator<Item = [u32; 256]> + '_ {
+            (0..rows.num_states()).map(|state| std::array::from_fn(|byte| rows.trans(state, byte)))
         }
 
         fn rebased_row(row: &[u32; 256], offset: u32) -> [u32; 256] {
@@ -1586,8 +1581,8 @@ impl FastTokenizerTransitions {
                         let state_to_dense_row = (0..rows.len() as u32).collect::<Vec<_>>();
                         (state_to_dense_row, rows)
                     }
-                    Self::Flat(flat) => {
-                        let rows = flat_rows(&flat)?;
+                    Self::Classed(classed) => {
+                        let rows = physical_rows(&classed).collect::<Vec<_>>();
                         let state_to_dense_row = (0..rows.len() as u32).collect::<Vec<_>>();
                         (state_to_dense_row, rows)
                     }
@@ -1610,9 +1605,8 @@ impl FastTokenizerTransitions {
                                 state_to_dense_row.push(dense);
                             }
                         }
-                        Self::Flat(flat) => {
-                            let rows = flat_rows(flat)?;
-                            for row in rows {
+                        Self::Classed(classed) => {
+                            for row in physical_rows(classed) {
                                 let dense = dense_rows.len() as u32;
                                 dense_rows.push(rebased_row(&row, *offset));
                                 state_to_dense_row.push(dense);

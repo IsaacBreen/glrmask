@@ -4311,10 +4311,10 @@ fn compile_prepared_with_profile_and_table_construction(
             .ignore_terminal
             .and_then(|terminal| tokenizer.terminal_expr(terminal).cloned());
         let reuse_compile_flat_transitions = runtime_lexer.separate.is_none()
-            && flat_trans.len() == tokenizer.num_states() as usize * 256
+            && flat_trans.num_states() == tokenizer.num_states() as usize
             && env_flag_enabled_by_default("GLRMASK_REUSE_COMPILE_FLAT_TRANSITIONS");
         let prebuilt_tokenizer_fast_transitions = if reuse_compile_flat_transitions {
-            crate::runtime::FastTokenizerTransitions::Flat(flat_trans)
+            crate::runtime::FastTokenizerTransitions::Classed(flat_trans)
         } else {
             crate::runtime::FastTokenizerTransitions::default()
         };

@@ -4,11 +4,11 @@ use super::*;
 impl NfaTrieScanCache<'_> {
     pub(super) fn execute_native_scalar_into(
         &mut self, action: &mut LexicalStateAction<'_>, input: &[u8], start: u32, matches: &mut Vec<TokenizerMatch>,
-        flat: Option<&[u32]>, validate: bool,
+        flat: Option<&ByteRows>, validate: bool,
     ) -> SmallVec<[u32; 1]> {
         let source = RawCursorSource {
             tokenizer: self.tokenizer,
-            flat: flat.filter(|table| table.len() == self.tokenizer.num_states() as usize * 256),
+            flat: flat.filter(|table| table.num_states() == self.tokenizer.num_states() as usize),
         };
         let ends = self.execute_cursor::<true, _>(action, &source, input, start, matches);
         if validate || self.strict_reference {
@@ -33,7 +33,7 @@ mod tests{
         for partitioned in [false,true]{
             let tokenizer=if partitioned{build_regex_partitioned(&exprs,&[0,1,2,3,4,5])}else{build_regex(&exprs)}
                 .into_tokenizer(6,Some(Arc::from(exprs.clone())));
-            let flat=crate::terminal_dwa::l1::build_flat_transition_table(&tokenizer);
+            let flat=ByteRows::from_tokenizer(&tokenizer);
             for case in 0..32{
                 let active=(0..6).map(|t|case%3!=1||t!=4).collect::<Vec<_>>();
                 let mut ordinary=NfaTrieScanCache::new(&tokenizer,Some(active.clone()));
@@ -43,7 +43,7 @@ mod tests{
                 if case==0{ordinary.match_stamp=u32::MAX-1;candidate.match_stamp=u32::MAX-1;}
                 let mut words=vec![vec![],b"a".to_vec(),b"abc!".to_vec(),b"ab !a".to_vec(),b"bc".to_vec(),vec![0,255,128]];
                 for _ in 0..16{let n=next()%16;words.push((0..n).map(|_|b"abc! \0\xff\x80"[next()%8]).collect());}
-                for start in 0..tokenizer.num_states(){for word in &words{for supplied in [None,Some(flat.as_slice()),Some(&flat[..flat.len()-1])]{
+                for start in 0..tokenizer.num_states(){for word in &words{for supplied in [None,Some(&flat),Some(&ByteRows::dense(Arc::from([])))]{
                     let mut a=Vec::new();let mut b=Vec::new();
                     let x=ordinary.execute_into(&mut ordinary_action,word,start,&mut a);
                     let y=candidate.execute_native_scalar_into(&mut candidate_action,word,start,&mut b,supplied,false);

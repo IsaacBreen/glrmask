@@ -1589,7 +1589,7 @@ fn collect_batched_demand_view(
 
 fn collect_batched_demand_possible_matches(
     tokenizer: &Tokenizer,
-    raw_transitions: Option<&[u32]>,
+    raw_transitions: Option<&ByteRows>,
     root: VocabPrefixTreeNode<'_>,
     entries: &[u32],
     demand: &DelayedTerminalDemand,
@@ -1605,7 +1605,7 @@ fn collect_batched_demand_possible_matches(
     let raw = match raw_transitions {
         Some(raw) => raw,
         None => {
-            owned = crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table(tokenizer);
+            owned = ByteRows::from_tokenizer(tokenizer);
             &owned
         }
     };
@@ -2229,7 +2229,7 @@ fn compute_constraint_possible_matches_with_artifacts(
     original_token_count: usize,
     artifacts: Arc<RuntimeVocabPreparation>,
     raw_byte_to_class: Option<&[u8; 256]>,
-    raw_transitions: Option<&[u32]>,
+    raw_transitions: Option<&ByteRows>,
     demand: DelayedTerminalDemand,
 ) -> ConstraintPossibleMatchesComputation {
     let pm_started_at = Instant::now();
@@ -2580,7 +2580,7 @@ fn compute_constraint_possible_matches_for_vocab_impl(
     vocab: &Vocab,
     config: ConstraintPossibleMatchesConfig,
     raw_byte_to_class: Option<&[u8; 256]>,
-    raw_transitions: Option<&[u32]>,
+    raw_transitions: Option<&ByteRows>,
 ) -> ConstraintPossibleMatchesComputation {
     if config.defer_to_dynamic_mask {
         let full_artifacts = runtime_vocab_preparation(vocab);
@@ -2630,14 +2630,13 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab_with_byte_observatio
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     config: ConstraintPossibleMatchesConfig,
-    raw_byte_to_class: &[u8; 256],
-    raw_transitions: &[u32],
+    raw_transitions: &ByteRows,
 ) -> ConstraintPossibleMatchesComputation {
     compute_constraint_possible_matches_for_vocab_impl(
         tokenizer,
         vocab,
         config,
-        Some(raw_byte_to_class),
+        Some(&raw_transitions.byte_to_column),
         Some(raw_transitions),
     )
 }

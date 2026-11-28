@@ -4,7 +4,7 @@
 //! and constructs NWA transitions for each (byte, tokenizer-state) pair.
 
 use crate::automata::lexer::Lexer;
-use crate::automata::lexer::observation::{ConfigActionCache, LexicalStateAction};
+use crate::automata::lexer::observation::{ByteRows, ConfigActionCache, LexicalStateAction};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -71,7 +71,7 @@ trait CursorSource {
 
 struct RawCursorSource<'a> {
     tokenizer: &'a Tokenizer,
-    flat: Option<&'a [u32]>,
+    flat: Option<&'a ByteRows>,
 }
 
 impl CursorSource for RawCursorSource<'_> {
@@ -84,7 +84,7 @@ impl CursorSource for RawCursorSource<'_> {
     fn step(&self, state: u32, byte: u8) -> Option<u32> {
         match self.flat {
             Some(table) => {
-                let target = table[state as usize * 256 + byte as usize];
+                let target = table.trans(state as usize, byte as usize);
                 (target != u32::MAX).then_some(target)
             }
             None => self.tokenizer.step(state, byte),
@@ -531,7 +531,7 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa, S: EventSink = NWA> {
     pub profile: TerminalDwaBuildProfile,
     flat_transitions: Vec<Option<Box<[u32; 256]>>>,
     nfa_scan_cache: Option<NfaTrieScanCache<'tok>>,
-    shared_flat_transitions: Option<&'tok [u32]>,
+    shared_flat_transitions: Option<&'tok ByteRows>,
     self_loop_subtree_skip_enabled: bool,
     profile_timing: bool,
     has_epsilon_transitions: bool,
@@ -592,7 +592,7 @@ impl<'tok, 'pm, 'nwa, S: EventSink> TerminalNwaBuilder<'tok, 'pm, 'nwa, S> {
         use_terminal_coloring: bool,
         active_terminals: Option<Vec<bool>>,
         num_tokenizer_states: usize,
-        shared_flat_transitions: Option<&'tok [u32]>,
+        shared_flat_transitions: Option<&'tok ByteRows>,
     ) -> Self {
         let has_epsilon_transitions = tokenizer.has_epsilon_transitions();
         let scalar_deterministic_dispatch = tokenizer.has_scalar_deterministic_dispatch();
@@ -631,7 +631,7 @@ impl<'tok, 'pm, 'nwa, S: EventSink> TerminalNwaBuilder<'tok, 'pm, 'nwa, S> {
             flat_transitions: vec![None; num_tokenizer_states],
             nfa_scan_cache,
             shared_flat_transitions: shared_flat_transitions
-                .filter(|transitions| transitions.len() == num_tokenizer_states * 256),
+                .filter(|transitions| transitions.num_states() == num_tokenizer_states),
             self_loop_subtree_skip_enabled: std::env::var_os(
                 "GLRMASK_ENABLE_L2P_SELF_LOOP_SUBTREE_SKIP",
             )
@@ -673,6 +673,11 @@ impl<'tok, 'pm, 'nwa, S: EventSink> TerminalNwaBuilder<'tok, 'pm, 'nwa, S> {
     /// O(1) DFA step using lazily-built flat transition table.
     #[inline]
     fn fast_step(&mut self, state: u32, byte: u8) -> Option<u32> {
+        if let Some(rows) = self.shared_flat_transitions {
+            let next = rows.trans(self.original_state(state) as usize, byte as usize);
+            if next == u32::MAX { return None; }
+            return self.borrowed_map.map_or(Some(next), |map| map.logical(next));
+        }
         let state_idx = state as usize;
         if self.flat_transitions[state_idx].is_none() {
             let mut row = self.tokenizer.transition_row(self.original_state(state));
@@ -1019,10 +1024,9 @@ impl<'tok, 'pm, 'nwa, S: EventSink> TerminalNwaBuilder<'tok, 'pm, 'nwa, S> {
         self.profile.trie_self_loop_checks += 1;
         if let Some(flat_transitions) = self.shared_flat_transitions {
             let raw=self.original_state(tokenizer_state);
-            let base = raw as usize * 256;
             let can_skip = U8Set::from_words(*node.subtree_bytes())
                 .iter()
-                .all(|byte| flat_transitions[base + byte as usize] == raw);
+                .all(|byte| flat_transitions.trans(raw as usize, byte as usize) == raw);
             if can_skip {
                 self.profile.trie_self_loop_skips += 1;
             }
@@ -1827,7 +1831,7 @@ pub fn build_nwa_via_trie_walk<'a>(
     vocab_tree_root: VocabPrefixTreeNode<'_>,
     roots: &NodesByTokenizerState,
     possible_matches: &mut PossibleMatchesComputer<'a>,
-    shared_flat_transitions: Option<&'a [u32]>,
+    shared_flat_transitions: Option<&'a ByteRows>,
     active_terminals: &[bool],
 ) -> TerminalDwaBuildProfile {
     let num_tokenizer_states = tokenizer.num_states() as usize;

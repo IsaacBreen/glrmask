@@ -107,6 +107,16 @@ pub fn compute_tokenizer_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
 impl ByteRows {
     /// Exact physical action, independent of any finite token alphabet.
     pub fn from_tokenizer(tokenizer: &Tokenizer) -> Self {
+        // Virtual rows have their own coordinate semantics. Preserve the
+        // exact physical fill contract rather than quotienting those rows
+        // using an ordinary transition observation.
+        if tokenizer.has_any_virtual_runtime() {
+            let mut values = vec![u32::MAX; tokenizer.num_states() as usize * 256];
+            for (state, row) in values.as_chunks_mut::<256>().0.iter_mut().enumerate() {
+                tokenizer.fill_transition_row(state as u32, row);
+            }
+            return Self::dense(Arc::from(values));
+        }
         let classes = compute_tokenizer_byte_classes(tokenizer);
         let representatives = column_representatives(&classes);
         let width = representatives.len();

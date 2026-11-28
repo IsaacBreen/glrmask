@@ -15,7 +15,6 @@ use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::pm_profile::{elapsed_ms, profile_summary_enabled, PossibleMatchesProfile};
-use crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table;
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
@@ -24,9 +23,8 @@ use crate::automata::lexer::observation::ByteRows;
 
 #[derive(Clone, Copy)]
 pub(super) enum ByteTransitions<'a> {
-    Raw(&'a [u32]),
     Projected {
-        raw: &'a [u32],
+        raw: &'a ByteRows,
         local_to_raw: &'a [u32],
         raw_to_local: &'a [u32],
     },
@@ -37,10 +35,9 @@ impl ByteTransitions<'_> {
     #[inline]
     pub(super) fn target(self, state: u32, byte: u8) -> u32 {
         match self {
-            Self::Raw(raw) => raw[state as usize * 256 + byte as usize],
             Self::Projected { raw, local_to_raw, raw_to_local } => {
                 let source = local_to_raw[state as usize];
-                let target = raw[source as usize * 256 + byte as usize];
+                let target = raw.trans(source as usize, byte as usize);
                 if target == u32::MAX { target } else { raw_to_local[target as usize] }
             }
             Self::Classed(rows) => rows.trans(state as usize, byte as usize),
@@ -1415,7 +1412,7 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_precomputed(
 
 pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     tokenizer: &Tokenizer,
-    raw_transitions: Option<&[u32]>,
+    raw_transitions: Option<&ByteRows>,
     root: VocabPrefixTreeNode<'_>,
     entries: &[u32],
     canonical_state: Option<&[u32]>,
@@ -1437,7 +1434,7 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     let raw = match raw_transitions {
         Some(raw) => raw,
         None => {
-            owned = build_flat_transition_table(tokenizer);
+            owned = ByteRows::from_tokenizer(tokenizer);
             &owned
         }
     };
@@ -1452,7 +1449,7 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
         num_terminals,
         &matched_terminals,
         &is_end,
-        ByteTransitions::Raw(raw),
+        ByteTransitions::Classed(raw),
         &self_loop_bytes,
     )
 }

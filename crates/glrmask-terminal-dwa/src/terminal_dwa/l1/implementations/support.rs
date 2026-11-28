@@ -83,7 +83,7 @@ impl<'a> Scanner<'a> {
         }
         let (id, inserted) = if let [state] = self.action.configs()[config as usize].as_ref() {
             // Direct singleton lookup retains the inexpensive closure fast path.
-            let raw_target = self.input.flat_trans[*state as usize * 256 + byte as usize];
+            let raw_target = self.input.flat_trans.trans(*state as usize, byte as usize);
             if raw_target == DEAD {
                 (DEAD, false)
             } else {
@@ -93,11 +93,11 @@ impl<'a> Scanner<'a> {
             // Unrestricted L1 configurations are already epsilon-closed.
             // Filter the terminal signature, not the source/target state set.
             let flat = self.input.flat_trans;
-            let image = self.image.get_or_insert_with(|| EpsilonImageScratch::new(flat.len() / 256));
+            let image = self.image.get_or_insert_with(|| EpsilonImageScratch::new(flat.num_states()));
             let states = image.step(
                 self.action.configs()[config as usize].as_ref(), byte, true,
                 self.singleton_closures.as_ref(), None,
-                |state, byte| flat[state as usize * 256 + byte as usize],
+                |state, byte| flat.trans(state as usize, byte as usize),
             );
             self.action.intern_canonical_slice(states)
         };

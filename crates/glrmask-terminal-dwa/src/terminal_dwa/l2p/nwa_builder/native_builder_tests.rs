@@ -37,7 +37,7 @@ fn native_and_ordinary_sinks_publish_identical_event_graphs() {
     for partitioned in [false,true] {
         let tokenizer=if partitioned {build_regex_partitioned(&expressions,&[0,1,2,3,4])}
             else {build_regex(&expressions)}.into_tokenizer(5,Some(Arc::from(expressions.clone())));
-        let flat=crate::terminal_dwa::l1::build_flat_transition_table(&tokenizer);
+        let flat=ByteRows::from_tokenizer(&tokenizer);
         for case in 0..48 {
             let mut words=vec![b"a".to_vec(),b"abc!".to_vec(),b"ab !a".to_vec(),b"bc".to_vec()];
             for _ in 0..24 {let len=1+next()%12;words.push((0..len).map(|_|b"abc! "[next()%5]).collect());}
@@ -50,7 +50,7 @@ fn native_and_ordinary_sinks_publish_identical_event_graphs() {
             let active=(0..5).map(|t|case%3!=1||t!=4).collect::<Vec<_>>();
             let ignore=(case%2==0).then_some(3);
             let coloring=TerminalColoring::identity(5);
-            for supplied in [None,Some(flat.as_slice()),Some(&flat[..flat.len()-1])] {
+            for supplied in [None,Some(&flat),Some(&ByteRows::dense(Arc::from([])))] {
                 let (seed,leaf,roots)=seeded(&tokenizer,&map,&keep);
                 let original=(seed.start_states().to_vec(),seed.states().to_vec());
                 let mut ordinary=seed.clone();let mut pm=PossibleMatchesComputer::new(&tokenizer);
@@ -176,7 +176,7 @@ fn borrowed_source_matches_materialized_logical_event_graph(){
     let mut checked=0;
     for split in [false,true]{
         let source=if split{build_regex_partitioned(&exprs,&[0,1,2,3,4,5])}else{build_regex(&exprs)}.into_tokenizer(6,Some(Arc::from(exprs.clone())));
-        let source_flat=crate::terminal_dwa::l1::build_flat_transition_table(&source);
+        let source_flat=ByteRows::from_tokenizer(&source);
         for case in 0..32{
             let mut words=vec![b"a".to_vec(),b"abc!".to_vec(),b"ab !a".to_vec(),b"bc".to_vec(),vec![0,255,128]];
             for _ in 0..16{let n=1+next()%10;words.push((0..n).map(|_|b"abc! q"[next()%6]).collect());}
@@ -203,7 +203,7 @@ fn borrowed_source_matches_materialized_logical_event_graph(){
             let tree=VocabPrefixTree::build(&words.into_iter().enumerate().collect::<Vec<_>>());
             let ids=id_map(view.tokenizer.num_states(),tree.root().reachable_token_ids().len()as usize);
             let(seed,leaf,roots)=seeded(&view.tokenizer,&ids,&mask);
-            let flat=crate::terminal_dwa::l1::build_flat_transition_table(&view.tokenizer);
+            let flat=ByteRows::from_tokenizer(&view.tokenizer);
             let coloring=TerminalColoring::identity(6);let active=(0..6).map(|i|case%3!=0||i!=4).collect::<Vec<_>>();let ignore=(case%2==0).then_some(4);
             let mut a=build(&view.tokenizer,&coloring,ignore,&seed,leaf,ids.num_tsids(),tree.root(),&roots,Some(&flat),&active).unwrap();
             let mut b=build_borrowed(&source,&coloring,ignore,&seed,leaf,ids.num_tsids(),tree.root(),&roots,Some(&source_flat),&active,borrowed).expect("certified query-prefix coverage");
@@ -235,7 +235,7 @@ fn borrowed_view_epsilon_free_packed_sources_are_exact(){
             let view=tok.induced_observation_view(&keep).unwrap();let map=BorrowedObservation::new(tok,&view.original_to_view,&view.view_to_original).unwrap();
             assert_eq!(map.has_epsilon,view.tokenizer.has_epsilon_transitions());assert_eq!(map.scalar_dispatch,view.tokenizer.has_scalar_deterministic_dispatch());
             let initial=view.view_to_original.iter().map(|q|first.contains(q)).collect::<Vec<_>>();let ids=id_map(view.tokenizer.num_states(),entries.len());let (seed,leaf,roots)=seeded(&view.tokenizer,&ids,&initial);let color=TerminalColoring::identity(4);let active=vec![true;4];
-            let flat=crate::terminal_dwa::l1::build_flat_transition_table(&view.tokenizer);let rawflat=crate::terminal_dwa::l1::build_flat_transition_table(tok);
+            let flat=ByteRows::from_tokenizer(&view.tokenizer);let rawflat=ByteRows::from_tokenizer(tok);
             let mut a=build(&view.tokenizer,&color,None,&seed,leaf,ids.num_tsids(),tree.root(),&roots,Some(&flat),&active).unwrap();
             let mut b=build_borrowed(tok,&color,None,&seed,leaf,ids.num_tsids(),tree.root(),&roots,Some(&rawflat),&active,map).unwrap();
             assert_eq!(a.sink.export_raw().unwrap().states(),b.sink.export_raw().unwrap().states());

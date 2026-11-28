@@ -16,7 +16,7 @@ use crate::vocab::LexicalVocabulary;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 
 use super::l2p::equivalence_analysis::compat::{FlatDfa, compute_tokenizer_byte_classes};
-use crate::automata::lexer::observation::{column_representatives, ConfigActionCache};
+use crate::automata::lexer::observation::{ByteRows, column_representatives, ConfigActionCache};
 use super::l2p::equivalence_analysis::state_equivalence::nfa::{
     TokenBoundedAnalysisTrie,
     build_bounded_analysis_view_from_combined_starts_prefix_only_with_trie,
@@ -2033,7 +2033,7 @@ fn build_active_suffix_start_by_byte(
 fn suffix_can_reach_active_terminal(
     tokenizer: &Tokenizer,
     bytesets: &SharedClassifyBytesets,
-    flat_trans: &[u32],
+    flat_trans: &ByteRows,
     suffix: &[u8],
     active_words: &[u64],
     active_matched_by_state: Option<&[u8]>,
@@ -2043,7 +2043,7 @@ fn suffix_can_reach_active_terminal(
         if !state_future_intersects_words(bytesets, state, active_words) {
             return false;
         }
-        let next = flat_trans[state as usize * 256 + byte as usize];
+        let next = flat_trans.trans(state as usize, byte as usize);
         if next == u32::MAX {
             return false;
         }
@@ -2061,7 +2061,7 @@ fn suffix_can_reach_active_terminal(
 fn token_has_active_terminal_suffix(
     tokenizer: &Tokenizer,
     bytesets: &SharedClassifyBytesets,
-    flat_trans: &[u32],
+    flat_trans: &ByteRows,
     bytes: &[u8],
     active_words: &[u64],
     active_matched_by_state: Option<&[u8]>,
@@ -2367,7 +2367,7 @@ trait ExactBoundaryDeterministicScanner {
 
 struct RawExactBoundaryScanner<'a> {
     tokenizer: &'a Tokenizer,
-    flat_trans: &'a [u32],
+    flat_trans: &'a ByteRows,
 }
 
 impl ExactBoundaryDeterministicScanner for RawExactBoundaryScanner<'_> {
@@ -2383,7 +2383,7 @@ impl ExactBoundaryDeterministicScanner for RawExactBoundaryScanner<'_> {
 
     #[inline]
     fn transition(&self, state: u32, byte: u8) -> u32 {
-        self.flat_trans[state as usize * 256 + byte as usize]
+        self.flat_trans.trans(state as usize, byte as usize)
     }
 
     #[inline]
@@ -3972,7 +3972,7 @@ impl<M: ContinuationMask> BoundaryWorkspace<M> {
 /// plus future terminals only when the whole suffix has been consumed.
 #[derive(Clone, Copy)]
 struct DenseCandidateAction<'a> {
-    transitions: &'a [u32],
+    transitions: &'a ByteRows,
     matched: &'a [u64],
     future: &'a [u64],
     width: usize,
@@ -3981,7 +3981,7 @@ struct DenseCandidateAction<'a> {
 impl DenseCandidateAction<'_> {
     #[inline]
     fn step(&self, state: u32, byte: u8) -> u32 {
-        self.transitions[state as usize * 256 + byte as usize]
+        self.transitions.trans(state as usize, byte as usize)
     }
 
     #[inline]
@@ -4067,7 +4067,7 @@ fn reset_action<'a, 'b>(
 fn execute_prepared_dense_suffix_trie(
     trie: &VocabSuffixTrie,
     continuation_reset_state: u32,
-    dense_flat_trans: &[u32],
+    dense_flat_trans: &ByteRows,
     dense_finalizer_masks: &[u64],
     dense_future_masks: &[u64],
 ) -> (Vec<u32>, Vec<u64>) {
@@ -4082,8 +4082,7 @@ fn execute_prepared_dense_suffix_trie(
         if parent_state == u32::MAX || dense_future_masks[parent_state as usize] == 0 {
             continue;
         }
-        let state = dense_flat_trans
-            [parent_state as usize * 256 + trie.incoming_bytes[node] as usize];
+        let state = dense_flat_trans.trans(parent_state as usize, trie.incoming_bytes[node] as usize);
         if state == u32::MAX {
             continue;
         }
@@ -4303,14 +4302,14 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let trie_ms = 0.0;
 
     let suffix_started_at = std::time::Instant::now();
-    let mut dense_flat_trans = Vec::new();
+    let mut dense_flat_trans = ByteRows::dense(Arc::from([]));
     let mut dense_finalizer_masks = Vec::new();
     let mut dense_future_masks = Vec::new();
     let continuation_reset_state = if uses_original_tokenizer {
         reset_state
     } else {
         let state_count = candidate_tokenizer.num_states() as usize;
-        dense_flat_trans = super::l1::build_flat_transition_table(candidate_tokenizer);
+        dense_flat_trans = ByteRows::from_tokenizer(candidate_tokenizer);
         dense_finalizer_masks = vec![0u64; state_count * words_per_mask];
         dense_future_masks = vec![0u64; state_count * words_per_mask];
         for state in 0..state_count {
@@ -5511,7 +5510,7 @@ fn assert_exact_boundary_batch_matches_scalar_reference(
 fn tokens_have_exact_active_l2p_boundary(
     tokenizer: &Tokenizer,
     bytesets: &SharedClassifyBytesets,
-    flat_trans: &[u32],
+    flat_trans: &ByteRows,
     tokens: &[&[u8]],
     active_bitset: &BitSet,
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -5607,7 +5606,7 @@ fn tokens_have_exact_active_l2p_boundary(
 
 pub fn split_vocab_for_active_l2p_terminals(
     tokenizer: &Tokenizer,
-    flat_trans: &[u32],
+    flat_trans: &ByteRows,
     vocab: &Vocab,
     disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
     num_terminals: u32,
@@ -6254,7 +6253,6 @@ mod tests {
     };
     use crate::automata::lexer::tokenizer::Tokenizer;
     use crate::automata::lexer::Lexer;
-    use crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table;
     use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalPathLength;
     use crate::ds::bitset::BitSet;
     use crate::ds::u8set::U8Set;
@@ -6353,7 +6351,7 @@ use crate::ds::vocab_prefix_tree::VocabPrefixTree;
         );
         let tokenizer = build_regex(expressions.as_ref())
             .into_tokenizer(expressions.len() as u32, Some(Arc::clone(&expressions)));
-        let flat = build_flat_transition_table(&tokenizer);
+        let flat = ByteRows::from_tokenizer(&tokenizer);
         let mut finalizers = vec![0u64; tokenizer.num_states() as usize];
         let mut futures = vec![0u64; tokenizer.num_states() as usize];
         for state in 0..tokenizer.num_states() as usize {
@@ -6382,7 +6380,7 @@ use crate::ds::vocab_prefix_tree::VocabPrefixTree;
                         consumed_suffix = false;
                         break;
                     }
-                    state = flat[state as usize * 256 + byte as usize];
+                    state = flat.trans(state as usize, byte as usize);
                     if state == u32::MAX {
                         consumed_suffix = false;
                         break;
@@ -6462,7 +6460,7 @@ use crate::ds::vocab_prefix_tree::VocabPrefixTree;
         assert!(tokenizer.has_epsilon_transitions());
 
         let bytesets = SharedClassifyBytesets::build(&tokenizer, tokenizer.num_terminals());
-        let flat_trans = build_flat_transition_table(&tokenizer);
+        let flat_trans = ByteRows::from_tokenizer(&tokenizer);
         let mut active = BitSet::new(tokenizer.num_terminals() as usize);
         for terminal in 0..tokenizer.num_terminals() as usize {
             active.set(terminal);
@@ -7010,7 +7008,7 @@ use crate::ds::vocab_prefix_tree::VocabPrefixTree;
             active_sets.push(single);
         }
         active_sets.push(all_active);
-        let flat_trans = build_flat_transition_table(&tokenizer);
+        let flat_trans = ByteRows::from_tokenizer(&tokenizer);
         let unrestricted_suffix_start = [1u8; 256];
         for active in &active_sets {
             let active_suffix_start =

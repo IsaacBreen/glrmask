@@ -6,6 +6,7 @@
 //! merged tokenizer. Keep those domains explicit so a quotient cannot seed a
 //! representative owned by another component.
 
+use crate::automata::lexer::observation::ByteRows;
 use std::sync::Arc;
 
 use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
@@ -237,7 +238,7 @@ pub fn restrict_quotient_to_initial_domain(
 pub fn crossing_prefix_seed_support(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    flat_trans: &[u32],
+    flat_trans: &ByteRows,
     ownership: &BoundaryOwnership,
     start: ImmediateComponentId,
 ) -> Option<(Vec<bool>, usize)> {
@@ -437,7 +438,7 @@ mod tests {
         use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
         use crate::compiler::glr::analysis::AnalyzedGrammar;
         use crate::grammar::flat::{Rule, Symbol};
-        use super::super::{build_scoped_boundary_id_map_and_terminal_dwa, l1, l2p, types};
+        use super::super::{build_scoped_boundary_id_map_and_terminal_dwa, l2p, types};
         use std::collections::BTreeMap;
 
         let expressions = vec![
@@ -471,7 +472,7 @@ mod tests {
             vec!["doc".into(), "augmented".into()], 1,
         );
         let ownership = Arc::new(BoundaryOwnership::flat(&[0, 2], 3).unwrap());
-        let flat: Arc<[u32]> = Arc::from(l1::build_flat_transition_table(&tokenizer));
+        let flat: ByteRows = ByteRows::from_tokenizer(&tokenizer);
         let mut total_removed = 0;
         for start in [ImmediateComponentId(0), ImmediateComponentId(1)] {
             let (support, _) = crossing_prefix_seed_support(&tokenizer, &vocab, &flat, &ownership, start).unwrap();
@@ -485,7 +486,7 @@ mod tests {
                 scope.automatic_prefix_support = automatic_prefix_support;
                 let (mapped, profile) = build_scoped_boundary_id_map_and_terminal_dwa(
                     &tokenizer, &vocab, &types::TerminalColoring::identity(3),
-                    None, &grammar, &BTreeMap::new(), Arc::clone(&flat), &scope,
+                    None, &grammar, &BTreeMap::new(), flat.clone(), &scope,
                 );
                 let (automaton, id_map) = mapped.into_parts();
                 let TerminalAutomaton::Dwa(dwa) = automaton else { panic!("boundary must publish DWA") };
@@ -504,7 +505,7 @@ mod tests {
     #[test]
     fn prefix_support_keeps_epsilon_and_foreign_partial_observations() {
         let tokenizer = crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
-        let flat = super::super::l1::build_flat_transition_table(&tokenizer);
+        let flat = ByteRows::from_tokenizer(&tokenizer);
         let ownership = BoundaryOwnership::flat(&[0, 1], 2).unwrap();
         let vocab = Vocab::from_entries_unchecked(vec![(8, b"a!".to_vec()), (20, b"b!".to_vec())]);
         let (support, _) = crossing_prefix_seed_support(&tokenizer, &vocab, &flat, &ownership, ImmediateComponentId(0)).unwrap();

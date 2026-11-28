@@ -2,6 +2,7 @@
 
 pub mod implementations;
 
+use crate::automata::lexer::observation::ByteRows;
 use std::sync::{Arc, OnceLock};
 
 use super::types::{
@@ -126,7 +127,7 @@ pub fn build_l1_id_map_and_terminal_dwa(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
-    flat_trans: &Arc<[u32]>,
+    flat_trans: &ByteRows,
     transitions_by_byte: Option<&crate::terminal_dwa::classify::ByteTransitionIndex>,
     initial_state_map: Option<&ManyToOneIdMap>,
     shared_generic_nfa_topology: Option<
@@ -166,7 +167,7 @@ pub fn build_l1_id_map_and_terminal_dwa_mode(
     ignore_terminal: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     active_terminals: &[bool],
-    flat_trans: &Arc<[u32]>,
+    flat_trans: &ByteRows,
     transitions_by_byte: Option<&crate::terminal_dwa::classify::ByteTransitionIndex>,
     initial_state_map: Option<&ManyToOneIdMap>,
     shared_generic_nfa_topology: Option<

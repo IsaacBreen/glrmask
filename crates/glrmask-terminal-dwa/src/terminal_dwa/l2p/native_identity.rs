@@ -12,7 +12,7 @@ pub(in crate::terminal_dwa) fn try_build(
     ignore: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     follows: &BTreeMap<u32, BitSet>,
-    flat: Option<&std::sync::Arc<[u32]>>,
+    flat: Option<&ByteRows>,
     scope: &BoundaryAnalysisScope,
     id_map: &InternalIdMap,
 ) -> Option<LocalIdMapTerminalDwa> {
@@ -43,7 +43,7 @@ pub(in crate::terminal_dwa) fn try_build(
     let coloring = TerminalColoring::identity(active.len());
     let native = nwa_builder::native_builder::build(
         tokenizer, &coloring, ignore, &seed, leaf, id_map.num_tsids(),
-        tree.root(), &roots, flat.map(AsRef::as_ref), &active,
+        tree.root(), &roots, flat, &active,
     )?;
     let build_ms = native.build_ms;
     let (dwa, post, core) = native.sink.finish(
@@ -73,7 +73,7 @@ pub(in crate::terminal_dwa) fn try_build_borrowed(
     ignore: Option<TerminalID>,
     grammar: &AnalyzedGrammar,
     follows: &BTreeMap<u32, BitSet>,
-    flat: Option<&std::sync::Arc<[u32]>>,
+    flat: Option<&ByteRows>,
     scope: &BoundaryAnalysisScope,
     id_map: &InternalIdMap,
     borrowed:nwa_builder::native_builder::BorrowedObservation<'_>,
@@ -114,10 +114,10 @@ pub(in crate::terminal_dwa) fn try_build_borrowed(
     let active = vec![true; tokenizer.num_terminals() as usize];
     let coloring = TerminalColoring::identity(active.len());
     let native = if direct_seed{
-        nwa_builder::native_builder::build_borrowed_direct_seed(tokenizer,&coloring,ignore,&classes,id_map.max_internal_token_id(),id_map.num_tsids(),tree.root(),&roots,flat.map(AsRef::as_ref),&active,borrowed)
+        nwa_builder::native_builder::build_borrowed_direct_seed(tokenizer,&coloring,ignore,&classes,id_map.max_internal_token_id(),id_map.num_tsids(),tree.root(),&roots,flat,&active,borrowed)
     }else{nwa_builder::native_builder::build_borrowed(
         tokenizer, &coloring, ignore, &seed, leaf, id_map.num_tsids(),
-        tree.root(), &roots, flat.map(AsRef::as_ref), &active,borrowed,
+        tree.root(), &roots, flat, &active,borrowed,
     )}?;
     let build_ms = native.build_ms;
     let (dwa, post, core) = native.sink.finish(
