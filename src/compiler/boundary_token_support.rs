@@ -9,6 +9,7 @@
 //! a proof that the token cannot occur in the boundary terminal language.
 //! This is a support filter, NEVER an admission oracle.
 
+use crate::automata::lexer::observation::ByteRows;
 use crate::automata::lexer::tokenizer::{Lexer, Tokenizer};
 use crate::compiler::stages::id_map_and_terminal_dwa::scope::{
     BoundaryOwnership, ImmediateComponentId,
@@ -181,27 +182,27 @@ pub(crate) fn crossing_token_support_with_follows(
 /// NFA operation. This view stores no vocabulary, grammar or owner decisions.
 pub(crate) struct PreparedSupportTransitions<'a> {
     tokenizer: &'a Tokenizer,
-    flat: &'a [u32],
+    flat: &'a ByteRows,
     has_epsilon: Vec<bool>,
 }
 impl<'a> PreparedSupportTransitions<'a> {
     /// Borrow the pinned direct table without accepting a lookalike context.
-    pub(crate) fn flat_for(&self,tokenizer:&Tokenizer)->Option<&[u32]> {
+    pub(crate) fn flat_for(&self,tokenizer:&Tokenizer)->Option<&ByteRows> {
         std::ptr::eq(self.tokenizer,tokenizer).then_some(self.flat)
     }
 
     /// `flat` must be the ordinary direct transition table built from this
     /// exact immutable tokenizer. The crate-private caller owns that link
     /// context; no vocabulary-dependent state map is accepted here.
-    pub(crate) fn new(tokenizer:&'a Tokenizer, flat:&'a [u32])->Option<Self> {
+    pub(crate) fn new(tokenizer:&'a Tokenizer, flat:&'a ByteRows)->Option<Self> {
         let n=tokenizer.num_states() as usize;
-        if flat.len()!=n.checked_mul(256)? || tokenizer.has_virtual_residual_runtime(){return None;}
+        if flat.num_states()!=n || tokenizer.has_virtual_residual_runtime(){return None;}
         Some(Self{tokenizer,flat,has_epsilon:(0..n as u32).map(|q|tokenizer.state_has_epsilon_transitions(q)).collect()})
     }
     #[inline]
     fn step(&self,source:u32,byte:u8)->crate::automata::lexer::tokenizer::TokenizerStateSet {
         if !self.has_epsilon[source as usize] {
-            let target=self.flat[source as usize*256+byte as usize];
+            let target=self.flat.trans(source as usize,byte as usize);
             if target==u32::MAX { return Default::default(); }
             if !self.has_epsilon[target as usize] { return crate::automata::lexer::tokenizer::TokenizerStateSet::from_buf([target]); }
         }
@@ -214,18 +215,17 @@ impl<'a> PreparedSupportTransitions<'a> {
 fn prepared_transitions_equal_every_raw_byte_step_including_nested_epsilon_dispatch() {
     use crate::automata::lexer::ast::{bytes,choice,plus};
     use crate::automata::lexer::compile::{build_regex_monolithic,build_regex_partitioned};
-    use crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table;
     let expressions=vec![bytes(b"abc"),plus(choice(vec![bytes(b"a"),bytes(b"bc")])),bytes(b"!ab")];
     let first=build_regex_monolithic(&expressions).into_tokenizer(3,None);
     let second=build_regex_partitioned(&expressions,&[0,1,2]).into_tokenizer(3,None);
     let (nested,_)=Tokenizer::disjoint_union_with_terminal_offsets(&[(&first,0),(&second,3)]);
     for tokenizer in [first,second,nested] {
-        let flat=build_flat_transition_table(&tokenizer);
+        let flat=ByteRows::from_tokenizer(&tokenizer);
         let prepared=PreparedSupportTransitions::new(&tokenizer,&flat).unwrap();
         for q in 0..tokenizer.num_states(){for byte in 0..=255u8{
             assert_eq!(prepared.step(q,byte),tokenizer.step_all(&[q],byte),"q={q} byte={byte}");
         }}
-        assert!(PreparedSupportTransitions::new(&tokenizer,&flat[..flat.len()-1]).is_none());
+        assert!(PreparedSupportTransitions::new(&tokenizer,&ByteRows::dense(std::sync::Arc::from([]))).is_none());
     }
 }
 
@@ -389,7 +389,7 @@ mod tests {
         let follows=BTreeMap::from([(0,blocked)]);
         for tokenizer in [build_regex_monolithic(&expressions).into_tokenizer(4,None),
             build_regex_partitioned(&expressions,&[0,1,2,3]).into_tokenizer(4,None)] {
-            let flat=crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table(&tokenizer);
+            let flat=ByteRows::from_tokenizer(&tokenizer);
             let prepared=PreparedSupportTransitions::new(&tokenizer,&flat).unwrap();
             let initial=vec![true;tokenizer.num_states() as usize];
             for adjacency in [None,Some(&follows)] {

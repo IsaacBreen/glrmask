@@ -19,6 +19,7 @@ use std::time::Instant;
 use smallvec::SmallVec;
 
 use crate::automata::lexer::tokenizer::{Lexer, Tokenizer};
+use crate::automata::lexer::observation::ByteRows;
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::automata::weighted_u32::minimize_acyclic::minimize_acyclic_owned;
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
@@ -131,7 +132,7 @@ pub(crate) struct BoundaryWalkInputs<'a> {
     pub retain_non_crossing_paths: bool,
     /// Prebuilt flat transition table for the merged tokenizer, shared across
     /// shards. Built on demand when `None`.
-    pub flat_trans: Option<&'a Arc<[u32]>>,
+    pub flat_trans: Option<&'a ByteRows>,
 }
 
 /// Per-stage timings for one shard build (milliseconds wall).
@@ -290,7 +291,7 @@ fn build_boundary_terminal_dwa_query_reference(
     tile_size:Option<usize>, terminal_support:bool, query_view:bool, identity:bool,
 ) -> Option<BoundaryWalkOutput> {
     if query_view
-        && let Some(prepared)=super::boundary_query_view::prepare_with_policy(inputs.merged_tokenizer,inputs.vocab,inputs.scope,inputs.flat_trans.map(|flat|flat.as_ref()))
+        && let Some(prepared)=super::boundary_query_view::prepare_with_policy(inputs.merged_tokenizer,inputs.vocab,inputs.scope,inputs.flat_trans)
     {
         let view=&prepared.view;
         let mut output=build_boundary_terminal_dwa_query_jobs(&BoundaryWalkInputs{
@@ -358,11 +359,11 @@ fn build_boundary_terminal_dwa_query_jobs(
         for chunk in entries.chunks(size){groups.push(inputs.vocab.subset(chunk.iter().map(|&(id,_)|id)));}
     }
     if groups.len()<2 || groups.len()>256{return compile_one(inputs,shared);}
-    let flat:Arc<[u32]>=inputs.flat_trans.cloned().unwrap_or_else(||Arc::from(tdwa::l1::build_flat_transition_table(inputs.merged_tokenizer)));
+    let flat=inputs.flat_trans.cloned().unwrap_or_else(||ByteRows::from_tokenizer(inputs.merged_tokenizer));
     let outputs=groups.par_iter().map(|vocab|{
         let began=Instant::now();
         let scoped=tdwa::scope::crossing_prefix_seed_support(
-            inputs.merged_tokenizer,vocab,&crate::automata::lexer::observation::ByteRows::dense(Arc::clone(&flat)),inputs.scope.ownership(),inputs.scope.start_component(),
+            inputs.merged_tokenizer,vocab,&flat,inputs.scope.ownership(),inputs.scope.start_component(),
         ).and_then(|(support,_)|inputs.scope.intersect_initial_support(&support));
         // A declined or empty prefilter is not treated as a proof of an empty
         // language. The mature compiler remains the conservative fallback.
@@ -420,10 +421,10 @@ fn build_boundary_terminal_dwa_on_view_policy(
     let num_terms = inputs.grammar.num_terminals as usize;
     let coloring = tdwa::types::TerminalColoring::identity(num_terms);
     let owned_flat;
-    let flat: &Arc<[u32]> = match inputs.flat_trans {
+    let flat: &ByteRows = match inputs.flat_trans {
         Some(flat) => flat,
         None => {
-            owned_flat = Arc::from(tdwa::l1::build_flat_transition_table(tokenizer));
+            owned_flat = ByteRows::from_tokenizer(tokenizer);
             &owned_flat
         }
     };
@@ -431,7 +432,7 @@ fn build_boundary_terminal_dwa_on_view_policy(
     let walk_started = Instant::now();
     let refined = identity.then(|| tdwa::build_scoped_boundary_identity_with_certificate(
         tokenizer, inputs.vocab, inputs.ignore_terminal, inputs.grammar,
-        inputs.disallowed_follows, crate::automata::lexer::observation::ByteRows::dense(Arc::clone(flat)), inputs.scope,
+        inputs.disallowed_follows, flat.clone(), inputs.scope,
     )).flatten();
     let (mapped, tdwa_profile, native_fixed_point) = refined.unwrap_or_else(|| {
         let (mapped, profile)=tdwa::build_scoped_boundary_id_map_and_terminal_dwa_with_filter(
@@ -441,7 +442,7 @@ fn build_boundary_terminal_dwa_on_view_policy(
         inputs.ignore_terminal,
         inputs.grammar,
         inputs.disallowed_follows,
-        crate::automata::lexer::observation::ByteRows::dense(Arc::clone(flat)),
+        flat.clone(),
         inputs.scope,
         shared,
         terminal_filter,
@@ -983,19 +984,7 @@ where
     use rayon::prelude::*;
 
     let flat_started = Instant::now();
-    let make_original_flat=|| Arc::from(tdwa::l1::build_flat_transition_table(inputs.merged_tokenizer));
-    let use_direct_flat=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_DIRECT_FLAT_ARC");
-    let prepared_flat=use_direct_flat.then(|| super::boundary_flat_transitions::build(inputs.merged_tokenizer,true)).flatten();
-    let direct_flat_selected=prepared_flat.is_some();
-    let flat: Arc<[u32]> = prepared_flat.unwrap_or_else(make_original_flat);
-    if direct_flat_selected && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_DIRECT_FLAT_ARC").is_some() {
-        let reference:Arc<[u32]>=make_original_flat();
-        assert_eq!(&*flat,&*reference,"direct Arc transition table differs from ordinary scalar rows");
-        eprintln!("[glrmask/validate][boundary_direct_flat_arc] exact=true cells={}",flat.len());
-    }
-    if use_direct_flat && compose_profile_enabled() {
-        eprintln!("[glrmask/profile][boundary_direct_flat_arc] selected={direct_flat_selected}");
-    }
+    let flat = ByteRows::from_tokenizer(inputs.merged_tokenizer);
     let flat_ms = flat_started.elapsed().as_secs_f64() * 1000.0;
     // Reuse the ordinary immutable direct table. Scalar rows take one lookup;
     // epsilon source/target rows preserve the exact original NFA operation.
@@ -1112,7 +1101,7 @@ where
         {
             let started = Instant::now();
             let supported = tdwa::scope::crossing_prefix_seed_support(
-                inputs.merged_tokenizer, candidate_vocab, &crate::automata::lexer::observation::ByteRows::dense(Arc::clone(&flat)), &ownership, plan.crossing_owner,
+                inputs.merged_tokenizer, candidate_vocab, &flat, &ownership, plan.crossing_owner,
             );
             if let Some((support, observation_states)) = supported {
                 let before = seed_mask.iter().filter(|&&keep| keep).count();
@@ -3487,8 +3476,8 @@ mod tests {
         // merge activates, strict-reference mode rebuilds this exact scope with
         // TI suppressed and compares the completed weighted language in
         // original tokenizer-state/token coordinates.
-        let flat: Arc<[u32]> =
-            Arc::from(tdwa::l1::build_flat_transition_table(&constraint.tokenizer));
+        let flat: ByteRows =
+            ByteRows::from_tokenizer(&constraint.tokenizer);
         let coloring = crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalColoring::identity(
             grammar.num_terminals as usize,
         );
@@ -3499,7 +3488,7 @@ mod tests {
             constraint.ignore_terminal,
             &grammar,
             &disallowed,
-            crate::automata::lexer::observation::ByteRows::dense(flat),
+            flat,
             &scope,
         );
     }
@@ -3654,8 +3643,8 @@ mod tests {
         let composed = low_level_compose(&parent, &children);
         let grammar = analyzed_grammar(&composed.table.table, &composed.terminal_names);
         let disallowed = compute_disallowed_follows(&grammar);
-        let flat: Arc<[u32]> =
-            Arc::from(tdwa::l1::build_flat_transition_table(&composed.tokenizer));
+        let flat: ByteRows =
+            ByteRows::from_tokenizer(&composed.tokenizer);
         let ownership = Arc::new(
             tdwa::scope::BoundaryOwnership::flat(
                 &composed.table.terminal_offsets,
@@ -6329,7 +6318,7 @@ mod tests {
         // owns leaf 0 and the already-composed block owns leaves 1+2. Pure
         // m↔g crossings are internal to the block and must not become outer
         // boundary candidates; g→x/g→y still crosses the block boundary.
-        let flat: Arc<[u32]> = Arc::from(tdwa::l1::build_flat_transition_table(&merged));
+        let flat: ByteRows = ByteRows::from_tokenizer(&merged);
         let ownership = Arc::new(
             tdwa::scope::BoundaryOwnership::from_leaf_layout(
                 &leaf_offsets,
@@ -6923,7 +6912,7 @@ fn build_boundary_terminal_dwa_borrowed_query(inputs:&BoundaryWalkInputs)->Optio
     let began=Instant::now();
     let (mapped,profile,certificate)=tdwa::build_scoped_boundary_borrowed_identity_with_certificate(
         inputs.merged_tokenizer,inputs.vocab,inputs.ignore_terminal,inputs.grammar,inputs.disallowed_follows,
-        crate::automata::lexer::observation::ByteRows::dense(Arc::clone(flat)),&prepared.scope,&prepared.original_to_view,&prepared.view_to_original)?;
+        flat.clone(),&prepared.scope,&prepared.original_to_view,&prepared.view_to_original)?;
     let local=BoundaryWalkInputs{merged_tokenizer:inputs.merged_tokenizer,vocab:inputs.vocab,grammar:inputs.grammar,
         disallowed_follows:inputs.disallowed_follows,ignore_terminal:inputs.ignore_terminal,
         follow_transparent_ignores:inputs.follow_transparent_ignores,scope:&prepared.scope,

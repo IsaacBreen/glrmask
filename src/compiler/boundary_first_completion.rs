@@ -1,5 +1,5 @@
 //! First-segment completion observations; never a quotient of reset states.
-use glrmask_lexer::__private::automata::lexer::{Lexer,tokenizer::Tokenizer};
+use glrmask_lexer::__private::automata::lexer::{Lexer,tokenizer::Tokenizer,observation::ByteRows};
 use glrmask_terminal_dwa::__private::terminal_dwa::scope::BoundaryAnalysisScope;
 use glrmask_vocab::Vocab;
 use rustc_hash::FxHashMap;
@@ -10,12 +10,12 @@ use std::collections::BTreeMap;
 impl Frontier{fn states(&self)->&[u32]{match self{Self::One(q)=>std::slice::from_ref(q),Self::Many(v)=>v}}}
 #[derive(Debug)]pub(crate) struct FirstRefinement{pub original_to_rep:Vec<u32>,pub representatives:Vec<bool>,pub before:usize,pub after:usize,pub steps:usize,pub prefixes:usize,pub signature_cells:usize}
 
-pub(crate) fn prepare(tok:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:&[u32])->Option<FirstRefinement>{
+pub(crate) fn prepare(tok:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:&ByteRows)->Option<FirstRefinement>{
  const MAX_STEPS:usize=16_000_000;const MAX_CELLS:usize=4_000_000;
  let n=tok.num_states()as usize;
  if !scope.require_crossing()||n==0||n>200_000||tok.has_virtual_residual_runtime()
   ||vocab.is_empty()||vocab.len()>4096||vocab.entries_map().values().any(<[u8]>::is_empty)
-  ||scope.initial_states().keep_raw().len()!=n||flat.len()!=n.checked_mul(256)? {return None;}
+  ||scope.initial_states().keep_raw().len()!=n||flat.num_states()!=n {return None;}
  let mut trie=vec![Node::default()];
  for word in vocab.entries_map().values(){let mut node=0;for &b in word{
   let next=if let Some(&q)=trie[node].edges.get(&b){q}else{if trie.len()>=65536{return None;}let q=trie.len()as u32;trie.push(Node::default());trie[node].edges.insert(b,q);q};node=next as usize;
@@ -42,7 +42,7 @@ pub(crate) fn prepare(tok:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,f
     steps=steps.checked_add(states.len())?;if steps>MAX_STEPS{return None;}
     let next=match frontier{
      Frontier::One(q) if !tok.state_has_epsilon_transitions(q)=>{
-      let target=flat[q as usize*256+b as usize];if target==u32::MAX{continue;}
+      let target=flat.trans(q as usize,b as usize);if target==u32::MAX{continue;}
       if tok.state_has_epsilon_transitions(target){Frontier::Many(tok.singleton_epsilon_closure(target).into_vec())}else{Frontier::One(target)}
      },
      _=>{let v=tok.step_all(states,b).into_vec();if v.is_empty(){continue;}
@@ -62,11 +62,11 @@ pub(crate) fn prepare(tok:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,f
  use super::*;use std::sync::Arc;
  use glrmask_terminal_dwa::__private::terminal_dwa::scope::ImmediateComponentId;
  use glrmask_lexer::__private::automata::lexer::{ast::{bytes,choice,plus},compile::{build_regex_monolithic,build_regex_partitioned}};
- use glrmask_terminal_dwa::__private::terminal_dwa::{scope::{InitialStateDomain,BoundaryOwnership},l1};
+ use glrmask_terminal_dwa::__private::terminal_dwa::scope::{InitialStateDomain,BoundaryOwnership};
  #[test]fn every_equated_seed_has_identical_completion_trace(){
   let exprs=vec![choice(vec![bytes(b"abcd"),bytes(b"xycd"),bytes(b"abd")]),plus(bytes(b" ")),plus(choice(vec![bytes(b"a"),bytes(b"ab")]))];
   let mut random=22u64;let mut next=||{random=random.wrapping_mul(6364136223846793005).wrapping_add(1);(random>>32)as usize};let mut merged=0;
-  for partitioned in [false,true]{let tok=if partitioned{build_regex_partitioned(&exprs,&[0,1,2])}else{build_regex_monolithic(&exprs)}.into_tokenizer(3,None);let flat=l1::build_flat_transition_table(&tok);
+  for partitioned in [false,true]{let tok=if partitioned{build_regex_partitioned(&exprs,&[0,1,2])}else{build_regex_monolithic(&exprs)}.into_tokenizer(3,None);let flat=ByteRows::from_tokenizer(&tok);
    for case in 0..128{let mut words=vec![b"cd!".to_vec(),b"d".to_vec(),b" !".to_vec()];for _ in 0..10{let len=1+next()%5;words.push((0..len).map(|_|b"abcdxy !"[next()%8]).collect());}let vocab=Vocab::from_entries_unchecked(words.iter().enumerate().map(|(i,w)|(i as u32,w.clone())).collect());
     let mut seeds=(0..tok.num_states()).map(|_|next()%3!=0).collect::<Vec<_>>();seeds[0]=true;
     let scope=BoundaryAnalysisScope::new(InitialStateDomain::from_mask(seeds.len(),seeds.clone()).unwrap(),tok.deterministic_reset_states().into_vec(),Arc::new(BoundaryOwnership::flat(&[0],3).unwrap()),ImmediateComponentId(0),true,None).unwrap();let p=prepare(&tok,&vocab,&scope,&flat).unwrap();merged+=p.before-p.after;

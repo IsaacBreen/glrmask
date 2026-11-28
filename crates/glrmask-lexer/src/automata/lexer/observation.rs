@@ -554,6 +554,27 @@ mod config_action_tests {
     use super::*;
 
     #[test]
+    fn exact_byte_rows_match_physical_fill_for_nested_lexers() {
+        use crate::automata::lexer::{ast::{bytes, choice, plus}, compile::{build_regex_monolithic, build_regex_partitioned}};
+        let exprs = vec![bytes(b"abc"), plus(choice(vec![bytes(b"a"), bytes(b"bc")])), bytes(b"!ab")];
+        let first = build_regex_monolithic(&exprs).into_tokenizer(3, None);
+        let second = build_regex_partitioned(&exprs, &[0, 1, 2]).into_tokenizer(3, None);
+        let (nested, _) = Tokenizer::disjoint_union_with_terminal_offsets(&[(&first, 0), (&second, 3)]);
+        for tokenizer in [first, second, nested] {
+            let rows = ByteRows::from_tokenizer(&tokenizer);
+            assert_eq!(rows.num_states(), tokenizer.num_states() as usize);
+            assert!(rows.width < 256);
+            for state in 0..tokenizer.num_states() {
+                let mut expected = [u32::MAX; 256];
+                tokenizer.fill_transition_row(state, &mut expected);
+                for (byte, target) in expected.into_iter().enumerate() {
+                    assert_eq!(rows.trans(state as usize, byte), target);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn memo_rows_share_only_proven_observed_columns() {
         let mut cache = ConfigActionCache::new([b'a', b'b', b'c'],
             |byte| if byte == b'b' || byte == b'd' { b'a' as usize } else { byte as usize },

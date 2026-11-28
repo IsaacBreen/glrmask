@@ -240,11 +240,3 @@ fn collect_active_terminal_signature(
     signature.dedup();
     signature
 }
-
-pub fn build_flat_transition_table(tokenizer: &Tokenizer) -> Vec<u32> {
-    let mut flat_trans = vec![0; tokenizer.num_states() as usize * 256];
-    for (state_idx, row) in flat_trans.as_chunks_mut::<256>().0.iter_mut().enumerate() {
-        tokenizer.fill_transition_row(state_idx as u32, row);
-    }
-    flat_trans
-}

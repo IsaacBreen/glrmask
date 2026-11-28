@@ -1,6 +1,7 @@
 //! Exact query-view reachability using an already source-certified direct
 //! transition table. The selected raw states, induced tokenizer and its ID
 //! layout must match `boundary_query_view::prepare`; only the traversal changes.
+use crate::automata::lexer::observation::ByteRows;
 use super::QueryView;
 use crate::automata::lexer::tokenizer::{Lexer, Tokenizer, SingletonEpsilonClosures};
 use crate::compiler::stages::id_map_and_terminal_dwa::scope::BoundaryAnalysisScope;
@@ -8,7 +9,7 @@ use crate::Vocab;
 use std::{sync::Arc, time::Instant};
 
 struct Stepper<'a> {
-    flat: &'a [u32],
+    flat: &'a ByteRows,
     closures: Arc<SingletonEpsilonClosures>,
     marks: Vec<u32>,
     epoch: u32,
@@ -26,7 +27,8 @@ impl Stepper<'_> {
         // `states` and `extra` are epsilon-closed. Byte movement followed by
         // target closure is exactly the ordinary NFA step, with one dedup pass.
         for &q in states {
-            let target = *self.flat.get(q as usize * 256 + byte as usize)?;
+            if q as usize >= self.flat.num_states() { return None; }
+            let target = self.flat.trans(q as usize, byte as usize);
             if target == u32::MAX { continue; }
             for &next in self.closures.get(target as usize)?.iter() {
                 let mark = self.marks.get_mut(next as usize)?;
@@ -56,7 +58,7 @@ fn union_len(a: &[u32], b: &[u32]) -> usize {
 /// boundary linker. Never pass a table belonging to a different source/view.
 pub(super) struct Footprint {pub keep:Vec<bool>,pub footprint_ms:f64,pub first_states:usize,pub reset_states:usize,pub state_steps:usize}
 pub(super) fn prepare(
-    tokenizer: &Tokenizer, vocab: &Vocab, scope: &BoundaryAnalysisScope, flat: &[u32],
+    tokenizer: &Tokenizer, vocab: &Vocab, scope: &BoundaryAnalysisScope, flat: &ByteRows,
 ) -> Option<QueryView> {
     let Footprint{keep,footprint_ms,first_states,reset_states,state_steps}=footprint(tokenizer,vocab,scope,flat)?;
     let began = Instant::now();
@@ -68,11 +70,11 @@ pub(super) fn prepare(
         first_states, reset_states, state_steps })
 }
 pub(super) fn footprint(
-    tokenizer: &Tokenizer, vocab: &Vocab, scope: &BoundaryAnalysisScope, flat: &[u32],
+    tokenizer: &Tokenizer, vocab: &Vocab, scope: &BoundaryAnalysisScope, flat: &ByteRows,
 ) -> Option<Footprint> {
     let n = tokenizer.num_states() as usize;
     if !(256..=200_000).contains(&n) || tokenizer.has_virtual_residual_runtime()
-        || !scope.require_crossing() || flat.len() != n.checked_mul(256)?
+        || !scope.require_crossing() || flat.num_states() != n
         || scope.initial_states().keep_raw().len() != n
     { return None; }
     let began = Instant::now();
@@ -137,7 +139,7 @@ pub(super) fn footprint(
 mod tests {
     use super::*;
     use crate::automata::lexer::{ast::{bytes,choice,plus},compile::{build_regex_monolithic,build_regex_partitioned}};
-    use glrmask_terminal_dwa::__private::terminal_dwa::{l1,scope::{BoundaryOwnership,InitialStateDomain,ImmediateComponentId}};
+    use glrmask_terminal_dwa::__private::terminal_dwa::scope::{BoundaryOwnership,InitialStateDomain,ImmediateComponentId};
     #[test]
     fn factored_reset_steps_preserve_complete_query_views() {
         let exprs = vec![bytes(&vec![b'q';700]), choice(vec![bytes(b"ab"),bytes(b"a!"),bytes(b"ba")]),plus(bytes(b" ")),bytes(b"!")];
@@ -146,7 +148,7 @@ mod tests {
         let mut checked=0;
         for partitioned in [false,true] {
             let tok=if partitioned{build_regex_partitioned(&exprs,&[0,1,2,3])}else{build_regex_monolithic(&exprs)}.into_tokenizer(4,None);
-            let flat=l1::build_flat_transition_table(&tok);
+            let flat=ByteRows::from_tokenizer(&tok);
             for case in 0..64 {
                 let mut keep=(0..tok.num_states()).map(|_|next()%3==0).collect::<Vec<_>>();
                 keep[tok.initial_state_id() as usize]=true;
@@ -167,7 +169,7 @@ mod tests {
                         crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(&b.view.tokenizer));
                     checked+=1;
                 }
-                assert!(prepare(&tok,&vocab,&scope,&flat[..flat.len()-1]).is_none());
+                assert!(prepare(&tok,&vocab,&scope,&ByteRows::dense(Arc::from([]))).is_none());
             }
         }
         assert!(checked>=64,"insufficient accepted-view coverage: {checked}");

@@ -6,6 +6,7 @@
 //! every query path and cannot invent an original byte path. Full lexical
 //! observations and raw coordinate lifting are preserved. No runtime lexer
 //! or reusable incoming-component whitelist is replaced by this local view.
+use crate::automata::lexer::observation::ByteRows;
 use crate::automata::lexer::tokenizer::{Lexer,Tokenizer,TokenizerObservationView};
 use crate::compiler::stages::id_map_and_terminal_dwa::scope::BoundaryAnalysisScope;
 use crate::Vocab;
@@ -72,7 +73,7 @@ pub(super) fn prepare(tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisS
 /// caller at the link's disjoint-union boundary. A declined optimization uses
 /// the original traversal and its original resource/coverage decisions.
 pub(super) fn prepare_with_policy(
-    tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:Option<&[u32]>,
+    tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:Option<&ByteRows>,
 )->Option<QueryView>{
     if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_FACTORED_QUERY_VIEW")
         && let Some(candidate)=flat.and_then(|flat|fast::prepare(tokenizer,vocab,scope,flat)) {
@@ -97,7 +98,7 @@ pub(super) struct BorrowedQuery {
     pub scope:BoundaryAnalysisScope,pub footprint_ms:f64,pub materialize_ms:f64,
     pub first_states:usize,pub reset_states:usize,pub state_steps:usize,
 }
-pub(super) fn prepare_borrowed(tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:&[u32])->Option<BorrowedQuery>{
+pub(super) fn prepare_borrowed(tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:&ByteRows)->Option<BorrowedQuery>{
     let footprint=fast::footprint(tokenizer,vocab,scope,flat)?;
     let began=Instant::now();let n=tokenizer.num_states()as usize;let mut keep=footprint.keep;
     let closures=tokenizer.all_singleton_epsilon_closures();let start=tokenizer.initial_state_id();

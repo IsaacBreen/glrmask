@@ -12,7 +12,6 @@ mod boundary_cut_support;
 mod boundary_terminal_summary;
 pub(crate) mod boundary_scoped_follow;
 pub(crate) mod boundary_scoped_follow_delta;
-pub(crate) mod boundary_flat_transitions;
 pub(crate) mod boundary_candidates;
 pub(crate) mod boundary_tail;
 pub(crate) mod boundary_walk;

@@ -1,5 +1,6 @@
 //! Exact factorization of the existing necessary crossing-token observer.
 //! This is not an admission oracle and does not build a parser automaton.
+use crate::automata::lexer::observation::ByteRows;
 use glrmask_lexer::__private::automata::lexer::tokenizer::SingletonEpsilonClosures;
 use glrmask_lexer::__private::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use glrmask_lexer::__private::ds::bitset::BitSet;
@@ -50,7 +51,7 @@ struct Row {
 }
 struct SegmentCache<'a> {
     tok: &'a Tokenizer,
-    flat: Option<&'a [u32]>,
+    flat: Option<&'a ByteRows>,
     closures: Arc<SingletonEpsilonClosures>,
     marks: Vec<u32>,
     epoch: u32,
@@ -61,7 +62,7 @@ struct SegmentCache<'a> {
     retained_raw: usize,
 }
 impl<'a> SegmentCache<'a> {
-    fn new(tok: &'a Tokenizer, flat: Option<&'a [u32]>) -> Self {
+    fn new(tok: &'a Tokenizer, flat: Option<&'a ByteRows>) -> Self {
         let empty = Vec::new();
         let mut ids = FxHashMap::default();
         ids.insert(empty.clone(), 0);
@@ -146,7 +147,7 @@ impl<'a> SegmentCache<'a> {
             }
             let mut out = Vec::new();
             for &source in &self.rows[q as usize].raw {
-                let target = flat[source as usize * 256 + byte as usize];
+                let target = flat.trans(source as usize, byte as usize);
                 if target == u32::MAX {
                     continue;
                 }
@@ -341,12 +342,12 @@ fn crossing_support_with_flat(
     ignore: Option<u32>,
     transparent: Option<&BitSet>,
     adjacency: Option<&BTreeMap<u32, BitSet>>,
-    flat: Option<&[u32]>,
+    flat: Option<&ByteRows>,
 ) -> Option<Result> {
     let clock = Instant::now();
     let n = tok.num_states() as usize;
     let nt = tok.num_terminals() as usize;
-    if flat.is_some_and(|f| Some(f.len()) != n.checked_mul(256)) {
+    if flat.is_some_and(|f| f.num_states() != n) {
         return None;
     }
     if n == 0
@@ -574,7 +575,7 @@ mod tests {
             choice(vec![bytes(b"!"), bytes(b"bc")]),
             plus(choice(vec![bytes(b"ab"), bytes(b"c")])),
         ];
-        let a = build_regex_monolithic(&exprs).into_tokenizer(6, None);
+         let a = build_regex_monolithic(&exprs).into_tokenizer(6, None);
         let b = build_regex_partitioned(&exprs, &[0, 1, 2, 3, 4, 5]).into_tokenizer(6, None);
         let (c, _) = Tokenizer::disjoint_union_with_terminal_offsets(&[(&a, 0), (&b, 6)]);
         let mut seed = 8197u64;
@@ -646,7 +647,7 @@ mod tests {
                     "case{case} terminals{nt} initial{initial:?} words{words:?}"
                 );
                 let flat =
-                    glrmask_terminal_dwa::__private::terminal_dwa::l1::build_flat_transition_table(
+                    ByteRows::from_tokenizer(
                         &tok,
                     );
                 let cached = cut_support::crossing_support_with_flat(
@@ -679,10 +680,9 @@ mod tests {
 fn cut_support_rejects_invalid_domain_and_wrong_tokenizer_table() {
     use super::boundary_token_support::PreparedSupportTransitions;
     use glrmask_lexer::__private::automata::lexer::{ast::bytes, compile::build_regex_monolithic};
-    use glrmask_terminal_dwa::__private::terminal_dwa::l1;
     let a = build_regex_monolithic(&[bytes(b"abc")]).into_tokenizer(1, None);
     let b = build_regex_monolithic(&[bytes(b"abd")]).into_tokenizer(1, None);
-    let flat = l1::build_flat_transition_table(&a);
+    let flat = ByteRows::from_tokenizer(&a);
     let prepared = PreparedSupportTransitions::new(&a, &flat).unwrap();
     let owner = BoundaryOwnership::flat(&[0], 1).unwrap();
     let v = Vocab::from_entries_unchecked(vec![(2, b"bc!".to_vec())]);
