@@ -46,6 +46,7 @@ impl CertifiedPrefixObserver<'_>{
         self.observer.query(words,seeds)
     }
     pub fn observer(&self)->&PrefixObserver{&self.observer}
+    pub(super) fn into_observer(self) -> PrefixObserver { self.observer }
     pub fn source(&self)->&Tokenizer{self.source}
 }
 

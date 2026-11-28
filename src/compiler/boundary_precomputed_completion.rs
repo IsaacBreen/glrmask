@@ -8,7 +8,9 @@ mod prefix_span_support;
 mod prefix_uniform;
 #[allow(dead_code)] mod reset_index;
 #[allow(dead_code)] mod cut_query;
-use self::completion_index::{CompletionContext, UntrustedCompletionIndex};
+use self::completion_index::CompletionContext;
+#[cfg(test)]
+use self::completion_index::UntrustedCompletionIndex;
 use self::prefix_observer::{Limits, PrefixObserver, Profile};
 use crate::automata::lexer::tokenizer::{Lexer,Tokenizer};
 use crate::{runtime::Constraint,Vocab};
@@ -86,9 +88,12 @@ pub(crate) fn prepare_component(constraint:&mut Constraint,vocab:&Vocab)->Result
     let source=Arc::clone(&constraint.tokenizer);let mut profile=Profile::default();
     let Some(prefix)=PrefixObserver::prepare(source.as_ref(),&words,Limits::default(),&mut profile)else{return Ok(false)};
     let Some(certified)=prefix.certify(source.as_ref())else{return Err("fresh prefix certificate failed".into())};
-    let index=match UntrustedCompletionIndex::from_certified_prefix(&certified){Ok(p)=>p,Err(completion_index::Error::ResourceLimit)=>return Ok(false),Err(e)=>return Err(format!("fresh completion index: {e:?}"))};
-    let wire:Arc<[u8]>=match index.to_bytes(){Ok(b)=>Arc::from(b),Err(completion_index::Error::ResourceLimit)=>return Ok(false),Err(e)=>return Err(format!("completion index serialization: {e:?}"))};
-    let prepared=PreparedCompletion::load(Arc::clone(&source),wire)?;
+    let (context, wire) = match CompletionContext::from_certified_prefix(Arc::clone(&source), certified) {
+        Ok(prepared) => prepared,
+        Err(completion_index::Error::ResourceLimit) => return Ok(false),
+        Err(e) => return Err(format!("fresh completion index: {e:?}")),
+    };
+    let prepared = PreparedCompletion { context: Arc::new(context), wire: Arc::from(wire), cut: None };
     let elapsed=started.elapsed().as_secs_f64()*1000.;
     if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][component_completion_prepare] states={} classes={} vocab={} bytes={} total_ms={elapsed:.3} profile={profile:?}",source.num_states(),prepared.context.class_count(),words.len(),prepared.wire.len());}
     constraint.boundary_completion_index=Some(Arc::new(prepared));constraint.serialized_artifact_cache=None;

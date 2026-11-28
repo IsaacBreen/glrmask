@@ -157,27 +157,32 @@ impl UntrustedCompletionIndex {
         // Do not trust serialized class numbers, observation IDs, or a hash.
         let expected = Data::derive(&certified)?;
         if self.data != expected { return Err(Error::CertificateMismatch); }
+        let observer = certified.into_observer();
         Ok(CertifiedCompletionIndex {
             source,
-            transitions: certified.observer().states.iter().map(|s| s.transitions.clone()).collect(),
-            covered_words: certified.observer().covered_words.clone(),
+            transitions: observer.states.into_iter().map(|state| state.transitions).collect(),
+            covered_words: observer.covered_words,
             data: self.data,
         })
     }
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        self.data.validate()?;
-        let prefix = self.prefix.to_bounded_bytes().ok_or(Error::Malformed)?;
+        Self::encode(&self.prefix, &self.data)
+    }
+
+    fn encode(observer: &PrefixObserver, data: &Data) -> Result<Vec<u8>> {
+        data.validate()?;
+        let prefix = observer.to_bounded_bytes().ok_or(Error::Malformed)?;
         let mut out = MAGIC.to_vec();
         fn put(out: &mut Vec<u8>, n: usize) -> Result<()> {
             out.extend_from_slice(&u32::try_from(n).map_err(|_| Error::ResourceLimit)?.to_le_bytes()); Ok(())
         }
-        put(&mut out, prefix.len())?; put(&mut out, self.data.raw_to_class.len())?;
-        put(&mut out, self.data.columns)?; put(&mut out, self.data.signatures.len())?;
-        put(&mut out, self.data.observations.len())?;
+        put(&mut out, prefix.len())?; put(&mut out, data.raw_to_class.len())?;
+        put(&mut out, data.columns)?; put(&mut out, data.signatures.len())?;
+        put(&mut out, data.observations.len())?;
         out.extend_from_slice(&prefix);
-        for &x in &self.data.raw_to_class { put(&mut out, x as usize)?; }
-        for row in &self.data.signatures { for &x in row { put(&mut out, x as usize)?; } }
-        for row in &self.data.observations { put(&mut out, row.len())?; for &x in row { put(&mut out, x as usize)?; } }
+        for &x in &data.raw_to_class { put(&mut out, x as usize)?; }
+        for row in &data.signatures { for &x in row { put(&mut out, x as usize)?; } }
+        for row in &data.observations { put(&mut out, row.len())?; for &x in row { put(&mut out, x as usize)?; } }
         if out.len() > MAX_WIRE { return Err(Error::ResourceLimit); } Ok(out)
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
@@ -249,6 +254,29 @@ pub struct CompletionContext {
     data: Data,
 }
 impl CompletionContext {
+    /// The caller has already certified this exact source. Derive the
+    /// observations once, encode the legacy certificate, and consume its
+    /// proof graph. Fresh preparation does not deserialize and certify its
+    /// own just-produced bytes.
+    pub(super) fn from_certified_prefix(
+        source: Arc<Tokenizer>,
+        certified: CertifiedPrefixObserver<'_>,
+    ) -> Result<(Self, Vec<u8>)> {
+        if !std::ptr::eq(source.as_ref(), certified.source()) {
+            return Err(Error::CertificateMismatch);
+        }
+        let data = Data::derive(&certified)?;
+        let wire = UntrustedCompletionIndex::encode(certified.observer(), &data)?;
+        let observer = certified.into_observer();
+        let context = Self {
+            source,
+            transitions: observer.states.into_iter().map(|state| state.transitions).collect(),
+            covered_words: observer.covered_words,
+            data,
+        };
+        Ok((context, wire))
+    }
+
     pub fn load(source: Arc<Tokenizer>, bytes: &[u8]) -> Result<Self> {
         let decoded = UntrustedCompletionIndex::from_bytes(bytes)?;
         let certified = decoded.certify(source.as_ref())?;
