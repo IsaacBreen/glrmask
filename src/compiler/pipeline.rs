@@ -19,7 +19,8 @@ use crate::automata::lexer::compile::{
     build_regex_partitioned_with_options,
     build_regex_with_profile_labels,
     compile_terminal_expr_dfa,
-    compile_terminal_expression_pair_with_vocabulary_token_quotient,
+    prepare_terminal_expression_pair_with_vocabulary_token_quotient,
+    PreparedTerminalExpressionPair,
     max_direct_bounded_suffix_state_count_estimate,
     expression_contains_large_bounded_repeat,
     expression_may_support_bounded_code_residual_runtime,
@@ -2453,6 +2454,7 @@ fn terminal_expr(terminal: &Terminal) -> Expr {
 struct SyntheticTokenizerPlan {
     full_expressions: Vec<Expr>,
     local: Arc<PartitionLocalPlan>,
+    prepared_pairs: std::sync::Mutex<BTreeMap<usize, PreparedTerminalExpressionPair>>,
     repeat_horizons: Arc<crate::automata::lexer::compile::VocabularyRepeatHorizonCache>,
 }
 
@@ -2607,6 +2609,7 @@ fn plan_synthetic_tokenizer_enabled(
         return None;
     }
 
+    let mut prepared_pairs = BTreeMap::new();
     let preflight_started_at = Instant::now();
     if !aggressive_partition_horizon {
         const MAX_LOCAL_PREFLIGHT_ESTIMATE: u128 = 4_000_000;
@@ -2631,7 +2634,7 @@ fn plan_synthetic_tokenizer_enabled(
             // whole-token quotient. Raw lexer substitution is decided later by
             // the stricter homomorphism constructor; a token-only candidate
             // keeps the full compile/runtime lexer.
-            let pair = compile_terminal_expression_pair_with_vocabulary_token_quotient(
+            let pair = prepare_terminal_expression_pair_with_vocabulary_token_quotient(
                 &full,
                 &candidate,
                 vocab,
@@ -2640,8 +2643,7 @@ fn plan_synthetic_tokenizer_enabled(
                 &relevant_bytes,
             );
             let keep = pair.as_ref().is_some_and(|pair| {
-                let full_states = pair.full.num_states();
-                let synthesized_states = pair.synthesized.num_states();
+                let (full_states, synthesized_states) = pair.state_counts();
                 synthesized_states < full_states
                     && full_states.saturating_sub(synthesized_states)
                         >= MIN_LOCAL_STATE_SAVING
@@ -2650,9 +2652,7 @@ fn plan_synthetic_tokenizer_enabled(
                         <= full_states.saturating_mul(MAX_SYNTHESIZED_RATIO_NUMERATOR)
             });
             if crate::env::var_os("GLRMASK_PROFILE_SYNTHETIC_PLAN").is_some() {
-                let (full_states, synthesized_states) = pair.as_ref().map_or((0, 0), |pair| {
-                    (pair.full.num_states(), pair.synthesized.num_states())
-                });
+                let (full_states, synthesized_states) = pair.as_ref().map_or((0, 0), PreparedTerminalExpressionPair::state_counts);
                 eprintln!(
                     "[glrmask/profile][synthetic_preflight] terminal={} keep={} full_states={} synthesized_states={} absolute_saving={}",
                     terminal,
@@ -2662,7 +2662,9 @@ fn plan_synthetic_tokenizer_enabled(
                     full_states.saturating_sub(synthesized_states),
                 );
             }
-            if !keep {
+            if keep {
+                prepared_pairs.insert(terminal, pair.expect("selected pair"));
+            } else {
                 synthesized.expressions[terminal] = full_expressions[terminal].clone();
             }
             keep
@@ -2721,6 +2723,7 @@ fn plan_synthetic_tokenizer_enabled(
 
     Some(SyntheticTokenizerPlan {
         full_expressions,
+        prepared_pairs: std::sync::Mutex::new(prepared_pairs),
         local: Arc::new(PartitionLocalPlan {
             expressions: Arc::from(synthesized.expressions),
             partition_ids: Arc::from(partition_ids),
@@ -2841,10 +2844,11 @@ fn prepare_structural_tokenizer_pair(
     let expression_count = full_expressions.len() as u32;
     let (synthesized_regex, full, full_to_synthesized, effective_synthesized_expressions) =
         if full_expressions.len() == 1 {
-            let pair = compile_terminal_expression_pair_with_vocabulary_token_quotient(
+            let prepared = plan.prepared_pairs.lock().expect("prepared pair cache poisoned").remove(&0);
+            let pair = prepared.or_else(|| prepare_terminal_expression_pair_with_vocabulary_token_quotient(
                 &full_expressions[0], &synthesized_expressions[0], vocab,
                 plan.repeat_horizons.as_ref(), max_token_len, &relevant_bytes,
-            )?;
+            ))?.finish();
             let mut full = pair.full.into_tokenizer(
                 expression_count,
                 Some(Arc::from(full_expressions.clone().into_boxed_slice())),
@@ -2864,6 +2868,7 @@ fn prepare_structural_tokenizer_pair(
                 &full_expressions, &synthesized_expressions, Some(&plan.local.labels),
                 &plan.local.partition_ids, &plan.local.residual_isolation_classes,
                 vocab, plan.repeat_horizons.as_ref(), max_token_len, &relevant_bytes,
+                &plan.prepared_pairs,
             )?;
             let (synthesized, full, full_to_synthesized, effective_synthesized_expressions) =
                 pair.into_parts();

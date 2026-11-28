@@ -7009,6 +7009,7 @@ fn prepare_partitioned_expression_pair_with_proof(
     max_token_len: usize,
     relevant_bytes: &[u8],
     proof: StructuralPairProof,
+    prepared_pairs: Option<&Mutex<BTreeMap<usize, PreparedTerminalExpressionPair>>>,
 ) -> Option<PreparedPartitionedExpressionPair> {
     let profile = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     if full_exprs.len() != synthesized_exprs.len()
@@ -7129,16 +7130,18 @@ fn prepare_partitioned_expression_pair_with_proof(
             }
             let terminal = changed_terminals[0];
             residual_isolation_classes[terminal]?;
-            let pair = prepare_terminal_expression_pair_with_structural_map_inner(
-                &full_exprs[terminal],
-                &synthesized_exprs[terminal],
-                vocab,
-                repeat_horizons,
-                max_token_len,
-                relevant_bytes,
-                true,
-                proof,
-            );
+            let pair = prepared_pairs
+                .and_then(|pairs| pairs.lock().expect("prepared pair cache poisoned").remove(&terminal))
+                .or_else(|| prepare_terminal_expression_pair_with_structural_map_inner(
+                    &full_exprs[terminal],
+                    &synthesized_exprs[terminal],
+                    vocab,
+                    repeat_horizons,
+                    max_token_len,
+                    relevant_bytes,
+                    true,
+                    proof,
+                ));
             let Some(pair) = pair else {
                 if std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
                     eprintln!(
@@ -7265,6 +7268,7 @@ pub fn prepare_partitioned_expression_pair_with_structural_map(
         max_token_len,
         relevant_bytes,
         StructuralPairProof::RawHomomorphism,
+        None,
     )
 }
 
@@ -7278,6 +7282,7 @@ pub fn prepare_partitioned_expression_pair_with_vocabulary_token_quotient(
     repeat_horizons: &VocabularyRepeatHorizonCache,
     max_token_len: usize,
     relevant_bytes: &[u8],
+    prepared_pairs: &Mutex<BTreeMap<usize, PreparedTerminalExpressionPair>>,
 ) -> Option<PreparedPartitionedExpressionPair> {
     prepare_partitioned_expression_pair_with_proof(
         full_exprs,
@@ -7290,6 +7295,7 @@ pub fn prepare_partitioned_expression_pair_with_vocabulary_token_quotient(
         max_token_len,
         relevant_bytes,
         StructuralPairProof::VocabularyTokenQuotient,
+        Some(prepared_pairs),
     )
 }
 
@@ -10006,11 +10012,40 @@ pub struct CompiledTerminalExpressionPair {
     pub synthesized_expression: Expr,
 }
 
-struct PreparedTerminalExpressionPair {
+pub struct PreparedTerminalExpressionPair {
     synthesized: Regex,
     full: DeferredDfa,
     full_to_synthesized: Vec<u32>,
     synthesized_expression: Expr,
+}
+
+impl PreparedTerminalExpressionPair {
+    pub fn state_counts(&self) -> (usize, usize) {
+        (self.full.num_states(), self.synthesized.num_states())
+    }
+
+    pub fn finish(self) -> CompiledTerminalExpressionPair {
+        CompiledTerminalExpressionPair {
+            synthesized: self.synthesized,
+            full: Regex { dfa: self.full.finish() },
+            full_to_synthesized: self.full_to_synthesized,
+            synthesized_expression: self.synthesized_expression,
+        }
+    }
+}
+
+pub fn prepare_terminal_expression_pair_with_vocabulary_token_quotient(
+    full_expression: &Expr,
+    synthesized_expression: &Expr,
+    vocab: &Vocab,
+    repeat_horizons: &VocabularyRepeatHorizonCache,
+    max_token_len: usize,
+    relevant_bytes: &[u8],
+) -> Option<PreparedTerminalExpressionPair> {
+    prepare_terminal_expression_pair_with_structural_map_inner(
+        full_expression, synthesized_expression, vocab, repeat_horizons,
+        max_token_len, relevant_bytes, true, StructuralPairProof::VocabularyTokenQuotient,
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10822,14 +10857,7 @@ fn compile_terminal_expression_pair_with_structural_map_and_proof(
         true,
         proof,
     )?;
-    Some(CompiledTerminalExpressionPair {
-        synthesized: prepared.synthesized,
-        full: Regex {
-            dfa: prepared.full.finish(),
-        },
-        full_to_synthesized: prepared.full_to_synthesized,
-        synthesized_expression: prepared.synthesized_expression,
-    })
+    Some(prepared.finish())
 }
 
 pub fn compile_terminal_expression_pair_with_structural_map(
