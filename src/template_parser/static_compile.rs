@@ -8,7 +8,6 @@
 use super::*;
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::automata::weighted::dwa::DWA;
-use crate::compiler::constraint_possible_matches as pm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::stages::equiv_types::MappedArtifact;
 use crate::compiler::stages::id_map_and_terminal_dwa as tdwa;
@@ -18,10 +17,9 @@ use crate::compiler::stages::parser_dwa::{
 };
 use crate::compiler::stages::templates::Templates;
 use crate::ds::bitset::BitSet;
-use crate::runtime::ConstraintRuntimeBackend;
+use crate::compiler::lexical_observation::LexicalObservationSource;
 use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa;
 use glrmask_parser_dwa::__private::pop_classes::PopLabelClasses;
-#[cfg(test)]
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::stages::parser_dwa::TemplateTopology;
 use crate::compiler::glr::labels::negative_to_positive_label;
@@ -605,55 +603,81 @@ pub(super) fn compile(
 ) -> Result<crate::runtime::Constraint> {
     let context = lexical_context(program.parser.terminal_count);
     let templates = prepare_static_templates(&program.parser.terminal_sources(), program.parser.state_count)?;
-    let (terminal, _, _) = tdwa::build_id_map_and_terminal_dwa(
-        &tokenizer,
-        vocab,
+    let source = LexicalObservationSource::new(tokenizer, vocab, None, None);
+    let (terminal_families, _) = source.terminal_families(
         &tdwa::types::TerminalColoring::identity(context.num_terminals as usize),
-        false,
-        ignore_terminal,
-        &context,
-        &BTreeMap::new(),
-        None,
+        false, ignore_terminal, &context, &BTreeMap::new(), None,
     );
-    let (terminal_dwa, terminal_ids) = terminal.into_parts();
-    let parser_dwa = match build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table(
-        &terminal_dwa, context.num_terminals, &templates, true,
-    ) {
-        Some(mut signed) => {
-            resolve_negative_codes_in_nwa(&mut signed, false);
-            normalize_weighted_stack_predicate_for_symbol_count(program.parser.state_count, &signed)
+    // The parser's signed stack relation distributes over a union of
+    // terminal languages. Compose each independent family in its own
+    // coordinate, rather than determinizing a terminal union only to
+    // turn it back into an NWA during the parser product.
+    let signed = terminal_families.into_vec().into_iter().map(|family| {
+        let (terminal, ids) = family.into_parts();
+        let fragment = build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_no_table(
+            &terminal, context.num_terminals, &templates, true,
+        ).unwrap_or_else(|| NWA::new(ids.num_tsids(), ids.max_internal_token_id()));
+        MappedArtifact::new(fragment, ids)
+    }).collect::<Vec<_>>();
+    let possible = source.possible_matches(true);
+    let (parser_dwa, terminal_ids) = if signed.is_empty() {
+        let ids = possible.mapped_possible_matches.id_map().clone();
+        (DWA::new(ids.num_tsids(), ids.max_internal_token_id()), ids)
+    } else {
+        let (fragments, ids) = MappedArtifact::reconcile_vec(signed).into_parts();
+        let mut union = NWA::new(ids.num_tsids(), ids.max_internal_token_id());
+        let mut starts = Vec::new();
+        for fragment in fragments {
+            starts.extend(union.append_owned_with_body(fragment).start_states);
         }
-        None => DWA::new(terminal_ids.num_tsids(), terminal_ids.max_internal_token_id()),
+        let parser_dwa = if starts.is_empty() {
+            DWA::new(ids.num_tsids(), ids.max_internal_token_id())
+        } else {
+            union.set_start_states(starts);
+            resolve_negative_codes_in_nwa(&mut union, false);
+            normalize_weighted_stack_predicate_for_symbol_count(program.parser.state_count, &union)
+        };
+        (parser_dwa, ids)
     };
-    let possible = pm::compute_constraint_possible_matches_for_vocab(
-        &tokenizer,
-        vocab,
-        pm::ConstraintPossibleMatchesConfig::EAGER,
-    );
     let mut mapped = MappedArtifact::from((
         MappedArtifact::new(parser_dwa, terminal_ids),
         possible.mapped_possible_matches,
     ));
     mapped.compact_dimensions();
     let ((parser_dwa, possible_matches), ids) = mapped.into_parts();
-    let mut inner =
-        crate::dynamic_constraint::DynamicConstraint::from_template_runtime_parts_unfinalized(
-            tokenizer,
-            context.terminal_display_names,
+    let mut tokenizer = source.tokenizer;
+    let ignore_expr = ignore_terminal.and_then(|terminal| tokenizer.terminal_expr(terminal).cloned());
+    tokenizer.restore_attached_virtual_runtime()
+        .expect("compiled template tokenizer expressions match the terminal domain");
+    let mut inner = crate::runtime::Constraint::from_compiler_parts(
+        crate::runtime::RuntimeLanguage {
+            table: crate::runtime::parser_backend::ParserExecutable::Native(Arc::clone(&program.parser)),
+            tokenizer: tokenizer.into(),
+            terminal_display_names: context.terminal_display_names,
+            direct_regular_automaton: None,
             ignore_terminal,
-            Arc::clone(&program.parser),
-            vocab,
-            possible.runtime_dynamic_vocab.vocab,
-        );
-    inner.runtime_backend = ConstraintRuntimeBackend::Static;
-    inner.special_token_terminals = specials.to_vec();
-    inner.parser_dwa = crate::runtime::ParserDwaStorage::Owned(parser_dwa.share_exact_transition_rows_owned());
-    inner.non_dwa_weights.materialized_mut().possible_matches = possible_matches;
-    inner.possible_matches_complete = possible.complete;
-    inner.tokenizer_tsids = crate::runtime::TokenizerTsidMap::partition(
-        ids.tokenizer_states.original_to_internal, ids.tokenizer_states.internal_to_originals,
+            ignore_expr,
+            special_token_terminals: specials.to_vec(),
+        },
+        vocab,
+        crate::runtime::CompiledMask::Weighted {
+            parser_dwa: parser_dwa.share_exact_transition_rows_owned(),
+            non_dwa_weights: crate::runtime::NonDwaWeights {
+                possible_matches,
+                ..Default::default()
+            },
+            possible_matches_complete: possible.complete,
+            tokenizer_tsids: crate::runtime::TokenizerTsidMap::partition(
+                ids.tokenizer_states.original_to_internal, ids.tokenizer_states.internal_to_originals,
+            ),
+            composition_grammar_summary: None,
+            token_classes: crate::runtime::TokenClasses::mapped(
+                ids.vocab_tokens.original_to_internal, ids.vocab_tokens.internal_to_originals,
+            ),
+        },
+        possible.runtime_dynamic_vocab.vocab,
+        Default::default(),
     );
-    inner.token_classes = crate::runtime::TokenClasses::mapped(ids.vocab_tokens.original_to_internal.clone(), ids.vocab_tokens.internal_to_originals_vecs());
     inner.rebuild_runtime_caches();
     assert!(
         !inner.table.is_present(),

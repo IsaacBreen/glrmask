@@ -3929,7 +3929,7 @@ fn build_static_parser_product(
             let (product, span) = measure_stage(|| {
                 let (mut families, mut profile) = source.terminal_families(
                     &coloring, use_coloring, grammar.ignore_terminal, &analysis.analyzed_grammar,
-                    &analysis.disallowed_follows, &analysis.always_allowed_follows,
+                    &analysis.disallowed_follows, Some(&analysis.always_allowed_follows),
                 );
                 let (special, span) = measure_stage(|| build_special_token_terminal_family(
                     &source.tokenizer, &collect_special_token_terminals(grammar),

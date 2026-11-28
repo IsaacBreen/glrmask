@@ -192,6 +192,31 @@ impl NWA {
         }
     }
 
+    /// Append a graph whose ownership has already been transferred. The
+    /// accepting and transition weights move with their states; only graph
+    /// state references need rebasing.
+    pub fn append_owned_with_body(&mut self, other: NWA) -> NwaBody {
+        self.invalidate_graph_caches();
+        let offset = u32::try_from(self.states.len()).expect("NWA state count overflow");
+        let (states, mut start_states) = other.into_parts();
+        self.states.reserve(states.len());
+        for mut state in states {
+            for targets in state.transitions.values_mut() {
+                for (target, _) in targets {
+                    *target = target.checked_add(offset).expect("NWA target overflow");
+                }
+            }
+            for (target, _) in &mut state.epsilons {
+                *target = target.checked_add(offset).expect("NWA epsilon target overflow");
+            }
+            self.states.push(state);
+        }
+        for state in &mut start_states {
+            *state = state.checked_add(offset).expect("NWA start state overflow");
+        }
+        NwaBody { start_states }
+    }
+
     pub fn concatenate_in_place(&mut self, left: &NWA, right_body: &NwaBody) -> NwaBody {
         let offset = self.states.len() as u32;
         let left_body = self.append_with_body(left);

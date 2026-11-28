@@ -25,7 +25,7 @@ use crate::ds::bitset::BitSet;
 use crate::grammar::flat::TerminalID;
 use crate::Vocab;
 
-pub(super) struct LexicalObservationSource<'v> {
+pub(crate) struct LexicalObservationSource<'v> {
     pub tokenizer: Tokenizer,
     pub flat_trans: Arc<[u32]>,
     vocab: &'v Vocab,
@@ -71,11 +71,11 @@ impl<'v> LexicalObservationSource<'v> {
         ignore: Option<TerminalID>,
         grammar: &AnalyzedGrammar,
         disallowed: &BTreeMap<u32, BitSet>,
-        always_allowed: &[Vec<TerminalID>],
+        always_allowed: Option<&[Vec<TerminalID>]>,
     ) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
         build_terminal_dwa_families_with_precomputed_global_max_length(
             &self.tokenizer, self.vocab, coloring, use_coloring, ignore, grammar,
-            disallowed, Some(always_allowed), Arc::clone(&self.flat_trans),
+            disallowed, always_allowed, Arc::clone(&self.flat_trans),
             self.global_map(), Some(self.classification(grammar.num_terminals)),
             self.local_synthesis.as_deref(), self.prepared_locals.as_deref(), None,
         )
