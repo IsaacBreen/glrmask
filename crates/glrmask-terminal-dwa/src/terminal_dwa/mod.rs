@@ -1463,7 +1463,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
         None,
         None,
         false,
-    )
+    ).into_families()
 }
 
 pub fn build_vocab_partition_from_static_id_maps(
@@ -1481,7 +1481,7 @@ pub fn build_vocab_partition_from_static_id_maps(
     partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
     prepared_partition_local_tokenizers: Option<&PreparedPartitionLocalTokenizers>,
 ) -> ManyToOneIdMap {
-    let (families, _) = build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
+    build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         tokenizer,
         vocab,
         terminal_coloring,
@@ -1498,35 +1498,8 @@ pub fn build_vocab_partition_from_static_id_maps(
         None,
         None,
         true,
-    );
-
-    let mut maps = Vec::new();
-    if let Some(family) = families.l1.as_ref() {
-        maps.push(family.id_map().clone());
-    }
-    if let Some(family) = families.l2p.as_ref() {
-        maps.push(family.id_map().clone());
-    }
-    match maps.as_slice() {
-        [] => {
-            let mut original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
-            let mut next = 0u32;
-            for &token_id in vocab.entries_map().keys() {
-                original_to_internal[token_id as usize] = next;
-                next += 1;
-            }
-            ManyToOneIdMap::from_original_to_internal_allowing_unmapped(original_to_internal, next)
-        }
-        [only] => only.vocab_tokens.clone(),
-        _ => merge::merge_internal_id_maps_only(
-            &maps.iter().collect::<Vec<_>>(),
-            tokenizer.num_states() as usize,
-            vocab.max_token_id(),
-        )
-        .vocab_tokens,
-    }
+    ).into_vocab_map()
 }
-
 
 /// Compute an exact conservative partition of model-vocabulary tokens by their
 /// grammar/lexer behavior, without constructing terminal or parser automata.
@@ -1673,7 +1646,28 @@ pub fn build_vocab_equivalence_partition_with_precomputed_global_max_length(
     result
 }
 
-pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
+enum TerminalBuildOutput {
+    Families(TerminalDwaFamilies, TerminalDwaPhaseProfile),
+    VocabMap(ManyToOneIdMap),
+}
+
+impl TerminalBuildOutput {
+    fn into_families(self) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
+        match self {
+            Self::Families(families, profile) => (families, profile),
+            Self::VocabMap(_) => unreachable!("weighted family build returned only a vocabulary map"),
+        }
+    }
+
+    fn into_vocab_map(self) -> ManyToOneIdMap {
+        match self {
+            Self::VocabMap(map) => map,
+            Self::Families(..) => unreachable!("vocabulary-only build returned weighted families"),
+        }
+    }
+}
+
+fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     terminal_coloring: &TerminalColoring,
@@ -1690,7 +1684,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     terminal_filter: Option<&[bool]>,
     boundary_scope: Option<&scope::BoundaryAnalysisScope>,
     id_map_only: bool,
-) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
+) -> TerminalBuildOutput {
     let total_started_at = Instant::now();
     let mut profile = TerminalDwaPhaseProfile::default();
     if compile_profile_enabled() {
@@ -1779,6 +1773,9 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             boundary_scope.is_some(),
             id_map_only,
         ) {
+            if id_map_only {
+                return TerminalBuildOutput::VocabMap(result.id_map.vocab_tokens);
+            }
             let total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
             let mut profile = result.profile;
             profile.split_terminal_dwa_total_ms = total_ms;
@@ -1793,7 +1790,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                     total_ms,
                 );
             }
-            return (
+            return TerminalBuildOutput::Families(
                 TerminalDwaFamilies {
                     l1: Some(MappedArtifact::new(
                         TerminalAutomaton::Dwa(result.dwa),
@@ -2126,28 +2123,15 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             internal_to_originals,
             representative_original_ids,
         };
-        let id_map = InternalIdMap {
-            tokenizer_states: global_max_length_state_map.clone(),
-            vocab_tokens,
-            deferred_vocab_singleton_original_ids: None,
-        };
-        let dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
         if compile_profile_enabled() {
             eprintln!(
                 "[glrmask/profile][vocab_partition_static_id_map_only] partitions={} classes={} total_ms={:.3}",
                 sub_vocabs.len(),
-                id_map.vocab_tokens.num_internal_ids(),
+                vocab_tokens.num_internal_ids(),
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
-        return (
-            TerminalDwaFamilies {
-                l1: Some(MappedArtifact::new(TerminalAutomaton::Dwa(dwa), id_map)),
-                l2p: None,
-                special: None,
-            },
-            profile,
-        );
+        return TerminalBuildOutput::VocabMap(vocab_tokens);
     }
 
     use rayon::prelude::*;
@@ -2187,7 +2171,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         }
         let boundary_scope = local_boundary_scope.as_ref().or(boundary_scope);
 
-        let ready_local = (!id_map_only && boundary_scope.is_none() && partition_local_synthesis_selected(&label))
+        let ready_local = (boundary_scope.is_none() && partition_local_synthesis_selected(&label))
             .then(|| {
                 prepared_partition_local_tokenizers
                     .and_then(|prepared| prepared.prepare_if_available(idx, tokenizer, sub_vocab))
@@ -2265,57 +2249,30 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             }
         }
 
-        let result = if id_map_only {
-            partition::build_partition_id_map_only(
-                &label,
-                tokenizer,
-                sub_vocab,
-                terminal_coloring,
-                use_terminal_coloring,
-                ignore_terminal,
-                grammar,
-                always_allowed_follows,
-                disallowed_follows,
-                &token_path_disallowed_follows,
-                &normalized_token_path_disallowed_follows,
-                &flat_trans,
-                boundary_scope
+        let result = partition::build_partition_id_map_and_terminal_dwa(
+            &label,
+            tokenizer,
+            sub_vocab,
+            terminal_coloring,
+            use_terminal_coloring,
+            ignore_terminal,
+            grammar,
+            always_allowed_follows,
+            disallowed_follows,
+            &token_path_disallowed_follows,
+            &normalized_token_path_disallowed_follows,
+            &flat_trans,
+            boundary_scope
                     .map(|scope| scope.initial_states().exact_singleton_map())
                     .or(Some(global_max_length_state_map)),
-                Some(&shared_vocab_dfa_cache),
-                Some(&shared_original_vocab_dfa_cache),
-                Some(&shared_original_vocab_analysis_dfa_cache),
-                Some(&shared_ti_output_cache),
-                Some(shared_classify_cache),
-                terminal_filter,
-                boundary_scope,
-            )
-        } else {
-            partition::build_partition_id_map_and_terminal_dwa(
-                &label,
-                tokenizer,
-                sub_vocab,
-                terminal_coloring,
-                use_terminal_coloring,
-                ignore_terminal,
-                grammar,
-                always_allowed_follows,
-                disallowed_follows,
-                &token_path_disallowed_follows,
-                &normalized_token_path_disallowed_follows,
-                &flat_trans,
-                boundary_scope
-                    .map(|scope| scope.initial_states().exact_singleton_map())
-                    .or(Some(global_max_length_state_map)),
-                Some(&shared_vocab_dfa_cache),
-                Some(&shared_original_vocab_dfa_cache),
-                Some(&shared_original_vocab_analysis_dfa_cache),
-                Some(&shared_ti_output_cache),
-                Some(shared_classify_cache),
-                terminal_filter,
-                boundary_scope,
-            )
-        }
+            Some(&shared_vocab_dfa_cache),
+            Some(&shared_original_vocab_dfa_cache),
+            Some(&shared_original_vocab_analysis_dfa_cache),
+            Some(&shared_ti_output_cache),
+            Some(shared_classify_cache),
+            terminal_filter,
+            boundary_scope,
+        )
         .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
         (result, idx)
     };
@@ -2449,7 +2406,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             },
             deferred_vocab_singleton_original_ids: None,
         };
-        return (
+        return TerminalBuildOutput::Families(
             TerminalDwaFamilies {
                 l1: Some(MappedArtifact::new(
                     TerminalAutomaton::Dwa(DWA::new(1, 0)),
@@ -2504,26 +2461,10 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             },
         )
     };
-    let merge_id_maps_only = |pairs: Vec<LocalIdMapTerminalDwa>| {
-        let refs = pairs.iter().map(|pair| &pair.id_map).collect::<Vec<_>>();
-        let id_map = merge::merge_internal_id_maps_only(
-            &refs,
-            num_tokenizer_states,
-            max_token_id,
-        );
-        let dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
-        (
-            MappedArtifact::new(TerminalAutomaton::Dwa(dwa), id_map),
-            TerminalDwaPhaseProfile::default(),
-        )
-    };
     let (l1_family, l2p_family) = compile_profile_join(
         "terminal_l1_and_l2p_family_merge",
         || {
             (!l1_pairs.is_empty()).then(|| {
-                if id_map_only {
-                    return merge_id_maps_only(l1_pairs);
-                }
                 if boundary_scope.is_some() {
                     return merge_scoped_family(l1_pairs);
                 }
@@ -2549,9 +2490,6 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         },
         || {
             (!l2p_pairs.is_empty()).then(|| {
-                if id_map_only {
-                    return merge_id_maps_only(l2p_pairs);
-                }
                 if boundary_scope.is_some() {
                     return merge_scoped_family(l2p_pairs);
                 }
@@ -2680,7 +2618,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         );
     }
 
-    (terminal_families, profile)
+    TerminalBuildOutput::Families(terminal_families, profile)
 }
 
 /// Compatibility wrapper for callers that still require one terminal
@@ -2917,7 +2855,7 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa_with_filter(
             terminal_filter,
             Some(scope),
             false,
-        );
+        ).into_families();
 
     if std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
         for (name, family) in [("l1", families.l1.as_ref()), ("l2p", families.l2p.as_ref())] {
