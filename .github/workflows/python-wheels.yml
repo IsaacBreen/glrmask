@@ -6,6 +6,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - ".github/workflows/python-wheels.yml"
       - "Cargo.lock"
@@ -30,6 +31,7 @@ concurrency:
 
 jobs:
   wheels:
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'full-ci')
     name: ${{ matrix.platform.id }} (abi3)
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 55
@@ -192,6 +194,7 @@ jobs:
           retention-days: 14
 
   sdist:
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'full-ci')
     name: Source distribution
     runs-on: ubuntu-24.04
     steps:
@@ -227,6 +230,7 @@ jobs:
           retention-days: 14
 
   validate-artifact-set:
+    if: github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') || contains(github.event.pull_request.labels.*.name, 'full-ci')
     name: Validate complete artifact set
     runs-on: ubuntu-24.04
     needs: [wheels, sdist]
@@ -264,3 +268,44 @@ jobs:
           path: dist/*
           if-no-files-found: error
           retention-days: 14
+
+  fast-wheel:
+    name: Fast PR Linux wheel (non-release)
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release/') && !contains(github.event.pull_request.labels.*.name, 'full-ci')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      CARGO_TARGET_DIR: target/python-pr
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Restore test-only Cargo cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: ci-test-python
+          workspaces: . -> target/python-pr
+          cache-workspace-crates: 'true'
+          cache-bin: 'false'
+      - name: Setup compiler cache (test only)
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+      - name: Build local test wheel
+        env:
+          SCCACHE_GHA_ENABLED: 'true'
+          RUSTC_WRAPPER: sccache
+        run: |
+          python -m pip install maturin==1.14.1 pytest
+          maturin build --locked --profile ci-test --compatibility linux --out dist --interpreter python --manifest-path python/Cargo.toml
+      - name: Install test wheel and run all Python tests
+        run: |
+          python -m pip install dist/*.whl
+          python -m pytest python/tests -q
+          python scripts/python-artifact-smoke.py dist --kind wheel
