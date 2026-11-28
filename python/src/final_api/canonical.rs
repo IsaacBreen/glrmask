@@ -99,11 +99,11 @@ impl PyExterns {
     }
 
     fn __contains__(&self, key: &Bound<'_, PyAny>) -> bool {
-        key.extract::<&str>().is_ok_and(|key| self.entries.iter().any(|e| e.name == key))
+        key.extract::<String>().is_ok_and(|key| self.entries.iter().any(|e| e.name == key))
     }
 
     fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<PyExtern> {
-        if let Ok(name) = key.extract::<&str>() {
+        if let Ok(name) = key.extract::<String>() {
             if let Some(entry) = self.entries.iter().find(|e| e.name == name) {
                 return Ok(entry.clone());
             }
@@ -113,7 +113,7 @@ impl PyExterns {
 
     #[pyo3(signature = (key, default = None, /))]
     fn get(&self, py: Python<'_>, key: &Bound<'_, PyAny>, default: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-        if let Ok(name) = key.extract::<&str>() {
+        if let Ok(name) = key.extract::<String>() {
             if let Some(entry) = self.entries.iter().find(|e| e.name == name) {
                 return Ok(entry.clone().into_pyobject(py)?.into_any().unbind());
             }

@@ -52,7 +52,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use glrmask::__private::{
     ConstraintExt as _, ConstraintStateExt as _, ConstraintStateReject as _,
-    DynamicConstraintExt as _, VocabExt as _,
+    DynamicConstraintExt as _, VocabExt as _, VocabAccess as _,
 };
 
 // ---------------------------------------------------------------------------
