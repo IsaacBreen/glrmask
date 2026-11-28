@@ -39,7 +39,7 @@ const grammar = Grammar.fromJsonSchema({
   additionalProperties: false,
 });
 
-// One token per byte; with a real model, use its tokenizer.
+// One token per byte, plus EOS. With a real model, build this from its tokenizer.
 const vocab = new Vocab(Array.from({ length: 256 }, (_, id) => [id, Uint8Array.of(id)]));
 const EOS = 256;
 const state = (await grammar.compile(vocab)).start();
@@ -56,12 +56,12 @@ while (true) {
       : ((mask[id >>> 5] >>> (id & 31)) & 1) === 1;
     if (allowed && (token < 0 || logits[id] > logits[token])) token = id;
   }
-  if (token < 0) throw new Error('No allowed token');
+  if (token < 0) throw new Error('no allowed token and cannot stop');
   if (token === EOS) break;
-  if (!state.commitToken(token)) throw new Error('Commit failed');
+  if (!state.commitToken(token)) throw new Error('allowed token rejected');
   output.push(token);
 }
-if (!state.isAccepting()) throw new Error("Incomplete output");
+if (!state.isAccepting()) throw new Error("incomplete output");
 console.log(Buffer.from(output).toString());
 ```
 
@@ -99,7 +99,7 @@ sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 ## Composing grammars
 
 ```js
-import { Module, Expr, Constraint } from '@glrmask/node';
+import { Vocab, Grammar, Module, Expr, Constraint } from '@glrmask/node';
 
 const vocab = new Vocab(Array.from({ length: 256 }, (_, id) => [id, Uint8Array.of(id)]));
 const weather = new Module(Grammar.fromJsonSchema({
@@ -129,7 +129,7 @@ const reply = Expr.choice(Grammar.fromLark('start: "yes"'), Grammar.fromLark('st
 const grammar = Grammar.fromExpr(Expr.sequence(Expr.literal('Answer: '), reply));
 ```
 
-Grammar expressions must contain neither modules nor token sets, even indirectly. Bind model-specific values on a Module.
+Grammar expressions must not contain modules, constraints or token sets, even indirectly. Bind model-specific values on a Module.
 
 ## Mask strategies
 
@@ -153,10 +153,10 @@ state.fillMask(mask);
 const allowed = (id) => ((mask[id >>> 5] >>> (id & 31)) & 1) === 1;
 ```
 
-A mask indicates which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `Math.floor(i / 32)`.
+A mask contains packed uint32 words: token i is bit i % 32 of word Math.floor(i / 32).
 `fillMask` writes it into an array you reuse; `mask()` returns a new one.
 
-`commitToken` and `commitBytes` consume a token or bytes. Consumes the input. Returns true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable. Commit special tokens and token sets with `commitToken`;
+`commitToken` and `commitBytes` consume the input. They return true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable. Commit special tokens and token sets with `commitToken`;
 bytes never match them.
 
 `isAccepting()` says whether the output so far could end here, and `isTerminated()` whether nothing more can be
@@ -189,12 +189,12 @@ the vocabulary its precompiled parts were built for; `compile` and `precompile` 
 the same GLRMask version on the same architecture, so keep the grammar source to compile again after an upgrade. Don't
 load saved bytes from untrusted sources.
 
-Empty ranges are no-ops; reversed ranges are invalid. Externs views are shallow, and bindings capture their values. Stop decisions belong to the caller: committing an unknown EOS rejects the state even if it was accepting. Load only trusted artifacts.
+Empty ranges are no-ops; reversed ranges are invalid. Bindings capture their values. Stop decisions belong to the caller: committing an unknown EOS rejects the state even if it was accepting.
 
 ## Errors
 
 Arguments of the wrong type throw `TypeError`. Native GLRMask errors throw a
-`GLRMaskError`, whose `code` is one of:
+`GLRMaskError`. The message text is for humans; its format is not stable. Its `code` is one of:
 
 | Code | |
 | --- | --- |

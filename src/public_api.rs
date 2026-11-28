@@ -215,7 +215,7 @@ impl Extern {
     }
 }
 
-/// An owned, shallow snapshot of extern declarations.
+/// A read-only collection of extern names and their `Extern` values.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Externs {
     entries: Vec<Extern>,
@@ -272,7 +272,6 @@ impl Externs {
     pub fn len(&self) -> usize { self.entries.len() }
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
 
-    /// A snapshot containing only declarations unbound at this level.
     pub fn unbound(&self) -> Self {
         Self { entries: self.unbound.clone(), unbound: self.unbound.clone() }
     }
@@ -621,7 +620,7 @@ impl Grammar {
     }
 
 
-    /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md) source.
+    /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats) source.
     pub fn from_lark(source: &str) -> Result<Self> {
         let grammar = Self::new(GrammarSource::Lark(Arc::from(source)));
         grammar.lark_document()?;
@@ -629,7 +628,7 @@ impl Grammar {
         Ok(grammar)
     }
 
-    /// Parses a JSON Schema given as JSON text.
+    /// Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats), given as JSON text.
     pub fn from_json_schema(source: &str) -> Result<Self> {
         crate::import::parse_json_schema_to_named(source)?;
         Ok(Self::new(GrammarSource::JsonSchema(Arc::from(source))))

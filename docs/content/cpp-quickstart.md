@@ -12,7 +12,7 @@ int main() {
         "additionalProperties": false
     })");
 
-    // One token per byte; with a real model, use its tokenizer.
+    // One token per byte, plus EOS. With a real model, build this from its tokenizer.
     std::vector<glrmask::VocabEntry> entries;
     for (glrmask::TokenId id = 0; id < 256; ++id)
         entries.emplace_back(id, glrmask::Bytes{static_cast<std::uint8_t>(id)});

@@ -2,8 +2,6 @@ use crate::{ConstraintState, Result, Vocab};
 use crate::runtime::Constraint as RuntimeConstraint;
 
 
-/// A compiled grammar, ready to start independent sequences.
-/// It is Send + Sync, so it can be shared across threads using an Arc.
 #[derive(Clone, Debug)]
 pub struct Constraint {
     inner: RuntimeConstraint,

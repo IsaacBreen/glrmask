@@ -2,7 +2,7 @@
 use super::*;
 use super::module::{CompiledPart, sealed::Binding};
 
-/// A grammar expression. Compiled constraints can be used in module-bound expressions with the same vocabulary.
+/// A grammar expression.
 #[derive(Debug, Clone)]
 pub struct Expr(pub(crate) Arc<ExprNode>);
 
@@ -63,7 +63,7 @@ impl From<&TokenSet> for Expr {
 }
 
 impl Expr {
-    /// Matches exactly `bytes`.
+    /// Matches `bytes` exactly.
     pub fn literal(bytes: impl AsRef<[u8]>) -> Self {
         Self(Arc::new(ExprNode::Literal(bytes.as_ref().to_vec())))
     }

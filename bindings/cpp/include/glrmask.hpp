@@ -218,9 +218,9 @@ class Grammar : public detail::Owned<glrmask_grammar, glrmask_grammar_free, glrm
 public:
     /// Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source.
     static Grammar from_glrm(std::string_view text) { return source(GLRMASK_GLRM, text); }
-    /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md) source.
+    /// Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats) source.
     static Grammar from_lark(std::string_view text) { return source(GLRMASK_LARK, text); }
-    /// Parses a JSON Schema given as JSON text.
+    /// Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats), given as JSON text.
     static Grammar from_json_schema(std::string_view text) { return source(GLRMASK_JSON_SCHEMA, text); }
 
     /// Builds a grammar from an `Expr`.
@@ -240,7 +240,7 @@ public:
     Constraint compile(const Vocab& vocab, const CompileOptions& options = {}) const;
 };
 
-/// One part of an expression: a grammar, module, expression or token set.
+/// One part of an expression: a grammar, module, constraint, expression or token set.
 ///
 /// It refers to the object, which must outlive the operand.
 struct ExprOperand {
@@ -269,15 +269,15 @@ public:
         for (const auto& value : values) items.push_back(value.value);
         glrmask_expr* p = nullptr; detail::check(glrmask_expr_sequence(items.data(), items.size(), &p)); return Expr(p);
     }
-    /// Matches bytes exactly.
+    /// Matches `data` exactly.
     static Expr literal(const std::uint8_t* data, std::size_t len) {
         glrmask_expr* p = nullptr; detail::check(glrmask_expr_literal(data, len, &p)); return Expr(p);
     }
-    /// Matches bytes exactly.
+    /// Matches `bytes` exactly.
     static Expr literal(std::string_view bytes) {
         return literal(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
     }
-    /// Matches bytes exactly.
+    /// Matches `bytes` exactly.
     static Expr literal(const Bytes& bytes) {
         return literal(bytes.data(), bytes.size());
     }
@@ -310,19 +310,19 @@ public:
 
         return Externs(std::move(all_items), std::move(unbound_items));
     }
-    /// Fails if the extern is undeclared, already bound or the wrong kind.
+    /// Binds an extern by name.
     void bind(std::string_view name, const Module& value) {
         detail::check(glrmask_module_bind_module(native_handle(), name.data(), name.size(), value.native_handle()));
     }
-    /// Fails if the extern is undeclared, already bound or the wrong kind.
+    /// Binds an extern by name.
     void bind(std::string_view name, const Grammar& value) {
         detail::check(glrmask_module_bind_grammar(native_handle(), name.data(), name.size(), value.native_handle()));
     }
-    /// Fails if the extern is undeclared, already bound or the wrong kind.
+    /// Binds an extern by name.
     void bind(std::string_view name, const Expr& value) {
         detail::check(glrmask_module_bind_expr(native_handle(), name.data(), name.size(), value.native_handle()));
     }
-    /// Fails if the extern is undeclared, already bound or the wrong kind.
+    /// Binds an extern by name.
     void bind(std::string_view name, const TokenSet& value) {
         detail::check(glrmask_module_bind_tokens(native_handle(), name.data(), name.size(), value.native_handle()));
     }
@@ -342,6 +342,7 @@ public:
 
     /// May fail if saved by a different GLRMask version.
     static Module load(const Bytes& bytes) { return load(bytes.data(), bytes.size()); }
+    /// May fail if saved by a different GLRMask version.
     static Module load(const std::uint8_t* bytes, std::size_t size) {
         glrmask_module* p = nullptr; detail::check(glrmask_module_load(bytes, size, &p)); return Module(p);
     }
@@ -377,13 +378,13 @@ class ConstraintState : public detail::Owned<glrmask_state, glrmask_state_free, 
     explicit ConstraintState(glrmask_state* p) : Base(p) {}
     friend class Constraint;
 public:
-    /// Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i / 32`.
+    /// Packed uint32 words: token i is bit i % 32 of word i / 32.
     std::vector<std::uint32_t> mask() const { std::vector<std::uint32_t> out((mask_bit_len() + 31) / 32); fill_mask(out); return out; }
     /// Like `mask()`, but writes the words into `output`.
     ///
     /// Throws `Error` if `word_count` is less than `(mask_bit_len() + 31) / 32`.
     void fill_mask(std::uint32_t* output, std::size_t word_count) const { detail::check(glrmask_state_fill_mask(native_handle(), output, word_count)); }
-    /// Like `mask()`, but writes the words into `output`.
+    /// Like `mask()`, but writes the words into `output`. Throws `Error` if the buffer is too small.
     void fill_mask(std::vector<std::uint32_t>& output) const { fill_mask(output.data(), output.size()); }
     /// The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs.
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_bit_len(native_handle(), &n)); return n; }

@@ -8,7 +8,7 @@ const grammar = Grammar.fromJsonSchema({
   additionalProperties: false,
 });
 
-// One token per byte; with a real model, use its tokenizer.
+// One token per byte, plus EOS. With a real model, build this from its tokenizer.
 const vocab = new Vocab(Array.from({ length: 256 }, (_, id) => [id, Uint8Array.of(id)]));
 const EOS = 256;
 const state = (await grammar.compile(vocab)).start();
@@ -25,11 +25,11 @@ while (true) {
       : ((mask[id >>> 5] >>> (id & 31)) & 1) === 1;
     if (allowed && (token < 0 || logits[id] > logits[token])) token = id;
   }
-  if (token < 0) throw new Error('No allowed token');
+  if (token < 0) throw new Error('no allowed token and cannot stop');
   if (token === EOS) break;
-  if (!state.commitToken(token)) throw new Error('Commit failed');
+  if (!state.commitToken(token)) throw new Error('allowed token rejected');
   output.push(token);
 }
-if (!state.isAccepting()) throw new Error("Incomplete output");
+if (!state.isAccepting()) throw new Error("incomplete output");
 console.log(Buffer.from(output).toString());
 ```

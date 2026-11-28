@@ -56,7 +56,7 @@ auto reply = glrmask::Expr::choice({
 auto grammar = glrmask::Grammar::from_expr(glrmask::Expr::sequence({glrmask::Expr::literal("Answer: "), reply}));
 ```
 
-Grammar expressions must contain neither modules nor token sets, even indirectly. Bind model-specific values on a Module.
+Grammar expressions must not contain modules, constraints or token sets, even indirectly. Bind model-specific values on a Module.
 
 ## Mask strategies
 
@@ -87,10 +87,10 @@ glrmask::TokenId id = 42;
 bool allowed = (mask[id / 32] >> (id % 32)) & 1;
 ```
 
-A mask indicates which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i / 32`. `fill_mask` writes it
+A mask contains packed uint32 words: token i is bit i % 32 of word i / 32. `fill_mask` writes it
 into a buffer you reuse; `mask()` returns a new one.
 
-`commit_token` and `commit_bytes` consume a token or bytes. Consumes the input. Returns true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable. Commit special tokens and token sets with `commit_token`;
+`commit_token` and `commit_bytes` consume the input. They return true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable. Commit special tokens and token sets with `commit_token`;
 bytes never match them.
 
 `is_accepting()` says whether the output so far could end here, and `is_terminated()` whether nothing more can be
@@ -115,11 +115,11 @@ the vocabulary its precompiled parts were built for; `compile` and `precompile` 
 the same GLRMask version on the same architecture, so keep the grammar source to compile again after an upgrade. Don't
 load saved bytes from untrusted sources.
 
-Empty ranges are no-ops; reversed ranges are invalid. Externs views are shallow, and bindings capture their values. Stop decisions belong to the caller: committing an unknown EOS rejects the state even if it was accepting. Load only trusted artifacts.
+Empty ranges are no-ops; reversed ranges are invalid. Bindings capture their values. Stop decisions belong to the caller: committing an unknown EOS rejects the state even if it was accepting.
 
 ## Errors
 
-Operations that can fail throw `glrmask::Error`, a `std::runtime_error`. `what()` is the message, and `status()` one of:
+Operations that can fail throw `glrmask::Error`, a `std::runtime_error`. `what()` is the message; its format is not stable. `status()` is one of:
 
 | Status | |
 | --- | --- |
@@ -145,7 +145,7 @@ threads at once.
 ## C
 
 `glrmask.h` is the C interface; the C++ header is built on it. Each function returns a `glrmask_status`, and on failure
-`glrmask_error_message()` gives the message, valid until the next GLRMask call on the same thread (except the message accessor); empty when no error is recorded. C commits return a status and write acceptance to an out-parameter; ordinary rejection is GLRMASK_OK with zero acceptance. Free each object once
+`glrmask_error_message()` gives the message, valid until the next GLRMask call on the same thread (except the message accessor); empty when no error is recorded. C commits return a status and write viability to an out-parameter; a dead state is reported as `GLRMASK_OK` with zero viability. Free each object once
 with its `_free` function. Initialize a `glrmask_compile_options options` with `glrmask_compile_options_init(&options, sizeof(options))`, or pass a null pointer for the
 defaults. The header documents ownership in full.
 

@@ -24,9 +24,9 @@ export declare class Grammar implements Disposable {
   private readonly __grammarBrand: void;
   /** Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source. */
   static fromGlrm(source: string): Grammar;
-  /** Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md) source. */
+  /** Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats) source. */
   static fromLark(source: string): Grammar;
-  /** Parses a JSON Schema given as JSON text or an object. */
+  /** Parses a [JSON Schema](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats), given as JSON text, a boolean or an object. */
   static fromJsonSchema(schema: string | boolean | object): Grammar;
   /** Builds a grammar from an `Expr`. */
   static fromExpr(expr: Expr): Grammar;
@@ -52,15 +52,11 @@ export type ExprPart = Grammar | Module | Constraint | Expr | TokenSet;
 export declare class Expr implements Disposable {
   private constructor();
   private readonly __exprBrand: void;
-  /** Matches any one of `parts`.
-   *
-   * Throws if a part has unbound externs. */
+  /** Matches any one of `parts`. */
   static choice(...parts: ExprPart[]): Expr;
-  /** Matches `parts` in order.
-   *
-   * Throws if a part has unbound externs. */
+  /** Matches `parts` in order. */
   static sequence(...parts: ExprPart[]): Expr;
-  /** Matches exactly `value`. A string is UTF-8 encoded. */
+  /** Matches `value` exactly. */
   static literal(value: string | Uint8Array): Expr;
 
   clone(): Expr;
@@ -82,9 +78,7 @@ export declare class TokenSet implements Disposable {
 
   constructor(ids: Iterable<number>);
   static fromRanges(ranges: Iterable<TokenRange>): TokenSet;
-  /** Whether `other` is a set with the same IDs. */
   equals(other: unknown): boolean;
-  /** The set as ranges, for example `TokenSet[0..=9, 20..=29]`. */
   toString(): string;
 
   clone(): TokenSet;
@@ -100,8 +94,9 @@ export declare class Module implements Disposable {
   constructor(grammar: Grammar);
   readonly externs: Externs;
 
-  /** Throws if the extern is undeclared, already bound or the wrong kind. */
+  /** Binds an extern by name. */
   bind(name: string, value: Exclude<ExprPart, Constraint>): void;
+  /** Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`. */
   precompile(vocab: Vocab, options?: CompileOptions): Promise<void>;
   /** Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`. */
   precompileSync(vocab: Vocab, options?: CompileOptions): void;
@@ -147,7 +142,7 @@ export declare class ConstraintState implements Disposable {
   private constructor();
   private readonly __stateBrand: void;
 
-  /** Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `Math.floor(i / 32)`. */
+  /** Packed uint32 words: token i is bit i % 32 of word Math.floor(i / 32). */
   mask(): Uint32Array;
   /** Like `mask()`, but writes the words into `output`. Throws `GLRMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` if `output` has fewer than `Math.ceil(maskBitLength / 32)` elements. */
   fillMask(output: Uint32Array): void;

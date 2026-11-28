@@ -8454,7 +8454,7 @@ impl ConstraintState {
         returned_profile
     }
 
-    /// Which tokens are allowed next, as a bitmask: token `i` is bit `i % 32` of word `i / 32`.
+    /// Packed u32 words: token i is bit i % 32 of word i / 32.
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_bit_len().div_ceil(32)];
         self.fill_mask(&mut buf);

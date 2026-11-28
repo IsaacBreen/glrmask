@@ -32,7 +32,7 @@ impl fmt::Debug for TokenSet {
 }
 
 impl TokenSet {
-    /// Builds a normalized set of IDs.
+    /// Panics if a token ID is outside the supported range (0 to 2^24 - 1).
     pub fn new(ids: impl IntoIterator<Item = u32>) -> Self {
         Self::from_pairs(ids.into_iter().map(|id| {
             assert!(id <= MAX_TOKEN_ID, "token ID {id} is outside the supported range");
@@ -40,7 +40,8 @@ impl TokenSet {
         }))
     }
 
-    /// Builds a normalized set from half-open ranges. Empty ranges contribute no IDs.
+    /// Builds a set from half-open ranges. Empty ranges contribute no IDs.
+    /// Panics if an included token ID is outside the supported range (0 to 2^24 - 1).
     pub fn from_ranges(ranges: impl IntoIterator<Item = Range<u32>>) -> Self {
         Self::from_pairs(ranges.into_iter().filter(|r| !r.is_empty()).map(|r| {
             let last = r.end - 1;
@@ -146,15 +147,7 @@ impl Clone for Vocab {
 }
 
 impl Vocab {
-    /// Fails with `ErrorKind::InvalidInput` on a duplicate ID.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use glrmask_vocab::Vocab;
-    /// let vocab = Vocab::new([(0, b"hello".to_vec()), (1, b"world".to_vec())])?;
-    /// # Ok::<(), glrmask_vocab::Error>(())
-    /// ```
+    /// Fails with `ErrorKind::InvalidInput` on duplicate or out-of-range IDs.
     pub fn new(entries: impl IntoIterator<Item = (u32, Vec<u8>)>) -> Result<Self, Error> {
         let mut ids = BTreeSet::new();
         let mut validated = Vec::new();

@@ -23,6 +23,7 @@ pub struct CompileOptions {
 
 impl CompileOptions {
 
+    /// Defaults to `MaskStrategy::AUTO`.
     pub fn mask_strategy(mut self, strategy: MaskStrategy) -> Self {
         self.mask_strategy = strategy;
         self.internal_mask = None;
@@ -481,7 +482,7 @@ impl Module {
         convert(grammar, &mut HashMap::new())
     }
 
-    /// Fails if the extern is undeclared, already bound or the wrong kind.
+    /// Binds an extern by name.
     pub fn bind(&mut self, name: &str, value: impl IntoBinding) -> Result<()> {
         let next = self.bound(name, sealed::ModuleValue::into_binding(value))?;
         *self = next;
@@ -687,6 +688,7 @@ impl Module {
         self.precompile_with(vocab, CompileOptions::default())
     }
 
+    /// Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`.
     pub fn precompile_with(&mut self, vocab: &Vocab, options: CompileOptions) -> Result<()> {
         with_deep_stack(|| {
             let run = |opts: &CompileOptions| -> Result<Module> {
