@@ -1,82 +1,54 @@
 # GLRM
 
-GLRM is GLRMask's own grammar format. Source is UTF-8. Line breaks, indentation and semicolons don't matter, and no
-version header is needed. Grammars without a `glrm` header use version 1; `glrm 1;` pins it explicitly.
+GLRM is GLRMask's own grammar format.
 
 ```glrm
 start value
+// Regular helper
 internal t DIGIT = /[0-9]/
 t INTEGER = DIGIT+
+/* Recursive rule */
 nt value = INTEGER | "(" value ")"
 ```
 
 ## Declarations
 
-| Example | Declares |
-|---|---|
-| `start value` | The rule the grammar matches. Every grammar has exactly one. |
-| `t INTEGER = /[0-9]+/` | A terminal: a regular language the lexer matches as one unit, taking the longest match. |
-| `internal t DIGIT = /[0-9]/` | A regular helper for other terminals. Rules and `ignore` can't use it. |
-| `nt value = INTEGER \| "(" value ")"` | A rule. Its body can use terminals, rules, literals and regular expressions. |
-| `ignore SPACE` | A terminal skipped wherever it can appear between others. |
-| `extern token END_CALL` | One token from a token set, bound from your code. |
-| `extern grammar PAYLOAD` | A grammar, bound from your code. |
-| `grammar item { start v nt v = "item" }` | An inline grammar, with its own names, start rule and ignored terminals. |
+- `start value`: start rule (one per grammar).
+- `t INTEGER = /[0-9]+/`: terminal, matched by the lexer.
+- `internal t DIGIT = /[0-9]/`: regular helper for terminal definitions.
+- `nt value = INTEGER`: rule, which can reference terminals and other rules.
 
-Every definition uses `=`.
+Names use ASCII letters, digits and underscores, with a letter or underscore first. Use backticks for reserved names. Semicolons are optional; indentation and line breaks are insignificant.
 
-A rule whose language happens to be regular is still a rule, not a terminal.
+## Literals and regular expressions
 
-Names match `[A-Za-z_][A-Za-z0-9_]*`. Put a keyword in backticks to use it as a name: ``nt `start` = "a"``. These words are reserved for future versions and can't be used as names: `use`, `export`, `import`, `super`, `as`, `fn`, `let`, `mod`, `pub`, `macro`, `include`. To use one as a name, write it in backticks.
+- `"text"` or `'text'`: UTF-8 text.
+- `b"\xFF"`: raw bytes.
+- `/[a-z]+/i`: Unicode regular expression.
+- `b/[\x00-\x7F]+/`: byte regular expression.
+- `eps`: empty string.
 
-Comments are `// ...` and `/* ... */`.
+Strings support escapes such as `\n`, `\t`, `\r`, `\0`, `\\`, `\xHH` and, for text, `\uHHHH` and `\u{H...}`. In a text literal, `\xE9` encodes U+00E9 as UTF-8; in a byte literal it produces one byte. Write non-ASCII bytes with escapes.
 
-## Strings and regular expressions
-
-| Example | Matches |
-|---|---|
-| `"text"` or `'text'` | The text, encoded as UTF-8 |
-| `b"\xFF"` or `b'\xFF'` | The bytes |
-| `/[a-z]+/i` | A regular expression over Unicode characters, encoded as UTF-8 |
-| `b/[\x00-\x7F]+/` | A regular expression over bytes |
-| `eps` | The empty string |
-
-Escapes are `\n`, `\t`, `\r`, `\0`, `\"`, `\'`, `\\`, `\xHH`, `\uHHHH` and `\u{H...}`. In text, `\xE9` is the
-character U+00E9; in a byte form, it's the byte E9. Byte forms can't contain non-ASCII characters except as escapes.
-
-Regular expressions are matched against the whole terminal, not searched for. They support classes such as `[a-z]`,
-`\d` and `\p{L}`, groups, alternation, greedy quantifiers and the flags `i`, `s`, `x` and `u`. `/./` excludes newline,
-`/./s` matches any character and `b/./s` any byte. Backreferences, lookaround, anchors and lazy quantifiers are errors.
-Classes and `.` only work inside `/.../`. A slash inside a bracket character class may be left unescaped (e.g.
-`/[^/]/`); use `\/` for a literal slash outside a class. The JavaScript regex spelling `[^]` is not supported; use
-`/./s` to match any Unicode character. If extended-mode comments make the closing delimiter ambiguous before a trailing
-`x` flag is seen, use an inline `(?x:...)` group or escape the slash.
+Regular expressions support character classes, groups, alternation, greedy quantifiers and the flags `i`, `s`, `x` and `u`. Use `/./s` for any Unicode character or `b/./s` for any byte. Backreferences, lookaround, anchors and lazy quantifiers are unsupported. Escape a literal slash outside a character class as `\/`.
 
 ## Operators
 
-| Example | Matches |
-|---|---|
-| `a b` | `a` then `b` |
-| `a \| b` | `a` or `b` |
-| `(a \| b) c` | Grouping |
-| `a?`, `a*`, `a+` | Optional, zero or more, one or more |
-| `a{3}`, `a{2,5}`, `a{2,}` | Exactly 3, from 2 to 5, at least 2 |
-| `/[a-z]+/ & /.{1,8}/` | Both |
-| `/[a-z]+/ - ("if" \| "else")` | The first but not the second |
-| `"," ~ ("a"? "b"? "c"?)` | `a,b,c`, `a,c`, `b` or the empty string: the items in order, with `,` between those present |
-| `"," ~+ ("a"? "b"?)` | The same, with at least one item |
+- `a b`: sequence.
+- `a | b`: alternatives.
+- `(a | b) c`: grouping.
+- `a?`, `a*`, `a+`: optional, zero or more, one or more.
+- `a{3}`, `a{2,5}`, `a{2,}`: exactly 3, from 2 to 5, at least 2.
+- `a & b`: intersection of regular languages.
+- `a - b`: difference of regular languages. With a rule on the left, removes matching top-level alternatives.
+- `"," ~ ("a"? "b"? "c"?)`: items in order, separated by commas if present.
+- `"," ~+ ("a"? "b"?)`: same, requiring at least one item.
 
-`&` and `-` work on regular languages: terminals, helpers, literals and regular expressions. On a rule, `-` removes
-matching top-level alternatives instead: `nt without_x = value - "x"` drops the alternative `"x"` of `value`, but `x`
-can still appear inside a nested `value`.
+Repetition binds before sequence, sequence before intersection and difference, and alternation last. Parenthesize a compound subtraction operand. Use `eps` for an empty alternative.
 
-An empty alternative or body is an error; write `eps` where you mean it.
+## Terminal matching
 
-When several parses match, GLRMask keeps them all. A complete parse doesn't rule out others that continue.
-
-## The shortest match
-
-A terminal takes the longest match. To make one end as soon as it can, subtract every longer match:
+Terminals take the longest match. For a shortest match, subtract every longer match:
 
 ```glrm
 start response
@@ -85,8 +57,7 @@ t THROUGH_END = BODY - (BODY b/./s+)
 nt response = THROUGH_END "!"
 ```
 
-`THROUGH_END` stops at the first `END`. Use `b/./s+`, not `/./s+`, so the suffix can be any bytes. Lark's `[lazy]` does
-the same.
+`THROUGH_END` stops at the first `END`. The byte regex allows any suffix, including invalid UTF-8.
 
 ## Externs and inline grammars
 
@@ -101,9 +72,7 @@ start response
 nt response = item PAYLOAD item END_CALL
 ```
 
-Externs are declared at the top level and bound from your code; see [Composing grammars](../GUIDE.md#composing-grammars).
-An inline grammar can't refer to names outside it. GLRM has no syntax for token IDs: bind a token set to an
-`extern token` instead.
+Bind `PAYLOAD` to a grammar and `END_CALL` to a token set in your code. Each occurrence of `END_CALL` matches one token from that set. Extern declarations belong at the top level. Inline grammars have their own scope and start rule. See [Composing grammars](../GUIDE.md#composing-grammars).
 
 ## Ignored terminals
 
@@ -114,8 +83,7 @@ ignore SPACE
 nt root = "hello" "world"
 ```
 
-An ignored terminal can't match the empty string or be used in a rule. A grammar's ignored terminals don't apply inside
-a bound or inline grammar.
+Ignored terminals can occur between lexical atoms and at grammar boundaries. They must consume input and cannot appear explicitly in rules. Each inline or bound grammar has its own ignored terminals.
 
 ## Finite automata
 
@@ -130,14 +98,4 @@ nt framed = fa {
 }
 ```
 
-One `start` state, any number of `accept` states. States are names or numbers; an `eps` label is an empty edge. In a
-terminal, labels are regular expressions; in a rule, they can use rules too.
-
-## Hints
-
-`pragma glrmask { ... }` holds hints that can make compiling faster without changing what the grammar matches. Other
-namespaces are skipped; an unknown hint inside `pragma glrmask` is an error.
-
-## Errors
-
-Errors give the line and column, counting columns in characters.
+Declare one start state and any number of accepting states. Edge labels can be expressions; use `eps` for an empty edge.
