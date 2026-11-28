@@ -48,68 +48,22 @@ pub struct FlatDfa {
     pub start_state: usize,
     pub transitions: ByteRows,
 }
-pub(super) const BYTE_COLUMN_HASH_MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
+pub(super) use crate::automata::lexer::observation::{
+    BYTE_COLUMN_HASH_MULTIPLIER, byte_classes_from_column_hashes,
+};
+pub(crate) use crate::automata::lexer::observation::compute_tokenizer_byte_classes;
 
-pub(super) fn byte_classes_from_column_hashes(
-    num_states: usize,
-    column_hashes: &[u64; 256],
-    relevant: &[bool; 256],
-    target: impl Fn(usize, usize) -> u32,
-) -> [u8; 256] {
-    let mut sorted: Vec<u8> = (0..=255).filter(|&byte| relevant[byte as usize]).collect();
-    sorted.sort_unstable_by_key(|&byte| column_hashes[byte as usize]);
-
-    let mut classes = [0; 256];
-    // Keep one unused catch-all column only for restricted alphabets.
-    let mut next = if sorted.len() == 256 { 0 } else { 1 };
-    for (i, &byte) in sorted.iter().enumerate() {
-        let hash = column_hashes[byte as usize];
-        let prior = sorted[..i].iter().rev()
-            .take_while(|&&previous| column_hashes[previous as usize] == hash)
-            .find(|&&previous| (0..num_states).all(|state|
-                target(state, byte as usize) == target(state, previous as usize)));
-        classes[byte as usize] = if let Some(&previous) = prior {
-            classes[previous as usize]
-        } else {
-            let class = u8::try_from(next).expect("byte class domain");
-            next += 1;
-            class
-        };
-    }
-    classes
-}
 pub fn compute_physical_byte_classes(tokenizer: &Tokenizer, transitions: &[u32]) -> [u8; 256] {
-    let num_states = tokenizer.num_states() as usize;
-    assert_eq!(transitions.len(), num_states * 256);
-
-    let hashes = physical_column_hashes(tokenizer, Some(transitions));
-    byte_classes_from_column_hashes(num_states, &hashes, &[true; 256],
-        |state, byte| transitions[state * 256 + byte])
-}
-
-/// Polynomial column hashes derived from sparse rows. The default is the
-/// all-dead column; each present edge changes just its weighted term.
-fn physical_column_hashes(tokenizer: &Tokenizer, flat: Option<&[u32]>) -> [u64; 256] {
-    let mut power = 1u64;
-    let mut dead_hash = 0u64;
-    let mut deltas = [0u64; 256];
-    for state in (0..tokenizer.num_states()).rev() {
-        dead_hash = dead_hash.wrapping_add((u32::MAX as u64).wrapping_mul(power));
-        for (byte, target) in tokenizer.transitions_from(state) {
-            debug_assert!(flat.is_none_or(|rows| rows[state as usize * 256 + byte as usize] == target));
-            deltas[byte as usize] = deltas[byte as usize]
-                .wrapping_add((target as u64).wrapping_sub(u32::MAX as u64).wrapping_mul(power));
+    assert_eq!(transitions.len(), tokenizer.num_states() as usize * 256);
+    let mut hashes = [0u64; 256];
+    for row in transitions.chunks_exact(256) {
+        for (byte, &target) in row.iter().enumerate() {
+            hashes[byte] = hashes[byte].wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
+                .wrapping_add(target as u64);
         }
-        power = power.wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER);
     }
-    deltas.map(|delta| delta.wrapping_add(dead_hash))
-}
-
-/// Same physical observation without allocating a dense table.
-pub(crate) fn compute_tokenizer_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
-    byte_classes_from_column_hashes(tokenizer.num_states() as usize,
-        &physical_column_hashes(tokenizer, None), &[true; 256],
-        |state, byte| tokenizer.get_transition(state as u32, byte as u8))
+    byte_classes_from_column_hashes(tokenizer.num_states() as usize, &hashes, &[true; 256],
+        |state, byte| transitions[state * 256 + byte])
 }
 
 /// Scan the represented byte action once. Dense physical rows have no
@@ -224,32 +178,25 @@ impl FlatDfa {
     pub fn from_tokenizer_parts(tokenizer: &Tokenizer, active: Option<&[bool]>, flat: Option<&Arc<[u32]>>) -> Self {
         let num_states = tokenizer.num_states() as usize;
         let states: Vec<_> = (0..num_states).map(|state| tokenizer_state(tokenizer, state as u32, active)).collect();
-        let transitions = if let Some(flat) = flat.filter(|_| active.is_none()) {
-            Arc::clone(flat)
-        } else {
+        let source = flat.map_or_else(
+            || ByteRows::from_tokenizer(tokenizer),
+            |flat| ByteRows::dense(Arc::clone(flat)),
+        );
+        let transitions = if active.is_some() {
             let alive: Vec<_> = states.iter().map(state_has_active_language).collect();
-            let mut rows = vec![u32::MAX; num_states * 256];
-            for state in 0..num_states {
-                if active.is_some() && !alive[state] { continue; }
-                let row = &mut rows[state * 256..(state + 1) * 256];
-                if let Some(flat) = flat {
-                    row.copy_from_slice(&flat[state * 256..(state + 1) * 256]);
-                    if active.is_some() {
-                        for target in row {
-                            if *target != u32::MAX && !alive[*target as usize] { *target = u32::MAX; }
-                        }
-                    }
-                } else {
-                    for (byte, target) in tokenizer.transitions_from(state as u32) {
-                        if active.is_none() || alive[target as usize] {
-                            row[byte as usize] = target;
-                        }
+            let mut rows = source.values.to_vec();
+            for (state, row) in rows.chunks_exact_mut(source.width).enumerate() {
+                for target in row {
+                    if !alive[state] || (*target != u32::MAX && !alive[*target as usize]) {
+                        *target = u32::MAX;
                     }
                 }
             }
-            Arc::from(rows)
+            ByteRows::new(Arc::from(rows), source.byte_to_column)
+        } else {
+            source
         };
-        Self { states, start_state: tokenizer.start_state() as usize, transitions: ByteRows::dense(transitions) }
+        Self { states, start_state: tokenizer.start_state() as usize, transitions }
     }
 
     pub fn new(tokenizer: &Tokenizer) -> Self {
@@ -512,6 +459,12 @@ mod sparse_transition_cache_tests {
         for state in 0..tokenizer.num_states() {
             for byte in 0u16..=255 {
                 flat_values.push(tokenizer.step(state, byte as u8).unwrap_or(u32::MAX));
+            }
+        }
+        let compressed = ByteRows::from_tokenizer(&tokenizer);
+        for state in 0..tokenizer.num_states() as usize {
+            for byte in 0..256 {
+                assert_eq!(compressed.trans(state, byte), flat_values[state * 256 + byte]);
             }
         }
         let flat = Arc::<[u32]>::from(flat_values);

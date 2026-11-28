@@ -50,7 +50,73 @@ pub fn conservative_byte_classes(relevant: &[bool; 256]) -> Option<[u8; 256]> {
     Some(classes)
 }
 
+pub const BYTE_COLUMN_HASH_MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
+
+pub fn byte_classes_from_column_hashes(
+    num_states: usize,
+    column_hashes: &[u64; 256],
+    relevant: &[bool; 256],
+    target: impl Fn(usize, usize) -> u32,
+) -> [u8; 256] {
+    let mut sorted: Vec<u8> = (0..=255).filter(|&byte| relevant[byte as usize]).collect();
+    sorted.sort_unstable_by_key(|&byte| column_hashes[byte as usize]);
+
+    let mut classes = [0; 256];
+    // Keep one unused catch-all column only for restricted alphabets.
+    let mut next = if sorted.len() == 256 { 0 } else { 1 };
+    for (i, &byte) in sorted.iter().enumerate() {
+        let hash = column_hashes[byte as usize];
+        let prior = sorted[..i].iter().rev()
+            .take_while(|&&previous| column_hashes[previous as usize] == hash)
+            .find(|&&previous| (0..num_states).all(|state|
+                target(state, byte as usize) == target(state, previous as usize)));
+        classes[byte as usize] = if let Some(&previous) = prior {
+            classes[previous as usize]
+        } else {
+            let class = u8::try_from(next).expect("byte class domain");
+            next += 1;
+            class
+        };
+    }
+    classes
+}
+/// Polynomial column hashes derived from sparse rows. The default is the
+/// all-dead column; each present edge changes just its weighted term.
+fn physical_column_hashes(tokenizer: &Tokenizer) -> [u64; 256] {
+    let mut power = 1u64;
+    let mut dead_hash = 0u64;
+    let mut deltas = [0u64; 256];
+    for state in (0..tokenizer.num_states()).rev() {
+        dead_hash = dead_hash.wrapping_add((u32::MAX as u64).wrapping_mul(power));
+        for (byte, target) in tokenizer.transitions_from(state) {
+            deltas[byte as usize] = deltas[byte as usize]
+                .wrapping_add((target as u64).wrapping_sub(u32::MAX as u64).wrapping_mul(power));
+        }
+        power = power.wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER);
+    }
+    deltas.map(|delta| delta.wrapping_add(dead_hash))
+}
+
+/// Same physical observation without allocating a dense table.
+pub fn compute_tokenizer_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
+    byte_classes_from_column_hashes(tokenizer.num_states() as usize,
+        &physical_column_hashes(tokenizer), &[true; 256],
+        |state, byte| tokenizer.get_transition(state as u32, byte as u8))
+}
+
 impl ByteRows {
+    /// Exact physical action, independent of any finite token alphabet.
+    pub fn from_tokenizer(tokenizer: &Tokenizer) -> Self {
+        let classes = compute_tokenizer_byte_classes(tokenizer);
+        let representatives = column_representatives(&classes);
+        let width = representatives.len();
+        let mut values = Vec::with_capacity(tokenizer.num_states() as usize * width);
+        for state in 0..tokenizer.num_states() {
+            values.extend(representatives.iter().map(|&byte| tokenizer.get_transition(state, byte)));
+        }
+        Self::new(Arc::from(values), classes)
+    }
+
     pub fn dense(values: Arc<[u32]>) -> Self {
         Self::new(values, std::array::from_fn(|byte| byte as u8))
     }
