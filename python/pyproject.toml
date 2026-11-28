@@ -9,7 +9,7 @@ requires-python = ">=3.9"
 description = "Extremely fast grammar-constrained decoding for LLMs"
 readme = "PYTHON.md"
 license = "MIT OR Apache-2.0"
-license-files = ["licenses/LICENSE-MIT", "licenses/LICENSE-APACHE", "licenses/NOTICE-LARK"]
+license-files = ["licenses/LICENSE-MIT", "licenses/LICENSE-APACHE", "licenses/NOTICE-LARK", "licenses/NOTICE-TOKTRIE"]
 dependencies = ["numpy>=1.21"]
 classifiers = [
     "Development Status :: 4 - Beta",

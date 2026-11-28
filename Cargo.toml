@@ -12,13 +12,14 @@ repository = "https://github.com/IsaacBreen/glrmask"
 homepage = "https://glrmask.com"
 keywords = ["grammar", "llm", "decoding", "parser", "json-schema"]
 categories = ["algorithms", "parsing"]
-include = ["/src/**", "/benches/*.rs", "/Cargo.toml", "/README.rust.md", "/CHANGELOG.md", "/LICENSE-MIT", "/LICENSE-APACHE"]
+include = ["/src/**", "/benches/*.rs", "/Cargo.toml", "/README.rust.md", "/CHANGELOG.md", "/LICENSE-MIT", "/LICENSE-APACHE", "/NOTICE-TOKTRIE"]
 
 [lints]
 workspace = true
 
 [features]
 default = []
+hf = ["dep:toktrie_hf_tokenizers"]
 internal-api = ["glrmask-grammar/internal-api"]
 # Runs tests that take over ~10 s; they are ignored by default.
 slow-tests = [
@@ -59,6 +60,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 bincode = "1"
 zstd = { version = "0.13", default-features = false }
 serde_json = { version = "1", features = ["preserve_order"] }
+toktrie_hf_tokenizers = { version = "=1.9.1", optional = true }
 regex = "1"
 regex-syntax = "0.8"
 derivre = { version = "=0.3.8", default-features = false, features = ["compress"] }

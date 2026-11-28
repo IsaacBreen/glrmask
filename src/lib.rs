@@ -23,7 +23,7 @@
 //! - `ConstraintState`: the state of one generated sequence.
 //! - `Module`: a partially compiled grammar ([see below](#composing-grammars)).
 //!
-//! In the quickstart, supply the tokenizer's exact token bytes and the model's EOS ID. The model produces logits; the sampling routine must apply the packed mask and permit EOS only when the state is accepting.
+//! For Hugging Face tokenizers, use `Vocab.from_huggingface(tokenizer)` in Python, or `Vocab::from_tokenizer_file(path, None)` in Rust (enable `hf` and import `VocabFromTokenizer`). Pass the model vocabulary size to include padded IDs. For other tokenizers, supply their exact token bytes. The quickstart also needs the model's EOS ID. The model produces logits; the sampling routine must apply the packed mask and permit EOS only when the state is accepting.
 //!
 //! # Quickstart
 //!
@@ -162,6 +162,10 @@ pub use runtime::ConstraintInner;
 #[doc(hidden)]
 pub use runtime::markers::{MarkerEvent, MarkerId};
 pub use glrmask_vocab::{TokenSet, Vocab};
+#[cfg(feature = "hf")]
+mod hf_vocab;
+#[cfg(feature = "hf")]
+pub use hf_vocab::VocabFromTokenizer;
 pub use error::{Error, ErrorKind, Result};
 pub use public_api::{Grammar, Module, CompileOptions, Expr, MaskStrategy, Extern, Externs, ExternIter, ExternIntoIter};
 #[cfg(any(test, feature = "internal-api"))]

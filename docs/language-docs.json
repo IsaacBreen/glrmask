@@ -1,7 +1,7 @@
 {
   "schema": "glrmask-language-docs-v1",
   "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark and [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md).",
-  "usage": "GLRMask has four core types:\n\n- `Grammar`: a grammar, written as source text or built from an expression.\n- `Constraint`: a compiled grammar, ready to use.\n- `ConstraintState`: the state of one generated sequence.\n- `Module`: a partially compiled grammar ([see below](#composing-grammars)).\n\nIn the quickstart, supply the tokenizer's exact token bytes and the model's EOS ID. The model produces logits; the sampling routine must apply the packed mask and permit EOS only when the state is accepting.",
+  "usage": "GLRMask has four core types:\n\n- `Grammar`: a grammar, written as source text or built from an expression.\n- `Constraint`: a compiled grammar, ready to use.\n- `ConstraintState`: the state of one generated sequence.\n- `Module`: a partially compiled grammar ([see below](#composing-grammars)).\n\nFor Hugging Face tokenizers, use `Vocab.from_huggingface(tokenizer)` in Python, or `Vocab::from_tokenizer_file(path, None)` in Rust (enable `hf` and import `VocabFromTokenizer`). Pass the model vocabulary size to include padded IDs. For other tokenizers, supply their exact token bytes. The quickstart also needs the model's EOS ID. The model produces logits; the sampling routine must apply the packed mask and permit EOS only when the state is accepting.",
   "installation": {
     "python": "python -m pip install glrmask",
     "rust": "cargo add glrmask"
@@ -272,8 +272,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "7aecf877b72615ab1e4c3324edfc85e5d99ece3aeff562c752781171ce5a0c51",
-    "bindings/node/README.md": "ab6c79e2940a420a7cde0ab930847fc8e257b7d6c61ce3fa56bdaba2f9d913c5",
+    "bindings/cpp/README.md": "99b1612240dda366674fd32f6b83d4a158cbb249a6820b5613d8b7a861d0b309",
+    "bindings/node/README.md": "ad14dda4150d1f44abad809b03a73469481739e5f0226efc055eedccc6529050",
     "docs/content/releases/0.3/cpp.md": "be210c50b92906fe2a988af24d798b46585857275b1072d9ae874a918ec8be7c",
     "docs/content/releases/0.3/javascript.md": "4a8891a7013c9e1461b7818759705f1ca8d2a594838701f160aa556663c4cace"
   },
@@ -281,5 +281,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "946ff39c6617aff5cc87a2e9ec691cd3d98fbfe6b2f9d990b9c69c76815c5633"
+  "content_sha256": "6c68d83eb52100fd885517d6999c4088562439dfb39aa32ab0f4cb11f5986540"
 }
