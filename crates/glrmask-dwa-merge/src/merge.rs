@@ -20,13 +20,12 @@ use crate::automata::weighted::minimize::minimize_owned;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::compiler::stages::mapped_artifact::MappedArtifact;
+use crate::compiler::stages::mapped_artifact::{MappedArtifact, refine_observation_classes, refine_sparse_memberships};
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
 
 use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile, compile_profile_enabled};
 
 type RemapCache<T> = FxHashMap<usize, T>;
-type CompositeClassKey = SmallVec<[u32; 16]>;
 
 enum FastGlobalTokenMaps {
     Direct(Vec<Vec<u32>>),
@@ -2080,424 +2079,29 @@ fn build_unified_global_id_map_fast(
     primary_source: Option<usize>,
     require_direct_token_maps: bool,
 ) -> (InternalIdMap, FastGlobalTokenMaps, Vec<Vec<Vec<u32>>>) {
-    let mut composite_to_class = FxHashMap::<SmallVec<[u32; 16]>, u32>::default();
-    let mut state_o2i = vec![0u32; num_tokenizer_states];
-    let mut state_i2o: Vec<Vec<u32>> = Vec::new();
-    let mut state_reps: Vec<u32> = Vec::new();
-    let mut class_keys = Vec::<SmallVec<[u32; 16]>>::new();
-
-    for (state, state_slot) in state_o2i.iter_mut().enumerate() {
-        let mut composite = SmallVec::<[u32; 16]>::with_capacity(inputs.len());
-        composite.extend(
-            inputs
-                .iter()
-                .map(|input| input.tokenizer_states.original_to_internal[state]),
-        );
-        let next_id = state_i2o.len() as u32;
-        let class = if let Some(&existing) = composite_to_class.get(&composite) {
-            existing
-        } else {
-            let class = next_id;
-            class_keys.push(composite.clone());
-            composite_to_class.insert(composite, class);
-            state_i2o.push(Vec::new());
-            state_reps.push(state as u32);
-            class
-        };
-        *state_slot = class;
-        state_i2o[class as usize].push(state as u32);
+    let mut state_maps = inputs.iter().map(|input| &input.tokenizer_states).collect::<Vec<_>>();
+    let primary = primary_source.filter(|&source| source < inputs.len());
+    if let Some(source) = primary {
+        let anchor = state_maps.remove(source);
+        state_maps.insert(0, anchor);
     }
-
-    let source_order = primary_source
-            .filter(|source| *source < inputs.len())
-            .map(|primary| {
-                std::iter::once(primary)
-                    .chain((0..inputs.len()).filter(move |&source| source != primary))
-                    .collect::<Vec<_>>()
-            });
-    if let Some(source_order) = source_order {
-        let mut order: Vec<usize> = (0..class_keys.len()).collect();
-        order.sort_unstable_by(|&left, &right| {
-            for &source in &source_order {
-                let comparison = class_keys[left][source].cmp(&class_keys[right][source]);
-                if !comparison.is_eq() {
-                    return comparison;
-                }
-            }
-            left.cmp(&right)
-        });
-        let mut old_to_new = vec![0u32; class_keys.len()];
-        for (new_id, &old_id) in order.iter().enumerate() {
-            old_to_new[old_id] = new_id as u32;
-        }
-        for class in &mut state_o2i {
-            *class = old_to_new[*class as usize];
-        }
-        let mut new_keys = Vec::with_capacity(class_keys.len());
-        let mut new_i2o = Vec::with_capacity(state_i2o.len());
-        let mut new_reps = Vec::with_capacity(state_reps.len());
-        for old_id in order {
-            new_keys.push(std::mem::take(&mut class_keys[old_id]));
-            new_i2o.push(std::mem::take(&mut state_i2o[old_id]));
-            new_reps.push(state_reps[old_id]);
-        }
-        class_keys = new_keys;
-        state_i2o = new_i2o;
-        state_reps = new_reps;
-    }
-
-    let mut local_to_global_tsids: Vec<Vec<Vec<u32>>> = inputs
-        .iter()
-        .map(|input| vec![Vec::new(); input.num_tsids() as usize])
-        .collect();
-    for (global_tsid, composite) in class_keys.iter().enumerate() {
-        for (input_index, &local_tsid) in composite.iter().enumerate() {
-            local_to_global_tsids[input_index][local_tsid as usize].push(global_tsid as u32);
-        }
-    }
-
+    let tokenizer_states = refine_observation_classes(
+        &state_maps, num_tokenizer_states, false, primary.is_some(),
+    );
     let (vocab_tokens, token_maps) = if require_direct_token_maps {
-        let (vocab_tokens, direct_maps) =
-            build_unified_global_token_id_map_assume_disjoint(inputs, max_token_id);
-        (vocab_tokens, FastGlobalTokenMaps::Direct(direct_maps))
+        let (map, direct) = build_unified_global_token_id_map_assume_disjoint(inputs, max_token_id);
+        (map, FastGlobalTokenMaps::Direct(direct))
     } else {
-        let use_two_source_fast_path = std::env::var("GLRMASK_TWO_SOURCE_TOKEN_MERGE")
-            .map(|value| {
-                let trimmed = value.trim();
-                trimmed.is_empty()
-                    || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(true);
-        let (vocab_tokens, general_maps) = if use_two_source_fast_path {
-            build_unified_global_token_id_map_at_most_two(inputs, max_token_id)
-                .unwrap_or_else(|| {
-                    build_unified_global_token_id_map_sparse_generic(inputs, max_token_id)
-                })
-        } else {
-            build_unified_global_token_id_map_sparse_generic(inputs, max_token_id)
-        };
-        (vocab_tokens, FastGlobalTokenMaps::General(general_maps))
+        let (map, fanout) = build_unified_global_token_id_map_sparse_generic(inputs, max_token_id);
+        (map, FastGlobalTokenMaps::General(fanout))
     };
-    (
-        InternalIdMap {
-            tokenizer_states: ManyToOneIdMap {
-                original_to_internal: state_o2i,
-                internal_to_originals: state_i2o,
-                representative_original_ids: state_reps,
-            },
-            vocab_tokens,
-            deferred_vocab_singleton_original_ids: None,
-        },
-        token_maps,
-        local_to_global_tsids,
-    )
-}
-
-/// Exact sparse token-map merge for the compiler's ordinary-L1 plus split-L1
-/// layout. Character partitions are disjoint, so an original token appears in
-/// at most the ordinary and split artifact for one partition. Keep those two
-/// memberships inline instead of allocating one `SmallVec` per overlapping
-/// token. If an arbitrary caller supplies a third membership, return `None`
-/// and let the fully generic builder handle it.
-fn build_unified_global_token_id_map_at_most_two(
-    inputs: &[&InternalIdMap],
-    max_token_id: u32,
-) -> Option<(ManyToOneIdMap, Vec<Vec<Vec<u32>>>)> {
-    let use_packed = std::env::var("GLRMASK_PACKED_TWO_SOURCE_TOKEN_MERGE")
-        .map(|value| {
-            let trimmed = value.trim();
-            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
-        })
-        .unwrap_or(true);
-    if use_packed {
-        build_unified_global_token_id_map_at_most_two_packed(inputs, max_token_id)
-            .or_else(|| build_unified_global_token_id_map_at_most_two_wide(inputs, max_token_id))
-    } else {
-        build_unified_global_token_id_map_at_most_two_wide(inputs, max_token_id)
-    }
-}
-
-fn build_unified_global_token_id_map_at_most_two_wide(
-    inputs: &[&InternalIdMap],
-    max_token_id: u32,
-) -> Option<(ManyToOneIdMap, Vec<Vec<Vec<u32>>>)> {
-    let token_count = max_token_id as usize + 1;
-    let mut first_input = vec![u16::MAX; token_count];
-    let mut first_local_class = vec![u32::MAX; token_count];
-    let mut second_input = vec![u16::MAX; token_count];
-    let mut second_local_class = vec![u32::MAX; token_count];
-
-    for (input_index, input) in inputs.iter().enumerate() {
-        if input_index >= u16::MAX as usize {
-            return None;
-        }
-        for (local_class, originals) in input
-            .vocab_tokens
-            .internal_to_originals
-            .iter()
-            .enumerate()
-        {
-            for &token_id in originals {
-                let token_index = token_id as usize;
-                debug_assert!(token_index < token_count);
-                if first_input[token_index] == u16::MAX {
-                    first_input[token_index] = input_index as u16;
-                    first_local_class[token_index] = local_class as u32;
-                } else if second_input[token_index] == u16::MAX {
-                    second_input[token_index] = input_index as u16;
-                    second_local_class[token_index] = local_class as u32;
-                } else {
-                    return None;
-                }
-            }
-        }
-    }
-
-    let mut unique_counts = inputs
-        .iter()
-        .map(|input| vec![0usize; input.num_internal_tokens() as usize])
-        .collect::<Vec<_>>();
-    let mut overlap_group_by_token = vec![u32::MAX; token_count];
-    let mut overlap_group_by_membership =
-        FxHashMap::<(u64, u64), u32>::default();
-    let mut overlap_memberships = Vec::<(u64, u64)>::new();
-    let mut overlap_counts = Vec::<usize>::new();
-
-    for token_index in 0..token_count {
-        if first_input[token_index] == u16::MAX {
-            continue;
-        }
-        if second_input[token_index] == u16::MAX {
-            unique_counts[first_input[token_index] as usize]
-                [first_local_class[token_index] as usize] += 1;
-            continue;
-        }
-        let membership = (
-            ((first_input[token_index] as u64) << 32)
-                | first_local_class[token_index] as u64,
-            ((second_input[token_index] as u64) << 32)
-                | second_local_class[token_index] as u64,
-        );
-        let group = if let Some(&group) = overlap_group_by_membership.get(&membership) {
-            group
-        } else {
-            let group = overlap_memberships.len() as u32;
-            overlap_group_by_membership.insert(membership, group);
-            overlap_memberships.push(membership);
-            overlap_counts.push(0);
-            group
-        };
-        overlap_group_by_token[token_index] = group;
-        overlap_counts[group as usize] += 1;
-    }
-
-    let mut token_i2o = Vec::<Vec<u32>>::new();
-    let mut token_reps = Vec::<u32>::new();
-    let mut local_to_global = inputs
-        .iter()
-        .map(|input| vec![Vec::<u32>::new(); input.num_internal_tokens() as usize])
-        .collect::<Vec<_>>();
-    let mut unique_global_class = inputs
-        .iter()
-        .map(|input| vec![u32::MAX; input.num_internal_tokens() as usize])
-        .collect::<Vec<_>>();
-
-    for input_index in 0..inputs.len() {
-        for local_class in 0..unique_counts[input_index].len() {
-            let count = unique_counts[input_index][local_class];
-            if count == 0 {
-                continue;
-            }
-            let global_class = token_i2o.len() as u32;
-            unique_global_class[input_index][local_class] = global_class;
-            local_to_global[input_index][local_class].push(global_class);
-            token_i2o.push(Vec::with_capacity(count));
-            token_reps.push(u32::MAX);
-        }
-    }
-
-    let overlap_global_base = token_i2o.len() as u32;
-    for (group, &(first, second)) in overlap_memberships.iter().enumerate() {
-        let global_class = overlap_global_base + group as u32;
-        token_i2o.push(Vec::with_capacity(overlap_counts[group]));
-        token_reps.push(u32::MAX);
-        for packed in [first, second] {
-            let input_index = (packed >> 32) as usize;
-            let local_class = packed as u32 as usize;
-            local_to_global[input_index][local_class].push(global_class);
-        }
-    }
-
-    let mut token_o2i = vec![u32::MAX; token_count];
-    for token_index in 0..token_count {
-        if first_input[token_index] == u16::MAX {
-            continue;
-        }
-        let group = overlap_group_by_token[token_index];
-        let global_class = if group == u32::MAX {
-            unique_global_class[first_input[token_index] as usize]
-                [first_local_class[token_index] as usize]
-        } else {
-            overlap_global_base + group
-        };
-        debug_assert_ne!(global_class, u32::MAX);
-        token_o2i[token_index] = global_class;
-        let originals = &mut token_i2o[global_class as usize];
-        if originals.is_empty() {
-            token_reps[global_class as usize] = token_index as u32;
-        }
-        originals.push(token_index as u32);
-    }
-
-    debug_assert!(token_i2o.iter().all(|originals| !originals.is_empty()));
-    Some((
-        ManyToOneIdMap {
-            original_to_internal: token_o2i,
-            internal_to_originals: token_i2o,
-            representative_original_ids: token_reps,
-        },
-        local_to_global,
-    ))
-}
-
-fn build_unified_global_token_id_map_at_most_two_packed(
-    inputs: &[&InternalIdMap],
-    max_token_id: u32,
-) -> Option<(ManyToOneIdMap, Vec<Vec<Vec<u32>>>)> {
-    const INPUT_BITS: u32 = 8;
-    const CLASS_BITS: u32 = 32 - INPUT_BITS;
-    const CLASS_MASK: u32 = (1u32 << CLASS_BITS) - 1;
-    const MAX_INPUT: usize = (1usize << INPUT_BITS) - 1;
-    let pack = |input: usize, class: usize| -> Option<u32> {
-        (input < MAX_INPUT && class < CLASS_MASK as usize)
-            .then_some(((input as u32) << CLASS_BITS) | class as u32)
+    let common = InternalIdMap {
+        tokenizer_states, vocab_tokens,
+        deferred_vocab_singleton_original_ids: None,
     };
-    let unpack_input = |packed: u32| (packed >> CLASS_BITS) as usize;
-    let unpack_class = |packed: u32| (packed & CLASS_MASK) as usize;
-
-    let token_count = max_token_id as usize + 1;
-    let mut first_membership = vec![u32::MAX; token_count];
-    let mut second_membership = vec![u32::MAX; token_count];
-
-    for (input_index, input) in inputs.iter().enumerate() {
-        for (local_class, originals) in input
-            .vocab_tokens
-            .internal_to_originals
-            .iter()
-            .enumerate()
-        {
-            let packed = pack(input_index, local_class)?;
-            for &token_id in originals {
-                let token_index = token_id as usize;
-                debug_assert!(token_index < token_count);
-                if first_membership[token_index] == u32::MAX {
-                    first_membership[token_index] = packed;
-                } else if second_membership[token_index] == u32::MAX {
-                    second_membership[token_index] = packed;
-                } else {
-                    return None;
-                }
-            }
-        }
-    }
-
-    let mut unique_counts = inputs
-        .iter()
-        .map(|input| vec![0usize; input.num_internal_tokens() as usize])
-        .collect::<Vec<_>>();
-    let mut overlap_group_by_membership =
-        FxHashMap::<(u32, u32), u32>::default();
-    let mut overlap_memberships = Vec::<(u32, u32)>::new();
-    let mut overlap_counts = Vec::<usize>::new();
-
-    for token_index in 0..token_count {
-        let first = first_membership[token_index];
-        if first == u32::MAX {
-            continue;
-        }
-        let second = second_membership[token_index];
-        if second == u32::MAX {
-            unique_counts[unpack_input(first)][unpack_class(first)] += 1;
-            continue;
-        }
-        let membership = (first, second);
-        let group = if let Some(&group) = overlap_group_by_membership.get(&membership) {
-            group
-        } else {
-            let group = overlap_memberships.len() as u32;
-            overlap_group_by_membership.insert(membership, group);
-            overlap_memberships.push(membership);
-            overlap_counts.push(0);
-            group
-        };
-        overlap_counts[group as usize] += 1;
-    }
-
-    let mut token_i2o = Vec::<Vec<u32>>::new();
-    let mut token_reps = Vec::<u32>::new();
-    let mut local_to_global = inputs
-        .iter()
-        .map(|input| vec![Vec::<u32>::new(); input.num_internal_tokens() as usize])
-        .collect::<Vec<_>>();
-    let mut unique_global_class = inputs
-        .iter()
-        .map(|input| vec![u32::MAX; input.num_internal_tokens() as usize])
-        .collect::<Vec<_>>();
-
-    for input_index in 0..inputs.len() {
-        for local_class in 0..unique_counts[input_index].len() {
-            let count = unique_counts[input_index][local_class];
-            if count == 0 {
-                continue;
-            }
-            let global_class = token_i2o.len() as u32;
-            unique_global_class[input_index][local_class] = global_class;
-            local_to_global[input_index][local_class].push(global_class);
-            token_i2o.push(Vec::with_capacity(count));
-            token_reps.push(u32::MAX);
-        }
-    }
-
-    let overlap_global_base = token_i2o.len() as u32;
-    for (group, &(first, second)) in overlap_memberships.iter().enumerate() {
-        let global_class = overlap_global_base + group as u32;
-        token_i2o.push(Vec::with_capacity(overlap_counts[group]));
-        token_reps.push(u32::MAX);
-        for packed in [first, second] {
-            local_to_global[unpack_input(packed)][unpack_class(packed)].push(global_class);
-        }
-    }
-
-    let mut token_o2i = vec![u32::MAX; token_count];
-    for token_index in 0..token_count {
-        let first = first_membership[token_index];
-        if first == u32::MAX {
-            continue;
-        }
-        let second = second_membership[token_index];
-        let global_class = if second == u32::MAX {
-            unique_global_class[unpack_input(first)][unpack_class(first)]
-        } else {
-            overlap_global_base + overlap_group_by_membership[&(first, second)]
-        };
-        debug_assert_ne!(global_class, u32::MAX);
-        token_o2i[token_index] = global_class;
-        let originals = &mut token_i2o[global_class as usize];
-        if originals.is_empty() {
-            token_reps[global_class as usize] = token_index as u32;
-        }
-        originals.push(token_index as u32);
-    }
-
-    debug_assert!(token_i2o.iter().all(|originals| !originals.is_empty()));
-    Some((
-        ManyToOneIdMap {
-            original_to_internal: token_o2i,
-            internal_to_originals: token_i2o,
-            representative_original_ids: token_reps,
-        },
-        local_to_global,
-    ))
+    let tsid_maps = inputs.iter().map(|local| build_local_to_global_tsid_map(local, &common))
+        .collect();
+    (common, token_maps, tsid_maps)
 }
 
 fn build_unified_global_id_map_disjoint_fast(
@@ -2568,38 +2172,16 @@ fn build_unified_global_id_map(
     num_tokenizer_states: usize,
     max_token_id: u32,
 ) -> (InternalIdMap, Option<Vec<Vec<u32>>>) {
-    let mut composite_to_class = FxHashMap::<CompositeClassKey, u32>::default();
-    let mut state_o2i = vec![0u32; num_tokenizer_states];
-    let mut state_i2o: Vec<Vec<u32>> = Vec::new();
-    let mut state_reps: Vec<u32> = Vec::new();
-
-    for (state, state_slot) in state_o2i.iter_mut().enumerate() {
-        let composite: CompositeClassKey = inputs
-            .iter()
-            .map(|input| input.tokenizer_states.original_to_internal[state])
-            .collect();
-        let next_id = state_i2o.len() as u32;
-        let class = *composite_to_class.entry(composite).or_insert_with(|| {
-            state_i2o.push(Vec::new());
-            state_reps.push(state as u32);
-            next_id
-        });
-        *state_slot = class;
-        state_i2o[class as usize].push(state as u32);
-    }
-
-    reorder_classes(composite_to_class, &mut state_o2i, &mut state_i2o, &mut state_reps);
-
+    let state_maps = inputs.iter().map(|input| &input.tokenizer_states).collect::<Vec<_>>();
+    let tokenizer_states = refine_observation_classes(
+        &state_maps, num_tokenizer_states, false, true,
+    );
     let (vocab_tokens, direct_local_to_global_token_maps) =
         build_unified_global_token_id_map_disjoint(inputs, max_token_id)
             .unwrap_or_else(|| (build_unified_global_token_id_map_generic(inputs, max_token_id), None));
     (
         InternalIdMap {
-            tokenizer_states: ManyToOneIdMap {
-                original_to_internal: state_o2i,
-                internal_to_originals: state_i2o,
-                representative_original_ids: state_reps,
-            },
+            tokenizer_states,
             vocab_tokens,
             deferred_vocab_singleton_original_ids: None,
         },
@@ -2625,235 +2207,28 @@ fn build_unified_global_token_id_map_sparse_generic(
     inputs: &[&InternalIdMap],
     max_token_id: u32,
 ) -> (ManyToOneIdMap, Vec<Vec<Vec<u32>>>) {
-    type MembershipKey = SmallVec<[u64; 4]>;
-
-    let token_count = max_token_id as usize + 1;
-    let mut first_input = vec![u16::MAX; token_count];
-    let mut first_local_class = vec![u32::MAX; token_count];
-    let mut overlap_index = vec![u32::MAX; token_count];
-    let mut overlap_memberships = Vec::<MembershipKey>::new();
-
-    for (input_index, input) in inputs.iter().enumerate() {
-        assert!(input_index < u16::MAX as usize, "too many immediate merge inputs");
-        for (local_class, originals) in input
-            .vocab_tokens
-            .internal_to_originals
-            .iter()
-            .enumerate()
-        {
-            for &token_id in originals {
-                let token_index = token_id as usize;
-                debug_assert!(token_index < token_count);
-                if first_input[token_index] == u16::MAX {
-                    first_input[token_index] = input_index as u16;
-                    first_local_class[token_index] = local_class as u32;
-                    continue;
-                }
-
-                let membership_index = if overlap_index[token_index] == u32::MAX {
-                    let membership_index = overlap_memberships.len() as u32;
-                    let mut membership = MembershipKey::new();
-                    membership.push(
-                        ((first_input[token_index] as u64) << 32)
-                            | first_local_class[token_index] as u64,
-                    );
-                    overlap_memberships.push(membership);
-                    overlap_index[token_index] = membership_index;
-                    membership_index
-                } else {
-                    overlap_index[token_index]
-                };
-                overlap_memberships[membership_index as usize]
-                    .push(((input_index as u64) << 32) | local_class as u64);
-            }
-        }
-    }
-
-    let mut unique_counts = inputs
-        .iter()
-        .map(|input| vec![0usize; input.num_internal_tokens() as usize])
-        .collect::<Vec<_>>();
-    for token_index in 0..token_count {
-        if first_input[token_index] != u16::MAX && overlap_index[token_index] == u32::MAX {
-            unique_counts[first_input[token_index] as usize]
-                [first_local_class[token_index] as usize] += 1;
-        }
-    }
-
-    let mut token_i2o = Vec::<Vec<u32>>::new();
-    let mut token_reps = Vec::<u32>::new();
-    let mut local_to_global = inputs
-        .iter()
-        .map(|input| vec![Vec::<u32>::new(); input.num_internal_tokens() as usize])
-        .collect::<Vec<_>>();
-    let mut unique_global_class = inputs
-        .iter()
-        .map(|input| vec![u32::MAX; input.num_internal_tokens() as usize])
-        .collect::<Vec<_>>();
-
-    for input_index in 0..inputs.len() {
-        for local_class in 0..unique_counts[input_index].len() {
-            if unique_counts[input_index][local_class] == 0 {
-                continue;
-            }
-            let global_class = token_i2o.len() as u32;
-            unique_global_class[input_index][local_class] = global_class;
-            local_to_global[input_index][local_class].push(global_class);
-            token_i2o.push(Vec::with_capacity(unique_counts[input_index][local_class]));
-            token_reps.push(u32::MAX);
-        }
-    }
-
-    let mut overlap_class_by_membership = FxHashMap::<MembershipKey, u32>::default();
-    let mut token_o2i = vec![u32::MAX; token_count];
-    for token_index in 0..token_count {
-        if first_input[token_index] == u16::MAX {
-            continue;
-        }
-        let global_class = if overlap_index[token_index] == u32::MAX {
-            unique_global_class[first_input[token_index] as usize]
-                [first_local_class[token_index] as usize]
-        } else {
-            let membership = &overlap_memberships[overlap_index[token_index] as usize];
-            if let Some(&existing) = overlap_class_by_membership.get(membership) {
-                existing
-            } else {
-                let global_class = token_i2o.len() as u32;
-                overlap_class_by_membership.insert(membership.clone(), global_class);
-                token_i2o.push(Vec::new());
-                token_reps.push(u32::MAX);
-                for &packed in membership {
-                    let input_index = (packed >> 32) as usize;
-                    let local_class = packed as u32 as usize;
-                    local_to_global[input_index][local_class].push(global_class);
-                }
-                global_class
-            }
-        };
-        debug_assert_ne!(global_class, u32::MAX);
-        token_o2i[token_index] = global_class;
-        let originals = &mut token_i2o[global_class as usize];
-        if originals.is_empty() {
-            token_reps[global_class as usize] = token_index as u32;
-        }
-        originals.push(token_index as u32);
-    }
-
-    debug_assert!(token_i2o.iter().all(|originals| !originals.is_empty()));
-    (
-        ManyToOneIdMap {
-            original_to_internal: token_o2i,
-            internal_to_originals: token_i2o,
-            representative_original_ids: token_reps,
-        },
-        local_to_global,
-    )
+    let maps = inputs.iter().map(|input| &input.vocab_tokens).collect::<Vec<_>>();
+    let (map, fanout) = refine_sparse_memberships(&maps, max_token_id as usize + 1, false, true);
+    (map, fanout.expect("requested sparse membership fanout"))
 }
 
 fn build_unified_global_token_id_map_generic(
     inputs: &[&InternalIdMap],
     max_token_id: u32,
 ) -> ManyToOneIdMap {
-    let mut token_composite_to_class = FxHashMap::<CompositeClassKey, u32>::default();
-    let mut token_o2i = vec![u32::MAX; max_token_id as usize + 1];
-    let mut token_i2o: Vec<Vec<u32>> = Vec::new();
-    let mut token_reps: Vec<u32> = Vec::new();
-
-    for token_id in 0..=max_token_id {
-        let composite: CompositeClassKey = inputs
-            .iter()
-            .map(|input| {
-                input
-                    .vocab_tokens
-                    .original_to_internal
-                    .get(token_id as usize)
-                    .copied()
-                    .unwrap_or(u32::MAX)
-            })
-            .collect();
-        if composite.iter().all(|&value| value == u32::MAX) {
-            continue;
-        }
-
-        let next_id = token_i2o.len() as u32;
-        let class = *token_composite_to_class
-            .entry(composite)
-            .or_insert_with(|| {
-                token_i2o.push(Vec::new());
-                token_reps.push(token_id);
-                next_id
-            });
-        token_o2i[token_id as usize] = class;
-        token_i2o[class as usize].push(token_id);
-    }
-
-    reorder_classes_with_sentinel(
-        token_composite_to_class,
-        &mut token_o2i,
-        &mut token_i2o,
-        &mut token_reps,
-        u32::MAX,
-    );
-
-    ManyToOneIdMap {
-        original_to_internal: token_o2i,
-        internal_to_originals: token_i2o,
-        representative_original_ids: token_reps,
-    }
+    let maps = inputs.iter().map(|input| &input.vocab_tokens).collect::<Vec<_>>();
+    refine_observation_classes(&maps, max_token_id as usize + 1, true, true)
 }
 
 fn build_unified_global_token_id_map_disjoint(
     inputs: &[&InternalIdMap],
     max_token_id: u32,
 ) -> Option<(ManyToOneIdMap, Option<Vec<Vec<u32>>>)> {
-    let mut owner_by_token = vec![usize::MAX; max_token_id as usize + 1];
-
-    for (input_idx, input) in inputs.iter().enumerate() {
-        for (token_id, &local_class) in input.vocab_tokens.original_to_internal.iter().enumerate() {
-            if local_class == u32::MAX {
-                continue;
-            }
-            let owner = &mut owner_by_token[token_id];
-            if *owner != usize::MAX && *owner != input_idx {
-                return None;
-            }
-            *owner = input_idx;
-        }
+    if !token_domains_disjoint(inputs.iter().copied(), max_token_id as usize + 1) {
+        return None;
     }
-
-    let mut token_o2i = vec![u32::MAX; max_token_id as usize + 1];
-    let mut token_i2o: Vec<Vec<u32>> = Vec::new();
-    let mut token_reps: Vec<u32> = Vec::new();
-    let mut direct_local_to_global_token_maps = Vec::with_capacity(inputs.len());
-
-    for input in inputs {
-        let mut local_to_global = vec![u32::MAX; input.num_internal_tokens() as usize];
-
-        for (local_class, originals) in input.vocab_tokens.internal_to_originals.iter().enumerate() {
-            if originals.is_empty() {
-                continue;
-            }
-
-            let global_class = token_i2o.len() as u32;
-            local_to_global[local_class] = global_class;
-            token_reps.push(input.vocab_tokens.representative_original_ids[local_class]);
-            token_i2o.push(originals.clone());
-            for &token_id in originals {
-                token_o2i[token_id as usize] = global_class;
-            }
-        }
-
-        direct_local_to_global_token_maps.push(local_to_global);
-    }
-
-    Some((
-        ManyToOneIdMap {
-            original_to_internal: token_o2i,
-            internal_to_originals: token_i2o,
-            representative_original_ids: token_reps,
-        },
-        Some(direct_local_to_global_token_maps),
-    ))
+    let (map, direct) = build_unified_global_token_id_map_assume_disjoint(inputs, max_token_id);
+    Some((map, Some(direct)))
 }
 
 fn build_direct_local_to_global_token_map(local_to_global: &[u32]) -> Vec<Vec<u32>> {
@@ -2867,75 +2242,6 @@ fn build_direct_local_to_global_token_map(local_to_global: &[u32]) -> Vec<Vec<u3
             }
         })
         .collect()
-}
-
-fn reorder_classes(
-    composite_to_class: FxHashMap<CompositeClassKey, u32>,
-    o2i: &mut [u32],
-    i2o: &mut Vec<Vec<u32>>,
-    reps: &mut Vec<u32>,
-) {
-    let num_classes = i2o.len();
-    if num_classes <= 1 {
-        return;
-    }
-
-    let mut sorted: Vec<(CompositeClassKey, u32)> = composite_to_class.into_iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut old_to_new = vec![0u32; num_classes];
-    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
-        old_to_new[*old_id as usize] = new_id as u32;
-    }
-
-    for val in o2i.iter_mut() {
-        *val = old_to_new[*val as usize];
-    }
-
-    let mut new_i2o = vec![Vec::new(); num_classes];
-    let mut new_reps = vec![0u32; num_classes];
-    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
-        new_i2o[new_id] = std::mem::take(&mut i2o[*old_id as usize]);
-        new_reps[new_id] = reps[*old_id as usize];
-    }
-    *i2o = new_i2o;
-    *reps = new_reps;
-}
-
-fn reorder_classes_with_sentinel(
-    composite_to_class: FxHashMap<CompositeClassKey, u32>,
-    o2i: &mut [u32],
-    i2o: &mut Vec<Vec<u32>>,
-    reps: &mut Vec<u32>,
-    sentinel: u32,
-) {
-    let num_classes = i2o.len();
-    if num_classes <= 1 {
-        return;
-    }
-
-    let mut sorted: Vec<(CompositeClassKey, u32)> = composite_to_class.into_iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut old_to_new = vec![0u32; num_classes];
-    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
-        old_to_new[*old_id as usize] = new_id as u32;
-    }
-
-    for val in o2i.iter_mut() {
-        if *val != sentinel {
-            *val = old_to_new[*val as usize];
-        }
-    }
-
-    let mut new_i2o = vec![Vec::new(); num_classes];
-    let mut new_reps = vec![0u32; num_classes];
-    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
-        new_i2o[new_id] = std::mem::take(&mut i2o[*old_id as usize]);
-        new_reps[new_id] = reps[*old_id as usize];
-    }
-    *i2o = new_i2o;
-    *reps = new_reps;
 }
 
 /// Map local TSIDs to the global composite TSIDs.
@@ -3704,34 +3010,11 @@ mod tests {
         let generic = build_unified_global_token_id_map_generic(&inputs, 4);
         let (sparse, local_to_global) =
             build_unified_global_token_id_map_sparse_generic(&inputs, 4);
-        let (two_source, two_source_local_to_global) =
-            build_unified_global_token_id_map_at_most_two(&inputs, 4)
-                .expect("two inputs cannot create a third membership");
-        let (wide, wide_local_to_global) =
-            build_unified_global_token_id_map_at_most_two_wide(&inputs, 4)
-                .expect("two inputs cannot create a third membership");
-        let (packed, packed_local_to_global) =
-            build_unified_global_token_id_map_at_most_two_packed(&inputs, 4)
-                .expect("fixture fits packed membership bounds");
-
         let mut generic_groups = generic.internal_to_originals.clone();
         let mut sparse_groups = sparse.internal_to_originals.clone();
-        let mut two_source_groups = two_source.internal_to_originals.clone();
         generic_groups.sort_unstable();
         sparse_groups.sort_unstable();
-        two_source_groups.sort_unstable();
         assert_eq!(sparse_groups, generic_groups);
-        assert_eq!(two_source_groups, generic_groups);
-        assert_eq!(two_source.original_to_internal, sparse.original_to_internal);
-        assert_eq!(two_source_local_to_global, local_to_global);
-        assert_eq!(packed.original_to_internal, wide.original_to_internal);
-        assert_eq!(packed.internal_to_originals, wide.internal_to_originals);
-        assert_eq!(
-            packed.representative_original_ids,
-            wide.representative_original_ids,
-        );
-        assert_eq!(packed_local_to_global, wide_local_to_global);
-
         for (input_index, input) in inputs.iter().enumerate() {
             for (local_class, originals) in
                 input.vocab_tokens.internal_to_originals.iter().enumerate()
@@ -3773,17 +3056,14 @@ mod tests {
     }
 
     #[test]
-    fn two_source_token_map_rejects_third_membership() {
-        let first = id_map_with_vocab_partition(vec![0], 1);
-        let second = id_map_with_vocab_partition(vec![0], 1);
-        let third = id_map_with_vocab_partition(vec![0], 1);
-        assert!(
-            build_unified_global_token_id_map_at_most_two(
-                &[&first, &second, &third],
-                0,
-            )
-            .is_none()
-        );
+    fn sparse_membership_refinement_keeps_arbitrary_overlaps() {
+        let first = id_map_with_vocab_partition(vec![0, 0, 0, u32::MAX], 1);
+        let second = id_map_with_vocab_partition(vec![0, 0, u32::MAX, 0], 1);
+        let third = id_map_with_vocab_partition(vec![0, u32::MAX, 0, 0], 1);
+        let inputs = [&first, &second, &third];
+        let (map, fanout) = build_unified_global_token_id_map_sparse_generic(&inputs, 3);
+        assert_eq!(map.internal_to_originals, vec![vec![0], vec![1], vec![2], vec![3]]);
+        assert_eq!(fanout, vec![vec![vec![0, 1, 2]], vec![vec![0, 1, 3]], vec![vec![0, 2, 3]]]);
     }
 
     #[test]
