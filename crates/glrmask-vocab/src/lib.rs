@@ -413,6 +413,7 @@ pub mod __private {
 
 #[cfg(test)]
 mod tests {
+    use crate::workspace_api::TokenSetExt as _;
     use super::*;
 
     #[test]
@@ -463,6 +464,7 @@ mod tests {
 }
 #[cfg(test)]
 mod compact_token_range_tests {
+    use crate::workspace_api::TokenSetExt as _;
     use super::*;
 
     #[test]

@@ -2477,6 +2477,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
 
 #[cfg(test)]
 mod ti_mre_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use std::{collections::BTreeMap, env, ffi::OsString, sync::{Arc, Mutex}};
 
     use crate::automata::lexer::ast::Expr;

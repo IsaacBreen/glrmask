@@ -15496,6 +15496,7 @@ fn build_regex_nfa_impl(exprs: &[Expr]) -> Nfa {
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::super::dfa::DFA;
     use super::super::Lexer;
     use super::{

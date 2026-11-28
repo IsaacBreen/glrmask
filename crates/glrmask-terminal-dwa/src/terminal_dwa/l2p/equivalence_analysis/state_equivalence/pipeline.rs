@@ -392,6 +392,7 @@ fn record_max_length_profile(
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
 

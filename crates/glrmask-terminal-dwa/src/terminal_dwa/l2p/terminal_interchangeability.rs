@@ -12279,6 +12279,7 @@ pub fn restrict_weights_to_forward_domains(dwa: &DWA) -> DWA {
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use std::sync::Arc;
 
     use super::*;

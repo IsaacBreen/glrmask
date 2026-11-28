@@ -1,4 +1,3 @@
-use glrmask_vocab::__private::VocabExt as _;
 use glrmask::test_modes::MaskMode;
 use std::{collections::BTreeSet, error::Error, hint::black_box, time::Instant};
 use glrmask::{ConstraintInner as Constraint, Grammar, Vocab};

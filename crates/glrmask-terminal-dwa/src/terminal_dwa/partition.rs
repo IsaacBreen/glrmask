@@ -2101,6 +2101,7 @@ fn concatenate_disjoint_partition_maps(
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::{
         automatic_combine_l1_single, automatic_structural_branch_tokenizer_selected,
         common_refine_partition_maps_impl, parse_vocab_partition_exact_l2p_override,

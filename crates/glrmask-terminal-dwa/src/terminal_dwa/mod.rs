@@ -3332,6 +3332,7 @@ pub fn build_id_map_and_terminal_dwa(
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::{
         AutomaticBranchActiveStateMapStrategy,
         DEFAULT_GLOBAL_MAX_LENGTH_STABLE_SIGNATURE_CELL_LIMIT,
