@@ -20,13 +20,7 @@ use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
 
-/// Physical byte observations are shared with terminal construction.
-/// Subset states store only distinct relevant byte-class targets.
-pub(super) struct ClassedTransitions {
-    pub(super) byte_to_column: [u16; 256],
-    pub(super) width: usize,
-    pub(super) targets: Vec<u32>,
-}
+use crate::automata::lexer::observation::ByteRows;
 
 #[derive(Clone, Copy)]
 pub(super) enum ByteTransitions<'a> {
@@ -36,7 +30,7 @@ pub(super) enum ByteTransitions<'a> {
         local_to_raw: &'a [u32],
         raw_to_local: &'a [u32],
     },
-    Classed(&'a ClassedTransitions),
+    Classed(&'a ByteRows),
 }
 
 impl ByteTransitions<'_> {
@@ -49,14 +43,7 @@ impl ByteTransitions<'_> {
                 let target = raw[source as usize * 256 + byte as usize];
                 if target == u32::MAX { target } else { raw_to_local[target as usize] }
             }
-            Self::Classed(classes) => {
-                let column = classes.byte_to_column[byte as usize];
-                if column == u16::MAX {
-                    u32::MAX
-                } else {
-                    classes.targets[state as usize * classes.width + column as usize]
-                }
-            }
+            Self::Classed(rows) => rows.trans(state as usize, byte as usize),
         }
     }
 }

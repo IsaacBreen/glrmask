@@ -66,6 +66,9 @@ pub mod __private {
             pub mod compile {
                 pub use crate::automata::lexer::compile::*;
             }
+            pub mod observation {
+                pub use crate::automata::lexer::observation::*;
+            }
             pub mod tokenizer {
                 pub use crate::automata::lexer::tokenizer::*;
             }

@@ -11,9 +11,10 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::lexer::observation::ByteRows;
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_possible_matches::collector::{
-    ByteTransitions, ClassedTransitions, IntervalPossibleMatchMap, TerminalRangeGroup, TrieClassBuildResult,
+    ByteTransitions, IntervalPossibleMatchMap, TerminalRangeGroup, TrieClassBuildResult,
 };
 use crate::compiler::pm_profile::elapsed_ms;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
@@ -1417,7 +1418,7 @@ fn nfa_powerset_collect_enabled(state_count: usize, root_terminal_union: usize) 
 struct PossibleMatchPowersetView {
     num_states: usize,
     matched_terminals: Vec<Box<[TerminalID]>>,
-    byte_transitions: ClassedTransitions,
+    byte_transitions: ByteRows,
     self_loop_bytes: Vec<U8Set>,
     raw_start_to_view: Vec<u32>,
     boundary_state: Vec<u32>,
@@ -1577,16 +1578,18 @@ fn build_possible_match_powerset_view(
             .collect::<Vec<_>>()
     };
     let mut matched_terminals = Vec::<Box<[TerminalID]>>::new();
-    let mut byte_transitions = ClassedTransitions {
-        byte_to_column: [u16::MAX; 256],
-        width: active_byte_classes.len(),
-        targets: Vec::new(),
-    };
+    // Unobserved bytes share one permanently dead column. All represented
+    // classes remain exact on the relevant alphabet, even when it has all
+    // 256 bytes (in which case there is no dead catch-all).
+    let dead_column = usize::from(relevant_bytes.iter().any(|&active| !active));
+    let mut byte_to_column = [0u8; 256];
+    let width = active_byte_classes.len() + dead_column;
     for (column, (_, members)) in active_byte_classes.iter().enumerate() {
         for &byte in members {
-            byte_transitions.byte_to_column[byte as usize] = column as u16;
+            byte_to_column[byte as usize] = (column + dead_column) as u8;
         }
     }
+    let mut byte_targets = Vec::new();
     let mut self_loop_bytes = Vec::<U8Set>::new();
     let mut boundary_state = Vec::<u32>::new();
     let mut is_end = Vec::<bool>::new();
@@ -1624,6 +1627,7 @@ fn build_possible_match_powerset_view(
         );
 
         let mut self_loops = U8Set::empty();
+        if dead_column != 0 { byte_targets.push(u32::MAX); }
         let source_is_closed = config_is_closed[config_index];
         for &(byte, ref class_members) in &active_byte_classes {
             target_generation = target_generation.wrapping_add(1);
@@ -1668,7 +1672,7 @@ fn build_possible_match_powerset_view(
                 &mut configs,
                 &mut config_is_closed,
             ).unwrap_or(u32::MAX);
-            byte_transitions.targets.push(target);
+            byte_targets.push(target);
             if target == config_index as u32 {
                 for &class_byte in class_members {
                     self_loops.insert(class_byte);
@@ -1681,7 +1685,7 @@ fn build_possible_match_powerset_view(
 
     let num_states = configs.len();
     debug_assert_eq!(matched_terminals.len(), num_states);
-    debug_assert_eq!(byte_transitions.targets.len(), byte_transitions.width * num_states);
+    debug_assert_eq!(byte_targets.len(), width * num_states);
     debug_assert_eq!(self_loop_bytes.len(), num_states);
     debug_assert_eq!(config_is_closed.len(), configs.len());
     debug_assert_eq!(boundary_state.len(), num_states);
@@ -1690,7 +1694,7 @@ fn build_possible_match_powerset_view(
     PossibleMatchPowersetView {
         num_states,
         matched_terminals,
-        byte_transitions,
+        byte_transitions: ByteRows::new(Arc::from(byte_targets), byte_to_column),
         self_loop_bytes,
         raw_start_to_view,
         boundary_state,
@@ -2005,12 +2009,12 @@ fn append_batched_demand_matches(
 
 fn batched_future_matched_masks(
     matched_masks: &[u128],
-    byte_transitions: &ClassedTransitions,
+    byte_transitions: &ByteRows,
     boundary_state: Option<&[u32]>,
 ) -> Vec<u128> {
     let num_states = matched_masks.len();
     let mut predecessors = vec![Vec::<u32>::new(); num_states];
-    for (source, row) in byte_transitions.targets.chunks(byte_transitions.width.max(1)).enumerate() {
+    for (source, row) in byte_transitions.values.chunks_exact(byte_transitions.width).enumerate() {
         for &target in row {
             if target != u32::MAX {
                 predecessors[target as usize].push(source as u32);
@@ -2332,7 +2336,7 @@ fn collect_batched_demand_possible_matches_precomputed(
     num_terminals: usize,
     matched_terminals: &[Box<[TerminalID]>],
     is_end: &[bool],
-    byte_transitions: &ClassedTransitions,
+    byte_transitions: &ByteRows,
     self_loop_bytes: &[U8Set],
     boundary_state: &[u32],
     demand: &DelayedTerminalDemand,

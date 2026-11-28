@@ -10,6 +10,7 @@ mod lightweight;
 mod minimize;
 mod nfa;
 pub(crate) mod tokenizer;
+pub(crate) mod observation;
 pub(crate) mod regex;
 #[doc(hidden)]
 pub mod runtime_unit_repeat;

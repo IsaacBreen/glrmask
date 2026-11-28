@@ -3,7 +3,9 @@
 //! Each token is classified by its match positions, suffix structure, and end
 //! states across all tokenizer starts.
 
-use super::super::compat::{byte_classes_from_column_hashes, conservative_byte_classes, compute_byte_classes, scan_byte_columns, ByteRows, FlatDfa, TokenizerView, BYTE_COLUMN_HASH_MULTIPLIER};
+use super::super::compat::{byte_classes_from_column_hashes, conservative_byte_classes, scan_byte_columns, ByteRows, FlatDfa, TokenizerView, BYTE_COLUMN_HASH_MULTIPLIER};
+#[cfg(test)]
+use super::super::compat::compute_byte_classes;
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
