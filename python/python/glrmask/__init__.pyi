@@ -67,7 +67,7 @@ print(bytes(output).decode())  # e.g. {"color": "blue"}
 from __future__ import annotations
 from collections.abc import Mapping
 from types import ModuleType
-from typing import Any, ClassVar, Iterable, SupportsIndex, final
+from typing import Any, ClassVar, Iterable, final
 import numpy as np
 from numpy.typing import NDArray
 
@@ -92,7 +92,7 @@ __all__: list[str] = [
 @final
 class Vocab:
     """Each token ID and its bytes."""
-    def __init__(self, id_to_bytes: Mapping[SupportsIndex, bytes], /) -> None:
+    def __init__(self, id_to_bytes: Mapping[int, bytes], /) -> None:
         ...
 
 @final
@@ -150,7 +150,7 @@ class Expr:
 @final
 class TokenSet:
     """A set of token IDs."""
-    def __init__(self, ids: Iterable[SupportsIndex | range], /) -> None:
+    def __init__(self, ids: Iterable[int | range], /) -> None:
         ...
     def __repr__(self) -> str:
         ...
@@ -231,7 +231,7 @@ class ConstraintState:
     def mask_bit_len(self) -> int:
         """The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs."""
         ...
-    def commit_token(self, token_id: SupportsIndex, /) -> bool:
+    def commit_token(self, token_id: int, /) -> bool:
         """Consumes the input. Returns True if the state is viable after the commit (this does not imply it is accepting); False means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns False. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first."""
         ...
     def commit_bytes(self, data: bytes, /) -> bool:
