@@ -382,58 +382,199 @@ fn build_common_many_to_one_id_map(
     project: impl Fn(&InternalIdMap) -> &ManyToOneIdMap,
     allow_unmapped: bool,
 ) -> ManyToOneIdMap {
-    if let [left, right] = inputs {
+    let maps = inputs.iter().map(|input| project(input)).collect::<Vec<_>>();
+    refine_observation_classes(&maps, num_originals, allow_unmapped, true)
+}
+
+/// Exact common partition of observations in the same original coordinate.
+/// Lexicographic numbering preserves input-class locality; first-seen order
+/// avoids sorting when a consumer has no such preference.
+pub fn refine_observation_classes(
+    inputs: &[&ManyToOneIdMap],
+    num_originals: usize,
+    allow_unmapped: bool,
+    lexicographic: bool,
+) -> ManyToOneIdMap {
+    if lexicographic && let [left, right] = inputs {
         return build_common_many_to_one_id_map_pair(
-            project(left),
-            project(right),
-            num_originals,
-            allow_unmapped,
+            left, right, num_originals, allow_unmapped,
         );
     }
+    if allow_unmapped && lexicographic && inputs.len() > 2 {
+        return refine_sparse_memberships(inputs, num_originals, true, false).0;
+    }
 
-    let mut composite_to_class: HashMap<Vec<u32>, u32> = HashMap::new();
+    let mut composite_to_class = FxHashMap::<Box<[u32]>, u32>::default();
+    let mut composite = vec![u32::MAX; inputs.len()];
     let mut original_to_internal = vec![u32::MAX; num_originals];
-    let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
-    let mut representatives: Vec<u32> = Vec::new();
+    let mut internal_to_originals = Vec::<Vec<u32>>::new();
+    let mut representatives = Vec::<u32>::new();
 
-    for (original, internal_slot) in original_to_internal.iter_mut().enumerate() {
-        let composite: Vec<u32> = inputs
-            .iter()
-            .map(|input| {
-                project(input)
-                    .original_to_internal
-                    .get(original)
-                    .copied()
-                    .unwrap_or(u32::MAX)
-            })
-            .collect();
+    for (original, slot) in original_to_internal.iter_mut().enumerate() {
+        for (value, input) in composite.iter_mut().zip(inputs) {
+            *value = input.original_to_internal.get(original)
+                .copied().unwrap_or(u32::MAX);
+        }
         if allow_unmapped && composite.iter().all(|&value| value == u32::MAX) {
             continue;
         }
-
-        let next_id = internal_to_originals.len() as u32;
-        let class_id = *composite_to_class.entry(composite).or_insert_with(|| {
+        // Borrow the reusable lookup key. Allocate a signature only for a
+        // distinct class, rather than for every original state.
+        let class = if let Some(&class) = composite_to_class.get(composite.as_slice()) {
+            class
+        } else {
+            let class = internal_to_originals.len() as u32;
+            composite_to_class.insert(composite.clone().into_boxed_slice(), class);
             internal_to_originals.push(Vec::new());
             representatives.push(original as u32);
-            next_id
+            class
+        };
+        *slot = class;
+        internal_to_originals[class as usize].push(original as u32);
+    }
+    if lexicographic {
+        reorder_common_classes(composite_to_class, &mut original_to_internal,
+            &mut internal_to_originals, &mut representatives, allow_unmapped);
+    }
+
+    ManyToOneIdMap { original_to_internal, internal_to_originals,
+        representative_original_ids: representatives }
+}
+
+/// A persistent signature prefix, interned once for each distinct
+/// membership extension. An original carries only its current head ID.
+struct Membership {
+    previous: u32,
+    source: u32,
+    local_class: u32,
+    size: usize,
+    representative: u32,
+    global: u32,
+}
+
+/// Refine sparse observations by actual inverse memberships, not a dense
+/// original-by-source product. Each source extends a signature at most
+/// once per original. Distinct signature prefixes share their history.
+///
+/// Source-local order puts single-owner classes first (contiguous token
+/// offsets), followed by overlapping classes in first-original order.
+/// Lexicographic order instead retains the ordinary common-map convention.
+/// The optional fanout is a derived projection of the same membership
+/// chains, not a second reconstruction of the partition.
+pub fn refine_sparse_memberships(
+    inputs: &[&ManyToOneIdMap],
+    original_count: usize,
+    lexicographic: bool,
+    build_fanout: bool,
+) -> (ManyToOneIdMap, Option<Vec<Vec<Vec<u32>>>>) {
+    const ABSENT: u32 = u32::MAX;
+    let mut heads = vec![ABSENT; original_count];
+    let mut nodes = Vec::<Membership>::new();
+    let mut extensions = FxHashMap::<u32, u32>::default();
+    for (source, input) in inputs.iter().enumerate() {
+        let source = u32::try_from(source).expect("too many observation sources");
+        for (local_class, originals) in input.internal_to_originals.iter().enumerate() {
+            let Some(&first) = originals.first() else { continue };
+            let local_class = u32::try_from(local_class).expect("too many observation classes");
+            let first_previous = heads[first as usize];
+            let mut extend = |previous| {
+                let id = u32::try_from(nodes.len()).expect("observation signature arena overflow");
+                assert_ne!(id, ABSENT, "observation signature arena exhausted");
+                nodes.push(Membership {
+                    previous, source, local_class, size: 0,
+                    representative: ABSENT, global: ABSENT,
+                });
+                id
+            };
+            let first_head = extend(first_previous);
+            extensions.clear();
+            for &original in originals {
+                let head = &mut heads[original as usize];
+                *head = if *head == first_previous {
+                    first_head
+                } else {
+                    *extensions.entry(*head).or_insert_with(|| extend(*head))
+                };
+            }
+        }
+    }
+
+    // Only signatures present at the end are classes. Earlier prefixes
+    // survive solely as compact witnesses for their descendants' fanout.
+    for (original, &head) in heads.iter().enumerate() {
+        if head != ABSENT {
+            let node = &mut nodes[head as usize];
+            node.size += 1;
+            if node.representative == ABSENT {
+                node.representative = original as u32;
+            }
+        }
+    }
+
+    let order = if lexicographic {
+        let mut order = nodes.iter().enumerate()
+            .filter_map(|(id, node)| (node.size != 0).then_some(id as u32))
+            .collect::<Vec<_>>();
+        order.sort_unstable_by(|&left, &right| {
+            let left = nodes[left as usize].representative as usize;
+            let right = nodes[right as usize].representative as usize;
+            for input in inputs {
+                let left = input.original_to_internal.get(left).copied().unwrap_or(ABSENT);
+                let right = input.original_to_internal.get(right).copied().unwrap_or(ABSENT);
+                let order = left.cmp(&right);
+                if !order.is_eq() { return order }
+            }
+            std::cmp::Ordering::Equal
         });
-        *internal_slot = class_id;
-        internal_to_originals[class_id as usize].push(original as u32);
+        order
+    } else {
+        // Single-owner nodes were created in source/local-class order.
+        let mut order = nodes.iter().enumerate()
+            .filter_map(|(id, node)| (node.size != 0 && node.previous == ABSENT).then_some(id as u32))
+            .collect::<Vec<_>>();
+        for (original, &head) in heads.iter().enumerate() {
+            if head != ABSENT {
+                let node = &nodes[head as usize];
+                if node.previous != ABSENT && node.representative as usize == original {
+                    order.push(head);
+                }
+            }
+        }
+        order
+    };
+
+    let mut local_to_global = build_fanout.then(|| inputs.iter()
+        .map(|input| vec![Vec::<u32>::new(); input.internal_to_originals.len()])
+        .collect::<Vec<_>>());
+    let mut groups = Vec::with_capacity(order.len());
+    let mut representatives = Vec::with_capacity(order.len());
+    for head in order {
+        let node = &mut nodes[head as usize];
+        let global = groups.len() as u32;
+        node.global = global;
+        groups.push(Vec::with_capacity(node.size));
+        representatives.push(node.representative);
+        if let Some(fanout) = &mut local_to_global {
+            let mut membership = head;
+            while membership != ABSENT {
+                let node = &nodes[membership as usize];
+                fanout[node.source as usize][node.local_class as usize].push(global);
+                membership = node.previous;
+            }
+        }
+    }
+    for (original, head) in heads.iter_mut().enumerate() {
+        if *head != ABSENT {
+            *head = nodes[*head as usize].global;
+            groups[*head as usize].push(original as u32);
+        }
     }
 
-    reorder_common_classes(
-        composite_to_class,
-        &mut original_to_internal,
-        &mut internal_to_originals,
-        &mut representatives,
-        allow_unmapped,
-    );
-
-    ManyToOneIdMap {
-        original_to_internal,
-        internal_to_originals,
+    (ManyToOneIdMap {
+        original_to_internal: heads,
+        internal_to_originals: groups,
         representative_original_ids: representatives,
-    }
+    }, local_to_global)
 }
 
 fn build_common_many_to_one_id_map_pair(
@@ -442,56 +583,17 @@ fn build_common_many_to_one_id_map_pair(
     num_originals: usize,
     allow_unmapped: bool,
 ) -> ManyToOneIdMap {
-    let use_sparse_unmapped_pair = std::env::var("GLRMASK_SPARSE_UNMAPPED_COMMON_PAIR_MAP")
-        .map(|value| {
-            let trimmed = value.trim();
-            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
-        })
-        .unwrap_or(true);
-    if allow_unmapped && use_sparse_unmapped_pair {
-        let direct_sparse = std::env::var("GLRMASK_DIRECT_SPARSE_COMMON_PAIR_MAP")
-            .map(|value| {
-                let trimmed = value.trim();
-                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(true);
-        if direct_sparse {
-            let direct = build_common_many_to_one_id_map_pair_direct_sparse(
-                left,
-                right,
-                num_originals,
-            );
-            if std::env::var_os("GLRMASK_VALIDATE_DIRECT_SPARSE_COMMON_PAIR_MAP").is_some() {
-                let reference = build_common_many_to_one_id_map_pair_sparse_unmapped(
-                    left,
-                    right,
-                    num_originals,
-                );
-                assert_eq!(
-                    direct.original_to_internal,
-                    reference.original_to_internal,
-                    "direct sparse common pair original map differs from reference",
-                );
-                assert_eq!(
-                    direct.internal_to_originals,
-                    reference.internal_to_originals,
-                    "direct sparse common pair classes differ from reference",
-                );
-                assert_eq!(
-                    direct.representative_original_ids,
-                    reference.representative_original_ids,
-                    "direct sparse common pair representatives differ from reference",
-                );
-            }
-            return direct;
-        }
-        return build_common_many_to_one_id_map_pair_sparse_unmapped(
-            left,
-            right,
-            num_originals,
-        );
+    if !allow_unmapped {
+        return build_common_many_to_one_id_map_pair_hashed(left, right, num_originals, false);
     }
-    build_common_many_to_one_id_map_pair_hashed(left, right, num_originals, allow_unmapped)
+    let direct = build_common_many_to_one_id_map_pair_direct_sparse(left, right, num_originals);
+    if std::env::var_os("GLRMASK_VALIDATE_DIRECT_SPARSE_COMMON_PAIR_MAP").is_some() {
+        let reference = build_common_many_to_one_id_map_pair_hashed(left, right, num_originals, true);
+        assert_eq!(direct.original_to_internal, reference.original_to_internal);
+        assert_eq!(direct.internal_to_originals, reference.internal_to_originals);
+        assert_eq!(direct.representative_original_ids, reference.representative_original_ids);
+    }
+    direct
 }
 
 fn build_common_many_to_one_id_map_pair_direct_sparse(
@@ -581,104 +683,6 @@ fn build_common_many_to_one_id_map_pair_direct_sparse(
     }
 }
 
-fn build_common_many_to_one_id_map_pair_sparse_unmapped(
-    left: &ManyToOneIdMap,
-    right: &ManyToOneIdMap,
-    num_originals: usize,
-) -> ManyToOneIdMap {
-    let left_classes = left.internal_to_originals.len();
-    let right_classes = right.internal_to_originals.len();
-    let mut left_only_counts = vec![0usize; left_classes];
-    let mut right_only_counts = vec![0usize; right_classes];
-    let mut overlap_counts = FxHashMap::<(u32, u32), usize>::default();
-
-    let pair = |original: usize| {
-        let left_internal = left
-            .original_to_internal
-            .get(original)
-            .copied()
-            .unwrap_or(u32::MAX);
-        let right_internal = right
-            .original_to_internal
-            .get(original)
-            .copied()
-            .unwrap_or(u32::MAX);
-        (left_internal, right_internal)
-    };
-
-    for original in 0..num_originals {
-        let (left_internal, right_internal) = pair(original);
-        match (left_internal, right_internal) {
-            (u32::MAX, u32::MAX) => {}
-            (left, u32::MAX) => left_only_counts[left as usize] += 1,
-            (u32::MAX, right) => right_only_counts[right as usize] += 1,
-            (left, right) => *overlap_counts.entry((left, right)).or_insert(0) += 1,
-        }
-    }
-
-    let mut overlap_keys = overlap_counts.keys().copied().collect::<Vec<_>>();
-    overlap_keys.sort_unstable();
-
-    let mut left_only_class = vec![u32::MAX; left_classes];
-    let mut right_only_class = vec![u32::MAX; right_classes];
-    let mut overlap_class = FxHashMap::<(u32, u32), u32>::default();
-    let mut internal_to_originals = Vec::<Vec<u32>>::new();
-    let mut representatives = Vec::<u32>::new();
-
-    let mut overlap_cursor = 0usize;
-    for left_class in 0..left_classes {
-        while overlap_cursor < overlap_keys.len()
-            && overlap_keys[overlap_cursor].0 as usize == left_class
-        {
-            let key = overlap_keys[overlap_cursor];
-            let class = internal_to_originals.len() as u32;
-            overlap_class.insert(key, class);
-            internal_to_originals.push(Vec::with_capacity(overlap_counts[&key]));
-            representatives.push(u32::MAX);
-            overlap_cursor += 1;
-        }
-        let count = left_only_counts[left_class];
-        if count != 0 {
-            left_only_class[left_class] = internal_to_originals.len() as u32;
-            internal_to_originals.push(Vec::with_capacity(count));
-            representatives.push(u32::MAX);
-        }
-    }
-    debug_assert_eq!(overlap_cursor, overlap_keys.len());
-    for right_class in 0..right_classes {
-        let count = right_only_counts[right_class];
-        if count != 0 {
-            right_only_class[right_class] = internal_to_originals.len() as u32;
-            internal_to_originals.push(Vec::with_capacity(count));
-            representatives.push(u32::MAX);
-        }
-    }
-
-    let mut original_to_internal = vec![u32::MAX; num_originals];
-    for (original, slot) in original_to_internal.iter_mut().enumerate() {
-        let (left_internal, right_internal) = pair(original);
-        let class = match (left_internal, right_internal) {
-            (u32::MAX, u32::MAX) => continue,
-            (left, u32::MAX) => left_only_class[left as usize],
-            (u32::MAX, right) => right_only_class[right as usize],
-            (left, right) => overlap_class[&(left, right)],
-        };
-        debug_assert_ne!(class, u32::MAX);
-        *slot = class;
-        let originals = &mut internal_to_originals[class as usize];
-        if originals.is_empty() {
-            representatives[class as usize] = original as u32;
-        }
-        originals.push(original as u32);
-    }
-
-    ManyToOneIdMap {
-        original_to_internal,
-        internal_to_originals,
-        representative_original_ids: representatives,
-    }
-}
-
 fn build_common_many_to_one_id_map_pair_hashed(
     left: &ManyToOneIdMap,
     right: &ManyToOneIdMap,
@@ -716,7 +720,7 @@ fn build_common_many_to_one_id_map_pair_hashed(
         internal_to_originals[class_id as usize].push(original as u32);
     }
 
-    reorder_common_pair_classes(
+    reorder_common_classes(
         composite_to_class,
         &mut original_to_internal,
         &mut internal_to_originals,
@@ -731,8 +735,8 @@ fn build_common_many_to_one_id_map_pair_hashed(
     }
 }
 
-fn reorder_common_pair_classes(
-    composite_to_class: FxHashMap<(u32, u32), u32>,
+fn reorder_common_classes<K: Ord>(
+    composite_to_class: impl IntoIterator<Item = (K, u32)>,
     original_to_internal: &mut [u32],
     internal_to_originals: &mut Vec<Vec<u32>>,
     representatives: &mut Vec<u32>,
@@ -743,45 +747,8 @@ fn reorder_common_pair_classes(
         return;
     }
 
-    let mut sorted: Vec<((u32, u32), u32)> = composite_to_class.into_iter().collect();
-    sorted.sort_unstable_by_key(|(composite, _)| *composite);
-
-    let mut old_to_new = vec![0u32; num_classes];
-    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
-        old_to_new[*old_id as usize] = new_id as u32;
-    }
-
-    for value in original_to_internal.iter_mut() {
-        if *value == u32::MAX && allow_unmapped {
-            continue;
-        }
-        *value = old_to_new[*value as usize];
-    }
-
-    let mut new_internal_to_originals = vec![Vec::new(); num_classes];
-    let mut new_representatives = vec![u32::MAX; num_classes];
-    for (new_id, (_, old_id)) in sorted.iter().enumerate() {
-        new_internal_to_originals[new_id] = std::mem::take(&mut internal_to_originals[*old_id as usize]);
-        new_representatives[new_id] = representatives[*old_id as usize];
-    }
-    *internal_to_originals = new_internal_to_originals;
-    *representatives = new_representatives;
-}
-
-fn reorder_common_classes(
-    composite_to_class: HashMap<Vec<u32>, u32>,
-    original_to_internal: &mut [u32],
-    internal_to_originals: &mut Vec<Vec<u32>>,
-    representatives: &mut Vec<u32>,
-    allow_unmapped: bool,
-) {
-    let num_classes = internal_to_originals.len();
-    if num_classes <= 1 {
-        return;
-    }
-
-    let mut sorted: Vec<(Vec<u32>, u32)> = composite_to_class.into_iter().collect();
-    sorted.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut sorted = composite_to_class.into_iter().collect::<Vec<_>>();
+    sorted.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
     let mut old_to_new = vec![0u32; num_classes];
     for (new_id, (_, old_id)) in sorted.iter().enumerate() {
@@ -1944,11 +1911,11 @@ mod tests {
                 allow_unmapped,
             );
             if allow_unmapped {
-                let sparse = build_common_many_to_one_id_map_pair_sparse_unmapped(
-                    &left,
-                    &right,
-                    num_originals,
+                let sparse = build_common_many_to_one_id_map_pair_direct_sparse(
+                    &left, &right, num_originals,
                 );
+                let refined = refine_sparse_memberships(&[&left, &right], num_originals, true, true).0;
+                assert_eq!(refined.original_to_internal, hashed.original_to_internal);
                 assert_eq!(sparse.original_to_internal, hashed.original_to_internal);
                 assert_eq!(sparse.internal_to_originals, hashed.internal_to_originals);
                 assert_eq!(
