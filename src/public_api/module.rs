@@ -1104,7 +1104,7 @@ impl Module {
             } else {
                 local.link_with(engine.build_options())?
             };
-            base.materialize_composition_link_metadata_for_compilation().map_err(Error::Compilation)?;
+            base.materialize_composition_metadata_for_compilation().map_err(Error::Compilation)?;
             Ok(base)
         };
         let mut parent = build_base()?;

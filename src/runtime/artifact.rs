@@ -9163,17 +9163,10 @@ constraint_data_schema! {
     pub(crate) deferred_terminal_exprs_blob: Option<DeferredTerminalExprBytes>,
     @serde(skip, default)
     pub(crate) deferred_terminal_exprs: OnceLock<Arc<[Expr]>>,
-    /// Serialized composition-only metadata (reset-token rows, parser template
-    /// cache, symbolic characterizations, and grammar summary). Current-format
-    /// loads keep this cold section backed by the artifact and materialize it
-    /// only if the constraint is later used as a composition component.
+    /// Cold composition metadata: grammar adjacency, trigger and boundary
+    /// candidate proof. Materialized only on an owned link input.
     @serde(skip, default)
     pub(crate) deferred_composition_metadata_blob: Option<DeferredCompositionMetadataBytes>,
-    /// Runtime-only marker distinguishing "the lightweight linking metadata
-    /// has already been decoded" from "the heavy static compiler-cache blob is
-    /// still deferred". Dynamic A+B intentionally keeps the latter deferred.
-    @serde(skip, default)
-    pub(crate) composition_link_metadata_materialized: bool,
     /// Large current-format GLR rule vectors are composition metadata rather
     /// than runtime parser data. Keep their canonical payload undecoded during
     /// ordinary load; composition materializes it lazily through

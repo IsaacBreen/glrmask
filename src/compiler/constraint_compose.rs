@@ -1204,7 +1204,6 @@ fn build_recursive_coordinator(
         deferred_terminal_exprs_blob: None,
         deferred_terminal_exprs: Default::default(),
         deferred_composition_metadata_blob: None,
-        composition_link_metadata_materialized: true,
         deferred_table_rules_blob: None,
         deferred_table_rules: Default::default(),
     });
@@ -1289,7 +1288,7 @@ fn compose_dynamic_recursive_shared_fast(
     if children.is_empty() {
         return Err("constraint composition requires at least one child".into());
     }
-    parent.materialize_composition_link_metadata_for_compilation()?;
+    parent.materialize_composition_metadata_for_compilation()?;
     let components = std::iter::once(&parent)
         .chain(children.iter().map(|child| child.constraint))
         .collect::<Vec<_>>();
@@ -1689,8 +1688,8 @@ fn compose_constraints_owned_parent_impl(
     let shared=shared_children.ok_or("retained-LR composition requires owned shared children")?;
     let owned=shared.iter().map(|child| {
         let mut child=child.clone();
-        if child.deferred_composition_metadata_blob.is_some() && !child.composition_link_metadata_materialized {
-            Arc::make_mut(&mut child).materialize_composition_link_metadata_for_compilation()?;
+        if child.deferred_composition_metadata_blob.is_some() {
+            Arc::make_mut(&mut child).materialize_composition_metadata_for_compilation()?;
         }
         Ok(child)
     }).collect::<Result<Vec<_>,String>>()?;
@@ -1974,7 +1973,7 @@ mod tests {
         let parent_bytes = parent.save();
         for (expected_text, child_bytes) in [("Xab!", child.save()), ("XXab!!", inner.save())] {
             let loaded_child = Arc::new(Constraint::load(&child_bytes, &vocab).unwrap());
-            let was_materialized = loaded_child.composition_link_metadata_materialized;
+            let was_materialized = loaded_child.deferred_composition_metadata_blob.is_none();
             if expected_text == "Xab!" {
                 assert!(loaded_child.deferred_composition_metadata_blob.is_some());
                 assert!(!was_materialized, "ordinary loaded child must exercise deferred link preparation");
@@ -2008,7 +2007,7 @@ mod tests {
                 assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
                     &restored, &reference, &vocab, 6, "unprepared dynamic link reload",
                 );
-                assert_eq!(loaded_child.composition_link_metadata_materialized, was_materialized,
+                assert_eq!(loaded_child.deferred_composition_metadata_blob.is_none(), was_materialized,
                     "preparing a retained child must not mutate the caller's shared/borrowed input");
                 assert_eq!(loaded_child.save(), child_bytes);
             }

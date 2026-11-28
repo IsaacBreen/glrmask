@@ -653,7 +653,7 @@ pub mod __private {
 
         fn prepare_for_dynamic_composition(&mut self, vocab: &Vocab) -> Result<()> {
             Constraint::bind_vocab_exact(self, vocab).map_err(Error::Compilation)?;
-            self.materialize_composition_link_metadata_for_compilation()
+            self.materialize_composition_metadata_for_compilation()
                 .map_err(Error::Compilation)
         }
 

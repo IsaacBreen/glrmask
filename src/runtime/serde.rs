@@ -517,23 +517,11 @@ struct ConstraintCompositionLinkMetadata {
     boundary_candidate_summary: BoundaryCandidateSummaryWire,
 }
 
-#[derive(Default, Serialize, Deserialize)]
-struct ConstraintCompositionCacheMetadata {
-    #[serde(rename = "composition_parser_templates_by_terminal")]
-    _obsolete_templates: DiscardedSequence<Option<crate::automata::unweighted_u32::dfa::DFA>>,
-    #[serde(rename = "composition_parser_characterizations_by_terminal")]
-    _obsolete_characterizations: DiscardedSequence<Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>>,
+struct CompositionMetadataPart<'a> {
+    raw_len: usize,
+    wire: &'a [u8],
+    compressed: bool,
 }
-
-struct CompositionMetadataSplitParts<'a> {
-    link_raw_len: usize,
-    link_wire: &'a [u8],
-    link_compressed: bool,
-    cache_raw_len: usize,
-    cache_wire: &'a [u8],
-    cache_compressed: bool,
-}
-
 fn encode_composition_metadata_part(raw: Vec<u8>) -> (usize, Vec<u8>, bool) {
     let raw_len = raw.len();
     if raw_len >= COMPOSITION_METADATA_COMPRESS_MIN_BYTES {
@@ -546,35 +534,28 @@ fn encode_composition_metadata_part(raw: Vec<u8>) -> (usize, Vec<u8>, bool) {
     (raw_len, raw, false)
 }
 
-fn assemble_composition_metadata_split(
-    link_raw_len: usize,
-    link_wire: &[u8],
-    link_compressed: bool,
-    cache_raw_len: usize,
-    cache_wire: &[u8],
-    cache_compressed: bool,
+fn assemble_composition_metadata(
+    raw_len: usize,
+    wire: &[u8],
+    compressed: bool,
 ) -> Vec<u8> {
-    let mut flags = 0u32;
-    if link_compressed {
-        flags |= COMPOSITION_METADATA_SPLIT_LINK_COMPRESSED;
-    }
-    if cache_compressed {
-        flags |= COMPOSITION_METADATA_SPLIT_CACHE_COMPRESSED;
-    }
+    // Keep the CMS6 framing readable by older decoders. The former cache
+    // section is two empty bincode sequences; no executable data lives there.
+    const EMPTY_CACHE: [u8; 16] = [0; 16];
+    let flags = if compressed { COMPOSITION_METADATA_SPLIT_LINK_COMPRESSED } else { 0 };
     let mut out = Vec::with_capacity(
-        COMPOSITION_METADATA_SPLIT_HEADER_LEN + link_wire.len() + cache_wire.len(),
+        COMPOSITION_METADATA_SPLIT_HEADER_LEN + wire.len() + EMPTY_CACHE.len(),
     );
     out.extend_from_slice(&COMPOSITION_METADATA_SPLIT_MAGIC);
     out.extend_from_slice(&flags.to_le_bytes());
-    out.extend_from_slice(&(link_raw_len as u64).to_le_bytes());
-    out.extend_from_slice(&(link_wire.len() as u64).to_le_bytes());
-    out.extend_from_slice(&(cache_raw_len as u64).to_le_bytes());
-    out.extend_from_slice(&(cache_wire.len() as u64).to_le_bytes());
-    out.extend_from_slice(link_wire);
-    out.extend_from_slice(cache_wire);
+    out.extend_from_slice(&(raw_len as u64).to_le_bytes());
+    out.extend_from_slice(&(wire.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(EMPTY_CACHE.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(EMPTY_CACHE.len() as u64).to_le_bytes());
+    out.extend_from_slice(wire);
+    out.extend_from_slice(&EMPTY_CACHE);
     out
 }
-
 fn decode_composition_metadata_part<'a>(
     wire: &'a [u8],
     raw_len: usize,
@@ -596,9 +577,9 @@ fn decode_composition_metadata_part<'a>(
     Ok(Cow::Owned(raw))
 }
 
-fn split_composition_metadata_parts(
+fn composition_metadata_part(
     input: &[u8],
-) -> Result<CompositionMetadataSplitParts<'_>, String> {
+) -> Result<CompositionMetadataPart<'_>, String> {
     if input.len() < COMPOSITION_METADATA_SPLIT_HEADER_LEN
         || !input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
     {
@@ -644,13 +625,11 @@ fn split_composition_metadata_parts(
     if cache_compressed && (cache_raw_len == 0 || cache_wire_len == 0) {
         return Err("invalid compressed split composition cache section".to_owned());
     }
-    Ok(CompositionMetadataSplitParts {
-        link_raw_len,
-        link_wire: &input[link_start..link_end],
-        link_compressed,
-        cache_raw_len,
-        cache_wire: &input[link_end..cache_end],
-        cache_compressed,
+    // Obsolete compiler-cache bytes are structurally framed but never decoded.
+    Ok(CompositionMetadataPart {
+        raw_len: link_raw_len,
+        wire: &input[link_start..link_end],
+        compressed: link_compressed,
     })
 }
 
@@ -669,59 +648,19 @@ fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
         boundary_candidate_summary: boundary_candidate_summary_wire(constraint),
     })
     .expect("composition link metadata serialization should succeed");
-    let cache_raw = bincode::serialize(&ConstraintCompositionCacheMetadata::default())
-        .expect("empty legacy composition cache serialization should succeed");
-    let (link_raw_len, link_wire, link_compressed) =
-        encode_composition_metadata_part(link_raw);
-    let (cache_raw_len, cache_wire, cache_compressed) =
-        encode_composition_metadata_part(cache_raw);
-    assemble_composition_metadata_split(
-        link_raw_len,
-        &link_wire,
-        link_compressed,
-        cache_raw_len,
-        &cache_wire,
-        cache_compressed,
-    )
+    let (raw_len, wire, compressed) = encode_composition_metadata_part(link_raw);
+    assemble_composition_metadata(raw_len, &wire, compressed)
 }
 
 fn encode_composition_metadata_for_save(constraint: &Constraint) -> Vec<u8> {
-    let Some(blob) = constraint.deferred_composition_metadata_blob.as_ref() else {
-        return encode_composition_metadata(constraint);
-    };
-    if !constraint.composition_link_metadata_materialized {
-        return blob.as_slice().to_vec();
+    match &constraint.deferred_composition_metadata_blob {
+        Some(blob) => blob.as_slice().to_vec(),
+        None => encode_composition_metadata(constraint),
     }
-
-    let link_raw = bincode::serialize(&ConstraintCompositionLinkMetadataRef {
-        composition_reset_tokens_by_terminal: &[],
-        composition_grammar_summary: &constraint.composition_grammar_summary,
-        boundary_trigger: boundary_trigger_wire_ref(&constraint.boundary_trigger),
-        boundary_candidate_summary: boundary_candidate_summary_wire(constraint),
-    })
-    .expect("composition link metadata serialization should succeed");
-    let (link_raw_len, link_wire, link_compressed) =
-        encode_composition_metadata_part(link_raw);
-
-    let input = blob.as_slice();
-    if input.is_empty() {
-        return encode_composition_metadata(constraint);
-    }
-    let parts = split_composition_metadata_parts(input)
-        .expect("loaded deferred composition metadata must remain structurally valid");
-    assemble_composition_metadata_split(
-        link_raw_len,
-        &link_wire,
-        link_compressed,
-        parts.cache_raw_len,
-        parts.cache_wire,
-        parts.cache_compressed,
-    )
 }
-
 fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
     if !input.is_empty() {
-        split_composition_metadata_parts(input)?;
+        composition_metadata_part(input)?;
     }
     Ok(())
 }
@@ -735,43 +674,16 @@ fn empty_composition_link_metadata() -> ConstraintCompositionLinkMetadata {
     }
 }
 
-fn decode_composition_link_part(
-    parts: &CompositionMetadataSplitParts<'_>,
-) -> Result<ConstraintCompositionLinkMetadata, String> {
-    let raw = decode_composition_metadata_part(
-        parts.link_wire,
-        parts.link_raw_len,
-        parts.link_compressed,
-    )?;
-    bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())
-}
-
 fn decode_composition_link_metadata(
     input: &[u8],
 ) -> Result<ConstraintCompositionLinkMetadata, String> {
     if input.is_empty() {
         return Ok(empty_composition_link_metadata());
     }
-    decode_composition_link_part(&split_composition_metadata_parts(input)?)
+    let part = composition_metadata_part(input)?;
+    let raw = decode_composition_metadata_part(part.wire, part.raw_len, part.compressed)?;
+    bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())
 }
-
-fn decode_composition_metadata(
-    input: &[u8],
-) -> Result<(ConstraintCompositionLinkMetadata, ConstraintCompositionCacheMetadata), String> {
-    if input.is_empty() {
-        return Ok((empty_composition_link_metadata(), ConstraintCompositionCacheMetadata::default()));
-    }
-    let parts = split_composition_metadata_parts(input)?;
-    let link = decode_composition_link_part(&parts)?;
-    let raw = decode_composition_metadata_part(
-        parts.cache_wire,
-        parts.cache_raw_len,
-        parts.cache_compressed,
-    )?;
-    let cache = bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
-    Ok((link, cache))
-}
-
 // Decoding finishes before any cache work or recursive component load begins.
 // The heap-owned Constraint also avoids retaining an inline core temporary in
 // each recursive loader frame; it is moved out only after finalization ends.
@@ -2294,35 +2206,17 @@ impl Constraint {
         self.serialized_artifact_cache = Some(std::sync::Arc::new(bytes));
     }
 
+    /// Materialize the sole cold composition metadata section on an owned
+    /// constraint. No parser compiler state is reconstructed from it.
     pub(crate) fn materialize_composition_metadata_for_compilation(
         &mut self,
     ) -> Result<(), String> {
         let Some(blob) = self.deferred_composition_metadata_blob.clone() else {
             return Ok(());
         };
-        let (metadata, _) = decode_composition_metadata(blob.as_slice())?;
-        self.install_composition_link_metadata(metadata)?;
-        self.deferred_composition_metadata_blob = None;
-        Ok(())
-    }
-
-    /// Materialize only the metadata needed to link an explicit dynamic A+B
-    /// composition. New split-format artifacts keep this data independent of
-    /// the large static parser-template caches, so dynamic late binding can
-    /// remain cheap. The deferred blob is intentionally retained: a later
-    /// static/generic composition of the same constraint can still request the
-    /// complete compiler cache through `materialize_composition_metadata_for_compilation`.
-    pub(crate) fn materialize_composition_link_metadata_for_compilation(
-        &mut self,
-    ) -> Result<(), String> {
-        let Some(blob) = self.deferred_composition_metadata_blob.clone() else {
-            return Ok(());
-        };
         let metadata = decode_composition_link_metadata(blob.as_slice())?;
-        self.install_composition_link_metadata(metadata)?;
-        Ok(())
+        self.install_composition_link_metadata(metadata)
     }
-
     fn install_composition_link_metadata(
         &mut self,
         metadata: ConstraintCompositionLinkMetadata,
@@ -2336,7 +2230,7 @@ impl Constraint {
             )?;
             let _ = self.boundary_candidate_summary.set(summary);
         }
-        self.composition_link_metadata_materialized = true;
+        self.deferred_composition_metadata_blob = None;
         Ok(())
     }
 
@@ -3745,8 +3639,6 @@ impl Constraint {
                 ))
             }
         };
-        constraint.composition_link_metadata_materialized =
-            constraint.deferred_composition_metadata_blob.is_none();
         if let Some(vocab) = external_vocab {
             constraint.token_bytes = crate::runtime::TokenByteDomain::from_entries(vocab.entries_arc());
         }
@@ -4799,7 +4691,6 @@ mod tests {
             wire[..4].copy_from_slice(magic);
             assert!(validate_composition_metadata_wire(&wire).is_err());
             assert!(decode_composition_link_metadata(&wire).is_err());
-            assert!(decode_composition_metadata(&wire).is_err());
         }
     }
 
@@ -4815,7 +4706,7 @@ mod tests {
             crate::runtime::BoundaryTrigger::None
         ));
         loaded
-            .materialize_composition_link_metadata_for_compilation()
+            .materialize_composition_metadata_for_compilation()
             .unwrap();
         assert_eq!(loaded.boundary_trigger.token_summary(), Some(&[1u32, 3u32][..]));
     }
@@ -4841,7 +4732,7 @@ mod tests {
         let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         assert!(loaded.boundary_candidate_summary.get().is_none());
         loaded
-            .materialize_composition_link_metadata_for_compilation()
+            .materialize_composition_metadata_for_compilation()
             .unwrap();
         let summary = loaded
             .boundary_candidate_summary
@@ -4893,7 +4784,7 @@ mod tests {
             constraint.boundary_candidate_summary.set(summary.clone()).unwrap();
             let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
             loaded
-                .materialize_composition_link_metadata_for_compilation()
+                .materialize_composition_metadata_for_compilation()
                 .unwrap();
             let restored = loaded
                 .boundary_candidate_summary
@@ -4943,7 +4834,7 @@ mod tests {
             .unwrap();
         let mut loaded = Constraint::load(constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         loaded
-            .materialize_composition_link_metadata_for_compilation()
+            .materialize_composition_metadata_for_compilation()
             .unwrap();
         let crate::runtime::BoundaryCandidateSummary::Known { tokens, .. } = loaded
             .boundary_candidate_summary
@@ -5023,7 +4914,7 @@ mod tests {
     }
 
     #[test]
-    fn split_composition_metadata_allows_link_only_materialization() {
+    fn composition_metadata_is_materialized_once() {
         let constraint = tiny_constraint();
         let expected_summary = constraint.composition_grammar_summary.clone();
         assert!(expected_summary.is_some());
@@ -5034,21 +4925,11 @@ mod tests {
             .as_ref()
             .expect("current artifact should defer composition metadata");
         assert!(deferred.as_slice().starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC));
-        assert!(!loaded.composition_link_metadata_materialized);
-
-        loaded
-            .materialize_composition_link_metadata_for_compilation()
-            .unwrap();
-        assert_eq!(loaded.composition_grammar_summary, expected_summary);
-        assert!(loaded.composition_link_metadata_materialized);
-        assert!(
-            loaded.deferred_composition_metadata_blob.is_some(),
-            "full compiler metadata must remain available for a later static composition",
-        );
 
         loaded
             .materialize_composition_metadata_for_compilation()
             .unwrap();
+        assert_eq!(loaded.composition_grammar_summary, expected_summary);
         assert!(loaded.deferred_composition_metadata_blob.is_none());
     }
 
@@ -5091,9 +4972,9 @@ mod tests {
             boundary_candidate_summary: boundary_candidate_summary_wire(&constraint),
         }).unwrap();
         let compressed = zstd::bulk::compress(&raw, CONSTRAINT_COMPRESSION_LEVEL).unwrap();
-        let invalid_length = assemble_composition_metadata_split(raw.len()+1, &compressed, true, 0, &[], false);
+        let invalid_length = assemble_composition_metadata(raw.len()+1, &compressed, true);
         assert!(decode_composition_link_metadata(&invalid_length).is_err());
-        let invalid_compression = assemble_composition_metadata_split(raw.len(), &[0; 8], true, 0, &[], false);
+        let invalid_compression = assemble_composition_metadata(raw.len(), &[0; 8], true);
         assert!(decode_composition_link_metadata(&invalid_compression).is_err());
     }
 

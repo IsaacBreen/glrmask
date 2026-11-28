@@ -4986,8 +4986,7 @@ fn compile_prepared_with_profile_and_table_construction(
             deferred_terminal_exprs_blob: None,
             deferred_terminal_exprs: Default::default(),
             deferred_composition_metadata_blob: None,
-            composition_link_metadata_materialized: true,
-            deferred_table_rules_blob: None,
+                deferred_table_rules_blob: None,
             deferred_table_rules: Default::default(),
         });
         if build_packed_parser_dwa {

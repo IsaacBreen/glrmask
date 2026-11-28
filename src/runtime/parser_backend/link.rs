@@ -34,7 +34,7 @@ pub(crate) fn compose(parent: Constraint, children: &[(String, Arc<Constraint>)]
 /// Consume private component handles before materializing deferred metadata.
 /// Shared inputs retain ordinary copy-on-write isolation through `make_mut`.
 pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<Constraint>)>, vocab: &Vocab) -> Result<Constraint> {
-    parent.materialize_composition_link_metadata_for_compilation().map_err(fail)?;
+    parent.materialize_composition_metadata_for_compilation().map_err(fail)?;
     // Internal callers can register slots after ordinary source compilation.
     // Remove their non-vocabulary sentinels before retaining the component:
     // its output domain and its cached token fragments must agree.
@@ -56,8 +56,8 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
                 return Err(fail(format!("slot {name:?} has no validated template CALL relation")));
             }
         }
-        if child.deferred_composition_metadata_blob.is_some() && !child.composition_link_metadata_materialized {
-            Arc::make_mut(&mut child).materialize_composition_link_metadata_for_compilation().map_err(fail)?;
+        if child.deferred_composition_metadata_blob.is_some() {
+            Arc::make_mut(&mut child).materialize_composition_metadata_for_compilation().map_err(fail)?;
         }
         components.push(child); slots.push(matching); binding_names.push(name);
     }

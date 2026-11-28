@@ -2111,14 +2111,7 @@ fn prepare_compiled_children(
             // composition-only metadata on this first owned child copy so the
             // linker does not clone the whole compiled child a second time
             // merely to materialize the same cold metadata.
-            match boundary_backend {
-                SegmentedBoundaryBackend::StaticParserDwa => constraint
-                    .materialize_composition_metadata_for_compilation()
-                    .map_err(Error::Compilation)?,
-                SegmentedBoundaryBackend::Dynamic => constraint
-                    .materialize_composition_link_metadata_for_compilation()
-                    .map_err(Error::Compilation)?,
-            }
+            constraint.materialize_composition_metadata_for_compilation().map_err(Error::Compilation)?;
             Ok((name, Arc::new(constraint)))
         })
         .collect()
@@ -3152,7 +3145,6 @@ mod tests {
         let parent = PreparedGrammar::load(parent.save(), &vocab).unwrap();
         let child = RuntimeConstraint::load(child.save(), &vocab).unwrap();
         assert!(child.deferred_composition_metadata_blob.is_some());
-        assert!(!child.composition_link_metadata_materialized);
         (vocab, parent, child)
     }
 
@@ -3220,7 +3212,7 @@ mod tests {
         let shared = crate::runtime::parser_backend::link::compose_owned(p, vec![("child".into(), c.clone())], &vocab)
             .unwrap().with_end_tokens(&[99]).unwrap();
         assert_ne!(Arc::as_ptr(&shared.static_dynamic_overlay.as_ref().unwrap().segmented_parser_components[1].constraint), Arc::as_ptr(&c));
-        assert!(!c.composition_link_metadata_materialized, "shared child mutated in place");
+        assert!(c.deferred_composition_metadata_blob.is_some(), "shared child mutated in place");
         assert_eq!(c.save(), shared_bytes); assert_eq!(c.start().mask(), shared_mask);
         assert_eq!(owned.save(), borrowed.save()); assert_eq!(owned.save(), shared.save());
         assert_compose_owned_behavior_equal(&owned, &borrowed);
@@ -4496,8 +4488,8 @@ mod tests {
             crate::runtime::BoundaryTrigger::Exact(_)
         ));
         assert!(
-            loaded.deferred_composition_metadata_blob.is_some(),
-            "trigger upgrade should not force materialization of the heavy parser-cache section",
+            loaded.deferred_composition_metadata_blob.is_none(),
+            "trigger upgrade consumes the only deferred metadata section",
         );
 
         let reloaded = RuntimeConstraint::load_body_external_artifact(loaded.save(), &vocab).unwrap();
@@ -4600,14 +4592,14 @@ mod tests {
 
         let loaded_dynamic = DynamicConstraint::load(&dynamic_constraint.save(), &vocab).unwrap();
         assert!(loaded_dynamic.clone_constraints().iter_mut().all(|constraint| {
-            constraint.materialize_composition_link_metadata_for_compilation().unwrap();
+            constraint.materialize_composition_metadata_for_compilation().unwrap();
             matches!(constraint.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_))
         }));
 
         let transfer = dynamic_constraint.clone().into_saved();
         let loaded_transfer = DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
         assert!(loaded_transfer.clone_constraints().iter_mut().all(|constraint| {
-            constraint.materialize_composition_link_metadata_for_compilation().unwrap();
+            constraint.materialize_composition_metadata_for_compilation().unwrap();
             matches!(constraint.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_))
         }));
     }

@@ -1598,7 +1598,7 @@ mod tests {
             "current artifacts deliberately defer composition-link metadata",
         );
         loaded
-            .materialize_composition_link_metadata_for_compilation()
+            .materialize_composition_metadata_for_compilation()
             .unwrap();
         let (reloaded, stats) = boundary_candidate_ids(&loaded, &vocab);
         assert_eq!(reloaded, fresh);
@@ -1637,7 +1637,7 @@ mod preparation_tests {
         assert!(loaded.serialized_artifact_cache.is_none());
         let saved=loaded.save();
         let mut reloaded=Constraint::load(&saved,&vocab).unwrap();
-        reloaded.materialize_composition_link_metadata_for_compilation().unwrap();
+        reloaded.materialize_composition_metadata_for_compilation().unwrap();
         assert!(reloaded.boundary_candidate_summary.get().unwrap().is_known());
         assert_eq!(boundary_candidate_ids(&reloaded,&vocab).0,Some(expected));
         assert_eq!(reloaded.save(),saved,"unchanged reload must retain the newly prepared artifact");
@@ -1654,7 +1654,7 @@ mod preparation_tests {
         loaded.prepare_for_composition_internal(&vocab).unwrap();
         assert!(matches!(loaded.boundary_candidate_summary.get(),Some(BoundaryCandidateSummary::Unknown{reason:SummaryUnavailable::Disabled})));
         let mut reloaded=Constraint::load(loaded.save(),&vocab).unwrap();
-        reloaded.materialize_composition_link_metadata_for_compilation().unwrap();
+        reloaded.materialize_composition_metadata_for_compilation().unwrap();
         assert!(matches!(reloaded.boundary_candidate_summary.get(),Some(BoundaryCandidateSummary::Unknown{reason:SummaryUnavailable::Disabled})));
         assert!(boundary_candidate_ids(&reloaded,&vocab).0.is_none());
     }

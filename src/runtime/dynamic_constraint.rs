@@ -390,8 +390,7 @@ impl DynamicConstraint {
             deferred_terminal_exprs_blob: None,
             deferred_terminal_exprs: Default::default(),
             deferred_composition_metadata_blob: None,
-            composition_link_metadata_materialized: true,
-            deferred_table_rules_blob: None,
+                deferred_table_rules_blob: None,
             deferred_table_rules: Default::default(),
         })
     }
@@ -765,7 +764,7 @@ impl DynamicConstraint {
                 .ok_or_else(|| error("truncated dynamic alternative"))?;
             let mut constraint = Constraint::load_external(body, vocab)?;
             if !constraint.has_template_parser() {
-                constraint.materialize_composition_link_metadata_for_compilation()
+                constraint.materialize_composition_metadata_for_compilation()
                     .map_err(crate::Error::Serialization)?;
             }
             constraints.push(constraint);
@@ -2215,7 +2214,7 @@ mod tests {
         );
         assert_eq!(u32::from_le_bytes(saved[50..54].try_into().unwrap()), 1);
         let mut loaded = DynamicConstraint::from_constraints(vec![Constraint::load_body_external_artifact(&saved[62..], &vocab).unwrap()]);
-        loaded.inner.materialize_composition_link_metadata_for_compilation().unwrap();
+        loaded.inner.materialize_composition_metadata_for_compilation().unwrap();
         assert_eq!(loaded.inner.late_grammar_slots, constraint.inner.late_grammar_slots);
         assert_eq!(loaded.inner.tokenizer.virtual_runtime_metadata(), metadata);
         assert!(loaded.inner.dynamic_mask_vocab.has_terminal_observation_classes());
@@ -2233,7 +2232,7 @@ mod tests {
         );
         assert!(DynamicConstraint::load_with_vocab(&transfer, &vocab).is_err());
         let mut transferred = DynamicConstraint::from_constraints(vec![Constraint::load_body_external_artifact(&transfer[62..], &vocab).unwrap()]);
-        transferred.inner.materialize_composition_link_metadata_for_compilation().unwrap();
+        transferred.inner.materialize_composition_metadata_for_compilation().unwrap();
         assert_eq!(transferred.inner.tokenizer.virtual_runtime_metadata(), metadata);
         assert!(transferred.inner.dynamic_mask_vocab.has_terminal_observation_classes());
         assert_eq!(

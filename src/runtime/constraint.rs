@@ -1141,7 +1141,7 @@ impl Constraint {
             self.serialized_artifact_cache = None;
             return Ok(());
         }
-        self.materialize_composition_link_metadata_for_compilation()?;
+        self.materialize_composition_metadata_for_compilation()?;
         if crate::env::var_os("GLRMASK_REPORT_ROUTE").is_some() {
             eprintln!("[glrmask/route] boundary_token_set=fallback_trie reason=summary_unknown");
         }
@@ -11323,7 +11323,7 @@ mod boundary_token_trie_tests {
 
     fn assert_matches_reference(constraint: &mut Constraint, label: &str) {
         constraint
-            .materialize_composition_link_metadata_for_compilation()
+            .materialize_composition_metadata_for_compilation()
             .unwrap_or_else(|error| panic!("{label}: metadata: {error}"));
         let relevant = constraint.boundary_relevant_terminals();
         let scan = constraint.boundary_token_candidates_from_scan(&relevant);
@@ -11366,7 +11366,7 @@ mod boundary_token_trie_tests {
             };
             let compile_ms = started.elapsed().as_secs_f64() * 1000.0;
             let _ = constraint.late_bind_vocab.set(vocab.clone());
-            constraint.materialize_composition_link_metadata_for_compilation().unwrap();
+            constraint.materialize_composition_metadata_for_compilation().unwrap();
             let relevant = constraint.boundary_relevant_terminals();
             let started = std::time::Instant::now();
             let scan = constraint.boundary_token_candidates_from_scan(&relevant);
