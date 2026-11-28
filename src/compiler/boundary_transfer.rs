@@ -33,8 +33,6 @@
 #[path = "boundary_template_program.rs"]
 pub(crate) mod template_program;
 
-#[path = "boundary_admission.rs"]
-mod admission;
 #[path = "boundary_direct_program.rs"]
 mod direct_program;
 
@@ -46,7 +44,6 @@ use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_
 use range_set_blaze::RangeSetBlaze;
 
 use crate::automata::weighted_u32::dwa::DWA;
-use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted_u32::minimize::reverse_hashcons_owned;
 use crate::automata::weighted_u32::minimize_acyclic::{
     PointwiseClassOrder, minimize_acyclic_owned_with_pointwise_class_order,
@@ -862,7 +859,6 @@ fn empty_transfer() -> TerminalCharacterization {
 #[derive(Clone)]
 pub(crate) struct FragmentLibrary {
     pub templates: BTreeMap<TerminalID, std::sync::Arc<TemplateTopology>>,
-    pub diagnostic_dfas: Option<BTreeMap<TerminalID, std::sync::Arc<UnweightedDfa>>>,
     /// Synthetic fragment key per link index for Entry / Finish exports.
     pub entry_keys: Vec<TerminalID>,
     pub finish_keys: Vec<TerminalID>,
@@ -870,23 +866,29 @@ pub(crate) struct FragmentLibrary {
     pub templates_ms: f64,
 }
 
-/// Convert each distinct raw graph once, with no weights or per-state maps.
-/// Keep raw DFAs only for the optional leaf-projection diagnostic.
-fn boundary_template_inventory(
-    templates: Templates,
-) -> (BTreeMap<TerminalID, std::sync::Arc<TemplateTopology>>, Option<BTreeMap<TerminalID, std::sync::Arc<UnweightedDfa>>>) {
+/// Compile distinct relations once and retain only their weightless topology.
+fn compile_fragment_inventory(
+    relations: &BTreeMap<TerminalID, TerminalCharacterization>,
+) -> Result<BTreeMap<TerminalID, std::sync::Arc<TemplateTopology>>, String> {
     use std::sync::Arc;
-    let diagnostics = crate::env::var_os("GLRMASK_PROFILE_BOUNDARY_LEAF_TEMPLATES").is_some();
+    let templates = Templates::try_from_characterizations(relations).map_err(|e| e.to_string())?;
     let mut topologies = BTreeMap::new();
     let mut by_source = rustc_hash::FxHashMap::<usize, Arc<TemplateTopology>>::default();
-    let mut diagnostic_dfas = diagnostics.then(BTreeMap::new);
     for (&terminal, dfa) in &templates.by_terminal {
         let id = Arc::as_ptr(dfa) as usize;
-        let graph = by_source.entry(id).or_insert_with(|| Arc::new(TemplateTopology::from_dfa(dfa)));
-        topologies.insert(terminal, Arc::clone(graph));
-        if let Some(dfas) = &mut diagnostic_dfas { dfas.insert(terminal, Arc::clone(dfa)); }
+        let graph = if let Some(graph) = by_source.get(&id) {
+            Arc::clone(graph)
+        } else {
+            let graph = Arc::new(TemplateTopology::from_dfa(dfa));
+            if !graph.is_acyclic() {
+                return Err(format!("signed link fragment {terminal} is cyclic; bounded flat closure cannot use it"));
+            }
+            by_source.insert(id, Arc::clone(&graph));
+            graph
+        };
+        topologies.insert(terminal, graph);
     }
-    (topologies, diagnostic_dfas)
+    Ok(topologies)
 }
 
 /// Link-scoped exact transfer cache prepared for the union of terminals
@@ -909,10 +911,10 @@ pub(crate) struct PreparedFragmentTransfers {
 /// serialize on unrelated parser tables.
 pub(crate) struct FragmentTransferCache {
     ordinary_by_owner:
-        Vec<std::sync::Mutex<BTreeMap<TerminalID, TerminalCharacterization>>>,
-    special: std::sync::Mutex<BTreeMap<TerminalID, TerminalCharacterization>>,
+        Vec<std::sync::Mutex<BTreeMap<TerminalID, std::sync::Arc<TemplateTopology>>>>,
+    special: std::sync::Mutex<BTreeMap<TerminalID, std::sync::Arc<TemplateTopology>>>,
     global_ignore_identity: std::sync::Mutex<Option<TerminalCharacterization>>,
-    controls: BTreeMap<TerminalID, TerminalCharacterization>,
+    controls: BTreeMap<TerminalID, std::sync::Arc<TemplateTopology>>,
     entry_keys: Vec<TerminalID>,
     finish_keys: Vec<TerminalID>,
     pub prepare_ms: f64,
@@ -921,17 +923,19 @@ pub(crate) struct FragmentTransferCache {
 impl FragmentTransferCache {
     pub(crate) fn new(context: &SignedLinkContext) -> Result<Self, String> {
         let empty = vec![false; context.num_terminals as usize];
+        let started = Instant::now();
         let prepared = prepare_fragment_transfers(context, &empty)?;
+        let controls = compile_fragment_inventory(&prepared.controls)?;
         Ok(Self {
             ordinary_by_owner: (0..context.state_offsets.len())
                 .map(|_| std::sync::Mutex::new(BTreeMap::new()))
                 .collect(),
             special: std::sync::Mutex::new(BTreeMap::new()),
             global_ignore_identity: std::sync::Mutex::new(None),
-            controls: prepared.controls,
+            controls,
             entry_keys: prepared.entry_keys,
             finish_keys: prepared.finish_keys,
-            prepare_ms: prepared.prepare_ms,
+            prepare_ms: started.elapsed().as_secs_f64() * 1000.0,
         })
     }
 }
@@ -1382,22 +1386,10 @@ pub(crate) fn build_fragment_library_from_prepared(
         combined.insert(terminal, transfer.clone());
         ordinary_terms += 1;
     }
-    let (templates, diagnostic_dfas) = boundary_template_inventory(Templates::from_characterizations(&combined));
+    let templates = compile_fragment_inventory(&combined)?;
     let templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
-    // The bounded-DAG composer requires acyclic fragments (the engine already
-    // guarantees acyclic nt re-reduction graphs by loud decline/panic; this
-    // checks the compiled template NWAs themselves). A cyclic fragment would
-    // reintroduce unbounded control words through the back door.
-    for (&key, fragment) in &templates {
-        if !fragment.is_acyclic() {
-            return Err(format!(
-                "signed link fragment {key} is cyclic; bounded flat closure cannot use it",
-            ));
-        }
-    }
     Ok(FragmentLibrary {
         templates,
-        diagnostic_dfas,
         entry_keys: prepared.entry_keys.clone(),
         finish_keys: prepared.finish_keys.clone(),
         ordinary_terms,
@@ -1460,18 +1452,19 @@ pub(crate) fn build_fragment_library_cached(
             .global_ignore_identity
             .lock()
             .map_err(|_| "signed link global-ignore cache poisoned".to_string())?;
-        for terminal in special_terminals {
-            if let std::collections::btree_map::Entry::Vacant(e) = special_cache.entry(terminal) {
-                let transfer =
-                    scoped_transfer_for_terminal(context, terminal, &mut global_ignore)?;
-                e.insert(transfer);
+        let mut missing = BTreeMap::new();
+        for &terminal in &special_terminals {
+            if !special_cache.contains_key(&terminal) {
+                let transfer = scoped_transfer_for_terminal(context, terminal, &mut global_ignore)?;
+                #[cfg(test)]
+                trace_transfer_characterization(context, terminal, &transfer);
+                missing.insert(terminal, transfer);
             }
-            let transfer = special_cache
-                .get(&terminal)
-                .expect("special transfer inserted above");
-            #[cfg(test)]
-            trace_transfer_characterization(context, terminal, transfer);
-            combined.insert(terminal, transfer.clone());
+        }
+        special_cache.extend(compile_fragment_inventory(&missing)?);
+        for terminal in special_terminals {
+            let graph = special_cache.get(&terminal).expect("special fragment compiled above");
+            combined.insert(terminal, std::sync::Arc::clone(graph));
         }
     }
 
@@ -1507,6 +1500,7 @@ pub(crate) fn build_fragment_library_cached(
             )
             .map_err(|error| error.to_string())?;
             let injection = context.injection(owner)?;
+            let mut transfers = BTreeMap::new();
             for local in missing {
                 let transfer = match characterized.get(&local) {
                     Some(characterization) => {
@@ -1523,32 +1517,20 @@ pub(crate) fn build_fragment_library_cached(
                         empty_transfer()
                     }
                 };
-                owner_cache.insert(local, transfer);
+                transfers.insert(local, transfer);
             }
+            owner_cache.extend(compile_fragment_inventory(&transfers)?);
         }
         for (terminal, local) in terminals {
-            let transfer = owner_cache
-                .get(&local)
-                .expect("owner transfer characterized or cached above");
-            #[cfg(test)]
-            trace_transfer_characterization(context, terminal, transfer);
-            combined.insert(terminal, transfer.clone());
+            let graph = owner_cache.get(&local).expect("owner fragment compiled above");
+            combined.insert(terminal, std::sync::Arc::clone(graph));
         }
     }
 
-    let templates = Templates::from_characterizations(&combined);
-    let (templates, diagnostic_dfas) = boundary_template_inventory(templates);
+    let templates = combined;
     let templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
-    for (&key, fragment) in &templates {
-        if !fragment.is_acyclic() {
-            return Err(format!(
-                "signed link fragment {key} is cyclic; bounded flat closure cannot use it",
-            ));
-        }
-    }
     Ok(FragmentLibrary {
         templates,
-        diagnostic_dfas,
         entry_keys: cache.entry_keys.clone(),
         finish_keys: cache.finish_keys.clone(),
         ordinary_terms,

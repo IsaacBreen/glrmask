@@ -16,9 +16,17 @@ pub(super) fn compile(
         || (depths == 1 && !context.links.is_empty()) { return None; }
     let ports = lexical.states().len().checked_mul(depths)?;
     if ports > 200_000 { return None; }
-    let template_ids = library.templates.keys().enumerate()
-        .map(|(i, &t)| (t, i)).collect::<BTreeMap<_, _>>();
-    let templates = library.templates.values().map(std::sync::Arc::as_ref).collect::<Vec<_>>();
+    let mut template_ids = BTreeMap::new();
+    let mut by_source = rustc_hash::FxHashMap::default();
+    let mut templates = Vec::new();
+    for (&terminal, graph) in &library.templates {
+        let id = *by_source.entry(std::sync::Arc::as_ptr(graph)).or_insert_with(|| {
+            let id = templates.len();
+            templates.push(graph.as_ref());
+            id
+        });
+        template_ids.insert(terminal, id);
+    }
     let mut coefficients = vec![Weight::all()];
     let mut indices = rustc_hash::FxHashMap::default(); indices.insert(coefficients[0].ptr_key(), 0);
     let mut weight_id = |weight: &Weight| -> usize {
@@ -62,8 +70,17 @@ pub(super) fn compile(
     if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
         // Count physical template insertion, not only the compact lexical
         // graph. Keep this diagnostic outside unprofiled performance samples.
-        let mut counts = vec![0usize; templates.len()];
-        for instance in &instances { counts[instance.template] += 1; }
+        let mut counts = BTreeMap::<u32, usize>::new();
+        for row in lexical.states() {
+            for (label, _, weight) in row.transitions.entries() {
+                if !weight.is_empty() {
+                    *counts.entry(label as u32).or_default() += 1;
+                }
+            }
+        }
+        for &control in library.entry_keys.iter().chain(&library.finish_keys) {
+            *counts.entry(control).or_default() += lexical.states().len() * (depths - 1);
+        }
         let mut groups = BTreeMap::<&str, (usize, usize, usize, usize)>::new();
         let mut largest = Vec::new();
         for (&key, &id) in &template_ids {
@@ -72,7 +89,7 @@ pub(super) fn compile(
             let template = templates[id];
             let states = template.state_count();
             let edges = template.edge_count();
-            let copies = counts[id];
+            let copies = counts.get(&key).copied().unwrap_or(0);
             let group = groups.entry(kind).or_default();
             group.0 += usize::from(copies != 0);
             group.1 += copies;
@@ -86,34 +103,6 @@ pub(super) fn compile(
         largest.truncate(12);
         eprintln!("[glrmask/profile][boundary_template_census] component={start_component} lexical_states={} lexical_edges={} ports={ports} groups_templates_copies_states_edges={groups:?} largest_totalstates_key_kind_copies_states_edges={largest:?}",
             lexical.num_states(), lexical.num_transitions());
-        if crate::env::var_os("GLRMASK_PROFILE_BOUNDARY_LEAF_TEMPLATES").is_some() {
-            let profile_started=Instant::now();
-            let mut counts=BTreeMap::<u32,usize>::new();
-            for row in lexical.states() {
-                for (label,target,weight) in row.transitions.entries() {
-                    if weight.is_empty() {continue;}
-                    let next=&lexical.states()[target as usize];
-                    if next.final_weight.as_ref().is_some_and(|w|!w.is_empty())
-                        && next.transitions.entries().all(|(_,_,w)|w.is_empty()) {
-                        *counts.entry(label as u32).or_default()+=1;
-                    }
-                }
-            }
-            let mut originals=0usize;let mut projected=0usize;let mut records=Vec::new();
-            for (&key,&copies) in &counts {
-                let original=library.templates.get(&key)?;
-                let reduced=library.diagnostic_dfas.as_ref().and_then(|dfas| dfas.get(&key))
-                    .and_then(|dfa|admission::project(dfa,context.total_scoped_states));
-                let before=original.state_count();
-                let after=reduced.as_ref().map_or(before,|dfa|dfa.states.len());
-                originals+=before*copies;projected+=after*copies;
-                records.push(((before.saturating_sub(after))*copies,key,copies,before,after,reduced.is_some()));
-            }
-            records.sort_unstable_by(|a,b|b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-            records.truncate(15);
-            eprintln!("[glrmask/profile][boundary_leaf_template_census] component={start_component} keys={} copies={} original_copied_states={originals} projected_copied_states={projected} largest_saving_key_copies_before_after_selected={records:?} diagnostic_ms={:.3}",
-                counts.len(),counts.values().sum::<usize>(),profile_started.elapsed().as_secs_f64()*1000.0);
-        }
     }
     let certificate = context.predecessor_support.get_or_init(|| {
         let tables = std::iter::once(context.parent_table).chain(context.child_tables.iter().copied()).collect::<Vec<_>>();
