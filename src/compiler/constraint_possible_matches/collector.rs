@@ -19,7 +19,7 @@ use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
 
-use crate::automata::lexer::observation::ByteRows;
+use crate::automata::lexer::observation::{ByteRows, ConfigInterner};
 
 #[derive(Clone, Copy)]
 pub(super) enum ByteTransitions<'a> {
@@ -79,60 +79,18 @@ impl TrieClassBuildResult {
 #[derive(Debug, Clone, Copy, Default, Eq, Hash, PartialEq)]
 struct SegmentOutcome { terminals_id: u32, end_state: Option<u32> }
 
-enum SegmentOutcomeCache {
-    Sparse { map: FxHashMap<u32, SegmentOutcome> },
-    Dense { filled: Vec<u32>, outcomes: Vec<SegmentOutcome>, generation: u32 },
-}
-
-impl Default for SegmentOutcomeCache {
-    fn default() -> Self {
-        Self::Sparse { map: FxHashMap::default() }
-    }
-}
-
-#[derive(Default)]
-struct ActiveStateSetInterner {
-    buckets: FxHashMap<u64, Vec<u32>>,
-    sets: Vec<Box<[u32]>>,
-}
-
-impl ActiveStateSetInterner {
-    fn intern(&mut self, states: &[u32]) -> u32 {
-        let mut hash = 0u64;
-        for &state in states {
-            hash = mix_signature_word(hash, state);
-        }
-        self.intern_with_state_hash(states, hash)
-    }
-
-    fn intern_with_state_hash(&mut self, states: &[u32], state_hash: u64) -> u32 {
-        let hash = mix_signature_word(state_hash, states.len() as u32);
-        if let Some(id) = self.buckets.get(&hash).and_then(|ids| {
-            ids.iter()
-                .copied()
-                .find(|&id| self.sets[id as usize].as_ref() == states)
-        }) {
-            return id;
-        }
-
-        let id = self.sets.len() as u32;
-        self.sets.push(states.to_vec().into_boxed_slice());
-        self.buckets.entry(hash).or_default().push(id);
-        id
-    }
-}
+type SegmentOutcomeCache = FxHashMap<u32, SegmentOutcome>;
 
 #[derive(Default)]
 struct SerialSegmentVectorCache {
-    active_sets: ActiveStateSetInterner,
+    active_sets: ConfigInterner,
     outcomes: FxHashMap<(usize, u32), Arc<[SegmentOutcome]>>,
 }
 
 #[derive(Clone, Default)]
 struct TerminalSetInterner {
-    ids: FxHashMap<Vec<TerminalID>, u32>,
     mask_ids: FxHashMap<u128, u32>,
-    sets: Vec<Vec<TerminalID>>,
+    sets: ConfigInterner,
 }
 
 impl TerminalSetInterner {
@@ -142,11 +100,7 @@ impl TerminalSetInterner {
     fn intern_vec(&mut self, mut terminals: Vec<TerminalID>) -> u32 {
         terminals.sort_unstable();
         terminals.dedup();
-        if let Some(&id) = self.ids.get(&terminals) { return id; }
-        let id = self.sets.len() as u32;
-        self.ids.insert(terminals.clone(), id);
-        self.sets.push(terminals);
-        id
+        self.sets.intern(terminals)
     }
     fn intern_mask(&mut self, mask: u128) -> u32 {
         if let Some(&id) = self.mask_ids.get(&mask) {
@@ -195,14 +149,9 @@ struct BuildTimings {
     segment_states_requested: usize,
     segment_cache_hits: usize,
     segment_cache_misses: usize,
-    segment_dense_promotions: usize,
     segment_vector_cache_hits: usize,
     segment_vector_cache_misses: usize,
     segment_vector_cached_states: usize,
-    segment_dense_hits: usize,
-    segment_dense_misses: usize,
-    segment_sparse_hits: usize,
-    segment_sparse_misses: usize,
     segment_bytes_scanned: usize,
     segment_terminal_iters: usize,
     segment_terminal_pushes: usize,
@@ -250,14 +199,9 @@ impl BuildTimings {
         self.segment_states_requested += other.segment_states_requested;
         self.segment_cache_hits += other.segment_cache_hits;
         self.segment_cache_misses += other.segment_cache_misses;
-        self.segment_dense_promotions += other.segment_dense_promotions;
         self.segment_vector_cache_hits += other.segment_vector_cache_hits;
         self.segment_vector_cache_misses += other.segment_vector_cache_misses;
         self.segment_vector_cached_states += other.segment_vector_cached_states;
-        self.segment_dense_hits += other.segment_dense_hits;
-        self.segment_dense_misses += other.segment_dense_misses;
-        self.segment_sparse_hits += other.segment_sparse_hits;
-        self.segment_sparse_misses += other.segment_sparse_misses;
         self.segment_bytes_scanned += other.segment_bytes_scanned;
         self.segment_terminal_iters += other.segment_terminal_iters;
         self.segment_terminal_pushes += other.segment_terminal_pushes;
@@ -423,35 +367,6 @@ fn next_nonzero_generation(generation: &mut u32, stamps: &mut [u32]) -> u32 {
     *generation
 }
 
-fn dense_segment_cache_min_entries() -> usize {
-    crate::env::var("GLRMASK_PM_DENSE_SEGMENT_CACHE_MIN_ENTRIES")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(0)
-}
-
-fn promote_segment_outcome_cache(
-    cache: &mut SegmentOutcomeCache,
-    num_states: usize,
-    timings: &mut BuildTimings,
-) {
-    let sparse = std::mem::take(cache);
-    let SegmentOutcomeCache::Sparse { map } = sparse else {
-        *cache = sparse;
-        return;
-    };
-    let generation = 1u32;
-    let mut filled = vec![0u32; num_states];
-    let mut outcomes = vec![SegmentOutcome::default(); num_states];
-    for (state, outcome) in map {
-        let idx = state as usize;
-        filled[idx] = generation;
-        outcomes[idx] = outcome;
-    }
-    *cache = SegmentOutcomeCache::Dense { filled, outcomes, generation };
-    timings.segment_dense_promotions += 1;
-}
-
 fn segment_outcomes_for_states(
     table: &mut SegmentOutcomeCache,
     needed_states: &[u32],
@@ -465,8 +380,6 @@ fn segment_outcomes_for_states(
     stamp_gen: &mut u32,
     timings: &mut BuildTimings,
     node_terminal_ids: &[u32],
-    num_states: usize,
-    dense_segment_cache_min_entries: usize,
     use_state_cache: bool,
 ) -> Vec<SegmentOutcome> {
     let started_at = Instant::now();
@@ -491,36 +404,13 @@ fn segment_outcomes_for_states(
     timings.segment_multi_byte_calls += 1;
 
     for &start_state in needed_states {
-        let outcome_idx = start_state as usize;
-        let cached = if use_state_cache {
-            match table {
-                SegmentOutcomeCache::Sparse { map } => map.get(&start_state).copied().inspect(|_| {
-                    timings.segment_cache_hits += 1;
-                    timings.segment_sparse_hits += 1;
-                }),
-                SegmentOutcomeCache::Dense { filled, outcomes, generation } => {
-                    if filled[outcome_idx] == *generation {
-                        timings.segment_cache_hits += 1;
-                        timings.segment_dense_hits += 1;
-                        Some(outcomes[outcome_idx])
-                    } else {
-                        None
-                    }
-                }
-            }
-        } else {
-            None
-        };
-        if let Some(outcome) = cached {
-            outcomes.push(outcome);
-            continue;
-        }
         if use_state_cache {
-            timings.segment_cache_misses += 1;
-            match table {
-                SegmentOutcomeCache::Sparse { .. } => timings.segment_sparse_misses += 1,
-                SegmentOutcomeCache::Dense { .. } => timings.segment_dense_misses += 1,
+            if let Some(&outcome) = table.get(&start_state) {
+                timings.segment_cache_hits += 1;
+                outcomes.push(outcome);
+                continue;
             }
+            timings.segment_cache_misses += 1;
         }
         let mut current_state = start_state;
         let mut blocked = false;
@@ -565,21 +455,7 @@ fn segment_outcomes_for_states(
         };
         let outcome = SegmentOutcome { terminals_id, end_state: (!blocked).then_some(current_state) };
         if use_state_cache {
-            let mut should_promote = false;
-            match table {
-                SegmentOutcomeCache::Sparse { map } => {
-                    map.insert(start_state, outcome);
-                    should_promote = dense_segment_cache_min_entries > 0
-                        && map.len() >= dense_segment_cache_min_entries;
-                }
-                SegmentOutcomeCache::Dense { filled, outcomes, generation } => {
-                    filled[outcome_idx] = *generation;
-                    outcomes[outcome_idx] = outcome;
-                }
-            }
-            if should_promote {
-                promote_segment_outcome_cache(table, num_states, timings);
-            }
+            table.insert(start_state, outcome);
         }
         outcomes.push(outcome);
     }
@@ -684,7 +560,6 @@ fn build_node(
     active_seen_positions: &mut [u32],
     parallel_depth: u8,
     parallel_min_active: usize,
-    dense_segment_cache_min_entries: usize,
     mut serial_segment_cache: Option<&mut SerialSegmentVectorCache>,
     serial_active_set_id: Option<u32>,
 ) -> NodeClasses {
@@ -723,8 +598,6 @@ fn build_node(
                     stamp_gen,
                     timings,
                     node_terminal_ids,
-                    num_states,
-                    dense_segment_cache_min_entries,
                     false,
                 ));
                 timings.segment_vector_cache_misses += 1;
@@ -745,22 +618,19 @@ fn build_node(
                 stamp_gen,
                 timings,
                 node_terminal_ids,
-                num_states,
-                dense_segment_cache_min_entries,
                 true,
             ))
         };
         let child_active_started_at = Instant::now();
         let subtree_bytes = U8Set::from_words(*child.subtree_bytes());
-        let (descend_positions, child_active_states, child_active_state_hash) =
+        let (descend_positions, child_active_states) =
             if subtree_bytes.is_empty() {
                 timings.empty_subtree_edges += 1;
                 timings.empty_subtree_rows_skipped += outcomes.len();
-                (vec![u32::MAX; outcomes.len()], Vec::new(), 0u64)
+                (vec![u32::MAX; outcomes.len()], Vec::new())
             } else {
                 let mut descend_positions = Vec::with_capacity(active_states.len());
                 let mut child_active_states = Vec::new();
-                let mut child_active_state_hash = 0u64;
                 let seen_gen = next_nonzero_generation(active_seen_gen, active_seen_stamps);
                 for outcome in outcomes.iter() {
                     let descend = if let Some(end_state) = outcome.end_state {
@@ -776,8 +646,6 @@ fn build_node(
                                 active_seen_stamps[descend_idx] = seen_gen;
                                 active_seen_positions[descend_idx] = child_active_states.len() as u32;
                                 child_active_states.push(descend_state);
-                                child_active_state_hash =
-                                    mix_signature_word(child_active_state_hash, descend_state);
                             }
                             active_seen_positions[descend_idx]
                         } else {
@@ -791,7 +659,6 @@ fn build_node(
                 (
                     descend_positions,
                     child_active_states,
-                    child_active_state_hash,
                 )
             };
         let child_active_set_id = if child_active_states.is_empty() {
@@ -800,7 +667,7 @@ fn build_node(
             serial_segment_cache.as_deref_mut().map(|cache| {
                 cache
                     .active_sets
-                    .intern_with_state_hash(&child_active_states, child_active_state_hash)
+                    .intern_slice(&child_active_states)
             })
         };
         timings.child_active_ms += elapsed_ms(child_active_started_at);
@@ -884,11 +751,11 @@ fn build_node(
                 let local_active_set_id = Some(
                     local_vector_cache
                         .active_sets
-                        .intern(&pending.child_active_states),
+                        .intern_slice(&pending.child_active_states),
                 );
 
                 let recursive_started_at = Instant::now();
-                let result = build_node(pending.child, num_states, num_terminals, &pending.child_active_states, matched_terminals, matched_terminal_masks, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, local_terminal_sets, local_segment_cache, local_segment_outcome_tables, &mut local_timings, local_stamp_gen, local_terminal_stamps, local_active_seen_gen, local_active_seen_stamps, local_active_seen_positions, 0, parallel_min_active, dense_segment_cache_min_entries, Some(local_vector_cache), local_active_set_id);
+                let result = build_node(pending.child, num_states, num_terminals, &pending.child_active_states, matched_terminals, matched_terminal_masks, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, local_terminal_sets, local_segment_cache, local_segment_outcome_tables, &mut local_timings, local_stamp_gen, local_terminal_stamps, local_active_seen_gen, local_active_seen_stamps, local_active_seen_positions, 0, parallel_min_active, Some(local_vector_cache), local_active_set_id);
                 local_timings.recursive_ms += elapsed_ms(recursive_started_at);
                 let child_class_project_started_at = Instant::now();
                 let child_class_ids = pending.descend_positions.iter().map(|&pos| if pos == u32::MAX { u32::MAX } else { result.classes[pos as usize] }).collect();
@@ -906,7 +773,7 @@ fn build_node(
                 (NodeClasses { classes: Vec::new(), class_maps: Vec::new() }, vec![u32::MAX; pending.descend_positions.len()])
             } else {
                 let recursive_started_at = Instant::now();
-                let result = build_node(pending.child, num_states, num_terminals, &pending.child_active_states, matched_terminals, matched_terminal_masks, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, terminal_sets, segment_cache, segment_outcome_tables, timings, stamp_gen, terminal_stamps, active_seen_gen, active_seen_stamps, active_seen_positions, parallel_depth.saturating_sub(1), parallel_min_active, dense_segment_cache_min_entries, serial_segment_cache.as_deref_mut(), pending.child_active_set_id);
+                let result = build_node(pending.child, num_states, num_terminals, &pending.child_active_states, matched_terminals, matched_terminal_masks, node_terminal_ids, empty_terminals_id, is_end, byte_transitions, self_loop_bytes, canonical_state, terminal_sets, segment_cache, segment_outcome_tables, timings, stamp_gen, terminal_stamps, active_seen_gen, active_seen_stamps, active_seen_positions, parallel_depth.saturating_sub(1), parallel_min_active, serial_segment_cache.as_deref_mut(), pending.child_active_set_id);
                 timings.recursive_ms += elapsed_ms(recursive_started_at);
                 let child_class_project_started_at = Instant::now();
                 let child_class_ids = pending.descend_positions.iter().map(|&pos| if pos == u32::MAX { u32::MAX } else { result.classes[pos as usize] }).collect();
@@ -927,98 +794,27 @@ fn build_node(
     match child_data.len() {
         0 => {
             if node.has_token() {
-                const SMALL_CLASS_LIMIT: usize = 16;
-                let mut small_terms = [u32::MAX; SMALL_CLASS_LIMIT];
-                let mut small_len = 0usize;
-                let mut by_term: Option<FxHashMap<u32, u32>> = None;
-                for (state_pos, &state) in active_states.iter().enumerate() {
-                    let term_id = node_terminal_ids[state as usize];
-                    let class_id = if let Some(by_term) = by_term.as_mut() {
-                        if let Some(&class_id) = by_term.get(&term_id) {
-                            class_id
-                        } else {
-                            let class_id = representative_states.len() as u32;
-                            by_term.insert(term_id, class_id);
-                            representative_states.push(state);
-                            representative_state_positions.push(state_pos);
-                            class_id
-                        }
-                    } else if let Some(class_id) = small_terms[..small_len]
-                        .iter()
-                        .position(|&existing| existing == term_id)
-                    {
-                        class_id as u32
-                    } else {
-                        let class_id = representative_states.len() as u32;
-                        representative_states.push(state);
-                        representative_state_positions.push(state_pos);
-                        if small_len < SMALL_CLASS_LIMIT {
-                            small_terms[small_len] = term_id;
-                            small_len += 1;
-                        } else {
-                            let mut map = FxHashMap::default();
-                            for (existing_class, &existing_term) in
-                                small_terms[..small_len].iter().enumerate()
-                            {
-                                map.insert(existing_term, existing_class as u32);
-                            }
-                            map.insert(term_id, class_id);
-                            by_term = Some(map);
-                        }
-                        class_id
-                    };
-                    classes[state_pos] = class_id;
-                }
+                classify_fixed_signatures(
+                    active_states, |_, state| [node_terminal_ids[state as usize]],
+                    &mut representative_states, &mut representative_state_positions, &mut classes,
+                );
             } else if let Some(&state) = active_states.first() {
-                representative_states.push(state); representative_state_positions.push(0);
+                representative_states.push(state);
+                representative_state_positions.push(0);
                 classes.fill(0);
             }
         }
         1 => {
             let child = &child_data[0];
-            const SMALL_CLASS_LIMIT: usize = 16;
-            let mut small_signatures = [(u32::MAX, u32::MAX, u32::MAX); SMALL_CLASS_LIMIT];
-            let mut small_len = 0usize;
-            let mut by_sig: Option<FxHashMap<(u32, u32, u32), u32>> = None;
-            for (state_pos, &state) in active_states.iter().enumerate() {
-                let node_terms = if node.has_token() { node_terminal_ids[state as usize] } else { empty_terminals_id };
-                let sig = (node_terms, child.outcomes[state_pos].terminals_id, child.child_class_ids[state_pos]);
-                let class_id = if let Some(by_sig) = by_sig.as_mut() {
-                    if let Some(&class_id) = by_sig.get(&sig) {
-                        class_id
-                    } else {
-                        let class_id = representative_states.len() as u32;
-                        by_sig.insert(sig, class_id);
-                        representative_states.push(state);
-                        representative_state_positions.push(state_pos);
-                        class_id
-                    }
-                } else if let Some(class_id) = small_signatures[..small_len]
-                    .iter()
-                    .position(|&existing| existing == sig)
-                {
-                    class_id as u32
-                } else {
-                    let class_id = representative_states.len() as u32;
-                    representative_states.push(state);
-                    representative_state_positions.push(state_pos);
-                    if small_len < SMALL_CLASS_LIMIT {
-                        small_signatures[small_len] = sig;
-                        small_len += 1;
-                    } else {
-                        let mut map = FxHashMap::default();
-                        for (existing_class, &existing_sig) in
-                            small_signatures[..small_len].iter().enumerate()
-                        {
-                            map.insert(existing_sig, existing_class as u32);
-                        }
-                        map.insert(sig, class_id);
-                        by_sig = Some(map);
-                    }
-                    class_id
-                };
-                classes[state_pos] = class_id;
-            }
+            classify_fixed_signatures(
+                active_states,
+                |pos, state| [
+                    if node.has_token() { node_terminal_ids[state as usize] } else { empty_terminals_id },
+                    child.outcomes[pos].terminals_id,
+                    child.child_class_ids[pos],
+                ],
+                &mut representative_states, &mut representative_state_positions, &mut classes,
+            );
         }
         _ => {
             let dense_pairs = active_states.len() * child_data.len();
@@ -1331,14 +1127,12 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_precomputed(
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(512);
-    let dense_segment_cache_min_entries = dense_segment_cache_min_entries();
     if profile_summary_enabled() {
         eprintln!(
-            "[glrmask/profile][trie_build_interval] root_parallel_children={} parallel_depth={} parallel_min_active_states={} dense_segment_cache_min_entries={}",
+            "[glrmask/profile][trie_build_interval] root_parallel_children={} parallel_depth={} parallel_min_active_states={}",
             root.children().len(),
             parallel_depth,
             parallel_min_active,
-            dense_segment_cache_min_entries,
         );
     }
     let root_started_at = Instant::now();
@@ -1356,7 +1150,7 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_precomputed(
         serial_segment_cache_enabled.then(SerialSegmentVectorCache::default);
     let root_active_set_id = serial_segment_cache
         .as_mut()
-        .map(|cache| cache.active_sets.intern(entries));
+        .map(|cache| cache.active_sets.intern_slice(entries));
     let root_result = build_node(
         root,
         num_states,
@@ -1381,13 +1175,12 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_precomputed(
         &mut active_seen_positions,
         parallel_depth,
         parallel_min_active,
-        dense_segment_cache_min_entries,
         serial_segment_cache.as_mut(),
         root_active_set_id,
     );
     let root_compute_ms = elapsed_ms(root_started_at);
     if profile_summary_enabled() {
-        eprintln!("[glrmask/profile][trie_build_interval_timings] segment_table_ms={:.3} signature_hash_ms={:.3} map_materialize_ms={:.3} child_active_ms={:.3} recursive_ms={:.3} reachable_interval_ms={:.3} child_precompute_ms={:.3} nondefault_build_ms={:.3} parallel_terminal_sets_clone_ms={:.3} parallel_segment_cache_init_ms={:.3} parallel_stamp_alloc_ms={:.3} parallel_child_class_project_ms={:.3} serial_child_class_project_ms={:.3} parallel_children_built={} serial_children_built={} parallel_empty_children={} serial_empty_children={} classes_built={} nodes_built={} active_state_rows={} max_active_states={} child_edges={} max_children_per_node={} child_active_state_rows={} segment_calls={} segment_single_byte_calls={} segment_multi_byte_calls={} segment_states_requested={} segment_cache_hits={} segment_cache_misses={} segment_dense_promotions={} segment_vector_cache_hits={} segment_vector_cache_misses={} segment_vector_cached_states={} segment_dense_hits={} segment_dense_misses={} segment_sparse_hits={} segment_sparse_misses={} segment_bytes_scanned={} segment_terminal_iters={} segment_terminal_pushes={} segment_mask_accumulations={} signature_nodes={} signature_rows={} signature_child_pairs={} signature_bucket_probes={} nondefault_rows_built={} sparse_signature_nodes={} sparse_signature_pairs={} empty_subtree_edges={} empty_subtree_rows_skipped={}", timings.segment_table_ms, timings.signature_hash_ms, timings.map_materialize_ms, timings.child_active_ms, timings.recursive_ms, timings.reachable_interval_ms, timings.child_precompute_ms, timings.nondefault_build_ms, timings.parallel_terminal_sets_clone_ms, timings.parallel_segment_cache_init_ms, timings.parallel_stamp_alloc_ms, timings.parallel_child_class_project_ms, timings.serial_child_class_project_ms, timings.parallel_children_built, timings.serial_children_built, timings.parallel_empty_children, timings.serial_empty_children, timings.classes_built, timings.nodes_built, timings.active_state_rows, timings.max_active_states, timings.child_edges, timings.max_children_per_node, timings.child_active_state_rows, timings.segment_calls, timings.segment_single_byte_calls, timings.segment_multi_byte_calls, timings.segment_states_requested, timings.segment_cache_hits, timings.segment_cache_misses, timings.segment_dense_promotions, timings.segment_vector_cache_hits, timings.segment_vector_cache_misses, timings.segment_vector_cached_states, timings.segment_dense_hits, timings.segment_dense_misses, timings.segment_sparse_hits, timings.segment_sparse_misses, timings.segment_bytes_scanned, timings.segment_terminal_iters, timings.segment_terminal_pushes, timings.segment_mask_accumulations, timings.signature_nodes, timings.signature_rows, timings.signature_child_pairs, timings.signature_bucket_probes, timings.nondefault_rows_built, timings.sparse_signature_nodes, timings.sparse_signature_pairs, timings.empty_subtree_edges, timings.empty_subtree_rows_skipped);
+        eprintln!("[glrmask/profile][trie_build_interval_timings] segment_table_ms={:.3} signature_hash_ms={:.3} map_materialize_ms={:.3} child_active_ms={:.3} recursive_ms={:.3} reachable_interval_ms={:.3} child_precompute_ms={:.3} nondefault_build_ms={:.3} parallel_terminal_sets_clone_ms={:.3} parallel_segment_cache_init_ms={:.3} parallel_stamp_alloc_ms={:.3} parallel_child_class_project_ms={:.3} serial_child_class_project_ms={:.3} parallel_children_built={} serial_children_built={} parallel_empty_children={} serial_empty_children={} classes_built={} nodes_built={} active_state_rows={} max_active_states={} child_edges={} max_children_per_node={} child_active_state_rows={} segment_calls={} segment_single_byte_calls={} segment_multi_byte_calls={} segment_states_requested={} segment_cache_hits={} segment_cache_misses={} segment_vector_cache_hits={} segment_vector_cache_misses={} segment_vector_cached_states={} segment_bytes_scanned={} segment_terminal_iters={} segment_terminal_pushes={} segment_mask_accumulations={} signature_nodes={} signature_rows={} signature_child_pairs={} signature_bucket_probes={} nondefault_rows_built={} sparse_signature_nodes={} sparse_signature_pairs={} empty_subtree_edges={} empty_subtree_rows_skipped={}", timings.segment_table_ms, timings.signature_hash_ms, timings.map_materialize_ms, timings.child_active_ms, timings.recursive_ms, timings.reachable_interval_ms, timings.child_precompute_ms, timings.nondefault_build_ms, timings.parallel_terminal_sets_clone_ms, timings.parallel_segment_cache_init_ms, timings.parallel_stamp_alloc_ms, timings.parallel_child_class_project_ms, timings.serial_child_class_project_ms, timings.parallel_children_built, timings.serial_children_built, timings.parallel_empty_children, timings.serial_empty_children, timings.classes_built, timings.nodes_built, timings.active_state_rows, timings.max_active_states, timings.child_edges, timings.max_children_per_node, timings.child_active_state_rows, timings.segment_calls, timings.segment_single_byte_calls, timings.segment_multi_byte_calls, timings.segment_states_requested, timings.segment_cache_hits, timings.segment_cache_misses, timings.segment_vector_cache_hits, timings.segment_vector_cache_misses, timings.segment_vector_cached_states, timings.segment_bytes_scanned, timings.segment_terminal_iters, timings.segment_terminal_pushes, timings.segment_mask_accumulations, timings.signature_nodes, timings.signature_rows, timings.signature_child_pairs, timings.signature_bucket_probes, timings.nondefault_rows_built, timings.sparse_signature_nodes, timings.sparse_signature_pairs, timings.empty_subtree_edges, timings.empty_subtree_rows_skipped);
     }
     let profile = PossibleMatchesProfile {
         cache_entries: root_result.class_maps.len(),
