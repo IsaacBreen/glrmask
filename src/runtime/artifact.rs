@@ -1340,7 +1340,7 @@ impl FastTokenizerTransitions {
         )
     }
 
-    fn packed_rows<C: Copy + PartialEq + TryFrom<u32>>(
+    fn packed_rows<C: Copy + PartialEq + TryFrom<u32> + Send + Sync>(
         tokenizer: &Tokenizer,
         finalizer_code: &[u32],
         dead: C,

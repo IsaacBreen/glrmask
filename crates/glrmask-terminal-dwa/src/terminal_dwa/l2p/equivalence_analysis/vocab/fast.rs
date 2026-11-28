@@ -3,7 +3,7 @@
 //! Each token is classified by its match positions, suffix structure, and end
 //! states across all tokenizer starts.
 
-use super::super::compat::{byte_classes_from_column_hashes, conservative_byte_classes, scan_byte_columns, ByteRows, FlatDfa, BYTE_COLUMN_HASH_MULTIPLIER};
+use super::super::compat::{conservative_byte_classes, ByteRows, FlatDfa};
 #[cfg(test)]
 use super::super::compat::compute_byte_classes;
 use ahash::{AHasher, RandomState};
@@ -128,22 +128,9 @@ fn observe_columns(
     relevant: &[bool; 256],
     conservative: Option<[u8; 256]>,
 ) -> ([u8; 256], Vec<U8Set>) {
-    let mut hashes = [0u64; 256];
-    let mut self_loop_bytes = vec![U8Set::empty(); dfa.states.len()];
-    let hash_columns = conservative.is_none();
-    scan_byte_columns(&dfa.transitions, relevant, |state, byte, target| {
-        if hash_columns {
-            hashes[byte] = hashes[byte]
-                .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
-                .wrapping_add(target as u64);
-        }
-        if target == state as u32 {
-            self_loop_bytes[state].insert(byte as u8);
-        }
-    });
-    let classes = conservative.unwrap_or_else(|| byte_classes_from_column_hashes(
-        dfa.states.len(), &hashes, relevant, |state, byte| dfa.trans(state, byte)));
-    (classes, self_loop_bytes)
+    let classes = conservative.unwrap_or_else(||
+        dfa.transitions.observed_classes(relevant, |_, target| target));
+    (classes, dfa.transitions.self_loop_byte_sets(relevant))
 }
 
 impl SharedVocabDfaBase {

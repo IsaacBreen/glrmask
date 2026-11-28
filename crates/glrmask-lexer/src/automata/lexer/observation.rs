@@ -50,58 +50,101 @@ pub fn conservative_byte_classes(relevant: &[bool; 256]) -> Option<[u8; 256]> {
     Some(classes)
 }
 
-pub const BYTE_COLUMN_HASH_MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
-
-pub fn byte_classes_from_column_hashes(
-    num_states: usize,
-    column_hashes: &[u64; 256],
-    relevant: &[bool; 256],
-    target: impl Fn(usize, usize) -> u32,
-) -> [u8; 256] {
-    let mut sorted: Vec<u8> = (0..=255).filter(|&byte| relevant[byte as usize]).collect();
-    sorted.sort_unstable_by_key(|&byte| column_hashes[byte as usize]);
-
-    let mut classes = [0; 256];
-    // Keep one unused catch-all column only for restricted alphabets.
-    let mut next = if sorted.len() == 256 { 0 } else { 1 };
-    for (i, &byte) in sorted.iter().enumerate() {
-        let hash = column_hashes[byte as usize];
-        let prior = sorted[..i].iter().rev()
-            .take_while(|&&previous| column_hashes[previous as usize] == hash)
-            .find(|&&previous| (0..num_states).all(|state|
-                target(state, byte as usize) == target(state, previous as usize)));
-        classes[byte as usize] = if let Some(&previous) = prior {
-            classes[previous as usize]
-        } else {
-            let class = u8::try_from(next).expect("byte class domain");
-            next += 1;
-            class
-        };
-    }
-    classes
+/// Exact column refinement. Each live row splits current classes by target;
+/// absent edges retain the dead subgroup. At most 256 classes can exist.
+struct ColumnPartition {
+    classes: [u8; 256],
+    sizes: [u16; 256],
+    relevant: [bool; 256],
+    next: usize,
+    limit: usize,
+    groups: rustc_hash::FxHashMap<(u8, u32), u8>,
 }
-/// Polynomial column hashes derived from sparse rows. The default is the
-/// all-dead column; each present edge changes just its weighted term.
-fn physical_column_hashes(tokenizer: &Tokenizer) -> [u64; 256] {
-    let mut power = 1u64;
-    let mut dead_hash = 0u64;
-    let mut deltas = [0u64; 256];
-    for state in (0..tokenizer.num_states()).rev() {
-        dead_hash = dead_hash.wrapping_add((u32::MAX as u64).wrapping_mul(power));
-        for (byte, target) in tokenizer.transitions_from(state) {
-            deltas[byte as usize] = deltas[byte as usize]
-                .wrapping_add((target as u64).wrapping_sub(u32::MAX as u64).wrapping_mul(power));
+
+impl ColumnPartition {
+    fn new(relevant: &[bool; 256], reserve_unobserved: bool) -> Self {
+        let offset = usize::from(reserve_unobserved);
+        let count = relevant.iter().filter(|&&yes| yes).count();
+        let mut sizes = [0; 256];
+        sizes[offset] = count as u16;
+        Self {
+            classes: relevant.map(|yes| if yes { offset as u8 } else { 0 }),
+            sizes,
+            relevant: *relevant,
+            next: offset + usize::from(count != 0),
+            limit: offset + count,
+            groups: Default::default(),
         }
-        power = power.wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER);
     }
-    deltas.map(|delta| delta.wrapping_add(dead_hash))
+
+    fn complete(&self) -> bool { self.next == self.limit }
+
+    fn refine(&mut self, edges: impl IntoIterator<Item = (u8, u32)>) {
+        if self.complete() { return; }
+        // At most one edge per byte; singleton classes need no more work.
+        let mut live = [(0u8, 0u8, 0u32); 256];
+        let mut len = 0;
+        let mut counts = [0u16; 256];
+        let mut first = [u32::MAX; 256];
+        let mut mixed = [false; 256];
+        for (byte, target) in edges {
+            let class = self.classes[byte as usize];
+            if self.relevant[byte as usize] && target != u32::MAX && self.sizes[class as usize] > 1 {
+                live[len] = (byte, class, target);
+                len += 1;
+                let index = class as usize;
+                if counts[index] == 0 { first[index] = target; }
+                else { mixed[index] |= first[index] != target; }
+                counts[index] += 1;
+            }
+        }
+        if len == 0 { return; }
+        // The first live subgroup can keep its ID only when no byte is dead.
+        let mut can_retain: [bool; 256] = std::array::from_fn(|class|
+            counts[class] == self.sizes[class]);
+        let unchanged: [bool; 256] = std::array::from_fn(|class|
+            !mixed[class] && can_retain[class]);
+        self.groups.clear();
+        for &(byte, old, target) in &live[..len] {
+            if unchanged[old as usize] {
+                continue;
+            }
+            let class = if let Some(&class) = self.groups.get(&(old, target)) {
+                class
+            } else {
+                let class = if std::mem::take(&mut can_retain[old as usize]) {
+                    old
+                } else {
+                    let new = u8::try_from(self.next).expect("byte class domain");
+                    self.next += 1;
+                    new
+                };
+                self.groups.insert((old, target), class);
+                class
+            };
+            if class != old {
+                self.sizes[old as usize] -= 1;
+                self.sizes[class as usize] += 1;
+                self.classes[byte as usize] = class;
+            }
+        }
+    }
 }
 
-/// Same physical observation without allocating a dense table.
+/// One congruence for the concatenated exact observations of several lexers.
+pub fn exact_byte_classes_for_tokenizers(tokenizers: &[&Tokenizer], relevant: &[bool; 256]) -> [u8; 256] {
+    let mut partition = ColumnPartition::new(relevant, relevant.iter().any(|&yes| !yes));
+    for tokenizer in tokenizers {
+        for state in 0..tokenizer.num_states() {
+            if partition.complete() { return partition.classes; }
+            partition.refine(tokenizer.transitions_from(state));
+        }
+    }
+    partition.classes
+}
+
 pub fn compute_tokenizer_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
-    byte_classes_from_column_hashes(tokenizer.num_states() as usize,
-        &physical_column_hashes(tokenizer), &[true; 256],
-        |state, byte| tokenizer.get_transition(state as u32, byte as u8))
+    exact_byte_classes_for_tokenizers(&[tokenizer], &[true; 256])
 }
 
 impl ByteRows {
@@ -115,7 +158,8 @@ impl<C: Copy + PartialEq> ByteRows<C> {
     /// Encode the exact physical action in a different cell width without
     /// materializing a second u32 slab. The encoding must be a function of
     /// the target (including the dead sentinel), never of the source byte.
-    pub fn from_tokenizer_mapped(tokenizer: &Tokenizer, mut encode: impl FnMut(u32) -> C) -> Self {
+    pub fn from_tokenizer_mapped(tokenizer: &Tokenizer, encode: impl Fn(u32) -> C + Sync) -> Self
+    where C: Send + Sync {
         let virtual_rows = tokenizer.has_any_virtual_runtime();
         let classes = if virtual_rows {
             std::array::from_fn(|byte| byte as u8)
@@ -124,16 +168,26 @@ impl<C: Copy + PartialEq> ByteRows<C> {
         };
         let representatives = column_representatives(&classes);
         let width = representatives.len();
-        let mut values = Vec::with_capacity(tokenizer.num_states() as usize * width);
-        for state in 0..tokenizer.num_states() {
-            if virtual_rows {
-                // Preserve the existing physical fill contract for virtual rows.
+        use rayon::prelude::*;
+        let states = tokenizer.num_states() as usize;
+        let mut values = vec![encode(u32::MAX); states.checked_mul(width).expect("byte row domain")];
+        let build = |(state, output): (usize, &mut [C])| {
+            if virtual_rows || width >= 32 {
                 let mut row = [u32::MAX; 256];
-                tokenizer.fill_transition_row(state, &mut row);
-                values.extend(row.into_iter().map(&mut encode));
+                tokenizer.fill_transition_row(state as u32, &mut row);
+                for (cell, &byte) in output.iter_mut().zip(&representatives) {
+                    *cell = encode(row[byte as usize]);
+                }
             } else {
-                values.extend(representatives.iter().map(|&byte| encode(tokenizer.get_transition(state, byte))));
+                for (cell, &byte) in output.iter_mut().zip(&representatives) {
+                    *cell = encode(tokenizer.get_transition(state as u32, byte));
+                }
             }
+        };
+        if states >= 1024 && rayon::current_num_threads() > 1 {
+            values.par_chunks_mut(width).enumerate().for_each(build);
+        } else {
+            values.chunks_mut(width).enumerate().for_each(build);
         }
         Self::new(Arc::from(values), classes)
     }
@@ -170,6 +224,52 @@ impl<C: Copy + PartialEq> ByteRows<C> {
 }
 
 impl ByteRows {
+    /// Exact quotient after projecting targets. Refine one representative
+    /// per already equal source column, then expand only the byte map.
+    pub fn observed_classes(&self, relevant: &[bool; 256], project: impl Fn(usize, u32) -> u32) -> [u8; 256] {
+        let mut by_column = [None; 256];
+        let mut selected = [false; 256];
+        for byte in (0..=255u8).rev() {
+            if relevant[byte as usize] {
+                by_column[self.byte_to_column[byte as usize] as usize] = Some(byte);
+            }
+        }
+        let columns: Vec<_> = by_column.iter().enumerate()
+            .filter_map(|(column, &byte)| byte.map(|byte| {
+                selected[byte as usize] = true;
+                (column, byte)
+            })).collect();
+        let mut partition = ColumnPartition::new(&selected, relevant.iter().any(|&yes| !yes));
+        for (state, row) in self.values.chunks_exact(self.width).enumerate() {
+            if partition.complete() { break; }
+            partition.refine(columns.iter().map(|&(column, byte)| (byte, project(state, row[column]))));
+        }
+        std::array::from_fn(|byte| {
+            if relevant[byte] {
+                let representative = by_column[self.byte_to_column[byte] as usize].unwrap();
+                partition.classes[representative as usize]
+            } else { 0 }
+        })
+    }
+
+    /// Inspect a compressed transition once, not every byte it represents.
+    pub fn self_loop_byte_sets(&self, relevant: &[bool; 256]) -> Vec<crate::ds::u8set::U8Set> {
+        use crate::ds::u8set::U8Set;
+        let mut by_column = vec![U8Set::empty(); self.width];
+        for byte in 0..=255u8 {
+            if relevant[byte as usize] {
+                by_column[self.byte_to_column[byte as usize] as usize].insert(byte);
+            }
+        }
+        self.values.chunks_exact(self.width).enumerate().map(|(state, row)| {
+            let mut result = U8Set::empty();
+            for (&target, &bytes) in row.iter().zip(&by_column) {
+                if target == state as u32 { result |= bytes; }
+            }
+            result
+        }).collect()
+    }
+
     /// Repack the entire represented action. The caller must have proved
     /// equality of the source columns for every pair of bytes in a class.
     /// This does not turn a finite-alphabet source into a physical lexer.
@@ -586,6 +686,40 @@ mod config_action_tests {
             }
         }
     }
+
+    #[test]
+    fn partition_refinement_matches_literal_projected_columns() {
+        let rows = [
+            [u32::MAX; 256],
+            std::array::from_fn(|byte| (byte % 13) as u32),
+            std::array::from_fn(|byte| if byte % 5 == 0 { u32::MAX } else { (byte % 7) as u32 }),
+            std::array::from_fn(|byte| byte as u32),
+        ];
+        for count in 0..=rows.len() {
+            let dense = ByteRows::dense(Arc::from(rows[..count].concat()));
+            let all = [true; 256];
+            let classes = dense.observed_classes(&all, |_, target| target);
+            let compressed = ByteRows::new(dense.repack(&classes, false), classes);
+            for relevant in [all, [false; 256], std::array::from_fn(|byte| byte % 3 == 0)] {
+                let project = |state, target| if state == 3 || target == u32::MAX { u32::MAX } else { target % 3 };
+                let actual = compressed.observed_classes(&relevant, project);
+                column_count(&actual);
+                for left in 0..256 {
+                    if !relevant[left] {
+                        assert_eq!(actual[left], 0);
+                        continue;
+                    }
+                    for right in 0..256 {
+                        if relevant[right] {
+                            assert_eq!(actual[left] == actual[right],
+                                (0..count).all(|state| project(state, rows[state][left]) == project(state, rows[state][right])));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 
     #[test]
     fn memo_rows_share_only_proven_observed_columns() {

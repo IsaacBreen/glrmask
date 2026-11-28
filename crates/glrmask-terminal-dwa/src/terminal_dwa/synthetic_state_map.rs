@@ -282,89 +282,19 @@ pub fn inactive_dispatch_component_state_map(
     ))
 }
 
-const BYTE_COLUMN_HASH_MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
-
-fn byte_columns_equal(
-    full: &Tokenizer,
-    synthesized: &Tokenizer,
-    left: u8,
-    right: u8,
-) -> bool {
-    (0..synthesized.num_states())
-        .all(|state| synthesized.step(state, left) == synthesized.step(state, right))
-        && (0..full.num_states())
-            .all(|state| full.step(state, left) == full.step(state, right))
-}
-
-/// Return one exact representative for every transition-column class among
-/// vocabulary-relevant bytes across both deterministic lexers.
-///
-/// Hashes only identify candidate classes. Every hash match is verified by a
-/// complete row-wise comparison, so the resulting alphabet quotient is exact.
+/// One exact representative for each relevant action shared by both lexers.
 fn exact_combined_byte_representatives(
     full: &Tokenizer,
     synthesized: &Tokenizer,
     relevant_bytes: &[u8],
 ) -> Vec<u8> {
-    let mut relevant = relevant_bytes.to_vec();
-    relevant.sort_unstable();
-    relevant.dedup();
-    if relevant.len() <= 1 {
-        return relevant;
-    }
-
-    let total_states = full.num_states() as usize + synthesized.num_states() as usize;
-    let mut row_weights = vec![0u64; total_states];
-    let mut power = 1u64;
-    for row in (0..total_states).rev() {
-        row_weights[row] = power;
-        power = power.wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER);
-    }
-    let dead = u32::MAX as u64;
-    let mut all_dead_hash = 0u64;
-    for _ in 0..total_states {
-        all_dead_hash = all_dead_hash
-            .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
-            .wrapping_add(dead);
-    }
-    let mut hashes = [all_dead_hash; 256];
-    let mut row = 0usize;
-    for tokenizer in [synthesized, full] {
-        for state in 0..tokenizer.num_states() {
-            let weight = row_weights[row];
-            for (byte, target) in tokenizer.transitions_from(state) {
-                let delta = (target as u64).wrapping_sub(dead);
-                hashes[byte as usize] =
-                    hashes[byte as usize].wrapping_add(delta.wrapping_mul(weight));
-            }
-            row += 1;
-        }
-    }
-
-    relevant.sort_unstable_by_key(|&byte| (hashes[byte as usize], byte));
-    let mut representatives = Vec::new();
-    let mut group_start = 0usize;
-    while group_start < relevant.len() {
-        let hash = hashes[relevant[group_start] as usize];
-        let mut group_end = group_start + 1;
-        while group_end < relevant.len() && hashes[relevant[group_end] as usize] == hash {
-            group_end += 1;
-        }
-
-        let mut group_representatives = Vec::new();
-        for &byte in &relevant[group_start..group_end] {
-            if !group_representatives
-                .iter()
-                .any(|&representative| byte_columns_equal(full, synthesized, representative, byte))
-            {
-                group_representatives.push(byte);
-            }
-        }
-        representatives.extend(group_representatives);
-        group_start = group_end;
-    }
-    representatives.sort_unstable();
-    representatives
+    let mut relevant = [false; 256];
+    for &byte in relevant_bytes { relevant[byte as usize] = true; }
+    let classes = crate::automata::lexer::observation::exact_byte_classes_for_tokenizers(
+        &[synthesized, full], &relevant);
+    let mut seen = [false; 256];
+    (0..=255u8).filter(|&byte| relevant[byte as usize]
+        && !std::mem::replace(&mut seen[classes[byte as usize] as usize], true)).collect()
 }
 
 fn collect_component_states(

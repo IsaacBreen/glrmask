@@ -48,45 +48,10 @@ pub struct FlatDfa {
     pub start_state: usize,
     pub transitions: ByteRows,
 }
-pub(super) use crate::automata::lexer::observation::{
-    BYTE_COLUMN_HASH_MULTIPLIER, byte_classes_from_column_hashes,
-};
 pub(crate) use crate::automata::lexer::observation::compute_tokenizer_byte_classes;
 
-/// Scan the represented byte action once. Dense physical rows have no
-/// indirection in the inner loop; a finite alphabet visits only its columns.
-pub(super) fn scan_byte_columns(
-    rows: &ByteRows,
-    relevant: &[bool; 256],
-    mut observe: impl FnMut(usize, usize, u32),
-) {
-    let bytes: Vec<usize> = (0..256).filter(|&byte| relevant[byte]).collect();
-    if bytes.len() == 256 && rows.width == 256
-        && rows.byte_to_column.iter().enumerate().all(|(byte, &column)| byte == column as usize)
-    {
-        for (state, row) in rows.values.chunks_exact(256).enumerate() {
-            for (byte, &target) in row.iter().enumerate() {
-                observe(state, byte, target);
-            }
-        }
-    } else {
-        for state in 0..rows.num_states() {
-            let row = rows.row(state);
-            for &byte in &bytes {
-                observe(state, byte, row[rows.byte_to_column[byte] as usize]);
-            }
-        }
-    }
-}
-
 pub fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
-    let mut hashes = [0u64; 256];
-    scan_byte_columns(&dfa.transitions, &[true; 256], |_, byte, target| {
-        hashes[byte] = hashes[byte].wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
-            .wrapping_add(target as u64);
-    });
-    byte_classes_from_column_hashes(dfa.states.len(), &hashes, &[true; 256],
-        |state, byte| dfa.trans(state, byte))
+    dfa.transitions.observed_classes(&[true; 256], |_, target| target)
 }
 
 /// Exact byte congruence of the physical lexer projected onto the selected
@@ -107,34 +72,13 @@ pub fn compute_active_physical_byte_classes_from_flat_trans(
         })
         .collect::<Vec<_>>();
 
-    #[inline]
-    fn projected_target(
-        flat_trans: &ByteRows,
-        active_language: &[bool],
-        source: usize,
-        byte: usize,
-    ) -> u32 {
-        if !active_language[source] {
-            return u32::MAX;
-        }
-        let target = flat_trans.trans(source, byte);
-        if target == u32::MAX || !active_language[target as usize] {
-            u32::MAX
-        } else {
+    flat_trans.observed_classes(&[true; 256], |source, target| {
+        if active_language[source] && target != u32::MAX && active_language[target as usize] {
             target
+        } else {
+            u32::MAX
         }
-    }
-
-    let mut hashes = [0u64; 256];
-    for source in 0..states {
-        for byte in 0..256 {
-            hashes[byte] = hashes[byte]
-                .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
-                .wrapping_add(projected_target(flat_trans, &active_language, source, byte) as u64);
-        }
-    }
-    byte_classes_from_column_hashes(states, &hashes, &[true; 256],
-        |source, byte| projected_target(flat_trans, &active_language, source, byte))
+    })
 }
 #[inline]
 fn state_has_active_language(state: &FlatDfaState) -> bool {
@@ -472,7 +416,7 @@ mod sparse_transition_cache_tests {
     }
 
     #[test]
-    fn sparse_column_hashes_preserve_exact_byte_classes() {
+    fn sparse_rows_preserve_exact_byte_classes() {
         let num_states = 4usize;
         let dead = u32::MAX;
         let mut transitions = vec![dead; num_states * 256];
@@ -482,27 +426,9 @@ mod sparse_transition_cache_tests {
             vec![(b'a', 3), (b'b', 3), (b'c', 1)],
             vec![(b'a', 3), (b'b', 3), (b'd', 1)],
         ];
-        let mut row_weight = vec![0u64; num_states];
-        let mut power = 1u64;
-        for state in (0..num_states).rev() {
-            row_weight[state] = power;
-            power = power.wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER);
-        }
-        let mut all_dead_hash = 0u64;
-        for _ in 0..num_states {
-            all_dead_hash = all_dead_hash
-                .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
-                .wrapping_add(dead as u64);
-        }
-        let mut sparse_hashes = [all_dead_hash; 256];
         for (state, row) in rows.iter().enumerate() {
             for &(byte, target) in row {
                 transitions[state * 256 + byte as usize] = target;
-                sparse_hashes[byte as usize] = sparse_hashes[byte as usize].wrapping_add(
-                    (target as u64)
-                        .wrapping_sub(dead as u64)
-                        .wrapping_mul(row_weight[state]),
-                );
             }
         }
         let dfa = FlatDfa {
@@ -522,9 +448,6 @@ mod sparse_transition_cache_tests {
                     (0..num_states).all(|state| dfa.trans(state, left) == dfa.trans(state, right)));
             }
         }
-        assert_eq!(
-            byte_classes_from_column_hashes(num_states, &sparse_hashes, &[true; 256], |state, byte| dfa.trans(state, byte)),
-            compute_byte_classes(&dfa),
-        );
+
     }
 }
