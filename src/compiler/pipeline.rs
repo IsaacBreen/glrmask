@@ -3462,12 +3462,10 @@ fn reconcile_parser_top_accept_parts(
         return None;
     }
     inputs.sort_unstable_by_key(|mapped| std::cmp::Reverse(mapped.id_map().num_tsids()));
-    let mut merged = inputs.remove(0);
-    for next in inputs {
-        let ((left, right), id_map) = merged.pair_forced_common(next).into_parts();
-        merged = MappedArtifact::new(merge_parser_top_accept(left, right), id_map);
-    }
-    Some(merged)
+    let (parts, common) = MappedArtifact::reconcile_vec(inputs).into_parts();
+    let merged = parts.into_iter().reduce(merge_parser_top_accept)
+        .expect("nonempty acceptance inventory");
+    Some(MappedArtifact::new(merged, common))
 }
 
 fn build_and_merge_parser_dwa_families(

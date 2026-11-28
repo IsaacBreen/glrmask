@@ -499,52 +499,59 @@ impl<T> MappedArtifact<Vec<T>>
 where
     T: WeightRefs,
 {
+    /// Build the joint observation partition before touching any weights.
+    /// Repeated pairwise merging used to remap the accumulated artifacts
+    /// again whenever another family split an existing class.
     pub fn reconcile_vec(inputs: Vec<MappedArtifact<T>>) -> MappedArtifact<Vec<T>> {
-        assert!(!inputs.is_empty(), "MappedArtifact::reconcile_vec called with empty inputs");
-
-        let mut iter = inputs.into_iter();
-        let first = iter.next().unwrap();
-        let (first_artifact, first_id_map) = first.into_parts();
-        let mut acc = MappedArtifact::new(vec![first_artifact], first_id_map);
-
-        for next in iter {
-            let mut next = next;
-            let common_id_map = acc.reconcile_with(&mut next);
-            let (artifacts, id_map) = acc.parts_mut();
-            artifacts.push(next.into_artifact());
-            *id_map = common_id_map;
-        }
-
-        acc
+        Self::reconcile_all(inputs, false)
     }
 
-    /// Reconcile artifacts over a deliberately sparse tokenizer-state domain.
-    /// Raw states unmapped by every input remain unmapped in the common map.
-    /// Ordinary compilation intentionally uses [`Self::reconcile_vec`], where
-    /// tokenizer coverage is global; boundary-scoped compilation uses this
-    /// variant so out-of-component raw states cannot re-enter through the
-    /// reconciler as an artificial `u32::MAX` class.
+    /// Boundary observations have a deliberately partial raw-state domain.
+    /// Keep states absent from every input absent from the common coordinate.
     pub fn reconcile_vec_preserving_unmapped_tokenizer(
-        mut inputs: Vec<MappedArtifact<T>>,
+        inputs: Vec<MappedArtifact<T>>,
     ) -> MappedArtifact<Vec<T>> {
-        assert!(
-            !inputs.is_empty(),
-            "MappedArtifact::reconcile_vec_preserving_unmapped_tokenizer called with empty inputs"
-        );
+        Self::reconcile_all(inputs, true)
+    }
+
+    fn reconcile_all(inputs: Vec<MappedArtifact<T>>, sparse: bool) -> MappedArtifact<Vec<T>> {
+        assert!(!inputs.is_empty(), "cannot reconcile an empty artifact inventory");
+        if inputs.len() == 1 {
+            let (artifact, id_map) = inputs.into_iter().next().unwrap().into_parts();
+            return MappedArtifact::new(vec![artifact], id_map);
+        }
+
         let common = {
-            let maps = inputs.iter().map(MappedArtifact::id_map).collect::<Vec<_>>();
-            reconcile::build_common_internal_id_map_preserving_unmapped_tokenizer(&maps)
+            // A weightless ordinary artifact has no observation capable of
+            // distinguishing classes. Preserve the historical empty-map
+            // fast path rather than refining on irrelevant coordinates.
+            let mut maps = inputs.iter().filter(|input|
+                sparse || !input.artifact().weight_refs().is_empty())
+                .map(MappedArtifact::id_map).collect::<Vec<_>>();
+            if maps.is_empty() {
+                maps.push(inputs[0].id_map());
+            }
+            if !sparse {
+                if let Some(finer) = maps.iter().copied().find(|candidate|
+                    maps.iter().all(|other|
+                        reconcile::internal_id_map_refines(candidate, other)))
+                {
+                    finer.clone()
+                } else {
+                    reconcile::build_common_internal_id_map(&maps)
+                }
+            } else {
+                reconcile::build_common_internal_id_map_preserving_unmapped_tokenizer(&maps)
+            }
         };
-        let mut artifacts = Vec::with_capacity(inputs.len());
-        for mut input in inputs.drain(..) {
+        let artifacts = inputs.into_iter().map(|mut input| {
             if !same_internal_id_maps(input.id_map(), &common) {
                 let (artifact, local) = input.parts_mut();
                 let mut weights = artifact.weight_refs_mut();
                 reconcile::remap_weights_into_existing_common(&mut weights, local, &common);
-                *local = common.clone();
             }
-            artifacts.push(input.into_artifact());
-        }
+            input.into_artifact()
+        }).collect();
         MappedArtifact::new(artifacts, common)
     }
 
