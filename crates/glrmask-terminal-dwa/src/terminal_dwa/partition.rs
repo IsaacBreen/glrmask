@@ -318,6 +318,147 @@ fn split_l2p_vocab_enabled() -> bool {
     })
 }
 
+/// The terminal path classification is the semantic routing authority for
+/// both weighted builds and vocabulary projections.
+struct TerminalMasks {
+    l1: Vec<bool>,
+    l2p: Vec<bool>,
+    counts: [usize; 3],
+}
+
+impl TerminalMasks {
+    fn new(lengths: &[TerminalPathLength], filter: Option<&[bool]>) -> Self {
+        if let Some(filter) = filter {
+            assert_eq!(filter.len(), lengths.len(), "restricted terminal mask must cover the merged terminal domain");
+        }
+        let mut result = Self {
+            l1: vec![false; lengths.len()],
+            l2p: vec![false; lengths.len()],
+            counts: [0; 3],
+        };
+        for (terminal, length) in lengths.iter().enumerate() {
+            if filter.is_some_and(|mask| !mask[terminal]) {
+                result.counts[0] += 1;
+                continue;
+            }
+            match length {
+                TerminalPathLength::Zero => result.counts[0] += 1,
+                TerminalPathLength::One => {
+                    result.counts[1] += 1;
+                    result.l1[terminal] = true;
+                }
+                TerminalPathLength::TwoPlus => {
+                    result.counts[2] += 1;
+                    result.l2p[terminal] = true;
+                }
+            }
+        }
+        result
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RoutingPolicy {
+    Ordinary,
+    Scoped,
+    ConservativeVocab,
+}
+
+/// Routing a token into an L2+ boundary or a projected single-terminal
+/// observation is independent of whether the consumer publishes a DWA.
+/// Preparation effort and conservative proof omissions remain policy choices.
+struct VocabRouting<'a> {
+    trie: Option<Arc<super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie>>,
+    split: Option<super::classify::L2pVocabBoundarySplit>,
+    has_split_l1: bool,
+    combine_l1_single: bool,
+    combined_l1_mask: Option<Vec<bool>>,
+    transitions_by_byte: Option<&'a [u32]>,
+    exact_l2p_selected: bool,
+}
+
+fn route_vocab<'a>(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    flat_trans: &[u32],
+    token_path_disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
+    l1_mask: &[bool],
+    l2p_mask: &[bool],
+    shared_classify_cache: Option<&'a super::classify::SharedClassifyCache>,
+    policy: RoutingPolicy,
+) -> VocabRouting<'a> {
+    let has_l1 = l1_mask.iter().any(|&active| active);
+    let l2p_terminal_count = l2p_mask.iter().filter(|&&active| active).count();
+    let has_l2p = l2p_terminal_count != 0;
+    let dedicated = matches!(policy, RoutingPolicy::ConservativeVocab);
+    let trie = if !has_l1 && !has_l2p {
+        None
+    } else if dedicated {
+        super::l1::prepared_l1_token_bounded_analysis_trie(vocab)
+    } else if std::env::var("GLRMASK_USE_PREBUILT_L1_TOKEN_TRIE")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+        }).unwrap_or(true)
+    {
+        super::l1::cached_l1_token_bounded_analysis_trie(vocab)
+    } else {
+        None
+    };
+    // Scoped crossing requires the full terminal-word relation.
+    let split = (has_l2p && !matches!(policy, RoutingPolicy::Scoped)
+        && split_l2p_vocab_enabled()).then(|| {
+        split_vocab_for_active_l2p_terminals(
+            tokenizer, flat_trans, vocab, token_path_disallowed_follows,
+            l2p_mask.len() as u32, l2p_mask, shared_classify_cache, trie.as_deref(),
+        )
+    });
+    let split_single_tokens = split.as_ref().map_or(0, |split| split.single_tokens);
+    let has_split_l1 = split_single_tokens != 0;
+    let exact_l2p_selected = dedicated && split.as_ref().is_some_and(|split| {
+        split.boundary_tokens != 0
+            && vocab_partition_exact_l2p_selected(partition_label, split.boundary_tokens, 1_024)
+    });
+    let combine_default = automatic_combine_l1_single(
+        vocab.len(), split_single_tokens, l2p_terminal_count,
+    );
+    let combine_l1_single = partition_label == "p1" && has_l1 && has_split_l1
+        && if dedicated {
+            !exact_l2p_selected && combine_default
+        } else {
+            std::env::var("GLRMASK_COMBINE_L1_SINGLE")
+                .map(|value| {
+                    let trimmed = value.trim();
+                    trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
+                }).unwrap_or(combine_default)
+        };
+    if compile_profile_enabled() {
+        if dedicated {
+            eprintln!(
+                "[glrmask/profile][vocab_partition_route] partition={} tokens={} l1_terminals={} l2p_terminals={} split_single={} split_boundary={} exact_l2p={}",
+                partition_label, vocab.len(), l1_mask.iter().filter(|&&active| active).count(),
+                l2p_terminal_count, split_single_tokens,
+                split.as_ref().map_or(0, |split| split.boundary_tokens), exact_l2p_selected,
+            );
+        } else if partition_label == "p1" && has_l1 && has_split_l1 {
+            eprintln!(
+                "[glrmask/profile][combine_l1_single] combined={} auto_separate={} vocab_tokens={} single_tokens={} l2p_terminals={} avoided_pairs={}",
+                combine_l1_single, !combine_default, vocab.len(), split_single_tokens,
+                l2p_terminal_count, vocab.len().saturating_sub(split_single_tokens).saturating_mul(l2p_terminal_count),
+            );
+        }
+    }
+    let combined_l1_mask = combine_l1_single.then(|| {
+        l1_mask.iter().zip(l2p_mask).map(|(&l1, &l2p)| l1 || l2p).collect()
+    });
+    let transitions_by_byte = (has_l1 || has_split_l1).then(|| {
+        shared_classify_cache.and_then(|cache| cache.get())
+            .map(|bytesets| bytesets.transitions_by_byte())
+    }).flatten();
+    VocabRouting { trie, split, has_split_l1, combine_l1_single,
+        combined_l1_mask, transitions_by_byte, exact_l2p_selected }
+}
 /// Build an id_map and terminal DWA for a single vocab partition.
 ///
 /// 1. Classify terminal path lengths into L1 / L2+ masks.
@@ -704,7 +845,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
             force_all_l2p,
         );
     }
-    let mut terminal_path_lengths = if force_all_l2p {
+    let terminal_path_lengths = if force_all_l2p {
         vec![TerminalPathLength::TwoPlus; num_terminals as usize]
     } else if let Some(precomputed) = precomputed_terminal_path_lengths {
         assert_eq!(
@@ -733,18 +874,6 @@ fn build_partition_id_map_and_terminal_dwa_impl(
             shared_classify_cache,
         )
     };
-    if let Some(active) = terminal_filter {
-        assert_eq!(
-            active.len(),
-            terminal_path_lengths.len(),
-            "restricted terminal mask must cover the merged terminal domain",
-        );
-        for (terminal, &is_active) in active.iter().enumerate() {
-            if !is_active {
-                terminal_path_lengths[terminal] = TerminalPathLength::Zero;
-            }
-        }
-    }
     let classify_ms = classify_started_at.elapsed().as_secs_f64() * 1000.0;
     if compile_profile_enabled() {
         eprintln!(
@@ -754,35 +883,10 @@ fn build_partition_id_map_and_terminal_dwa_impl(
     }
 
     let routing_started_at = Instant::now();
-    let mut l1_mask = vec![false; num_terminals as usize];
-    let mut l2p_mask = vec![false; num_terminals as usize];
-    let mut has_l1 = false;
-    let mut has_l2p = false;
-    let mut num_zero = 0usize;
-    let mut num_one = 0usize;
-    let mut num_two_plus = 0usize;
-    for (i, len) in terminal_path_lengths.iter().enumerate() {
-        if terminal_filter.is_some_and(|filter| !filter.get(i).copied().unwrap_or(false)) {
-            num_zero += 1;
-            continue;
-        }
-        match len {
-            TerminalPathLength::One => {
-                l1_mask[i] = true;
-                has_l1 = true;
-                num_one += 1;
-            }
-            TerminalPathLength::TwoPlus => {
-                l2p_mask[i] = true;
-                has_l2p = true;
-                num_two_plus += 1;
-            }
-            TerminalPathLength::Zero => {
-                num_zero += 1;
-            }
-        }
-    }
-
+    let TerminalMasks { l1: l1_mask, l2p: l2p_mask, counts: [num_zero, num_one, num_two_plus] } =
+        TerminalMasks::new(&terminal_path_lengths, terminal_filter);
+    let has_l1 = num_one != 0;
+    let has_l2p = num_two_plus != 0;
     let speculative_hit = allow_speculative_skip
         && speculative_witness_mask
             .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()))
@@ -807,101 +911,16 @@ fn build_partition_id_map_and_terminal_dwa_impl(
         eprintln!("[glrmask/dump][l2p_mask] partition={} ids={:?}", partition_label, ids);
     }
 
-    let use_prebuilt_l1_token_trie = std::env::var("GLRMASK_USE_PREBUILT_L1_TOKEN_TRIE")
-        .map(|value| {
-            let trimmed = value.trim();
-            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
-        })
-        .unwrap_or(true);
-    let shared_l1_token_trie = if use_prebuilt_l1_token_trie && (has_l1 || has_l2p) {
-        super::l1::cached_l1_token_bounded_analysis_trie(vocab)
-    } else {
-        None
-    };
-
-    // Likewise, the split-off L2P-single shortcut is certified for ordinary
-    // local masking, not for the stronger scoped crossing relation.
-    let use_l2p_vocab_split = has_l2p && boundary_scope.is_none() && split_l2p_vocab_enabled();
-    let l2p_vocab_split = use_l2p_vocab_split.then(|| {
-        split_vocab_for_active_l2p_terminals(
-            tokenizer,
-            flat_trans,
-            vocab,
-            token_path_disallowed_follows,
-            num_terminals,
-            &l2p_mask,
-            shared_classify_cache,
-            shared_l1_token_trie.as_deref(),
-        )
-    });
-    let has_split_l1 = l2p_vocab_split
-        .as_ref()
-        .is_some_and(|split| split.single_tokens != 0);
-    // A p1 partition with both ordinary L1 terminals and split-off L2P-single
-    // work otherwise scans essentially the same large vocab twice.  The union
-    // of those single-terminal relations can be built in one projected-L1 pass:
-    // any L2P-terminal single path on a boundary token is already contained in
-    // the exact boundary L2P relation, so including it here does not change the
-    // union.  Keep a kill switch for same-binary validation.
-    // Folding the split-off L2P-single relation into the ordinary L1 pass
-    // avoids a second L1 artifact, but it also adds every active L2P terminal
-    // to a full-vocabulary scan.  When the split-single vocabulary is tiny,
-    // that can be far more work than building the exact small relation
-    // separately.  Estimate the work avoided by separation in token-terminal
-    // pairs: every non-single token no longer participates in the extra L2P
-    // terminal coordinates of the full L1 pass.
-    //
-    // Keep combining when the single side is not genuinely small, or when the
-    // avoided work is modest.  In particular this protects grammars where
-    // nearly the whole vocabulary is single-only: separating those would just
-    // move the full scan into a nested L1 branch.
-    let l2p_terminal_count = l2p_mask.iter().filter(|&&active| active).count();
-    let split_single_tokens = l2p_vocab_split.as_ref().map_or(0, |split| split.single_tokens);
-    let non_single_tokens = vocab.entries_map().len().saturating_sub(split_single_tokens);
-    let avoided_full_vocab_pairs = non_single_tokens.saturating_mul(l2p_terminal_count);
-    let combine_l1_single_default = automatic_combine_l1_single(
-        vocab.entries_map().len(),
-        split_single_tokens,
-        l2p_terminal_count,
+    let VocabRouting {
+        trie: shared_l1_token_trie, split: l2p_vocab_split, has_split_l1,
+        combine_l1_single, combined_l1_mask, transitions_by_byte: l1_transitions_by_byte,
+        ..
+    } = route_vocab(
+        partition_label, tokenizer, vocab, flat_trans, token_path_disallowed_follows,
+        &l1_mask, &l2p_mask, shared_classify_cache,
+        if boundary_scope.is_some() { RoutingPolicy::Scoped } else { RoutingPolicy::Ordinary },
     );
-    let auto_separate_l1_single = has_split_l1 && !combine_l1_single_default;
-    let combine_l1_single = partition_label == "p1"
-        && has_l1
-        && has_split_l1
-        && std::env::var("GLRMASK_COMBINE_L1_SINGLE")
-            .map(|value| {
-                let trimmed = value.trim();
-                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(combine_l1_single_default);
-    if compile_profile_enabled() && partition_label == "p1" && has_l1 && has_split_l1 {
-        eprintln!(
-            "[glrmask/profile][combine_l1_single] combined={} auto_separate={} vocab_tokens={} single_tokens={} l2p_terminals={} avoided_pairs={}",
-            combine_l1_single,
-            auto_separate_l1_single,
-            vocab.entries_map().len(),
-            split_single_tokens,
-            l2p_terminal_count,
-            avoided_full_vocab_pairs,
-        );
-    }
-    let combined_l1_mask = combine_l1_single.then(|| {
-        l1_mask
-            .iter()
-            .zip(&l2p_mask)
-            .map(|(&l1, &l2p)| l1 || l2p)
-            .collect::<Vec<_>>()
-    });
-    let l1_build_mask = combined_l1_mask.as_deref().unwrap_or(&l1_mask);
-    // Classification already initializes this shared byte-major DFA table.
-    // L1 exact equivalence walks many states at a fixed token byte, for which
-    // the transposed layout avoids a 256-word stride through the row-major table.
-    let l1_transitions_by_byte = (has_l1 || has_split_l1).then(|| {
-        shared_classify_cache
-            .and_then(|cache| cache.get())
-            .map(|bytesets| bytesets.transitions_by_byte())
-    }).flatten();
-    let routing_ms = routing_started_at.elapsed().as_secs_f64() * 1000.0;
+    let l1_build_mask = combined_l1_mask.as_deref().unwrap_or(&l1_mask);    let routing_ms = routing_started_at.elapsed().as_secs_f64() * 1000.0;
     let derive_l1_subset_order = std::env::var("GLRMASK_DERIVE_L1_SUBSET_ORDER")
         .map(|value| {
             let trimmed = value.trim();
@@ -1542,90 +1561,19 @@ pub(super) fn build_partition_vocab_equivalence(
         num_terminals,
         shared_classify_cache,
     );
-    let mut l1_mask = vec![false; num_terminals as usize];
-    let mut l2p_mask = vec![false; num_terminals as usize];
-    let mut has_l1 = false;
-    let mut has_l2p = false;
-    for (terminal, length) in terminal_path_lengths.iter().enumerate() {
-        match length {
-            TerminalPathLength::One => {
-                l1_mask[terminal] = true;
-                has_l1 = true;
-            }
-            TerminalPathLength::TwoPlus => {
-                l2p_mask[terminal] = true;
-                has_l2p = true;
-            }
-            TerminalPathLength::Zero => {}
-        }
-    }
-
-    let shared_l1_token_trie = (has_l1 || has_l2p)
-        .then(|| super::l1::prepared_l1_token_bounded_analysis_trie(vocab))
-        .flatten();
-    let l2p_vocab_split = (has_l2p && split_l2p_vocab_enabled()).then(|| {
-        split_vocab_for_active_l2p_terminals(
-            tokenizer,
-            flat_trans,
-            vocab,
-            token_path_disallowed_follows,
-            num_terminals,
-            &l2p_mask,
-            shared_classify_cache,
-            shared_l1_token_trie.as_deref(),
-        )
-    });
-    let has_split_l1 = l2p_vocab_split
-        .as_ref()
-        .is_some_and(|split| split.single_tokens != 0);
-    let exact_l2p_selected = l2p_vocab_split.as_ref().is_some_and(|split| {
-        split.boundary_tokens != 0
-            && vocab_partition_exact_l2p_selected(
-                partition_label,
-                split.boundary_tokens,
-                1_024,
-            )
-    });
-
-    let l2p_terminal_count = l2p_mask.iter().filter(|&&active| active).count();
-    let split_single_tokens = l2p_vocab_split.as_ref().map_or(0, |split| split.single_tokens);
-    if compile_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][vocab_partition_route] partition={} tokens={} l1_terminals={} l2p_terminals={} split_single={} split_boundary={} exact_l2p={}",
-            partition_label,
-            vocab.len(),
-            l1_mask.iter().filter(|&&active| active).count(),
-            l2p_terminal_count,
-            split_single_tokens,
-            l2p_vocab_split.as_ref().map_or(0, |split| split.boundary_tokens),
-            exact_l2p_selected,
-        );
-    }
-    let combine_l1_single = partition_label == "p1"
-        && has_l1
-        && has_split_l1
-        // When the boundary side will receive a full exact L2P quotient below,
-        // folding the L2P terminals into this full-vocabulary L1 pass repeats
-        // that work. Keep the true L1 family here and analyze the split L2P
-        // single side separately instead.
-        && !exact_l2p_selected
-        && automatic_combine_l1_single(vocab.len(), split_single_tokens, l2p_terminal_count);
-    let combined_l1_mask = combine_l1_single.then(|| {
-        l1_mask
-            .iter()
-            .zip(&l2p_mask)
-            .map(|(&l1, &l2p)| l1 || l2p)
-            .collect::<Vec<_>>()
-    });
+    let TerminalMasks { l1: l1_mask, l2p: l2p_mask, counts: [_, num_one, num_two_plus] } =
+        TerminalMasks::new(&terminal_path_lengths, None);
+    let has_l1 = num_one != 0;
+    let has_l2p = num_two_plus != 0;
+    let VocabRouting {
+        trie: shared_l1_token_trie, split: l2p_vocab_split,
+        combine_l1_single, combined_l1_mask, transitions_by_byte: l1_transitions_by_byte,
+        exact_l2p_selected, ..
+    } = route_vocab(
+        partition_label, tokenizer, vocab, flat_trans, token_path_disallowed_follows,
+        &l1_mask, &l2p_mask, shared_classify_cache, RoutingPolicy::ConservativeVocab,
+    );
     let l1_build_mask = combined_l1_mask.as_deref().unwrap_or(&l1_mask);
-    let l1_transitions_by_byte = (has_l1 || has_split_l1)
-        .then(|| {
-            shared_classify_cache
-                .and_then(|cache| cache.get())
-                .map(|bytesets| bytesets.transitions_by_byte())
-        })
-        .flatten();
-
     let mut maps = Vec::<ManyToOneIdMap>::new();
     if has_l1 {
         let input = super::l1::implementations::BuildInput {
