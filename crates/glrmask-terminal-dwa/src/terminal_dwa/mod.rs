@@ -901,19 +901,13 @@ impl CharTypeSubVocabPartition {
         self.vocab
             .get_or_init(|| {
                 let mut entries = Vec::with_capacity(self.token_ids.len());
-                let mut follow_bytes = [U8Set::empty(); 256];
                 for &token_id in self.token_ids.iter() {
                     let bytes = parent
                         .get(token_id)
                         .expect("char-type partition token must exist in parent vocab");
-                    for pair in bytes.windows(2) {
-                        follow_bytes[pair[0] as usize].insert(pair[1]);
-                    }
                     entries.push((token_id, bytes.to_vec()));
                 }
-                let vocab = Vocab::from_entries_unchecked(entries);
-                classify::cache_vocab_classification_facts(&vocab, self.bytes, follow_bytes);
-                vocab
+                Vocab::from_entries_unchecked(entries)
             })
             .clone()
     }

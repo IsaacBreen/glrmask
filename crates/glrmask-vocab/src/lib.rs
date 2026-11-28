@@ -105,13 +105,23 @@ struct VocabCompilerCache {
 }
 
 #[derive(Debug)]
-struct VocabRelevantBytes {
+pub struct VocabByteFacts {
     bytes: Arc<[u8]>,
-    mask: [bool; 256],
+    words: [u64; 4],
+    follow_words: Box<[[u64; 4]; 256]>,
     total_bytes: usize,
 }
 
-impl VocabDerivedArtifact for VocabRelevantBytes {}
+impl VocabDerivedArtifact for VocabByteFacts {}
+impl VocabByteFacts {
+    pub fn byte_words(&self) -> [u64; 4] {
+        self.words
+    }
+
+    pub fn follow_words(&self, byte: u8) -> [u64; 4] {
+        self.follow_words[byte as usize]
+    }
+}
 
 /// The immutable exact-spelling coordinate shared by vocabulary consumers.
 /// IDs in each alias group are ordered by original ID; groups are ordered by
@@ -352,7 +362,8 @@ impl Vocab {
     /// Membership in that same alphabet, in physical byte coordinates.
     #[doc(hidden)]
     pub fn relevant_byte_mask(&self) -> [bool; 256] {
-        self.byte_facts().mask
+        let words = self.byte_facts().words;
+        std::array::from_fn(|byte| words[byte / 64] & (1u64 << (byte % 64)) != 0)
     }
 
     /// Number of bytes across the original vocabulary entries, before
@@ -362,25 +373,35 @@ impl Vocab {
         self.byte_facts().total_bytes
     }
 
-    fn byte_facts(&self) -> Arc<VocabRelevantBytes> {
-        if let Some(cached) = self.vocab_derived_cache_get_internal::<VocabRelevantBytes>() {
+    /// Pure observations of byte support and adjacent pairs in this vocabulary.
+    #[doc(hidden)]
+    pub fn byte_facts(&self) -> Arc<VocabByteFacts> {
+        if let Some(cached) = self.vocab_derived_cache_get_internal::<VocabByteFacts>() {
             return cached;
         }
-        let mut mask = [false; 256];
+        let mut words = [0u64; 4];
+        let mut follow_words = Box::new([[0u64; 4]; 256]);
         let mut total_bytes = 0usize;
         for token in self.entries.values() {
             total_bytes += token.len();
+            let mut previous = None::<u8>;
             for &byte in token {
-                mask[byte as usize] = true;
+                let index = byte as usize / 64;
+                let bit = 1u64 << (byte % 64);
+                words[index] |= bit;
+                if let Some(previous) = previous {
+                    follow_words[previous as usize][index] |= bit;
+                }
+                previous = Some(byte);
             }
         }
-        let bytes = mask.iter().enumerate()
-            .filter_map(|(byte, &present)| present.then_some(byte as u8))
-            .collect::<Vec<_>>().into();
-        let facts = Arc::new(VocabRelevantBytes { bytes, mask, total_bytes });
+        let bytes = (0..=u8::MAX)
+            .filter(|&byte| words[byte as usize / 64] & (1u64 << (byte % 64)) != 0)
+            .collect::<Vec<_>>()
+            .into();
+        let facts = Arc::new(VocabByteFacts { bytes, words, follow_words, total_bytes });
         self.vocab_derived_cache_set_internal(Arc::clone(&facts));
-        // Return the published instance if another compiler won the race.
-        self.vocab_derived_cache_get_internal::<VocabRelevantBytes>().unwrap_or(facts)
+        self.vocab_derived_cache_get_internal::<VocabByteFacts>().unwrap_or(facts)
     }
 
     /// The number of tokens with bytes; special tokens are not counted.
@@ -526,7 +547,7 @@ mod suffix_index;
 pub mod __private {
     pub use super::derived_artifact::VocabDerivedArtifact;
     pub use super::error::internal::{error_message, new_error, with_source_span};
-    pub use super::{Vocab, LexicalVocabulary};
+    pub use super::{Vocab, LexicalVocabulary, VocabByteFacts};
     pub use super::suffix_index::VocabularySuffixIndex;
 
     pub mod vocab_prefix_tree {
@@ -545,6 +566,8 @@ mod tests {
         let bytes = vocab.relevant_bytes();
         assert_eq!(bytes.as_ref(), b"abc");
         assert_eq!(vocab.total_token_bytes(), 4);
+        assert_eq!(vocab.byte_facts().follow_words(b'a'), [0, 1u64 << (b'b' % 64), 0, 0]);
+        assert_eq!(vocab.byte_facts().follow_words(b'c'), [0; 4]);
         assert_eq!(vocab.max_token_byte_len(), 2);
         assert!(vocab.relevant_byte_mask()[b'b' as usize]);
         assert!(!vocab.relevant_byte_mask()[b'z' as usize]);

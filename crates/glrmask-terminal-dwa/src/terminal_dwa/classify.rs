@@ -272,14 +272,6 @@ fn merge_sorted_token_ids(mut left: Vec<u32>, right: Vec<u32>) -> Vec<u32> {
 }
 
 #[derive(Debug)]
-pub struct VocabClassificationFacts {
-    bytes: U8Set,
-    observed_follow_bytes: [U8Set; 256],
-}
-
-impl crate::vocab::VocabDerivedArtifact for VocabClassificationFacts {}
-
-#[derive(Debug)]
 struct VocabAdjacentPairIndex {
     lexical: Arc<LexicalVocabulary>,
     pair_offsets: Box<[u32]>,
@@ -425,44 +417,6 @@ fn vocab_suffix_trie(vocab: &Vocab) -> Arc<VocabSuffixTrie> {
     trie
 }
 
-fn vocab_classification_facts(vocab: &Vocab) -> Arc<VocabClassificationFacts> {
-    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabClassificationFacts>() {
-        return cached;
-    }
-
-    let mut byteset = U8Set::empty();
-    let mut observed_follow_bytes = [U8Set::empty(); 256];
-    for bytes in vocab.entries_map().values() {
-        for &byte in bytes {
-            byteset.insert(byte);
-        }
-        for pair in bytes.windows(2) {
-            observed_follow_bytes[pair[0] as usize].insert(pair[1]);
-        }
-    }
-    let facts = Arc::new(VocabClassificationFacts {
-        bytes: byteset,
-        observed_follow_bytes,
-    });
-    vocab.vocab_derived_cache_set(Arc::clone(&facts));
-    facts
-}
-
-pub fn cache_vocab_classification_facts(
-    vocab: &Vocab,
-    bytes: U8Set,
-    observed_follow_bytes: [U8Set; 256],
-) {
-    vocab.vocab_derived_cache_set(Arc::new(VocabClassificationFacts {
-        bytes,
-        observed_follow_bytes,
-    }));
-}
-
-fn vocab_byte_set(vocab: &Vocab) -> U8Set {
-    vocab_classification_facts(vocab).bytes
-}
-
 pub fn vocab_tokens_with_adjacent_pairs(
     vocab: &Vocab,
     allowed_pairs: &[U8Set; 256],
@@ -508,7 +462,7 @@ pub fn vocab_tokens_with_adjacent_pairs(
 }
 
 pub fn prepare_vocab_for_terminal_classification(vocab: &Vocab) {
-    let _ = vocab_classification_facts(vocab);
+    let _ = vocab.byte_facts();
     let prepare_common_atom_suffix_index =
         std::env::var_os("GLRMASK_DISABLE_PREPARE_COMMON_ATOM_SUFFIX_INDEX").is_none()
             && (std::env::var_os("GLRMASK_PREPARE_COMMON_ATOM_SUFFIX_INDEX").is_some()
@@ -1753,13 +1707,13 @@ pub fn classify_terminal_path_lengths(
 }
 
 fn heuristic_terminal_path_two_plus(
-    vocab_facts: &VocabClassificationFacts,
+    vocab_facts: &crate::vocab::VocabByteFacts,
     bytesets: &SharedClassifyBytesets,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     num_terminals: u32,
 ) -> BitSet {
     let nt = num_terminals as usize;
-    let vocab_bytes = vocab_facts.bytes;
+    let vocab_bytes = U8Set::from_words(vocab_facts.byte_words());
     let mut heuristic_two_plus = BitSet::new(nt);
     for t1 in 0..nt {
         if bytesets.last_bytes[t1].is_disjoint(&vocab_bytes) {
@@ -1768,7 +1722,7 @@ fn heuristic_terminal_path_two_plus(
         let mut observed_after_t1 = U8Set::empty();
         for last_byte in bytesets.last_bytes[t1].iter() {
             observed_after_t1 = observed_after_t1
-                .union(&vocab_facts.observed_follow_bytes[last_byte as usize]);
+                .union(&U8Set::from_words(vocab_facts.follow_words(last_byte)));
         }
         if observed_after_t1.is_empty() {
             continue;
@@ -1798,7 +1752,7 @@ pub fn candidate_terminal_path_two_plus(
     num_terminals: u32,
     shared_classify_cache: Option<&SharedClassifyCache>,
 ) -> Vec<bool> {
-    let vocab_facts = vocab_classification_facts(vocab);
+    let vocab_facts = vocab.byte_facts();
     let owned_bytesets: Option<SharedClassifyBytesets>;
     let bytesets: &SharedClassifyBytesets = if let Some(cache) = shared_classify_cache {
         cache.get_or_init(|| SharedClassifyBytesets::build(tokenizer, num_terminals))
@@ -1828,8 +1782,8 @@ pub(crate) fn classify_terminal_path_lengths_with_probe(
 ) -> Vec<TerminalPathLength> {
     let nt = num_terminals as usize;
     // 1. Vocab byte bitset: all bytes appearing in any vocab token.
-    let vocab_facts = vocab_classification_facts(vocab);
-    let vocab_bytes = vocab_facts.bytes;
+    let vocab_facts = vocab.byte_facts();
+    let vocab_bytes = U8Set::from_words(vocab_facts.byte_words());
 
     // 2. Byte bitsets per terminal — use cache if available.
     let owned_bytesets: Option<SharedClassifyBytesets>;
