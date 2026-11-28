@@ -4065,82 +4065,7 @@ fn convert_fast_boundary_nwa(
     Some((states, source_ids.len()))
 }
 
-fn resolve_negative_codes_small_boundary_impl(
-    nwa: &NWA,
-    tsid_count: usize,
-    token_count: usize,
-) -> Option<NWA> {
-    let total_started = Instant::now();
-    let mut interner = FastBoundaryWeightInterner::new(tsid_count, token_count)?;
-    let convert_started = Instant::now();
-    let (mut states, source_weight_count) = convert_fast_boundary_nwa(
-        nwa, &mut interner, None, FastBoundaryInputPolicy::DropEmpty,
-    )?;
-    let convert_ms = elapsed_ms(convert_started);
-    let resolve_started = Instant::now();
-    fast_boundary_resolve_negative_codes(&mut states, &mut interner)?;
-    let resolve_ms = elapsed_ms(resolve_started);
-    let materialize_started = Instant::now();
-    let mut weight_cache = vec![None::<Weight>; interner.values.len()];
-    if !weight_cache.is_empty() {
-        weight_cache[0] = Some(Weight::empty());
-    }
-    if weight_cache.len() > 1 {
-        weight_cache[1] = Some(Weight::all());
-    }
-    let mut materialized_weight = |id: FastBoundaryWeightId| {
-        if let Some(weight) = weight_cache[id as usize].as_ref() {
-            return weight.clone();
-        }
-        let weight = interner.to_weight(id);
-        weight_cache[id as usize] = Some(weight.clone());
-        weight
-    };
-    let mut output = NWA::new(0, 0);
-    for _ in 0..states.len() {
-        output.add_state();
-    }
-    output.set_start_states(nwa.start_states().to_vec());
-    for (state_id, state) in states.into_iter().enumerate() {
-        if state.final_weight != 0 {
-            output.set_final_weight(state_id as u32, materialized_weight(state.final_weight));
-        }
-        for (target, weight) in state.epsilons {
-            output.add_epsilon(state_id as u32, target, materialized_weight(weight));
-        }
-        for (label, branches) in state.transitions {
-            for (target, weight) in branches {
-                output.add_transition(
-                    state_id as u32,
-                    label,
-                    target,
-                    materialized_weight(weight),
-                );
-            }
-        }
-    }
-    let materialize_ms = elapsed_ms(materialize_started);
-    if compile_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][small_boundary_signed_resolution] states={} source_weights={} fast_weights={} convert_ms={convert_ms:.3} resolve_ms={resolve_ms:.3} materialize_ms={materialize_ms:.3} total_ms={:.3}",
-            nwa.states().len(),
-            source_weight_count,
-            interner.values.len(),
-            elapsed_ms(total_started),
-        );
-    }
-    Some(output)
-}
-
-pub fn resolve_negative_codes_small_boundary(
-    nwa: &NWA,
-    tsid_count: usize,
-    token_count: usize,
-) -> Option<NWA> {
-    resolve_negative_codes_small_boundary_impl(nwa, tsid_count, token_count)
-}
-
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
++#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct FiniteBoundaryDwaState {
     pub transitions: Vec<(i32, u32, u32)>,
     pub final_weight: u32,
@@ -5852,97 +5777,6 @@ fn build_possible_outgoing_ids_by_fast_boundary_state(
             labels
         },
     )
-}
-
-/// Exact small-coordinate publication from a signed parser NWA. The signed
-/// graph is converted once to the fixed-width boundary semiring; cancellation,
-/// finality and support determinization all consume that same representation.
-/// The returned runtime artifact is still the ordinary deterministic positive
-/// parser DWA.
-pub fn normalize_signed_weighted_parser_stack_nwa_small_boundary(
-    table: &GLRTable,
-    signed_nwa: &NWA,
-    tsid_count: usize,
-    token_count: usize,
-) -> Option<DWA> {
-    normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_state_count(
-        table.num_states,
-        signed_nwa,
-        tsid_count,
-        token_count,
-    )
-}
-
-pub fn normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_state_count(
-    num_parser_states: u32,
-    signed_nwa: &NWA,
-    tsid_count: usize,
-    token_count: usize,
-) -> Option<DWA> {
-    if tsid_count == 0 || tsid_count > FAST_BOUNDARY_TSID_LIMIT || token_count == 0 || token_count > 64 {
-        return None;
-    }
-    let total_started = Instant::now();
-    let convert_started = Instant::now();
-    let mut interner = FastBoundaryWeightInterner::new(tsid_count, token_count)?;
-    let (mut fast_nwa, source_weight_count) = convert_fast_boundary_nwa(
-        signed_nwa, &mut interner, None, FastBoundaryInputPolicy::DropEmpty,
-    )?;
-    let convert_ms = elapsed_ms(convert_started);
-    let resolve_started = Instant::now();
-    fast_boundary_resolve_negative_codes(&mut fast_nwa, &mut interner)?;
-    let resolve_ms = elapsed_ms(resolve_started);
-    let hashcons_started = Instant::now();
-    let (fast_nwa, fast_start_states) =
-        fast_boundary_reverse_hashcons_positive(fast_nwa, signed_nwa.start_states())?;
-    let hashcons_ms = elapsed_ms(hashcons_started);
-
-    let determinize_started = Instant::now();
-    let determinized = determinize_preconverted_small_boundary(
-        &fast_nwa,
-        &fast_start_states,
-        num_parser_states,
-        &mut interner,
-        source_weight_count,
-        convert_ms,
-        total_started,
-    )?;
-    let determinize_ms = elapsed_ms(determinize_started);
-    let mut parser_dwa = determinized.dwa;
-
-    let possible_started = Instant::now();
-    let possible_by_state = build_possible_outgoing_ids_by_fast_boundary_state(
-        &fast_nwa,
-        &determinized.supports,
-        num_parser_states,
-    );
-    let possible_ms = elapsed_ms(possible_started);
-    let default_started = Instant::now();
-    optimize_parser_dwa_defaults(&mut parser_dwa, &possible_by_state, num_parser_states);
-    let default_ms = elapsed_ms(default_started);
-    let subtract_started = Instant::now();
-    subtract_final_weights_from_outgoing_dwa(&mut parser_dwa);
-    let subtract_ms = elapsed_ms(subtract_started);
-    let fallback_started = Instant::now();
-    parser_dwa = determinize_parser_dwa_with_fallbacks(
-        &parser_dwa,
-        &possible_by_state,
-        num_parser_states,
-    );
-    let fallback_ms = elapsed_ms(fallback_started);
-    if compile_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][small_boundary_signed_fused] signed_states={} positive_states={} source_weights={} fast_weights={} convert_ms={convert_ms:.3} resolve_ms={resolve_ms:.3} hashcons_ms={hashcons_ms:.3} determinize_ms={determinize_ms:.3} possible_ms={possible_ms:.3} default_ms={default_ms:.3} subtract_ms={subtract_ms:.3} fallback_ms={fallback_ms:.3} output_states={} output_transitions={} total_ms={:.3}",
-            signed_nwa.states().len(),
-            fast_nwa.len(),
-            source_weight_count,
-            interner.values.len(),
-            parser_dwa.num_states(),
-            parser_dwa.num_transitions(),
-            elapsed_ms(total_started),
-        );
-    }
-    Some(parser_dwa)
 }
 
 fn determinize_with_supports_small_boundary(
@@ -8173,24 +8007,6 @@ pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_termina
         false,
         Some(prebuilt_bundle_cache),
         false,
-    )
-    .map(|(nwa, _)| nwa)
-}
-
-pub fn build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles(
-    terminal_dwa: &TerminalAutomaton,
-    num_terminals: u32,
-    templates: &Templates,
-    table: &GLRTable,
-) -> Option<NWA> {
-    build_parser_nwa_from_terminal_dwa_for_terminal_count(
-        terminal_dwa,
-        num_terminals,
-        templates,
-        Some(table),
-        true,
-        None,
-        true,
     )
     .map(|(nwa, _)| nwa)
 }

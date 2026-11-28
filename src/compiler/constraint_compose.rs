@@ -28,17 +28,17 @@ use crate::compiler::stages::equiv_types::{
     InternalIdMap, ManyToOneIdMap, MappedArtifact,
 };
 use crate::compiler::stages::mapped_artifact::{WeightRefs, remap_weights_with_maps};
+#[cfg(test)]
 use crate::compiler::stages::parser_dwa::{
     build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count,
-    build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles,
     normalize_weighted_parser_stack_nwa,
-    normalize_signed_weighted_parser_stack_nwa_small_boundary,
-    resolve_negative_codes_small_boundary,
 };
 use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa;
+#[cfg(test)]
 use crate::compiler::stages::templates::characterize::{
     try_characterize_selected_terminals_for_terminal_count,
 };
+#[cfg(test)]
 use crate::compiler::stages::templates::Templates;
 #[cfg(test)]
 use crate::compiler::glr::table::Action;
@@ -420,6 +420,7 @@ pub(crate) struct WalkShardPublishProfile {
 /// state and silently misroutes queries (inner-6 over-admission +
 /// inner-7 under-admission were both this bug).
 
+#[cfg(test)]
 pub(crate) fn publish_walk_boundary_shard_work(
     work: BoundaryShardMetadata,
     crossing: DWA,
@@ -449,64 +450,18 @@ pub(crate) fn publish_walk_boundary_shard_work(
     let templates_ms = templates_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let materialize_started_at = Instant::now();
-    let mut id_map = work.id_map;
-    let mut crossing = crossing;
-    if crate::env::var_os("GLRMASK_EXPERIMENT_EARLY_BOUNDARY_TSID_QUOTIENT").is_some() {
-        let old_tsids = id_map.num_tsids() as usize;
-        let token_classes = id_map.num_internal_tokens() as usize;
-        let started_at = Instant::now();
-        if let Some((old_to_new, unique_weights)) =
-            compute_boundary_dwa_tsid_behavior_quotient(&crossing, old_tsids, token_classes)
-        {
-            let new_tsids = old_to_new.iter().copied().max().map_or(0, |v| v as usize + 1);
-            if new_tsids < old_tsids {
-                apply_boundary_tsid_quotient_to_dwa_and_id_map(&mut crossing, &mut id_map, &old_to_new)
-                    .expect("early boundary TSID quotient must apply to matching DWA/id-map coordinate");
-                if compose_profile_enabled() {
-                    eprintln!("[glrmask/profile][constraint_boundary_early_tsid_quotient] old_tsids={} new_tsids={} unique_terminal_weights={} total_ms={:.3}",
-                        old_tsids, new_tsids, unique_weights, started_at.elapsed().as_secs_f64() * 1000.0);
-                }
-            }
-        }
-    }
+    let id_map = work.id_map;
     let terminal_automaton = TerminalAutomaton::Dwa(crossing);
-    let nondeterministic_bundles = crate::env::var_os("GLRMASK_EXPERIMENT_COMPILE_NONDETERMINISTIC_BUNDLES").is_some()
-        && id_map.num_internal_tokens() >= crate::env::var("GLRMASK_COMPILE_NONDETERMINISTIC_BUNDLES_MIN_TOKENS")
-            .ok().and_then(|value| value.parse::<u32>().ok()).unwrap_or(64);
-    let parser_nwa = if nondeterministic_bundles {
-        build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count_nondeterministic_bundles(
-            &terminal_automaton, num_terminals, &templates, boundary_table)
-    } else {
-        build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count(
-            &terminal_automaton, num_terminals, &templates, boundary_table)
-    };
-    let small = id_map.num_tsids() <= 16 && id_map.num_internal_tokens() <= 64;
+    let parser_nwa = build_parser_nwa_from_terminal_dwa_with_precomputed_templates_for_terminal_count(
+        &terminal_automaton, num_terminals, &templates, boundary_table,
+    );
     let (parser_dwa, materialize_ms, normalize_ms) = match parser_nwa {
         None => (DWA::new(id_map.num_tsids(), id_map.max_internal_token_id()),
             materialize_started_at.elapsed().as_secs_f64() * 1000.0, 0.0),
-        Some(nwa) if small && crate::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_SIGNED_FUSED").is_some() => {
-            let dwa = normalize_signed_weighted_parser_stack_nwa_small_boundary(
-                boundary_table, &nwa, id_map.num_tsids() as usize, id_map.num_internal_tokens() as usize)
-                .ok_or_else(|| "small-boundary fused signed publication rejected boundary coordinate".to_string())?;
-            (dwa, materialize_started_at.elapsed().as_secs_f64() * 1000.0, 0.0)
-        }
         Some(mut nwa) => {
             let grouped = boundary_table.construction
                 == crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged;
-            let reverse_topo = if small
-                && crate::env::var_os("GLRMASK_EXPERIMENT_SMALL_BOUNDARY_SIGNED_RESOLUTION").is_some()
-            {
-                nwa = resolve_negative_codes_small_boundary(&nwa,
-                    id_map.num_tsids() as usize, id_map.num_internal_tokens() as usize)
-                    .ok_or_else(|| "small-boundary signed resolver rejected boundary coordinate".to_string())?;
-                None
-            } else {
-                resolve_negative_codes_in_nwa(&mut nwa, grouped)
-            };
-            if crate::env::var_os("GLRMASK_EXPERIMENT_FAST_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some()
-                || crate::env::var_os("GLRMASK_EXPERIMENT_HASHCONS_RESOLVED_BOUNDARY_NWA").is_some() {
-                nwa = reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(nwa, reverse_topo);
-            }
+            resolve_negative_codes_in_nwa(&mut nwa, grouped);
             for (source, state) in nwa.states().iter().enumerate() {
                 if let Some(&label) = state.transitions.keys().find(|&&label| is_negative_label(label)) {
                     return Err(format!("runtime boundary parser NWA contains negative/PUSH label {label} at state {source}"));
@@ -647,115 +602,6 @@ fn finish_walk_shard_publication(
 
 
 
-
-fn compute_boundary_dwa_tsid_behavior_quotient(
-    dwa: &DWA,
-    old_tsid_count: usize,
-    token_classes: usize,
-) -> Option<(Vec<u32>, usize)> {
-    if old_tsid_count <= 1 || token_classes == 0 || token_classes > 64 {
-        return None;
-    }
-    let mut unique_ids = FxHashMap::<usize, u16>::default();
-    let mut unique_weights = Vec::<Weight>::new();
-    for weight in dwa.weight_refs() {
-        if weight.is_full() || weight.is_empty() {
-            continue;
-        }
-        let key = weight.ptr_key();
-        if unique_ids.contains_key(&key) {
-            continue;
-        }
-        let Ok(index) = u16::try_from(unique_weights.len()) else {
-            return None;
-        };
-        unique_ids.insert(key, index);
-        unique_weights.push(weight.clone());
-    }
-    type Signature = SmallVec<[(u16, u64); 4]>;
-    let mut signatures = vec![Signature::new(); old_tsid_count];
-    for (weight_index, weight) in unique_weights.iter().enumerate() {
-        for (start, end, tokens) in weight.range_entries() {
-            if end as usize >= old_tsid_count {
-                return None;
-            }
-            let mut mask = 0u64;
-            for range in tokens.ranges() {
-                for token in range {
-                    if token as usize >= token_classes || token >= 64 {
-                        return None;
-                    }
-                    mask |= 1u64 << token;
-                }
-            }
-            if mask == 0 {
-                continue;
-            }
-            for tsid in start..=end {
-                signatures[tsid as usize].push((weight_index as u16, mask));
-            }
-        }
-    }
-    let mut classes = FxHashMap::<Signature, u32>::default();
-    let mut old_to_new = vec![0u32; old_tsid_count];
-    for (old_tsid, signature) in signatures.into_iter().enumerate() {
-        let next = classes.len() as u32;
-        let class = *classes.entry(signature).or_insert(next);
-        old_to_new[old_tsid] = class;
-    }
-    Some((old_to_new, unique_weights.len()))
-}
-
-fn apply_boundary_tsid_quotient_to_dwa_and_id_map(
-    dwa: &mut DWA,
-    id_map: &mut InternalIdMap,
-    old_to_new: &[u32],
-) -> Option<()> {
-    let old_tsid_count = id_map.num_tsids() as usize;
-    if old_to_new.len() != old_tsid_count {
-        return None;
-    }
-    let new_tsid_count = old_to_new.iter().copied().max().map_or(0, |v| v as usize + 1);
-    if new_tsid_count == 0 || new_tsid_count >= old_tsid_count {
-        return None;
-    }
-    let token_count = id_map.num_internal_tokens() as usize;
-    let tsid_map = old_to_new.iter().map(|&class| vec![class]).collect::<Vec<_>>();
-    let token_map = (0..token_count as u32).map(|token| vec![token]).collect::<Vec<_>>();
-    {
-        let mut weights = dwa.weight_refs_mut();
-        remap_weights_with_maps(&mut weights, &tsid_map, &token_map, new_tsid_count);
-    }
-    let old_groups = std::mem::take(&mut id_map.tokenizer_states.internal_to_originals);
-    let old_representatives = std::mem::take(&mut id_map.tokenizer_states.representative_original_ids);
-    let mut new_groups = vec![Vec::<u32>::new(); new_tsid_count];
-    let mut new_representatives = vec![u32::MAX; new_tsid_count];
-    for old_tsid in 0..old_tsid_count {
-        let class = old_to_new[old_tsid] as usize;
-        if let Some(group) = old_groups.get(old_tsid) {
-            new_groups[class].extend(group.iter().copied());
-        }
-        if new_representatives[class] == u32::MAX {
-            new_representatives[class] = old_representatives
-                .get(old_tsid)
-                .copied()
-                .or_else(|| new_groups[class].first().copied())
-                .unwrap_or(old_tsid as u32);
-        }
-    }
-    for group in &mut new_groups {
-        group.sort_unstable();
-        group.dedup();
-    }
-    for internal in &mut id_map.tokenizer_states.original_to_internal {
-        if *internal != u32::MAX {
-            *internal = *old_to_new.get(*internal as usize)?;
-        }
-    }
-    id_map.tokenizer_states.internal_to_originals = new_groups;
-    id_map.tokenizer_states.representative_original_ids = new_representatives;
-    Some(())
-}
 
 /// Runtime parser segments are allowed to remain nondeterministic, but their
 /// alphabet is strictly the positive parser-stack read alphabet (plus DEFAULT).
@@ -976,275 +822,6 @@ pub(crate) fn merged_retained_terminal_exprs(
     }
     merged.into_iter().collect()
 }
-
-fn full_nwa_topological_order(nwa: &NWA) -> Option<Vec<u32>> {
-    let state_count = nwa.num_states() as usize;
-    let mut indegree = vec![0usize; state_count];
-    for state in nwa.states() {
-        for (target, _) in &state.epsilons {
-            *indegree.get_mut(*target as usize)? += 1;
-        }
-        for targets in state.transitions.values() {
-            for (target, _) in targets {
-                *indegree.get_mut(*target as usize)? += 1;
-            }
-        }
-    }
-    let mut queue = VecDeque::new();
-    for (state, &degree) in indegree.iter().enumerate() {
-        if degree == 0 {
-            queue.push_back(state as u32);
-        }
-    }
-    let mut order = Vec::with_capacity(state_count);
-    while let Some(source) = queue.pop_front() {
-        order.push(source);
-        let state = &nwa.states()[source as usize];
-        for target in state
-            .epsilons
-            .iter()
-            .map(|(target, _)| *target)
-            .chain(
-                state
-                    .transitions
-                    .values()
-                    .flat_map(|targets| targets.iter().map(|(target, _)| *target)),
-            )
-        {
-            let degree = &mut indegree[target as usize];
-            *degree -= 1;
-            if *degree == 0 {
-                queue.push_back(target);
-            }
-        }
-    }
-    (order.len() == state_count).then_some(order)
-}
-
-
-fn reverse_hashcons_positive_acyclic_nwa_fast(nwa: NWA) -> NWA {
-    reverse_hashcons_acyclic_nwa_fast_with_reverse_topo(nwa, None, false)
-}
-
-fn reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(
-    nwa: NWA,
-    precomputed_reverse_topo: Option<Vec<u32>>,
-) -> NWA {
-    reverse_hashcons_acyclic_nwa_fast_with_reverse_topo(nwa, precomputed_reverse_topo, false)
-}
-
-
-fn reverse_hashcons_acyclic_nwa_fast_with_reverse_topo(
-    nwa: NWA,
-    precomputed_reverse_topo: Option<Vec<u32>>,
-    allow_signed_labels: bool,
-) -> NWA {
-    use rayon::prelude::*;
-    use glrmask_weighted_automata::weighted_u32::structural_quotient::{classify_reverse, checked_successor};
-
-    let profile = compose_profile_enabled();
-    let total_started = profile.then(Instant::now);
-    let topo_started = profile.then(Instant::now);
-    let old_state_count = nwa.num_states() as usize;
-    let reverse_order = if let Some(order) = precomputed_reverse_topo
-        && order.len() == old_state_count
-        && order.iter().all(|&state| (state as usize) < old_state_count)
-    {
-        order
-    } else {
-        let Some(order) = full_nwa_topological_order(&nwa) else {
-            return nwa;
-        };
-        order.into_iter().rev().collect()
-    };
-    let topo_ms = topo_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
-    let classify_started = profile.then(Instant::now);
-    let Some(quotient) = classify_reverse(old_state_count, reverse_order, |old, classes, signature| {
-        let source = &nwa.states()[old as usize];
-        if !allow_signed_labels && source.transitions.keys().any(|&label| is_negative_label(label)) {
-            return None;
-        }
-        signature.final_weight(source.final_weight.as_ref().map(Weight::ptr_key));
-        for (&label, branches) in &source.transitions {
-            signature.label(label);
-            for (target, weight) in branches {
-                signature.branch(label, checked_successor(classes, *target)?, weight.ptr_key());
-            }
-        }
-        for (target, weight) in &source.epsilons {
-            signature.epsilon(checked_successor(classes, *target)?, weight.ptr_key());
-        }
-        Some(())
-    }) else {
-        return nwa;
-    };
-    let (old_states, old_starts) = nwa.into_parts();
-    let mut old_to_new = quotient.old_to_new;
-    let mut representatives = quotient.representatives;
-    let classify_ms = classify_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
-
-    let renumber_by_old_id = crate::env::var_os(
-        "GLRMASK_EXPERIMENT_HASHCONS_RENUMBER_SKIP_SORT",
-    )
-    .is_some();
-    if renumber_by_old_id {
-        let mut class_by_old_id = representatives
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(class_id, old_id)| (old_id, class_id as u32))
-            .collect::<Vec<_>>();
-        class_by_old_id.sort_unstable_by_key(|(old_id, _)| *old_id);
-        let mut class_to_sorted = vec![u32::MAX; representatives.len()];
-        for (sorted_id, &(_, class_id)) in class_by_old_id.iter().enumerate() {
-            class_to_sorted[class_id as usize] = sorted_id as u32;
-        }
-        for mapped in &mut old_to_new {
-            *mapped = class_to_sorted[*mapped as usize];
-        }
-        representatives = class_by_old_id
-            .into_iter()
-            .map(|(old_id, _)| old_id)
-            .collect();
-    }
-
-    // Move the representative states into the quotient and drop all duplicate
-    // states on the Rayon workers. This avoids paying the discarded graph's
-    // large serial destructor tail on the composition critical path.
-    let move_started = profile.then(Instant::now);
-    let mut representative_new_id = vec![u32::MAX; old_state_count];
-    for (new_id, &old_id) in representatives.iter().enumerate() {
-        representative_new_id[old_id as usize] = new_id as u32;
-    }
-    let mut moved = old_states
-        .into_par_iter()
-        .enumerate()
-        .filter_map(|(old_id, mut state)| {
-            let new_id = representative_new_id[old_id];
-            if new_id == u32::MAX {
-                return None;
-            }
-            for targets in state.transitions.values_mut() {
-                for (target, _) in targets {
-                    *target = old_to_new[*target as usize];
-                }
-            }
-            for (target, _) in &mut state.epsilons {
-                *target = old_to_new[*target as usize];
-            }
-            Some((new_id, state))
-        })
-        .collect::<Vec<_>>();
-    if !renumber_by_old_id
-        || moved.windows(2).any(|pair| pair[0].0 >= pair[1].0)
-    {
-        moved.par_sort_unstable_by_key(|(new_id, _)| *new_id);
-    }
-    let states = moved.into_iter().map(|(_, state)| state).collect::<Vec<_>>();
-    let move_ms = move_started.map(|started| started.elapsed().as_secs_f64() * 1000.0);
-
-    let mut starts = old_starts
-        .into_iter()
-        .map(|state| old_to_new[state as usize])
-        .collect::<Vec<_>>();
-    starts.sort_unstable();
-    starts.dedup();
-    if let (Some(topo_ms), Some(classify_ms), Some(move_ms), Some(total_started)) =
-        (topo_ms, classify_ms, move_ms, total_started)
-    {
-        eprintln!(
-            "[glrmask/profile][fast_reverse_hashcons_nwa] signed={} input_states={} output_states={} topo_ms={topo_ms:.3} classify_ms={classify_ms:.3} move_drop_ms={move_ms:.3} total_ms={:.3}",
-            allow_signed_labels,
-            old_state_count,
-            states.len(),
-            total_started.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-    NWA::from_parts(states, starts)
-}
-
-#[cfg(test)]
-fn reverse_hashcons_positive_acyclic_nwa(nwa: NWA) -> NWA {
-    #[derive(Hash, PartialEq, Eq)]
-    struct Key {
-        final_weight: Option<usize>,
-        transitions: Vec<(i32, Vec<(u32, usize)>)>,
-        epsilons: Vec<(u32, usize)>,
-    }
-
-    let Some(order) = full_nwa_topological_order(&nwa) else {
-        return nwa;
-    };
-    let old_state_count = nwa.num_states() as usize;
-    let (old_states, old_starts) = nwa.into_parts();
-    let mut old_to_new = vec![u32::MAX; old_state_count];
-    let mut states = Vec::new();
-    let mut ids = FxHashMap::<Key, u32>::default();
-
-    for old_id in order.into_iter().rev() {
-        let source = &old_states[old_id as usize];
-        debug_assert!(source.transitions.keys().all(|&label| !is_negative_label(label)));
-        let transitions = source
-            .transitions
-            .iter()
-            .map(|(&label, targets)| {
-                (
-                    label,
-                    targets
-                        .iter()
-                        .map(|(target, weight)| {
-                            let mapped = old_to_new[*target as usize];
-                            debug_assert_ne!(mapped, u32::MAX);
-                            (mapped, weight.ptr_key())
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let epsilons = source
-            .epsilons
-            .iter()
-            .map(|(target, weight)| {
-                let mapped = old_to_new[*target as usize];
-                debug_assert_ne!(mapped, u32::MAX);
-                (mapped, weight.ptr_key())
-            })
-            .collect::<Vec<_>>();
-        let key = Key {
-            final_weight: source.final_weight.as_ref().map(Weight::ptr_key),
-            transitions,
-            epsilons,
-        };
-        let new_id = if let Some(&existing) = ids.get(&key) {
-            existing
-        } else {
-            let created = states.len() as u32;
-            let mut state = source.clone();
-            for targets in state.transitions.values_mut() {
-                for (target, _) in targets {
-                    *target = old_to_new[*target as usize];
-                }
-            }
-            for (target, _) in &mut state.epsilons {
-                *target = old_to_new[*target as usize];
-            }
-            states.push(state);
-            ids.insert(key, created);
-            created
-        };
-        old_to_new[old_id as usize] = new_id;
-    }
-
-    let mut starts = old_starts
-        .into_iter()
-        .map(|state| old_to_new[state as usize])
-        .collect::<Vec<_>>();
-    starts.sort_unstable();
-    starts.dedup();
-    NWA::from_parts(states, starts)
-}
-
-
 
 /// Transport complete PM relations across the same intact disjoint leaf
 /// lexer union used by native static boundaries. The component coordinate
@@ -2833,87 +2410,6 @@ mod tests {
         assert!(actual.commit_token(0));
         assert!(actual.is_accepting());
 
-    }
-
-
-    #[test]
-    fn fast_reverse_hashcons_matches_exact_structural_quotient_on_weighted_dags() {
-        fn weight(start: u32, end: u32) -> Weight {
-            Weight::from_token_set_for_tsid(
-                0,
-                RangeSetBlaze::from_iter(std::iter::once(start..=end)),
-            )
-        }
-
-        fn generated(seed: u32) -> NWA {
-            // Construct duplicate sub-DAGs deliberately.  Every edge points to
-            // a larger old state id, so the graph is acyclic; paired states use
-            // distinct old targets whose suffixes are nevertheless equivalent.
-            let mut nwa = NWA::new(1, 63);
-            for _ in 0..14 {
-                nwa.add_state();
-            }
-            let full = Weight::all();
-            let narrow = weight(seed % 16, (seed % 16) + 7);
-            nwa.set_final_weight(12, narrow.clone());
-            nwa.set_final_weight(13, narrow.clone());
-            for (left, right, left_target, right_target, label) in [
-                (10, 11, 12, 13, 1),
-                (8, 9, 10, 11, 2),
-                (6, 7, 8, 9, DEFAULT_LABEL),
-                (4, 5, 6, 7, 3),
-                (2, 3, 4, 5, 4),
-                (0, 1, 2, 3, 5),
-            ] {
-                nwa.add_transition(left, label, left_target, narrow.clone());
-                nwa.add_transition(right, label, right_target, narrow.clone());
-                if label != DEFAULT_LABEL {
-                    nwa.add_epsilon(left, left_target, full.clone());
-                    nwa.add_epsilon(right, right_target, full.clone());
-                }
-                if (left + seed).is_multiple_of(3) {
-                    nwa.set_final_weight(left, full.clone());
-                    nwa.set_final_weight(right, full.clone());
-                }
-            }
-            nwa.set_start_states(vec![0, 1]);
-            nwa
-        }
-
-        for seed in 0..64 {
-            let input = generated(seed);
-            let reference = reverse_hashcons_positive_acyclic_nwa(input.clone());
-            let reverse_topo = full_nwa_topological_order(&input)
-                .expect("generated quotient graph must be acyclic")
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>();
-            let fast = reverse_hashcons_positive_acyclic_nwa_fast(input.clone());
-            let reused = reverse_hashcons_positive_acyclic_nwa_fast_with_reverse_topo(
-                input,
-                Some(reverse_topo),
-            );
-            assert_eq!(
-                fast.start_states(),
-                reference.start_states(),
-                "fast quotient start states differ for seed {seed}",
-            );
-            assert_eq!(
-                fast.states(),
-                reference.states(),
-                "fast quotient structure differs from exact structural quotient for seed {seed}",
-            );
-            assert_eq!(
-                reused.start_states(),
-                reference.start_states(),
-                "reused-topology quotient start states differ for seed {seed}",
-            );
-            assert_eq!(
-                reused.states(),
-                reference.states(),
-                "reused-topology quotient differs from exact structural quotient for seed {seed}",
-            );
-        }
     }
 
 
