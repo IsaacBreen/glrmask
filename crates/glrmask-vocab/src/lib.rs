@@ -173,7 +173,11 @@ impl VocabEntries {
     fn subset(&self, ids: impl IntoIterator<Item=u32>) -> Self {
         let mut ordinals = ids.into_iter().filter_map(|id| self.ordinal(id)).collect::<Vec<_>>();
         ordinals.sort_unstable();
-        assert!(ordinals.windows(2).all(|pair| pair[0] < pair[1]), "duplicate vocabulary subset ID");
+        self.subset_ordinals(&ordinals)
+    }
+
+    fn subset_ordinals(&self, ordinals: &[usize]) -> Self {
+        assert!(ordinals.windows(2).all(|pair| pair[0] < pair[1]), "unordered or duplicate vocabulary subset ordinal");
         let ids = ordinals.iter().map(|&i| self.ids[i]).collect();
         let spans = ordinals.iter().map(|&i| self.spans[i]).collect();
         Self::from_parts(ids, spans, Arc::clone(&self.data))
@@ -280,6 +284,7 @@ pub struct LexicalVocabulary {
     pub original_slot_count: usize,
     pub ordered_to_originals: Arc<Vec<Vec<u32>>>,
     pub ordered_token_bytes: Arc<Vec<TokenBytes>>,
+    entry_indices: Box<[u32]>,
     original_to_ordered: OnceLock<Arc<[u32]>>,
     original_order: OnceLock<Arc<[(u32, u32)]>>,
     trie: OnceLock<Arc<vocab_prefix_tree::VocabPrefixTree>>,
@@ -289,11 +294,16 @@ pub struct LexicalVocabulary {
 
 impl LexicalVocabulary {
     pub fn build(entries: &VocabEntries) -> Self {
-        let mut sorted: Vec<_> = (0..entries.len()).collect();
-        sorted.sort_unstable_by(|&a, &b| entries.bytes_at(a).cmp(entries.bytes_at(b)).then(a.cmp(&b)));
+        let mut sorted: Vec<u32> = (0..u32::try_from(entries.len()).expect("vocabulary entry count")).collect();
+        sorted.sort_unstable_by(|&a, &b| entries.bytes_at(a as usize).cmp(entries.bytes_at(b as usize)).then(a.cmp(&b)));
+        Self::from_entry_order(entries, sorted)
+    }
+
+    fn from_entry_order(entries: &VocabEntries, sorted: Vec<u32>) -> Self {
         let mut words: Vec<TokenBytes> = Vec::new();
         let mut aliases: Vec<Vec<u32>> = Vec::new();
-        for ordinal in sorted {
+        for &ordinal in &sorted {
+            let ordinal = ordinal as usize;
             let id = entries.ids[ordinal];
             if words.last().is_some_and(|last| last.as_ref() == entries.bytes_at(ordinal)) {
                 aliases.last_mut().expect("existing spelling").push(id);
@@ -306,6 +316,7 @@ impl LexicalVocabulary {
             original_slot_count: entries.last_key_value().map_or(0, |(&id, _)| id as usize + 1),
             ordered_to_originals: Arc::new(aliases),
             ordered_token_bytes: Arc::new(words),
+            entry_indices: sorted.into_boxed_slice(),
             original_to_ordered: OnceLock::new(),
             original_order: OnceLock::new(),
             trie: OnceLock::new(),
@@ -313,6 +324,9 @@ impl LexicalVocabulary {
             suffix_index: OnceLock::new(),
         }
     }
+
+    /// Original entry ordinals, ordered by exact spelling and then original ID.
+    pub fn entry_indices(&self) -> &[u32] { &self.entry_indices }
 
     pub fn original_to_ordered(&self) -> &[u32] {
         self.original_to_ordered.get_or_init(|| {
@@ -367,10 +381,12 @@ impl LexicalVocabulary {
 
     pub fn original_order(&self) -> Arc<[(u32, u32)]> {
         Arc::clone(self.original_order.get_or_init(|| {
-            let mut pairs: Vec<_> = self.ordered_to_originals.iter().enumerate().flat_map(|(ordered, ids)|
-                ids.iter().map(move |&id| (id, ordered as u32))
-            ).collect();
-            pairs.sort_unstable_by_key(|&(id, _)| id);
+            let mut pairs = vec![(0, 0); self.entry_indices.len()];
+            let entries = self.ordered_to_originals.iter().enumerate().flat_map(|(ordered, ids)|
+                ids.iter().map(move |&id| (id, ordered as u32)));
+            for (&ordinal, entry) in self.entry_indices.iter().zip(entries) {
+                pairs[ordinal as usize] = entry;
+            }
             pairs.into()
         }))
     }
@@ -435,6 +451,26 @@ impl Vocab {
     #[doc(hidden)]
     pub fn subset(&self, ids: impl IntoIterator<Item=u32>) -> Self {
         Self::from_storage(self.0.entries.subset(ids))
+    }
+
+    /// Restrict a sorted original-entry coordinate and propagate an existing
+    /// lexical order without sorting or copying the selected byte spellings.
+    /// A cold parent remains cold.
+    #[doc(hidden)]
+    pub fn subset_ordinals_with_cached_lexical(&self, ordinals: &[usize]) -> Self {
+        let child = Self::from_storage(self.0.entries.subset_ordinals(ordinals));
+        if let Some(parent_order) = self.cached_lexical_vocabulary() {
+            let parent_original_order = parent_order.original_order();
+            let mut sorted: Vec<u32> = (0..u32::try_from(ordinals.len()).expect("vocabulary entry count")).collect();
+            sorted.sort_unstable_by_key(|&i| {
+                let parent_ordinal = ordinals[i as usize];
+                let (id, spelling) = parent_original_order[parent_ordinal];
+                debug_assert_eq!(id, self.0.entries.ids[parent_ordinal]);
+                (spelling, i)
+            });
+            let _ = child.0.lexical.set(Arc::new(LexicalVocabulary::from_entry_order(child.entries_map(), sorted)));
+        }
+        child
     }
 
     fn from_storage(entries: VocabEntries) -> Self {
@@ -538,27 +574,27 @@ impl Vocab {
     #[doc(hidden)]
     pub fn byte_facts(&self) -> Arc<VocabByteFacts> {
         Arc::clone(self.0.byte_facts.get_or_init(|| {
-        let mut words = [0u64; 4];
-        let mut follow_words = Box::new([[0u64; 4]; 256]);
-        let mut total_bytes = 0usize;
-        for token in self.0.entries.values() {
-            total_bytes += token.len();
-            let mut previous = None::<u8>;
-            for &byte in token {
-                let index = byte as usize / 64;
-                let bit = 1u64 << (byte % 64);
-                words[index] |= bit;
-                if let Some(previous) = previous {
-                    follow_words[previous as usize][index] |= bit;
+            let mut words = [0u64; 4];
+            let mut follow_words = Box::new([[0u64; 4]; 256]);
+            let mut total_bytes = 0usize;
+            for token in self.0.entries.values() {
+                total_bytes += token.len();
+                let mut previous = None::<u8>;
+                for &byte in token {
+                    let index = byte as usize / 64;
+                    let bit = 1u64 << (byte % 64);
+                    words[index] |= bit;
+                    if let Some(previous) = previous {
+                        follow_words[previous as usize][index] |= bit;
+                    }
+                    previous = Some(byte);
                 }
-                previous = Some(byte);
             }
-        }
-        let bytes = (0..=u8::MAX)
-            .filter(|&byte| words[byte as usize / 64] & (1u64 << (byte % 64)) != 0)
-            .collect::<Vec<_>>()
-            .into();
-        Arc::new(VocabByteFacts { bytes, words, follow_words, total_bytes })
+            let bytes = (0..=u8::MAX)
+                .filter(|&byte| words[byte as usize / 64] & (1u64 << (byte % 64)) != 0)
+                .collect::<Vec<_>>()
+                .into();
+            Arc::new(VocabByteFacts { bytes, words, follow_words, total_bytes })
         }))
     }
 
@@ -744,6 +780,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn subset_inherits_exact_spelling_order_in_original_entry_coordinates() {
+        let vocab = Vocab::from_entries_unchecked(vec![
+            (2, b"z".to_vec()), (19, b"a".to_vec()), (101, b"z".to_vec()),
+            (1003, b"".to_vec()), (9_000_001, b"ab".to_vec()),
+        ]);
+        let ordinals = [0, 2, 3, 4];
+        let cold = vocab.subset_ordinals_with_cached_lexical(&ordinals);
+        assert!(cold.cached_lexical_vocabulary().is_none());
+        let parent = vocab.lexical_vocabulary();
+        assert_eq!(parent.entry_indices(), &[3, 1, 4, 0, 2]);
+        let inherited = vocab.subset_ordinals_with_cached_lexical(&ordinals);
+        let child = inherited.cached_lexical_vocabulary().expect("inherited order");
+        assert_eq!(child.entry_indices(), &[2, 3, 0, 1]);
+        assert_eq!(child.original_order().as_ref(), &[(2, 2), (101, 2), (1003, 0), (9_000_001, 1)]);
+        assert_eq!(child.ordered_to_originals, cold.lexical_vocabulary().ordered_to_originals);
+        assert!(parent.original_to_ordered.get().is_none(), "subset must not materialize sparse ID holes");
     }
 
     #[test]

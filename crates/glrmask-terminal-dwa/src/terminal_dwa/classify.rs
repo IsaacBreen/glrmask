@@ -186,7 +186,6 @@ impl L2pVocabBoundarySplit {
     }
 
     fn materialize_vocab(vocab: &Vocab, token_ids: &[u32]) -> Vocab {
-        let mut selected = Vec::with_capacity(token_ids.len());
         let mut parent_entry_indices = Vec::with_capacity(token_ids.len());
         let mut token_ids = token_ids.iter().copied().peekable();
         for (parent_entry_index, &token_id) in vocab.entries_map().keys().enumerate() {
@@ -194,7 +193,6 @@ impl L2pVocabBoundarySplit {
                 token_ids.next();
             }
             if token_ids.peek().is_some_and(|candidate| *candidate == token_id) {
-                selected.push(token_id);
                 parent_entry_indices.push(parent_entry_index);
                 token_ids.next();
             }
@@ -202,7 +200,7 @@ impl L2pVocabBoundarySplit {
                 break;
             }
         }
-        let child = vocab.subset(selected);
+        let child = vocab.subset_ordinals_with_cached_lexical(&parent_entry_indices);
         super::l2p::equivalence_analysis::vocab::common_atom::inherit_vocab_suffix_index(
             vocab,
             &child,
@@ -212,9 +210,7 @@ impl L2pVocabBoundarySplit {
     }
 
     pub fn boundary_vocab(&self, vocab: &Vocab) -> Vocab {
-        let child = Self::materialize_vocab(vocab, &self.boundary_token_ids);
-        super::l1::inherit_l2p_lexical_entry_order(vocab, &child, &self.boundary_token_ids);
-        child
+        Self::materialize_vocab(vocab, &self.boundary_token_ids)
     }
 
     pub fn single_vocab(&self, vocab: &Vocab) -> Vocab {

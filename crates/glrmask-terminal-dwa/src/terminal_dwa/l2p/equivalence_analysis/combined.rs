@@ -26,7 +26,7 @@ use crate::ds::bitset::BitSet;
 use super::compat::FlatDfa;
 use super::disallowed_follows::normalize_disallowed_follows;
 use super::shared::{
-    TokenDedup, VocabLexicalEntryOrder,
+    TokenDedup,
     hash_byte_class_seq,
     representative_tokens_for_vocab_classes,
     tokenizer_group_count,
@@ -519,13 +519,13 @@ struct PreparedEquivalenceInputs<'a> {
     token_ids: Vec<u32>,
     token_bytes: Vec<&'a [u8]>,
     initial_states: Vec<usize>,
-    lexical_entry_order: Option<Arc<VocabLexicalEntryOrder>>,
+    lexical_entry_order: Option<Arc<crate::vocab::LexicalVocabulary>>,
 }
 
 impl PreparedEquivalenceInputs<'_> {
     #[inline]
     fn lexical_entry_indices(&self) -> Option<&[u32]> {
-        self.lexical_entry_order.as_deref().map(|order| order.entry_indices.as_ref())
+        self.lexical_entry_order.as_deref().map(|order| order.entry_indices())
     }
 }
 
@@ -552,7 +552,7 @@ fn prepare_equivalence_inputs<'a>(
         token_ids,
         token_bytes,
         initial_states,
-        lexical_entry_order: vocab.vocab_derived_cache_get::<VocabLexicalEntryOrder>(),
+        lexical_entry_order: vocab.cached_lexical_vocabulary(),
     }
 }
 
