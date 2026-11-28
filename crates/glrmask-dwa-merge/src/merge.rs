@@ -18,15 +18,12 @@ use crate::automata::weighted::minimize::minimize_owned;
 use crate::automata::weighted::nwa::{NWA, NWAState};
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::compiler::stages::mapped_artifact::{MappedArtifact, refine_observation_classes, refine_sparse_memberships, local_to_refined_classes, WeightRefs, TokenAxisMap, remap_weights_with_token_axis};
+use crate::compiler::stages::mapped_artifact::{MappedArtifact, refine_observation_classes, refine_sparse_memberships, local_to_refined_classes, WeightRefs, TokenAxisMap, remap_weights_with_axes};
+#[cfg(test)]
+use crate::compiler::stages::mapped_artifact::remap_weights_with_token_axis;
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
 
 use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile, compile_profile_enabled};
-
-enum FastGlobalTokenMaps {
-    Direct(Vec<Vec<u32>>),
-    General(Vec<Vec<Vec<u32>>>),
-}
 
 fn merged_terminal_dwa_phase_enabled(variable: &str, default: bool) -> bool {
     std::env::var(variable)
@@ -86,35 +83,27 @@ fn inputs_have_disjoint_token_domains(inputs: &[LocalIdMapTerminalDwa], max_toke
 /// The token coordinate either has a source-proven injection (including a
 /// contiguous offset) or the general partition-meet fanout. The latter is
 /// allocated only when no direct injection proof is available.
-fn with_source_lift<R>(
-    local: &InternalIdMap,
-    global: &InternalIdMap,
-    direct: Option<&[u32]>,
-    precomputed_tsids: Option<&[Vec<u32>]>,
-    apply: impl FnOnce(&[Vec<u32>], TokenAxisMap<'_>) -> R,
-) -> R {
-    let tsid_storage;
-    let tsids = match precomputed_tsids {
-        Some(tsids) => tsids,
-        None => {
-            tsid_storage = build_local_to_global_tsid_map(local, global);
-            &tsid_storage
-        }
+fn source_axes<'a>(
+    local: &'a InternalIdMap,
+    global: &'a InternalIdMap,
+    direct: Option<&'a [u32]>,
+) -> (TokenAxisMap<'a>, TokenAxisMap<'a>) {
+    let states = TokenAxisMap::Refinement {
+        local: &local.tokenizer_states, common: &global.tokenizer_states,
     };
-    if let Some(direct) = direct {
-        return apply(tsids, TokenAxisMap::Injection(direct));
-    }
-    let tokens = build_local_to_global_token_map(local, global);
-    apply(tsids, TokenAxisMap::Explicit(&tokens))
+    let tokens = direct.map(TokenAxisMap::Injection).unwrap_or(TokenAxisMap::Refinement {
+        local: &local.vocab_tokens, common: &global.vocab_tokens,
+    });
+    (states, tokens)
 }
 
 fn remap_dwa(
     dwa: &mut DWA,
-    tsids: &[Vec<u32>],
+    tsids: TokenAxisMap<'_>,
     tokens: TokenAxisMap<'_>,
     global: &InternalIdMap,
 ) {
-    remap_weights_with_token_axis(
+    remap_weights_with_axes(
         &mut dwa.weight_refs_mut(), tsids, tokens,
         global.num_tsids() as usize, global.num_internal_tokens() as usize,
     );
@@ -217,9 +206,8 @@ fn try_merge_disjoint_token_domain_dwas(
         let direct = direct_local_to_global_token_maps
             .and_then(|maps| maps.get(input_index)).map(Vec::as_slice);
         let mut dwa = input.dwa.clone();
-        with_source_lift(&input.id_map, global_id_map, direct, None, |tsids, tokens| {
-            remap_dwa(&mut dwa, tsids, tokens, global_id_map);
-        });
+        let (tsids, tokens) = source_axes(&input.id_map, global_id_map, direct);
+        remap_dwa(&mut dwa, tsids, tokens, global_id_map);
         remapped.push(dwa);
     }
     let lift_ms = lift_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -263,7 +251,7 @@ pub fn merge_local_id_maps_and_terminal_dwas(
     )
     .unwrap_or_else(|| {
         let global_nwa = union_lifted_terminal_nwa(
-            &inputs, &global_id_map, direct_local_to_global_token_maps.as_deref(), None, false,
+            &inputs, &global_id_map, direct_local_to_global_token_maps.as_deref(), false,
         );
         determinize(&global_nwa).expect("merge terminal NWA determinization failed")
     });
@@ -963,7 +951,7 @@ fn generic_global_union_determinization(
 fn append_lifted_dwa(
     global: &mut NWA,
     dwa: &DWA,
-    tsids: &[Vec<u32>],
+    tsids: TokenAxisMap<'_>,
     tokens: TokenAxisMap<'_>,
     map: &InternalIdMap,
 ) -> u32 {
@@ -991,17 +979,14 @@ fn union_lifted_terminal_nwa(
     inputs: &[LocalIdMapTerminalDwa],
     map: &InternalIdMap,
     direct: Option<&[Vec<u32>]>,
-    all_tsids: Option<&[Vec<Vec<u32>>]>,
     fuse_start: bool,
 ) -> NWA {
     let mut global = NWA::new(map.num_tsids(), map.max_internal_token_id());
     let mut starts = Vec::<u32>::with_capacity(inputs.len());
     for (index, input) in inputs.iter().enumerate() {
         let direct = direct.map(|maps| maps[index].as_slice());
-        let precomputed_tsids = all_tsids.map(|maps| maps[index].as_slice());
-        let start = with_source_lift(&input.id_map, map, direct, precomputed_tsids, |tsids, tokens| {
-            append_lifted_dwa(&mut global, &input.dwa, tsids, tokens, map)
-        });
+        let (tsids, tokens) = source_axes(&input.id_map, map, direct);
+        let start = append_lifted_dwa(&mut global, &input.dwa, tsids, tokens, map);
         if fuse_start && let Some(&combined) = starts.first() {
             // Preserve the source row until reachability is established:
             // a source may have incoming edges from otherwise dead states.
@@ -1124,26 +1109,20 @@ fn try_merge_id_maps_and_token_deterministic_nwa_impl(
         .filter(|source| *source < inputs.len());
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
     let id_map_started_at = Instant::now();
-    let (global_id_map, direct_local_to_global_token_maps, precomputed_tsid_maps) =
+    let (global_id_map, direct_local_to_global_token_maps) =
         if token_domains_proven_disjoint {
-            let (id_map, direct_maps, tsid_maps) = build_unified_global_id_map_disjoint_fast(
-                &id_map_refs,
-                num_tokenizer_states,
-                max_token_id,
-                primary_tsid_source,
-            );
-            (id_map, Some(direct_maps), Some(tsid_maps))
+            build_unified_global_id_map_fast(
+                &id_map_refs, num_tokenizer_states, max_token_id, primary_tsid_source, true,
+            )
         } else {
-            let (id_map, direct_maps) =
-                build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id);
-            (id_map, direct_maps, None)
+            build_unified_global_id_map(&id_map_refs, num_tokenizer_states, max_token_id)
         };
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
     let remap_started_at = Instant::now();
     let profiling = compile_profile_enabled();
     let global_nwa = union_lifted_terminal_nwa(
         inputs, &global_id_map, direct_local_to_global_token_maps.as_deref(),
-        precomputed_tsid_maps.as_deref(), true,
+        true,
     );
     debug_assert!(global_nwa.is_acyclic());
     debug_assert!(global_nwa.states().iter().all(|state| state.epsilons.is_empty()));
@@ -1264,7 +1243,7 @@ fn merge_id_maps_and_terminal_dwas_impl(
     let used_direct_global = direct_global.is_some();
     let profiling = compile_profile_enabled();
     let global_nwa = (!used_direct_global).then(|| union_lifted_terminal_nwa(
-        &inputs, &global_id_map, direct_local_to_global_token_maps.as_deref(), None, false,
+        &inputs, &global_id_map, direct_local_to_global_token_maps.as_deref(), false,
     ));
     let remap_and_union_ms = remap_and_union_started_at.elapsed().as_secs_f64() * 1000.0;
     let nwa_states_before_determinize = global_nwa.as_ref().map_or(0, NWA::num_states);
@@ -1416,10 +1395,8 @@ fn try_merge_immediate_terminal_dwas(
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
     let id_map_refs: Vec<&InternalIdMap> = inputs.iter().map(|input| &input.id_map).collect();
-    // These inputs are the compiler's disjoint vocabulary partitions. Preserve
-    // that proof instead of scanning every original-token map again, and retain
-    // the local→global TSID maps produced while constructing the global classes.
-    let (global_id_map, token_maps, local_to_global_tsid_maps) =
+    // Preserve any caller-proven disjointness and lift directly from the meet.
+    let (global_id_map, direct_maps) =
         build_unified_global_id_map_fast(
             &id_map_refs,
             num_tokenizer_states,
@@ -1433,13 +1410,10 @@ fn try_merge_immediate_terminal_dwas(
     let mut weights_by_label = BTreeMap::<i32, Vec<Weight>>::new();
     for (input_index, input) in inputs.iter().enumerate() {
         let mut accepting = immediate_dwa_accepting_edges(&input.dwa)?;
-        let tsid_map = &local_to_global_tsid_maps[input_index];
-        let token_axis = match &token_maps {
-            FastGlobalTokenMaps::Direct(maps) => TokenAxisMap::Injection(&maps[input_index]),
-            FastGlobalTokenMaps::General(maps) => TokenAxisMap::Explicit(&maps[input_index]),
-        };
+        let direct = direct_maps.as_ref().map(|maps| maps[input_index].as_slice());
+        let (tsid_map, token_axis) = source_axes(&input.id_map, &global_id_map, direct);
         let mut weights = accepting.iter_mut().map(|(_, weight)| weight).collect::<Vec<_>>();
-        remap_weights_with_token_axis(
+        remap_weights_with_axes(
             &mut weights, tsid_map, token_axis,
             global_id_map.num_tsids() as usize, global_id_map.num_internal_tokens() as usize,
         );
@@ -1499,7 +1473,7 @@ fn build_unified_global_id_map_fast(
     max_token_id: u32,
     primary_source: Option<usize>,
     require_direct_token_maps: bool,
-) -> (InternalIdMap, FastGlobalTokenMaps, Vec<Vec<Vec<u32>>>) {
+) -> (InternalIdMap, Option<Vec<Vec<u32>>>) {
     let mut state_maps = inputs.iter().map(|input| &input.tokenizer_states).collect::<Vec<_>>();
     let primary = primary_source.filter(|&source| source < inputs.len());
     if let Some(source) = primary {
@@ -1511,37 +1485,16 @@ fn build_unified_global_id_map_fast(
     );
     let (vocab_tokens, token_maps) = if require_direct_token_maps {
         let (map, direct) = build_unified_global_token_id_map_assume_disjoint(inputs, max_token_id);
-        (map, FastGlobalTokenMaps::Direct(direct))
+        (map, Some(direct))
     } else {
-        let (map, fanout) = build_unified_global_token_id_map_sparse_generic(inputs, max_token_id);
-        (map, FastGlobalTokenMaps::General(fanout))
+        let maps = inputs.iter().map(|input| &input.vocab_tokens).collect::<Vec<_>>();
+        (refine_sparse_memberships(&maps, max_token_id as usize + 1, false, false).0, None)
     };
     let common = InternalIdMap {
         tokenizer_states, vocab_tokens,
         deferred_vocab_singleton_original_ids: None,
     };
-    let tsid_maps = inputs.iter().map(|local| build_local_to_global_tsid_map(local, &common))
-        .collect();
-    (common, token_maps, tsid_maps)
-}
-
-fn build_unified_global_id_map_disjoint_fast(
-    inputs: &[&InternalIdMap],
-    num_tokenizer_states: usize,
-    max_token_id: u32,
-    primary_source: Option<usize>,
-) -> (InternalIdMap, Vec<Vec<u32>>, Vec<Vec<Vec<u32>>>) {
-    let (id_map, token_maps, tsid_maps) = build_unified_global_id_map_fast(
-        inputs,
-        num_tokenizer_states,
-        max_token_id,
-        primary_source,
-        true,
-    );
-    let FastGlobalTokenMaps::Direct(direct_maps) = token_maps else {
-        panic!("disjoint token domains must produce direct token maps");
-    };
-    (id_map, direct_maps, tsid_maps)
+    (common, token_maps)
 }
 
 fn build_unified_global_token_id_map_assume_disjoint(
@@ -1624,6 +1577,7 @@ pub fn merge_internal_id_maps_only(
     build_unified_global_id_map(inputs, num_tokenizer_states, max_token_id).0
 }
 
+#[cfg(test)]
 fn build_unified_global_token_id_map_sparse_generic(
     inputs: &[&InternalIdMap],
     max_token_id: u32,
@@ -1681,12 +1635,12 @@ fn remap_nwa_with_maps(
     tokens: &[Vec<u32>],
     global: &InternalIdMap,
 ) {
-    remap_nwa_states(nwa.states_mut(), tsids, TokenAxisMap::Explicit(tokens), global);
+    remap_nwa_states(nwa.states_mut(), TokenAxisMap::Explicit(tsids), TokenAxisMap::Explicit(tokens), global);
 }
 
 fn remap_nwa_states(
     states: &mut [NWAState],
-    tsids: &[Vec<u32>],
+    tsids: TokenAxisMap<'_>,
     tokens: TokenAxisMap<'_>,
     global: &InternalIdMap,
 ) {
@@ -1696,7 +1650,7 @@ fn remap_nwa_states(
         weights.extend(state.transitions.values_mut().flatten().map(|(_, weight)| weight));
         weights.extend(state.epsilons.iter_mut().map(|(_, weight)| weight));
     }
-    remap_weights_with_token_axis(
+    remap_weights_with_axes(
         &mut weights, tsids, tokens,
         global.num_tsids() as usize, global.num_internal_tokens() as usize,
     );
@@ -2280,7 +2234,7 @@ mod tests {
 
         let mut appended = NWA::new(3, 3);
         let unused = appended.add_state();
-        let start = append_lifted_dwa(&mut appended, &source, &tsids,
+        let start = append_lifted_dwa(&mut appended, &source, TokenAxisMap::Explicit(&tsids),
             TokenAxisMap::Injection(&[u32::MAX, 1, 3]), &common);
         assert_ne!(start, unused);
         appended.set_start_states(vec![start]);

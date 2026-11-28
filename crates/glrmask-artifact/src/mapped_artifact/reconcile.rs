@@ -22,25 +22,8 @@ pub(super) fn reconcile_weight_id_maps(
 
     let common_id_map = build_common_internal_id_map(&[left_id_map, right_id_map]);
 
-    let left_tsid_map = build_local_to_common_tsid_map(left_id_map, &common_id_map);
-    let left_token_map = build_local_to_common_token_map_from_common_classes(left_id_map, &common_id_map);
-    let right_tsid_map = build_local_to_common_tsid_map(right_id_map, &common_id_map);
-    let right_token_map = build_local_to_common_token_map_from_common_classes(right_id_map, &common_id_map);
-
-    remap_weights_with_maps(
-        left_weights,
-        &left_tsid_map,
-        &left_token_map,
-        common_id_map.num_tsids() as usize,
-        common_id_map.num_internal_tokens() as usize,
-    );
-    remap_weights_with_maps(
-        right_weights,
-        &right_tsid_map,
-        &right_token_map,
-        common_id_map.num_tsids() as usize,
-        common_id_map.num_internal_tokens() as usize,
-    );
+    remap_weights_into_existing_common(left_weights, left_id_map, &common_id_map);
+    remap_weights_into_existing_common(right_weights, right_id_map, &common_id_map);
 
     *left_id_map = common_id_map.clone();
     *right_id_map = common_id_map;
@@ -90,16 +73,6 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
         .map(|started| started.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
 
-    let maps_started_at = profiling.then(Instant::now);
-    let left_tsid_map = build_local_to_common_tsid_map(left_id_map, &common_id_map);
-    let left_token_map = build_local_to_common_token_map_from_common_classes(left_id_map, &common_id_map);
-    let right_tsid_map = build_local_to_common_tsid_map(right_id_map, &common_id_map);
-    let right_token_map = build_local_to_common_token_map_from_common_classes(right_id_map, &common_id_map);
-    let maps_ms = maps_started_at
-        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-
-    let common_tsid_count = common_id_map.num_tsids() as usize;
     let parallel_remap = std::env::var("GLRMASK_PARALLEL_FORCED_COMMON_REMAP")
         .map(|value| {
             let value = value.trim();
@@ -110,13 +83,7 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
         rayon::join(
             || {
                 let started = profiling.then(Instant::now);
-                remap_weights_with_maps(
-                    left_weights,
-                    &left_tsid_map,
-                    &left_token_map,
-                    common_tsid_count,
-                    common_id_map.num_internal_tokens() as usize,
-                );
+                remap_weights_into_existing_common(left_weights, left_id_map, &common_id_map);
                 (
                     started
                         .map(|started| started.elapsed().as_secs_f64() * 1000.0)
@@ -126,13 +93,7 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
             },
             || {
                 let started = profiling.then(Instant::now);
-                remap_weights_with_maps(
-                    right_weights,
-                    &right_tsid_map,
-                    &right_token_map,
-                    common_tsid_count,
-                    common_id_map.num_internal_tokens() as usize,
-                );
+                remap_weights_into_existing_common(right_weights, right_id_map, &common_id_map);
                 (
                     started
                         .map(|started| started.elapsed().as_secs_f64() * 1000.0)
@@ -143,24 +104,12 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
         )
     } else {
         let left_started = profiling.then(Instant::now);
-        remap_weights_with_maps(
-            left_weights,
-            &left_tsid_map,
-            &left_token_map,
-            common_tsid_count,
-            common_id_map.num_internal_tokens() as usize,
-        );
+        remap_weights_into_existing_common(left_weights, left_id_map, &common_id_map);
         let left_ms = left_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
         let right_started = profiling.then(Instant::now);
-        remap_weights_with_maps(
-            right_weights,
-            &right_tsid_map,
-            &right_token_map,
-            common_tsid_count,
-            common_id_map.num_internal_tokens() as usize,
-        );
+        remap_weights_into_existing_common(right_weights, right_id_map, &common_id_map);
         let right_ms = right_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -168,18 +117,8 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
     };
 
     if let Some(total_started_at) = total_started_at {
-        let fanout = |map: &[Vec<u32>]| {
-            let total = map.iter().map(Vec::len).sum::<usize>();
-            let multi = map.iter().filter(|targets| targets.len() > 1).count();
-            let maximum = map.iter().map(Vec::len).max().unwrap_or(0);
-            (total, multi, maximum)
-        };
-        let (left_tsid_total, left_tsid_multi, left_tsid_max) = fanout(&left_tsid_map);
-        let (right_tsid_total, right_tsid_multi, right_tsid_max) = fanout(&right_tsid_map);
-        let (left_token_total, left_token_multi, left_token_max) = fanout(&left_token_map);
-        let (right_token_total, right_token_multi, right_token_max) = fanout(&right_token_map);
         eprintln!(
-            "[glrmask/profile][forced_common_reconcile] left_weights={} right_weights={} left_tsids={} right_tsids={} common_tsids={} left_tokens={} right_tokens={} common_tokens={} build_ms={:.3} maps_ms={:.3} left_remap_ms={:.3} right_remap_ms={:.3} total_ms={:.3} left_tsid_fanout={}/{}/{} right_tsid_fanout={}/{}/{} left_token_fanout={}/{}/{} right_token_fanout={}/{}/{}",
+            "[glrmask/profile][forced_common_reconcile] left_weights={} right_weights={} left_tsids={} right_tsids={} common_tsids={} left_tokens={} right_tokens={} common_tokens={} build_ms={:.3} left_remap_ms={:.3} right_remap_ms={:.3} total_ms={:.3}",
             left_weights.len(),
             right_weights.len(),
             left_id_map.num_tsids(),
@@ -189,22 +128,9 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
             right_id_map.num_internal_tokens(),
             common_id_map.num_internal_tokens(),
             build_ms,
-            maps_ms,
             left_ms,
             right_ms,
             total_started_at.elapsed().as_secs_f64() * 1000.0,
-            left_tsid_total,
-            left_tsid_multi,
-            left_tsid_max,
-            right_tsid_total,
-            right_tsid_multi,
-            right_tsid_max,
-            left_token_total,
-            left_token_multi,
-            left_token_max,
-            right_token_total,
-            right_token_multi,
-            right_token_max,
         );
     }
 
@@ -246,12 +172,10 @@ pub(super) fn remap_weights_into_existing_common(
     if weights.is_empty() {
         return;
     }
-    let tsid_map = build_local_to_common_tsid_map(local_id_map, common_id_map);
-    let token_map = build_local_to_common_token_map_from_common_classes(local_id_map, common_id_map);
-    remap_weights_with_maps(
+    remap_weights_with_axes(
         weights,
-        &tsid_map,
-        &token_map,
+        TokenAxisMap::Refinement { local: &local_id_map.tokenizer_states, common: &common_id_map.tokenizer_states },
+        TokenAxisMap::Refinement { local: &local_id_map.vocab_tokens, common: &common_id_map.vocab_tokens },
         common_id_map.num_tsids() as usize,
         common_id_map.num_internal_tokens() as usize,
     );
@@ -864,6 +788,7 @@ pub fn local_to_refined_classes(
     fanout
 }
 
+#[cfg(test)]
 fn build_local_to_common_tsid_map(
     local: &InternalIdMap,
     common: &InternalIdMap,
@@ -871,6 +796,7 @@ fn build_local_to_common_tsid_map(
     local_to_refined_classes(&local.tokenizer_states, &common.tokenizer_states)
 }
 
+#[cfg(test)]
 fn build_local_to_common_token_map_from_common_classes(
     local: &InternalIdMap,
     common: &InternalIdMap,
@@ -919,6 +845,8 @@ pub enum TokenAxisMap<'a> {
     Explicit(&'a [Vec<u32>]),
     /// Proven injection, with u32::MAX denoting an absent local class.
     Injection(&'a [u32]),
+    /// Destination classes refine the source partition (including absent originals).
+    Refinement { local: &'a ManyToOneIdMap, common: &'a ManyToOneIdMap },
     Offset { offset: u32, local_token_count: u32 },
 }
 
@@ -1007,9 +935,113 @@ impl<'a> AxisImage<'a> {
         }
     }
 
+    /// Construct the disjoint image directly from the common partition.
+    /// A common class belongs to at most one local class. Visit destination
+    /// IDs in order, counting maximal runs rather than expanding memberships.
+    fn refinement(local: &ManyToOneIdMap, common: &ManyToOneIdMap) -> Self {
+        let n = local.internal_to_originals.len();
+        let sparse = local.original_to_internal.is_empty().then(|| {
+            local.internal_to_originals.iter().enumerate().flat_map(|(class, originals)|
+                originals.iter().map(move |&original| (original, class as u32))
+            ).collect::<FxHashMap<_, _>>()
+        });
+        let local_class = |original: u32| {
+            if let Some(sparse) = &sparse {
+                sparse.get(&original).copied().unwrap_or(u32::MAX)
+            } else {
+                local.original_to_internal.get(original as usize).copied().unwrap_or(u32::MAX)
+            }
+        };
+        let membership = |originals: &[u32]| {
+            let Some(&representative) = originals.first() else { return u32::MAX };
+            let class = local_class(representative);
+            #[cfg(debug_assertions)]
+            for &original in originals {
+                debug_assert_eq!(local_class(original), class,
+                    "destination must refine the local observation classes");
+            }
+            class
+        };
+        let mut first = vec![u32::MAX; n];
+        let mut last = vec![u32::MAX; n];
+        let mut counts = vec![0usize; n];
+        let mut previous = None::<(usize, u32)>;
+        let mut monotone = true;
+        let mut adjacent = true;
+        for (destination, originals) in common.internal_to_originals.iter().enumerate() {
+            let class = membership(originals);
+            if class == u32::MAX { continue; }
+            let class = class as usize;
+            let destination = destination as u32;
+            if let Some((prev_class, prev_dest)) = previous {
+                monotone &= prev_class <= class;
+                adjacent &= prev_dest.checked_add(1) == Some(destination);
+            }
+            previous = Some((class, destination));
+            if first[class] == u32::MAX {
+                first[class] = destination;
+                counts[class] = 1;
+            } else if last[class].checked_add(1) != Some(destination) {
+                counts[class] += 1;
+            }
+            last[class] = destination;
+        }
+        let singleton = first == last;
+        if singleton {
+            if let Some(&offset) = first.first() {
+                if offset != u32::MAX && first.iter().enumerate().all(|(i, &target)|
+                    offset.checked_add(i as u32) == Some(target))
+                {
+                    return Self::Affine { offset, count: n };
+                }
+            }
+        }
+        if adjacent && monotone {
+            let mut next = u32::MAX;
+            for start in first.iter_mut().rev() {
+                if *start != u32::MAX { next = *start; }
+                *start = next;
+            }
+            let mut prev = u32::MAX;
+            for end in &mut last {
+                if *end != u32::MAX { prev = *end; }
+                *end = prev;
+            }
+            return Self::Contiguous { first, last };
+        }
+        if singleton {
+            return Self::Singleton { destinations: Cow::Owned(first), monotone };
+        }
+        let mut offsets = Vec::with_capacity(n + 1);
+        offsets.push(0usize);
+        for count in counts {
+            offsets.push(offsets.last().unwrap() + count);
+        }
+        let mut runs = vec![(u32::MAX, u32::MAX); *offsets.last().unwrap()];
+        let mut cursor = offsets[..n].to_vec();
+        for (destination, originals) in common.internal_to_originals.iter().enumerate() {
+            let class = membership(originals);
+            if class == u32::MAX { continue; }
+            let class = class as usize;
+            let destination = destination as u32;
+            let pos = cursor[class];
+            if pos > offsets[class] && runs[pos - 1].1.checked_add(1) == Some(destination) {
+                runs[pos - 1].1 = destination;
+            } else {
+                runs[pos] = (destination, destination);
+                cursor[class] += 1;
+            }
+        }
+        Self::Disjoint { offsets, runs, monotone }
+    }
+
     fn tokens(map: TokenAxisMap<'a>, destination_count: usize) -> Self {
         match map {
             TokenAxisMap::Explicit(fanout) => Self::explicit(fanout, destination_count),
+            TokenAxisMap::Refinement { local, common } => {
+                assert_eq!(common.internal_to_originals.len(), destination_count);
+                Self::refinement(local, common)
+            }
             TokenAxisMap::Injection(destinations) => {
                 if let Some(&offset) = destinations.first() {
                     if offset != u32::MAX && destinations.iter().enumerate().all(|(local, &target)| {
@@ -1227,13 +1259,27 @@ pub fn remap_weights_with_token_axis(
     common_tsid_count: usize,
     common_token_count: usize,
 ) {
+    remap_weights_with_axes(
+        weights, TokenAxisMap::Explicit(local_to_common_tsids), local_to_common_tokens,
+        common_tsid_count, common_token_count,
+    );
+}
+
+/// Lift both dimensions directly from their certified coordinate images.
+pub fn remap_weights_with_axes(
+    weights: &mut [&mut Weight],
+    local_to_common_tsids: TokenAxisMap<'_>,
+    local_to_common_tokens: TokenAxisMap<'_>,
+    common_tsid_count: usize,
+    common_token_count: usize,
+) {
     if weights.is_empty() {
         return;
     }
     let profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
     let started = profiling.then(Instant::now);
-    let states = AxisImage::explicit(local_to_common_tsids, common_tsid_count);
+    let states = AxisImage::tokens(local_to_common_tsids, common_tsid_count);
     let tokens = AxisImage::tokens(local_to_common_tokens, common_token_count);
     let identity_states = states.identity(common_tsid_count);
     let identity_tokens = tokens.identity(common_token_count);
@@ -1478,6 +1524,30 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn direct_partition_image_matches_expanded_memberships() {
+        let local = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+            vec![1, 0, u32::MAX, 1, 0, 3, 3, 1], 5,
+        );
+        let common = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+            vec![0, 1, 2, 3, 4, 5, 5, 6], 7,
+        );
+        let explicit = local_to_refined_classes(&local, &common);
+        let mut sparse = local.clone();
+        sparse.original_to_internal.clear();
+        for source in [&local, &sparse] {
+            let image = AxisImage::refinement(source, &common);
+            for start in 0..5 {
+                for end in start..5 {
+                    let expected = RangeSetBlaze::from_iter(
+                        explicit[start..=end].iter().flatten().copied(),
+                    );
+                    assert_eq!(image.image([(start as u32, end as u32)]), expected);
+                }
+            }
+        }
     }
 
     fn id_map_key(id_map: &InternalIdMap) -> (Vec<u32>, Vec<Vec<u32>>, Vec<u32>, Vec<Vec<u32>>) {
