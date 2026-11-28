@@ -433,3 +433,15 @@ def test_documented_tool_composition():
     state = scope["constraint"].start()
     assert state.commit_bytes(b'<weather>{"city": "Perth"}</weather>')
     assert state.is_accepting()
+
+
+def test_documented_quickstart():
+    from pathlib import Path
+    import json
+
+    doc = Path(__file__).resolve().parents[2] / "docs/content/python-quickstart.md"
+    code = doc.read_text(encoding="utf-8").split("```python\n", 1)[1].split("\n```", 1)[0]
+    scope = {}
+    exec(code, scope)
+    assert scope["state"].is_accepting()
+    assert json.loads(bytes(scope["output"]))["color"] in {"red", "green", "blue"}

@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import sys
 import tomllib
+from example_content import visible_example
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTENT = ROOT / 'docs' / 'content'
@@ -102,8 +103,8 @@ def installation(language, release=None):
 
 def document(language, release=None):
     if release is None:
-        quickstart = read(language + '-quickstart')
-        details = read(language + '-details')
+        quickstart = visible_example(read(language + '-quickstart'))
+        details = read(language + '-details').replace('{{composition}}', visible_example(read(language + '-composition')))
     else:
         quickstart = read_release(release, language + '-quickstart')
         details = read_release(release, language + '-details')

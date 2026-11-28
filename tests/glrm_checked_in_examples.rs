@@ -128,9 +128,9 @@ fn shipped_example_sources_import() {
         ("Python composition", include_str!("../docs/content/python-composition.md"), "from_glrm('''", "'''"),
         ("token sets", include_str!("../docs/token-sets.md"), "from_glrm('''", "'''"),
         ("C++ README", include_str!("../bindings/cpp/README.md"), "from_glrm(R\"(", ")\""),
-        ("C++ details", include_str!("../docs/content/cpp-details.md"), "from_glrm(R\"(", ")\""),
+        ("C++ composition", include_str!("../docs/content/cpp-composition.md"), "from_glrm(R\"(", ")\""),
         ("Node README", include_str!("../bindings/node/README.md"), "fromGlrm(\x60", "\x60"),
-        ("Node details", include_str!("../docs/content/javascript-details.md"), "fromGlrm(\x60", "\x60"),
+        ("Node composition", include_str!("../docs/content/javascript-composition.md"), "fromGlrm(\x60", "\x60"),
         ("template parser", include_str!("../docs/design/template-parser.md"), "from_glrm(r#\"", "\"#"),
         ("template composition", include_str!("../docs/design/template-parser-composition.md"), "r#\"glrm 1;", "\"#"),
     ];

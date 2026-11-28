@@ -1,38 +1,51 @@
 ```python
+# [hidden]
+from glrmask import Grammar, Vocab
 import numpy as np
-import glrmask
 
-grammar = glrmask.Grammar.from_json_schema({
+token_bytes = {i: bytes([i]) for i in range(256)}
+EOS = 256
+rng = np.random.default_rng(0)
+def model(output):
+    return rng.standard_normal(257)
+def sample(logits, mask, accepting):
+    allowed = np.zeros(len(logits), dtype=bool)
+    bits = np.unpackbits(mask.astype('<u4').view(np.uint8), bitorder='little')
+    allowed[:EOS] = bits[:EOS]
+    allowed[EOS] = accepting
+    if not allowed.any():
+        raise RuntimeError('no allowed token and cannot stop')
+    return int(np.argmax(np.where(allowed, logits, -np.inf)))
+# [/hidden]
+grammar = Grammar.from_json_schema({
     "type": "object",
-    "properties": {"color": {"enum": ["red", "green", "blue"]}},
+    "properties": {
+        "color": {
+            "enum": ["red", "green", "blue"]
+        }
+    },
     "required": ["color"],
     "additionalProperties": False,
 })
 
-# One token per byte, plus EOS. With a real model, build this from its tokenizer.
-vocab = glrmask.Vocab({i: bytes([i]) for i in range(256)})
-EOS = 256
-
+# Token ID -> exact bytes from tokenizer
+vocab = Vocab(token_bytes)
 state = grammar.compile(vocab).start()
-rng = np.random.default_rng(0)
+
 output = []
 while True:
-    logits = rng.standard_normal(257)  # stand-in for your model
-    allowed = np.zeros(257, dtype=bool)
-    m = state.mask()
-    # NumPy boilerplate: unpack the bitmask into booleans to index the logits.
-    allowed[:state.mask_bit_len] = np.unpackbits(m.astype('<u4').view(np.uint8), bitorder='little')[:state.mask_bit_len].astype(bool)
-    allowed[EOS] = state.is_accepting()
-    if not allowed.any():
-        raise RuntimeError("no allowed token and cannot stop")
-    token = int(np.argmax(np.where(allowed, logits, -np.inf)))
+    logits = model(output)
+    mask = state.mask()
+    token = sample(
+        logits, mask, state.is_accepting()
+    )
     if token == EOS:
         break
     if not state.commit_token(token):
-        raise RuntimeError("allowed token rejected")
+        raise RuntimeError("Rejected token")
     output.append(token)
-
-if not state.is_accepting():
-    raise RuntimeError("incomplete output")
-print(bytes(output).decode())  # e.g. {"color": "blue"}
+# [hidden]
+assert state.is_accepting()
+print(bytes(output).decode())
+# [/hidden]
 ```

@@ -354,3 +354,18 @@ test('commit outcome reports post-state viability',async()=>{
     }
   }
 });
+
+test('canonical quickstart and composition run with hidden setup', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { execFileSync } = require('node:child_process');
+  for (const example of ['quickstart', 'composition']) {
+    const doc = path.resolve(__dirname, '../../../docs/content/javascript-' + example + '.md');
+    const lines = fs.readFileSync(doc, 'utf8').trim().split(/\r?\n/);
+    assert.equal(lines.shift(), '```js');
+    assert.equal(lines.pop(), '```');
+    execFileSync(process.execPath, ['--input-type=module', '-e', lines.join('\n')], {
+      cwd: path.resolve(__dirname, '..'), stdio: 'pipe',
+    });
+  }
+});

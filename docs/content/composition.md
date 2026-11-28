@@ -1,1 +1,1 @@
-GLRMask compiles grammars in parts and links them later. A `Module` is a grammar with named slots. Bind each slot to another grammar, a compiled constraint or a token set, then compile. Parts that are already compiled are reused, so linking only does work where the parts meet.
+GLRMask compiles grammars in parts and links them later. A `Module` is a grammar with named externs. Bind each extern to another grammar, a compiled constraint or a token set, then compile. Parts that are already compiled are reused, so linking avoids recompiling them from scratch.

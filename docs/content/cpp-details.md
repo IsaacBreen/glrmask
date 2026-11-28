@@ -27,23 +27,7 @@ sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 
 ## Composing grammars
 
-```cpp
-std::vector<glrmask::VocabEntry> entries;
-for (glrmask::TokenId id = 0; id < 256; ++id) entries.emplace_back(id, glrmask::Bytes{static_cast<std::uint8_t>(id)});
-glrmask::Vocab vocab(entries);
-
-glrmask::Module weather(glrmask::Grammar::from_json_schema(R"({
-    "type": "object", "properties": {"city": {"type": "string"}},
-    "required": ["city"], "additionalProperties": false})"));
-weather.precompile(vocab);
-
-glrmask::Module call(glrmask::Grammar::from_glrm(R"(
-    extern grammar ARGS
-    start call
-    nt call = "<weather>" ARGS "</weather>")"));
-call.bind("ARGS", weather);
-auto constraint = call.compile(vocab);
-```
+{{composition}}
 
 On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Constraint`, `Expr`, or `TokenSet`. It changes the module in
 place; if it fails, nothing changes. Copy a module first to bind the same one in different ways. `externs().unbound()` lists the unbound names.

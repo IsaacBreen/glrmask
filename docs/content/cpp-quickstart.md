@@ -1,50 +1,66 @@
 ```cpp
+// [hidden]
 #include <glrmask.hpp>
 #include <iostream>
 #include <string>
 #include <vector>
-
+#include <stdexcept>
+using namespace glrmask;
+constexpr TokenId EOS = 256;
+std::vector<float> model(const std::vector<TokenId>& output) {
+    const std::string target = R"({"color": "blue"})";
+    std::vector<float> logits(257, -1.0f);
+    logits[output.size() < target.size() ? static_cast<TokenId>(target[output.size()]) : EOS] = 1;
+    return logits;
+}
+TokenId sample(const std::vector<float>& logits, const std::vector<std::uint32_t>& mask, bool accepting) {
+    TokenId token = 0;
+    bool found = false;
+    for (TokenId id = 0; id <= EOS; ++id) {
+        bool allowed = id == EOS ? accepting : ((mask[id / 32] >> (id % 32)) & 1) != 0;
+        if (allowed && (!found || logits[id] > logits[token])) { token = id; found = true; }
+    }
+    if (!found) throw std::runtime_error("no allowed token and cannot stop");
+    return token;
+}
 int main() {
-    auto grammar = glrmask::Grammar::from_json_schema(R"({
+std::vector<VocabEntry> token_bytes;
+for (TokenId id = 0; id < 256; ++id) token_bytes.emplace_back(id, Bytes{static_cast<std::uint8_t>(id)});
+// [/hidden]
+auto grammar = Grammar::from_json_schema(
+    R"({
         "type": "object",
-        "properties": {"color": {"enum": ["red", "green", "blue"]}},
+        "properties": {
+            "color": {
+                "enum": [
+                    "red", "green", "blue"
+                ]
+            }
+        },
         "required": ["color"],
         "additionalProperties": false
-    })");
+    })"
+);
 
-    // One token per byte, plus EOS. With a real model, build this from its tokenizer.
-    std::vector<glrmask::VocabEntry> entries;
-    for (glrmask::TokenId id = 0; id < 256; ++id)
-        entries.emplace_back(id, glrmask::Bytes{static_cast<std::uint8_t>(id)});
-    glrmask::Vocab vocab(entries);
-    const glrmask::TokenId eos = 256;
+// Token ID -> exact bytes from tokenizer
+Vocab vocab(token_bytes);
+auto constraint = grammar.compile(vocab);
+auto state = constraint.start();
 
-    auto state = grammar.compile(vocab).start();
-    std::string output;
-    const std::string sample = R"({"color": "blue"})";
-    while (true) {
-        // Stand-in scores for a model that wants to produce sample.
-        std::vector<float> logits(257, -1.0f);
-        auto next = output.size() < sample.size()
-            ? static_cast<glrmask::TokenId>(sample[output.size()]) : eos;
-        logits[next] = 1.0f;
-        auto mask = state.mask();
-        glrmask::TokenId token = 0;
-        bool found = false;
-        for (glrmask::TokenId id = 0; id <= eos; ++id) {
-            bool allowed = id == eos ? state.is_accepting()
-                : ((mask[id / 32] >> (id % 32)) & 1) != 0;
-            if (allowed && (!found || logits[id] > logits[token])) {
-                token = id;
-                found = true;
-            }
-        }
-        if (!found) return 1;
-        if (token == eos) break;
-        if (!state.commit_token(token)) return 1;
-        output += static_cast<char>(token);
-    }
-    if (!state.is_accepting()) return 1;
-    std::cout << output << '\n';
+std::vector<TokenId> output;
+while (true) {
+    auto logits = model(output);
+    auto mask = state.mask();
+    auto token = sample(
+        logits, mask, state.is_accepting()
+    );
+    if (token == EOS) break;
+    if (!state.commit_token(token)) return 1;
+    output.push_back(token);
 }
+// [hidden]
+if (!state.is_accepting()) return 1;
+std::cout << std::string(output.begin(), output.end()) << '\n';
+}
+// [/hidden]
 ```

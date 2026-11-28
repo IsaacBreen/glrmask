@@ -20,7 +20,7 @@ mask_on_device = bitmask.to(device, non_blocking=True)
 
 ### Modules and expressions
 
-A grammar extern accepts a grammar, module, constraint, expression or token set. A token extern accepts only a token set. Each slot is bound once; copy a module to use different bindings. Bindings capture the supplied values. A model token can span the boundary between grammar parts.
+A grammar extern accepts a grammar, module, constraint, expression or token set. A token extern accepts only a token set. Each extern is bound once; copy a module to use different bindings. Bindings capture the supplied values. A model token can span the boundary between grammar parts.
 
 `precompile(vocab)` compiles as much of a module as possible with its current bindings. Precompiled work is tied to the vocabulary. Modules can be saved with unbound slots and loaded later.
 

@@ -23,60 +23,64 @@ GLRMask has four core types:
 - `ConstraintState`: the state of one generated sequence.
 - `Module`: a partially compiled grammar ([see below](#composing-grammars)).
 
+In the quickstart, supply the tokenizer's exact token bytes and the model's EOS ID. The model produces logits; the sampling routine must apply the packed mask and permit EOS only when the state is accepting.
+
 ## Quickstart
 
 ```python
-import numpy as np
-import glrmask
-
-grammar = glrmask.Grammar.from_json_schema({
+grammar = Grammar.from_json_schema({
     "type": "object",
-    "properties": {"color": {"enum": ["red", "green", "blue"]}},
+    "properties": {
+        "color": {
+            "enum": ["red", "green", "blue"]
+        }
+    },
     "required": ["color"],
     "additionalProperties": False,
 })
 
-# One token per byte, plus EOS. With a real model, build this from its tokenizer.
-vocab = glrmask.Vocab({i: bytes([i]) for i in range(256)})
-EOS = 256
-
+# Token ID -> exact bytes from tokenizer
+vocab = Vocab(token_bytes)
 state = grammar.compile(vocab).start()
-rng = np.random.default_rng(0)
+
 output = []
 while True:
-    logits = rng.standard_normal(257)  # stand-in for your model
-    allowed = np.zeros(257, dtype=bool)
-    m = state.mask()
-    # NumPy boilerplate: unpack the bitmask into booleans to index the logits.
-    allowed[:state.mask_bit_len] = np.unpackbits(m.astype('<u4').view(np.uint8), bitorder='little')[:state.mask_bit_len].astype(bool)
-    allowed[EOS] = state.is_accepting()
-    if not allowed.any():
-        raise RuntimeError("no allowed token and cannot stop")
-    token = int(np.argmax(np.where(allowed, logits, -np.inf)))
+    logits = model(output)
+    mask = state.mask()
+    token = sample(
+        logits, mask, state.is_accepting()
+    )
     if token == EOS:
         break
     if not state.commit_token(token):
-        raise RuntimeError("allowed token rejected")
+        raise RuntimeError("Rejected token")
     output.append(token)
-
-if not state.is_accepting():
-    raise RuntimeError("incomplete output")
-print(bytes(output).decode())  # e.g. {"color": "blue"}
 ```
 
 ## Composing grammars
 
-GLRMask compiles grammars in parts and links them later. A `Module` is a grammar with named slots. Bind each slot to another grammar, a compiled constraint or a token set, then compile. Parts that are already compiled are reused, so linking only does work where the parts meet.
+GLRMask compiles grammars in parts and links them later. A `Module` is a grammar with named externs. Bind each extern to another grammar, a compiled constraint or a token set, then compile. Parts that are already compiled are reused, so linking avoids recompiling them from scratch.
 
 ```python
-import glrmask
-vocab = glrmask.Vocab({i: bytes([i]) for i in range(256)})
-weather = glrmask.Grammar.from_json_schema(
-    '{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}'
-).compile(vocab)
-call = glrmask.Module(glrmask.Grammar.from_glrm('''extern grammar ARGS
+# Token ID -> exact bytes from tokenizer
+vocab = Vocab(token_bytes)
+
+weather = Grammar.from_json_schema({
+    "type": "object",
+    "properties": {
+        "city": {"type": "string"}
+    },
+    "required": ["city"],
+    "additionalProperties": False,
+}).compile(vocab)
+
+parent = Grammar.from_glrm('''
+    extern grammar ARGS
     start call
-    nt call = "<weather>" ARGS "</weather>"'''))
+    nt call = "<weather>" ARGS
+              "</weather>"
+''')
+call = Module(parent)
 call.bind("ARGS", weather)
 constraint = call.compile(vocab)
 ```

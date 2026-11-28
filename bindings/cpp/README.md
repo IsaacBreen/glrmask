@@ -28,56 +28,41 @@ GLRMask has four core types:
 - `ConstraintState`: the state of one generated sequence.
 - `Module`: a partially compiled grammar ([see below](#composing-grammars)).
 
+In the quickstart, supply the tokenizer's exact token bytes and the model's EOS ID. The model produces logits; the sampling routine must apply the packed mask and permit EOS only when the state is accepting.
+
 ## Quickstart
 
 ```cpp
-#include <glrmask.hpp>
-#include <iostream>
-#include <string>
-#include <vector>
-
-int main() {
-    auto grammar = glrmask::Grammar::from_json_schema(R"({
+auto grammar = Grammar::from_json_schema(
+    R"({
         "type": "object",
-        "properties": {"color": {"enum": ["red", "green", "blue"]}},
+        "properties": {
+            "color": {
+                "enum": [
+                    "red", "green", "blue"
+                ]
+            }
+        },
         "required": ["color"],
         "additionalProperties": false
-    })");
+    })"
+);
 
-    // One token per byte, plus EOS. With a real model, build this from its tokenizer.
-    std::vector<glrmask::VocabEntry> entries;
-    for (glrmask::TokenId id = 0; id < 256; ++id)
-        entries.emplace_back(id, glrmask::Bytes{static_cast<std::uint8_t>(id)});
-    glrmask::Vocab vocab(entries);
-    const glrmask::TokenId eos = 256;
+// Token ID -> exact bytes from tokenizer
+Vocab vocab(token_bytes);
+auto constraint = grammar.compile(vocab);
+auto state = constraint.start();
 
-    auto state = grammar.compile(vocab).start();
-    std::string output;
-    const std::string sample = R"({"color": "blue"})";
-    while (true) {
-        // Stand-in scores for a model that wants to produce sample.
-        std::vector<float> logits(257, -1.0f);
-        auto next = output.size() < sample.size()
-            ? static_cast<glrmask::TokenId>(sample[output.size()]) : eos;
-        logits[next] = 1.0f;
-        auto mask = state.mask();
-        glrmask::TokenId token = 0;
-        bool found = false;
-        for (glrmask::TokenId id = 0; id <= eos; ++id) {
-            bool allowed = id == eos ? state.is_accepting()
-                : ((mask[id / 32] >> (id % 32)) & 1) != 0;
-            if (allowed && (!found || logits[id] > logits[token])) {
-                token = id;
-                found = true;
-            }
-        }
-        if (!found) return 1;
-        if (token == eos) break;
-        if (!state.commit_token(token)) return 1;
-        output += static_cast<char>(token);
-    }
-    if (!state.is_accepting()) return 1;
-    std::cout << output << '\n';
+std::vector<TokenId> output;
+while (true) {
+    auto logits = model(output);
+    auto mask = state.mask();
+    auto token = sample(
+        logits, mask, state.is_accepting()
+    );
+    if (token == EOS) break;
+    if (!state.commit_token(token)) return 1;
+    output.push_back(token);
 }
 ```
 
@@ -115,19 +100,27 @@ sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 ## Composing grammars
 
 ```cpp
-std::vector<glrmask::VocabEntry> entries;
-for (glrmask::TokenId id = 0; id < 256; ++id) entries.emplace_back(id, glrmask::Bytes{static_cast<std::uint8_t>(id)});
-glrmask::Vocab vocab(entries);
+// Token ID -> exact bytes from tokenizer
+Vocab vocab(token_bytes);
 
-glrmask::Module weather(glrmask::Grammar::from_json_schema(R"({
-    "type": "object", "properties": {"city": {"type": "string"}},
-    "required": ["city"], "additionalProperties": false})"));
-weather.precompile(vocab);
+auto weather = Grammar::from_json_schema(
+    R"({
+        "type": "object",
+        "properties": {
+            "city": {"type": "string"}
+        },
+        "required": ["city"],
+        "additionalProperties": false
+    })"
+).compile(vocab);
 
-glrmask::Module call(glrmask::Grammar::from_glrm(R"(
+auto parent = Grammar::from_glrm(R"(
     extern grammar ARGS
     start call
-    nt call = "<weather>" ARGS "</weather>")"));
+    nt call = "<weather>" ARGS
+              "</weather>"
+)");
+Module call(parent);
 call.bind("ARGS", weather);
 auto constraint = call.compile(vocab);
 ```

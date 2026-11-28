@@ -25,70 +25,72 @@ GLRMask has four core types:
 - `ConstraintState`: the state of one generated sequence.
 - `Module`: a partially compiled grammar ([see below](#composing-grammars)).
 
+In the quickstart, supply the tokenizer's exact token bytes and the model's EOS ID. The model produces logits; the sampling routine must apply the packed mask and permit EOS only when the state is accepting.
+
 ## Quickstart
 
 ```rust
-use glrmask::{Grammar, Vocab};
-
-fn main() -> glrmask::Result<()> {
-    let grammar = Grammar::from_json_schema(r#"{
+let grammar = Grammar::from_json_schema(
+    r#"{
         "type": "object",
-        "properties": {"color": {"enum": ["red", "green", "blue"]}},
+        "properties": {
+            "color": {
+                "enum": [
+                    "red", "green", "blue"
+                ]
+            }
+        },
         "required": ["color"],
         "additionalProperties": false
-    }"#)?;
+    }"#,
+)?;
 
-    // One token per byte, plus EOS. With a real model, build this from its tokenizer.
-    let vocab = Vocab::new((0..256u32).map(|b| (b, vec![b as u8])))?;
-    const EOS: u32 = 256;
+// Token ID -> exact bytes from tokenizer
+let vocab = Vocab::new(token_bytes)?;
+let constraint = grammar.compile(&vocab)?;
+let mut state = constraint.start();
 
-    let mut state = grammar.compile(&vocab)?.start();
-    let mut output = Vec::new();
-    loop {
-        let logits = model(&output); // stand-in for your model
-        let mask = state.mask();
-        let allowed = |t: u32| match t {
-            EOS => state.is_accepting(),
-            t => mask[t as usize / 32] >> (t % 32) & 1 == 1,
-        };
-        let token = (0..=EOS)
-            .filter(|&t| allowed(t))
-            .max_by(|&a, &b| logits[a as usize].total_cmp(&logits[b as usize]))
-            .expect("no allowed token and cannot stop");
-        if token == EOS {
-            break;
-        }
-        assert!(state.commit_token(token), "allowed token rejected");
-        output.push(token as u8);
-    }
-    assert!(state.is_accepting(), "incomplete output");
-    println!("{}", String::from_utf8_lossy(&output)); // e.g. {"color": "blue"}
-    Ok(())
-}
-
-fn model(output: &[u8]) -> Vec<f32> {
-    (0..257).map(|t| ((t * 7919 + output.len() * 104_729) % 1000) as f32).collect()
+let mut output = Vec::new();
+loop {
+    let logits = model(&output);
+    let mask = state.mask();
+    let token = sample(
+        &logits, &mask, state.is_accepting()
+    );
+    if token == EOS { break; }
+    assert!(state.commit_token(token));
+    output.push(token);
 }
 ```
 
 ## Composing grammars
 
-GLRMask compiles grammars in parts and links them later. A `Module` is a grammar with named slots. Bind each slot to another grammar, a compiled constraint or a token set, then compile. Parts that are already compiled are reused, so linking only does work where the parts meet.
+GLRMask compiles grammars in parts and links them later. A `Module` is a grammar with named externs. Bind each extern to another grammar, a compiled constraint or a token set, then compile. Parts that are already compiled are reused, so linking avoids recompiling them from scratch.
 
 ```rust
-use glrmask::{Grammar, Module, Vocab};
-fn main() -> glrmask::Result<()> {
-    let vocab = Vocab::new((0..=255u32).map(|b| (b, vec![b as u8])).collect::<Vec<_>>())?;
-    let weather = Grammar::from_json_schema(
-        r#"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}"#,
-    )?.compile(&vocab)?;
-    let mut call = Module::new(&Grammar::from_glrm(r#"extern grammar ARGS
-        start call
-        nt call = "<weather>" ARGS "</weather>""#)?);
-    call.bind("ARGS", &weather)?;
-    let _constraint = call.compile(&vocab)?;
-    Ok(())
-}
+// Token ID -> exact bytes from tokenizer
+let vocab = Vocab::new(token_bytes)?;
+
+let weather = Grammar::from_json_schema(
+    r#"{
+        "type": "object",
+        "properties": {
+            "city": {"type": "string"}
+        },
+        "required": ["city"],
+        "additionalProperties": false
+    }"#,
+)?.compile(&vocab)?;
+
+let parent = Grammar::from_glrm(r#"
+    extern grammar ARGS
+    start call
+    nt call = "<weather>" ARGS
+              "</weather>"
+"#)?;
+let mut call = Module::new(&parent);
+call.bind("ARGS", &weather)?;
+let constraint = call.compile(&vocab)?;
 ```
 
 ## Learn more

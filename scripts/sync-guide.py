@@ -9,6 +9,7 @@ import re
 import sys
 import subprocess
 import tomllib
+from example_content import visible_example
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTENT = ROOT / 'docs/content'
@@ -76,16 +77,21 @@ def install(language, heading, note=''):
     return f'{heading}\n\n```bash\n{command}\n```{tail}'
 
 
-def quickstart(language, heading):
-    return heading + '\n\n' + read(language + '-quickstart')
+def example(name, rustdoc=False):
+    source = read(name)
+    return source if rustdoc else visible_example(source)
+
+
+def quickstart(language, heading, rustdoc=False):
+    return heading + '\n\n' + example(language + '-quickstart', rustdoc)
 
 
 def composition_payload():
-    return {'prose': read('composition'), **{lang: read(lang + '-composition') for lang in ['python', 'rust']}}
+    return {'prose': read('composition'), **{lang: example(lang + '-composition') for lang in ['python', 'rust']}}
 
 
-def composition_section(heading='## Composing grammars', languages=('python', 'rust')):
-    return '\n\n'.join([heading, read('composition'), *(read(lang + '-composition') for lang in languages)])
+def composition_section(heading='## Composing grammars', languages=('python', 'rust'), rustdoc=False):
+    return '\n\n'.join([heading, read('composition'), *(example(lang + '-composition', rustdoc) for lang in languages)])
 
 
 def getting_started(flavor):
@@ -132,7 +138,7 @@ def website_payload():
         'introduction': read('introduction'), 'links': links('website'),
         'usage': read('usage'),
         'installation': {'python': 'python -m pip install glrmask', 'rust': 'cargo add glrmask'},
-        'quickstarts': {language: read(language + '-quickstart') for language in ['python', 'rust']},
+        'quickstarts': {language: example(language + '-quickstart') for language in ['python', 'rust']},
         'composition': composition_payload(), 'benchmark_markdown': read('benchmarks'),
         'chart': json.loads((CONTENT / 'tail-chart.json').read_text(encoding="utf-8")),
         'datasets': {'json': 'docs/benchmarks/website-aws-json-2026-10-19.json',
@@ -147,7 +153,7 @@ def language_payload():
     payload = {'schema': 'glrmask-language-docs-v1',
                'introduction': read('introduction'), 'usage': read('usage'),
                'installation': {'python': 'python -m pip install glrmask', 'rust': 'cargo add glrmask'},
-               'quickstarts': {language: read(language + '-quickstart') for language in ['python', 'rust']},
+               'quickstarts': {language: example(language + '-quickstart') for language in ['python', 'rust']},
                'composition': composition_payload(),
                'guide_url': REPO + '/blob/main/GUIDE.md',
                'python_symbols': json.loads((CONTENT / 'python-api.json').read_text(encoding="utf-8")),
@@ -165,7 +171,7 @@ def rust_module_intro():
     start = source.index('//!')
     end = source.index('#![deny(warnings)]')
     prose = '\n\n'.join([NOTICE, read('introduction'), install('rust', '# Installation', MSRV),
-                           '# Usage\n\n' + read('usage'), quickstart('rust', '# Quickstart'), composition_section('# Composing grammars', ('rust',)),
+                           '# Usage\n\n' + read('usage'), quickstart('rust', '# Quickstart', rustdoc=True), composition_section('# Composing grammars', ('rust',), rustdoc=True),
                            '# Learn more\n\n[Full guide](' + REPO + '/blob/main/GUIDE.md) · [API reference](https://docs.rs/glrmask/latest/glrmask/)'])
     block = '\n'.join('//! ' + line if line else '//!' for line in prose.splitlines()) + '\n//!\n'
     return source[:start] + block + source[end:]

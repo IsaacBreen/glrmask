@@ -27,26 +27,7 @@ sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 
 ## Composing grammars
 
-```js
-import { Vocab, Grammar, Module, Expr, Constraint } from '@glrmask/node';
-
-const vocab = new Vocab(Array.from({ length: 256 }, (_, id) => [id, Uint8Array.of(id)]));
-const weather = new Module(Grammar.fromJsonSchema({
-  type: 'object',
-  properties: { city: { type: 'string' } },
-  required: ['city'],
-  additionalProperties: false,
-}));
-await weather.precompile(vocab);
-
-const call = new Module(Grammar.fromGlrm(`
-  extern grammar ARGS
-  start call
-  nt call = "<weather>" ARGS "</weather>"
-`));
-call.bind('ARGS', weather);
-const constraint = await call.compile(vocab);
-```
+{{composition}}
 
 On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Constraint`, `Expr`, or `TokenSet`. `bind` changes the module in place, so `clone()` it first to bind the
 same one in different ways. `externs.unbound` lists the unbound names.
