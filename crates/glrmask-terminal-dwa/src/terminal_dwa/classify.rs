@@ -3917,67 +3917,238 @@ fn accumulate_terminal_path_boundaries(
     allowed_pairs
 }
 
-#[inline]
-fn merge_word_continuation(continuations: &mut Vec<(u32, u64)>, state: u32, active: u64) {
-    if active == 0 {
-        return;
-    }
-    if let Some((_, existing)) = continuations.iter_mut().find(|(candidate, _)| *candidate == state)
-    {
-        *existing |= active;
-    } else {
-        continuations.push((state, active));
-    }
+/// The continuation relation is (configuration, allowed terminal mask).
+/// Small terminal domains retain their compact inline u64 representation.
+trait ContinuationMask {
+    fn from_words(words: &[u64]) -> Self;
+    fn words(&self) -> &[u64];
+    fn words_mut(&mut self) -> &mut [u64];
 }
 
-struct DenseWordContinuations {
-    masks: Vec<u64>,
-    touched: Vec<u32>,
+impl ContinuationMask for u64 {
+    fn from_words(words: &[u64]) -> Self { words[0] }
+    fn words(&self) -> &[u64] { std::slice::from_ref(self) }
+    fn words_mut(&mut self) -> &mut [u64] { std::slice::from_mut(self) }
 }
 
-impl DenseWordContinuations {
-    fn new(num_states: usize) -> Self {
-        Self {
-            masks: vec![0; num_states],
-            touched: Vec::new(),
-        }
-    }
+impl ContinuationMask for Box<[u64]> {
+    fn from_words(words: &[u64]) -> Self { words.into() }
+    fn words(&self) -> &[u64] { self }
+    fn words_mut(&mut self) -> &mut [u64] { self }
+}
 
-    #[inline]
-    fn merge(&mut self, state: u32, active: u64) {
-        if active == 0 {
-            return;
-        }
-        let slot = &mut self.masks[state as usize];
-        if *slot == 0 {
-            self.touched.push(state);
-        }
-        *slot |= active;
+struct ContinuationSet<M> {
+    entries: Vec<(u32, M)>,
+    slots: Option<Vec<usize>>,
+}
+
+impl<M: ContinuationMask> ContinuationSet<M> {
+    fn new(dense_states: Option<usize>) -> Self {
+        Self { entries: Vec::new(), slots: dense_states.map(|states| vec![usize::MAX; states]) }
     }
 
     fn clear(&mut self) {
-        for &state in &self.touched {
-            self.masks[state as usize] = 0;
+        if let Some(slots) = &mut self.slots {
+            for &(state, _) in &self.entries { slots[state as usize] = usize::MAX; }
         }
-        self.touched.clear();
+        self.entries.clear();
+    }
+
+    #[inline]
+    fn merge(&mut self, state: u32, words: &[u64]) {
+        if words.iter().all(|&word| word == 0) { return; }
+        let index = if let Some(slots) = &mut self.slots {
+            let slot = &mut slots[state as usize];
+            if *slot == usize::MAX { *slot = self.entries.len(); }
+            *slot
+        } else {
+            self.entries.iter().position(|&(existing, _)| existing == state)
+                .unwrap_or(self.entries.len())
+        };
+        if index == self.entries.len() {
+            self.entries.push((state, M::from_words(words)));
+        } else {
+            for (existing, &word) in self.entries[index].1.words_mut().iter_mut().zip(words) {
+                *existing |= word;
+            }
+        }
     }
 }
 
-fn merge_mask_continuation(
-    continuations: &mut Vec<(u32, Box<[u64]>)>,
-    state: u32,
-    active: &[u64],
-) {
-    if active.iter().all(|&word| word == 0) {
-        return;
-    }
-    if let Some((_, existing)) = continuations.iter_mut().find(|(candidate, _)| *candidate == state)
-    {
-        for (existing_word, active_word) in existing.iter_mut().zip(active) {
-            *existing_word |= *active_word;
+enum TokenSuffixes<'a> {
+    Dense(&'a [u64], usize),
+    Sparse(&'a [(usize, usize, u64)]),
+}
+
+impl<'a> TokenSuffixes<'a> {
+    fn limit(&self) -> usize {
+        match self {
+            Self::Dense(words, width) => words.chunks_exact(*width)
+                .rposition(|mask| mask.iter().any(|&word| word != 0)).map_or(0, |last| last + 1),
+            Self::Sparse(splits) => splits.last().map_or(0, |split| split.1 + 1),
         }
-    } else {
-        continuations.push((state, active.to_vec().into_boxed_slice()));
+    }
+
+    fn at(&mut self, split: usize) -> &'a [u64] {
+        match self {
+            Self::Dense(words, width) => {
+                let words = *words;
+                &words[split * *width..(split + 1) * *width]
+            }
+            Self::Sparse(splits) => {
+                if let Some((head, tail)) = (*splits).split_first() {
+                    if head.1 == split {
+                        *splits = tail;
+                        return std::slice::from_ref(&head.2);
+                    }
+                }
+                &[]
+            }
+        }
+    }
+}
+
+struct CandidateTrace<'a, 'b> {
+    scanner: Option<&'a mut CandidatePrefixPowerset<'b>>,
+    prepared_prefix: Option<(&'a VocabPrefixTrie, &'a [u32])>,
+    prefix_words: Option<&'a [u64]>,
+    dense: Option<DenseCandidateAction<'a>>,
+}
+
+impl CandidateTrace<'_, '_> {
+    #[inline]
+    fn prefix(&mut self, state: &mut u32, byte: u8, split: usize, matched: &mut [u64]) {
+        if let Some(words) = self.prefix_words {
+            matched[0] = words[split];
+            return;
+        }
+        let scanner = self.scanner.as_deref_mut().expect("live prefix scanner");
+        *state = match self.prepared_prefix {
+            Some((trie, states)) => states[trie.split_nodes[split] as usize],
+            None => scanner.step(*state, byte),
+        };
+        if *state == PREFIX_DEAD_STATE { matched.fill(0); }
+        else { matched.copy_from_slice(scanner.matched_mask(*state)); }
+    }
+
+    #[inline]
+    fn advance(&mut self, state: u32, byte: u8, active: &[u64], matched: &mut [u64], live: &mut [u64])
+        -> Option<u32>
+    {
+        let mut action = match self.dense {
+            Some(dense) => ResetAction::Dense(dense),
+            None => ResetAction::Original(self.scanner.as_deref_mut().expect("live continuation scanner")),
+        };
+        let target = action.step(state, byte);
+        if target == PREFIX_DEAD_STATE { return None; }
+        for ((output, &completed), &allowed) in matched.iter_mut().zip(action.matched(target)).zip(active) {
+            *output |= completed & allowed;
+        }
+        for ((output, &future), &allowed) in live.iter_mut().zip(action.future(target)).zip(active) {
+            *output = future & allowed;
+        }
+        Some(target)
+    }
+}
+
+struct BoundaryPlan<'a> {
+    words: usize,
+    candidates: usize,
+    prefix_start: u32,
+    reset: u32,
+    allowed: &'a [u64],
+    lut: Option<&'a (Vec<u64>, Vec<u64>, u64)>,
+}
+
+struct BoundaryResult {
+    two_plus: Vec<u64>,
+    witnesses: Option<Vec<Option<TerminalBoundaryWitness>>>,
+    split_checks: usize,
+    allowed_pairs: usize,
+}
+
+impl BoundaryResult {
+    fn new(plan: &BoundaryPlan<'_>, witnesses: bool) -> Self {
+        Self {
+            two_plus: vec![0; plan.words],
+            witnesses: witnesses.then(|| vec![None; plan.candidates]),
+            split_checks: 0,
+            allowed_pairs: 0,
+        }
+    }
+
+    fn merge(mut self, other: Self) -> Self {
+        debug_assert!(self.witnesses.is_none() && other.witnesses.is_none());
+        for (left, right) in self.two_plus.iter_mut().zip(other.two_plus) { *left |= right; }
+        self.split_checks += other.split_checks;
+        self.allowed_pairs += other.allowed_pairs;
+        self
+    }
+}
+
+struct BoundaryWorkspace<M> {
+    continuations: ContinuationSet<M>,
+    next: ContinuationSet<M>,
+    matched: Vec<u64>,
+    live: Vec<u64>,
+    followers: Vec<u64>,
+}
+
+impl<M: ContinuationMask> BoundaryWorkspace<M> {
+    fn new(plan: &BoundaryPlan<'_>, dense_states: Option<usize>) -> Self {
+        Self {
+            continuations: ContinuationSet::new(dense_states),
+            next: ContinuationSet::new(dense_states),
+            matched: vec![0; plan.words], live: vec![0; plan.words], followers: vec![0; plan.words],
+        }
+    }
+
+    /// At each byte, advance the original prefix and every active reset
+    /// continuation, intersect completions with allowed followers, and seed
+    /// a reset at precisely the witnessed boundary. Sparse scheduling may
+    /// omit zero suffix observations, never the intervening byte actions.
+    fn token(
+        &mut self, trace: &mut CandidateTrace<'_, '_>, plan: &BoundaryPlan<'_>,
+        token_id: u32, bytes: &[u8], split_base: usize, mut suffixes: TokenSuffixes<'_>,
+        needs_continuations: bool, result: &mut BoundaryResult,
+    ) {
+        self.continuations.clear();
+        self.next.clear();
+        let mut prefix = plan.prefix_start;
+        for (split, &byte) in bytes.iter().take(suffixes.limit()).enumerate() {
+            trace.prefix(&mut prefix, byte, split_base + split, &mut self.matched);
+            self.next.clear();
+            if needs_continuations {
+                for (state, active) in &self.continuations.entries {
+                    if let Some(target) = trace.advance(*state, byte, active.words(), &mut self.matched, &mut self.live) {
+                        self.next.merge(target, &self.live);
+                    }
+                }
+            }
+            self.followers.fill(0);
+            let suffix = suffixes.at(split);
+            if suffix.iter().any(|&word| word != 0) && self.matched.iter().any(|&word| word != 0) {
+                result.split_checks += 1;
+                if let Some((allowed_union, left_with_follow, valid)) = plan.lut.filter(|_| result.witnesses.is_none()) {
+                    let matched = self.matched[0] & *valid;
+                    let suffix = suffix[0] & *valid;
+                    self.followers[0] = suffix & allowed_union[matched as usize];
+                    result.two_plus[0] |= self.followers[0] | (matched & left_with_follow[suffix as usize]);
+                    result.allowed_pairs += self.followers[0].count_ones() as usize;
+                } else {
+                    let witness = result.witnesses.as_deref_mut().map(|witnesses|
+                        (witnesses, token_id, bytes, split + 1));
+                    result.allowed_pairs += accumulate_terminal_path_boundaries(
+                        &self.matched, suffix, plan.allowed, plan.words, plan.candidates,
+                        &mut result.two_plus, &mut self.followers, witness,
+                    );
+                }
+            }
+            if needs_continuations {
+                self.next.merge(plan.reset, &self.followers);
+                std::mem::swap(&mut self.continuations, &mut self.next);
+            }
+        }
     }
 }
 
@@ -4876,19 +5047,21 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     });
 
     let collect_witnesses = std::env::var_os("GLRMASK_DUMP_TERMINAL_PATH_WITNESSES").is_some();
-    let mut local_two_plus_words = vec![0u64; words_per_mask];
-    let mut local_witnesses = vec![None; candidate_count];
-    let mut split_checks = 0usize;
-    let mut allowed_pairs = 0usize;
-    if words_per_mask == 1 {
-        // When the adjacent-byte filter leaves only a tiny number of viable
-        // suffixes, do not walk every token merely to rediscover those split
-        // positions. Collect the non-empty feasible suffixes directly from the
-        // pair index, group them by token, then run the ordinary exact prefix /
-        // continuation machine only across those selected tokens. Continuation
-        // state still advances over every byte up to the last selected split,
-        // so multiple boundaries inside one token are represented exactly.
-        let sparse_viable_splits = if let Some(splits) = direct_sparse_viable_splits.take() {
+    let plan = BoundaryPlan {
+        words: words_per_mask, candidates: candidate_count, prefix_start,
+        reset: continuation_reset_state, allowed: &allowed_after, lut: small_mask_lut.as_ref(),
+    };
+    let token_needs_continuations = |entry: usize| {
+        !per_token_boundary_certificate
+            || per_token_continuations_needed.as_ref().expect("per-token certificate")[entry]
+    };
+    let prepared_prefix = prepared_prefix_trie.as_deref().zip(prepared_prefix_states.as_deref());
+    let dense_suffixes = |entry: usize| TokenSuffixes::Dense(
+        &suffix_viable_masks[split_offsets[entry] * words_per_mask
+            ..split_offsets[entry + 1] * words_per_mask], words_per_mask,
+    );
+    let result = if words_per_mask == 1 {
+        let sparse = if let Some(splits) = direct_sparse_viable_splits.take() {
             Some(splits)
         } else {
             adjacent_pair_index.as_ref().and_then(|index| {
@@ -4922,661 +5095,89 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             Some(splits)
             })
         };
-        let parallel_combine = !collect_witnesses
-            && !uses_original_tokenizer
+        let parallel_combine = !collect_witnesses && dense_action.is_some()
             && std::env::var_os("GLRMASK_CLASSIFY_PARALLEL_COMBINE").is_some()
-            && rayon::current_num_threads() > 1
-            && vocab.len() >= 256;
-        if let Some(sparse_splits) = sparse_viable_splits.as_ref() {
-            let sparse_started_at = std::time::Instant::now();
-            let token_entries = vocab.entries_map().iter().collect::<Vec<_>>();
-            let mut continuations = Vec::<(u32, u64)>::new();
-            let mut next_continuations = Vec::<(u32, u64)>::new();
-            let mut cursor = 0usize;
-            while cursor < sparse_splits.len() {
-                let entry_index = sparse_splits[cursor].0;
+            && rayon::current_num_threads() > 1 && vocab.len() >= 256;
+        let dense_slots = (dense_action.is_some()
+            && std::env::var_os("GLRMASK_CLASSIFY_DENSE_WORD_CONTINUATIONS").is_some())
+            .then(|| candidate_tokenizer.num_states() as usize);
+        if let Some(splits) = sparse.as_ref() {
+            let entries = vocab.entries_map().iter().collect::<Vec<_>>();
+            let mut trace = CandidateTrace {
+                scanner: Some(&mut prefix_scanner), prepared_prefix, prefix_words: None, dense: dense_action,
+            };
+            let mut workspace = BoundaryWorkspace::<u64>::new(&plan, dense_slots);
+            let mut result = BoundaryResult::new(&plan, collect_witnesses);
+            let mut cursor = 0;
+            while cursor < splits.len() {
+                let entry = splits[cursor].0;
                 let begin = cursor;
                 cursor += 1;
-                while cursor < sparse_splits.len() && sparse_splits[cursor].0 == entry_index {
-                    cursor += 1;
-                }
-                let selected = &sparse_splits[begin..cursor];
-                let (&token_id, bytes) = token_entries[entry_index];
-                let last_split = selected.last().expect("non-empty sparse split group").1;
-                let token_needs_continuations = !per_token_boundary_certificate
-                    || per_token_continuations_needed
-                        .as_ref()
-                        .expect("per-token certificate requires prepared suffix metadata")[entry_index];
-                continuations.clear();
-                next_continuations.clear();
-                let mut prefix_state = prefix_start;
-                let mut selected_cursor = 0usize;
-                for split_after in 0..=last_split {
-                    let byte = bytes[split_after];
-                    prefix_state = if let (Some(trie), Some(states)) =
-                        (prepared_prefix_trie.as_ref(), prepared_prefix_states.as_ref())
-                    {
-                        let split_index = split_offsets[entry_index] + split_after;
-                        states[trie.split_nodes[split_index] as usize]
-                    } else {
-                        prefix_scanner.step(prefix_state, byte)
-                    };
-                    let mut matched = if prefix_state == PREFIX_DEAD_STATE {
-                        0
-                    } else {
-                        prefix_scanner.matched_mask(prefix_state)[0]
-                    };
-                    next_continuations.clear();
-                    if token_needs_continuations {
-                        for &(state, active) in &continuations {
-                            let target = if uses_original_tokenizer {
-                                prefix_scanner.step(state, byte)
-                            } else {
-                                dense_flat_trans[state as usize * 256 + byte as usize]
-                            };
-                            if target == PREFIX_DEAD_STATE || target == u32::MAX {
-                                continue;
-                            }
-                            let (target_matched, target_future) = if uses_original_tokenizer {
-                                (
-                                    prefix_scanner.matched_mask(target)[0],
-                                    prefix_scanner.future_mask(target)[0],
-                                )
-                            } else {
-                                (
-                                    dense_finalizer_masks[target as usize],
-                                    dense_future_masks[target as usize],
-                                )
-                            };
-                            matched |= target_matched & active;
-                            merge_word_continuation(
-                                &mut next_continuations,
-                                target,
-                                target_future & active,
-                            );
-                        }
-                    }
-
-                    let mut followers = 0u64;
-                    if selected_cursor < selected.len() && selected[selected_cursor].1 == split_after {
-                        let suffix_word = selected[selected_cursor].2;
-                        selected_cursor += 1;
-                        if matched != 0 {
-                            split_checks += 1;
-                            if collect_witnesses {
-                                let matched_mask = [matched];
-                                let suffix = [suffix_word];
-                                let mut follower_mask = [0u64; 1];
-                                allowed_pairs += accumulate_terminal_path_boundaries(
-                                    &matched_mask,
-                                    &suffix,
-                                    &allowed_after,
-                                    words_per_mask,
-                                    candidate_count,
-                                    &mut local_two_plus_words,
-                                    &mut follower_mask,
-                                    Some((
-                                        local_witnesses.as_mut_slice(),
-                                        token_id,
-                                        bytes.as_slice(),
-                                        split_after + 1,
-                                    )),
-                                );
-                                followers = follower_mask[0];
-                            } else if let Some((allowed_union, left_with_follow, valid_mask)) =
-                                small_mask_lut.as_ref()
-                            {
-                                let matched_word = matched & *valid_mask;
-                                let suffix_word = suffix_word & *valid_mask;
-                                followers = suffix_word & allowed_union[matched_word as usize];
-                                local_two_plus_words[0] |= followers
-                                    | (matched_word & left_with_follow[suffix_word as usize]);
-                                allowed_pairs += followers.count_ones() as usize;
-                            } else {
-                                let mut pending_matched = matched;
-                                while pending_matched != 0 {
-                                    let terminal_1 = pending_matched.trailing_zeros() as usize;
-                                    pending_matched &= pending_matched - 1;
-                                    if terminal_1 >= candidate_count {
-                                        continue;
-                                    }
-                                    let accepted = suffix_word & allowed_after[terminal_1];
-                                    if accepted == 0 {
-                                        continue;
-                                    }
-                                    allowed_pairs += accepted.count_ones() as usize;
-                                    followers |= accepted;
-                                    local_two_plus_words[0] |= accepted | (1u64 << terminal_1);
-                                }
-                            }
-                        }
-                    }
-                    if token_needs_continuations {
-                        merge_word_continuation(
-                            &mut next_continuations,
-                            continuation_reset_state,
-                            followers,
-                        );
-                        std::mem::swap(&mut continuations, &mut next_continuations);
-                    }
-                }
+                while cursor < splits.len() && splits[cursor].0 == entry { cursor += 1; }
+                let (&id, bytes) = entries[entry];
+                workspace.token(&mut trace, &plan, id, bytes, split_offsets[entry],
+                    TokenSuffixes::Sparse(&splits[begin..cursor]), token_needs_continuations(entry), &mut result);
             }
-            if super::types::compile_profile_enabled() {
-                let sparse_tokens = sparse_splits
-                    .iter()
-                    .map(|&(entry, _, _)| entry)
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len();
-                eprintln!(
-                    "[glrmask/profile][terminal_path_sparse_combine] viable_splits={} tokens={} split_checks={} allowed_pairs={} ms={:.3}",
-                    sparse_splits.len(),
-                    sparse_tokens,
-                    split_checks,
-                    allowed_pairs,
-                    sparse_started_at.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
+            result
         } else if parallel_combine {
-            let token_entries = vocab.entries_map().values().collect::<Vec<_>>();
-
-            // The prefix powerset is the only mutable automaton in this hot
-            // path. Materialize its matched-terminal mask once per candidate
-            // split, serially, then let all token-local continuation work use
-            // immutable dense DFA tables in parallel.
-            let prefix_precompute_started_at = std::time::Instant::now();
-            let mut prefix_matched_at_split = vec![0u64; total_splits];
-            for (token_index, bytes) in token_entries.iter().enumerate() {
-                let split_start = split_offsets[token_index];
-                let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
-                    .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
-                else {
-                    continue;
+            let entries = vocab.entries_map().iter().collect::<Vec<_>>();
+            // Publish the same prefix observation once, then run independent
+            // token recurrences in parallel using the immutable reset action.
+            let mut prefix_words = vec![0u64; total_splits];
+            {
+                let mut trace = CandidateTrace {
+                    scanner: Some(&mut prefix_scanner), prepared_prefix, prefix_words: None, dense: dense_action,
                 };
-                let mut prefix_state = prefix_start;
-                for split_after in 0..=last_candidate_split {
-                    prefix_state = prefix_scanner.step(prefix_state, bytes[split_after]);
-                    if prefix_state == PREFIX_DEAD_STATE {
-                        break;
-                    }
-                    prefix_matched_at_split[split_start + split_after] =
-                        prefix_scanner.matched_mask(prefix_state)[0];
-                }
-            }
-            let _prefix_precompute_ms =
-                prefix_precompute_started_at.elapsed().as_secs_f64() * 1000.0;
-
-            let (two_plus_word, total_split_checks, total_allowed_pairs) = token_entries
-                .par_iter()
-                .enumerate()
-                .map_init(
-                    || {
-                        (
-                            DenseWordContinuations::new(candidate_tokenizer.num_states() as usize),
-                            DenseWordContinuations::new(candidate_tokenizer.num_states() as usize),
-                        )
-                    },
-                    |(continuations, next_continuations), (token_index, bytes)| {
-                        continuations.clear();
-                        next_continuations.clear();
-                        let token_needs_continuations = !per_token_boundary_certificate
-                            || per_token_continuations_needed
-                                .as_ref()
-                                .expect("per-token certificate requires prepared suffix metadata")[token_index];
-                        let split_start = split_offsets[token_index];
-                        let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
-                            .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
-                        else {
-                            return (0u64, 0usize, 0usize);
-                        };
-                        let split_end = split_start + last_candidate_split + 1;
-                        let mut local_two_plus = 0u64;
-                        let mut local_split_checks = 0usize;
-                        let mut local_allowed_pairs = 0usize;
-                        for (split_after, split_index) in (split_start..split_end).enumerate() {
-                            let byte = bytes[split_after];
-                            let mut matched = prefix_matched_at_split[split_index];
-                            next_continuations.clear();
-                            if token_needs_continuations {
-                                for &state in &continuations.touched {
-                                    let active = continuations.masks[state as usize];
-                                    let target =
-                                        dense_flat_trans[state as usize * 256 + byte as usize];
-                                    if target == u32::MAX {
-                                        continue;
-                                    }
-                                    matched |= dense_finalizer_masks[target as usize] & active;
-                                    let live = dense_future_masks[target as usize] & active;
-                                    next_continuations.merge(target, live);
-                                }
-                            }
-
-                            let mut followers = 0u64;
-                            let suffix_word = suffix_viable_masks[split_index];
-                            if matched != 0 && suffix_word != 0 {
-                                local_split_checks += 1;
-                                if let Some((allowed_union, left_with_follow, valid_mask)) =
-                                    small_mask_lut.as_ref()
-                                {
-                                    let matched_word = matched & *valid_mask;
-                                    let suffix_word = suffix_word & *valid_mask;
-                                    followers = suffix_word & allowed_union[matched_word as usize];
-                                    local_two_plus |= followers
-                                        | (matched_word & left_with_follow[suffix_word as usize]);
-                                    local_allowed_pairs += followers.count_ones() as usize;
-                                } else {
-                                    let mut pending_matched = matched;
-                                    while pending_matched != 0 {
-                                        let terminal_1 = pending_matched.trailing_zeros() as usize;
-                                        pending_matched &= pending_matched - 1;
-                                        if terminal_1 >= candidate_count {
-                                            continue;
-                                        }
-                                        let accepted = suffix_word & allowed_after[terminal_1];
-                                        if accepted == 0 {
-                                            continue;
-                                        }
-                                        local_allowed_pairs += accepted.count_ones() as usize;
-                                        followers |= accepted;
-                                        local_two_plus |= accepted | (1u64 << terminal_1);
-                                    }
-                                }
-                            }
-                            if token_needs_continuations {
-                                next_continuations.merge(continuation_reset_state, followers);
-                                std::mem::swap(continuations, next_continuations);
-                            }
-                        }
-                        (local_two_plus, local_split_checks, local_allowed_pairs)
-                    },
-                )
-                .reduce(
-                    || (0u64, 0usize, 0usize),
-                    |left, right| (left.0 | right.0, left.1 + right.1, left.2 + right.2),
-                );
-            local_two_plus_words[0] = two_plus_word;
-            split_checks = total_split_checks;
-            allowed_pairs = total_allowed_pairs;
-        } else if !collect_witnesses && !uses_original_tokenizer && single_boundary_certified {
-            let mut matched = [0u64; 1];
-            let mut followers = [0u64; 1];
-            for (token_index, bytes) in vocab.entries_map().values().enumerate() {
-                let split_start = split_offsets[token_index];
-                let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
-                    .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
-                else {
-                    continue;
-                };
-                let split_end = split_start + last_candidate_split + 1;
-                let mut prefix_state = prefix_start;
-                for split_index in split_start..split_end {
-                    let byte = bytes[split_index - split_start];
-                    prefix_state = if let (Some(trie), Some(states)) =
-                        (prepared_prefix_trie.as_ref(), prepared_prefix_states.as_ref())
-                    {
-                        states[trie.split_nodes[split_index] as usize]
-                    } else {
-                        prefix_scanner.step(prefix_state, byte)
-                    };
-                    matched[0] = if prefix_state == PREFIX_DEAD_STATE {
-                        0
-                    } else {
-                        prefix_scanner.matched_mask(prefix_state)[0]
-                    };
-                    followers[0] = 0;
-                    let suffix_word = suffix_viable_masks[split_index];
-                    if matched[0] != 0 && suffix_word != 0 {
-                        split_checks += 1;
-                        if let Some((allowed_union, left_with_follow, valid_mask)) =
-                            small_mask_lut.as_ref()
-                        {
-                            let matched_word = matched[0] & *valid_mask;
-                            let suffix_word = suffix_word & *valid_mask;
-                            followers[0] = suffix_word & allowed_union[matched_word as usize];
-                            local_two_plus_words[0] |= followers[0]
-                                | (matched_word & left_with_follow[suffix_word as usize]);
-                            allowed_pairs += followers[0].count_ones() as usize;
-                        } else {
-                            let mut pending_matched = matched[0];
-                            while pending_matched != 0 {
-                                let terminal_1 = pending_matched.trailing_zeros() as usize;
-                                pending_matched &= pending_matched - 1;
-                                if terminal_1 >= candidate_count {
-                                    continue;
-                                }
-                                let accepted = suffix_word & allowed_after[terminal_1];
-                                if accepted == 0 {
-                                    continue;
-                                }
-                                allowed_pairs += accepted.count_ones() as usize;
-                                followers[0] |= accepted;
-                                local_two_plus_words[0] |= accepted | (1u64 << terminal_1);
-                            }
-                        }
+                for (entry, (_, bytes)) in entries.iter().enumerate() {
+                    let mut prefix = prefix_start;
+                    let limit = dense_suffixes(entry).limit();
+                    let base = split_offsets[entry];
+                    for (split, &byte) in bytes.iter().take(limit).enumerate() {
+                        trace.prefix(&mut prefix, byte, base + split,
+                            &mut prefix_words[base + split..base + split + 1]);
                     }
                 }
             }
-        } else if !uses_original_tokenizer
-            && std::env::var_os("GLRMASK_CLASSIFY_DENSE_WORD_CONTINUATIONS").is_some()
-        {
-            let num_dense_states = candidate_tokenizer.num_states() as usize;
-            let mut continuations = DenseWordContinuations::new(num_dense_states);
-            let mut next_continuations = DenseWordContinuations::new(num_dense_states);
-            let mut matched = [0u64; 1];
-            let mut followers = [0u64; 1];
-            let mut continuation_entries = 0usize;
-            let mut continuation_max = 0usize;
-            let mut continuation_match_events = 0usize;
-            let mut continuation_match_bits = 0usize;
-            for (token_index, (&token_id, bytes)) in vocab.entries_map().iter().enumerate() {
-                continuations.clear();
-                next_continuations.clear();
-                let split_start = split_offsets[token_index];
-                let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
-                    .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
-                else {
-                    continue;
-                };
-                let split_end = split_start + last_candidate_split + 1;
-                let mut prefix_state = prefix_start;
-                for (split_after, split_index) in (split_start..split_end).enumerate() {
-                    let byte = bytes[split_after];
-                    prefix_state = if let (Some(trie), Some(states)) =
-                        (prepared_prefix_trie.as_ref(), prepared_prefix_states.as_ref())
-                    {
-                        states[trie.split_nodes[split_index] as usize]
-                    } else {
-                        prefix_scanner.step(prefix_state, byte)
+            entries.par_iter().enumerate().fold(
+                || (BoundaryWorkspace::<u64>::new(&plan, Some(candidate_tokenizer.num_states() as usize)),
+                    BoundaryResult::new(&plan, false)),
+                |(mut workspace, mut result), (entry, &(id, bytes))| {
+                    let mut trace = CandidateTrace {
+                        scanner: None, prepared_prefix: None, prefix_words: Some(&prefix_words), dense: dense_action,
                     };
-                    matched[0] = if prefix_state == PREFIX_DEAD_STATE {
-                        0
-                    } else {
-                        prefix_scanner.matched_mask(prefix_state)[0]
-                    };
-                    next_continuations.clear();
-                    continuation_entries += continuations.touched.len();
-                    continuation_max = continuation_max.max(continuations.touched.len());
-                    for &state in &continuations.touched {
-                        let active = continuations.masks[state as usize];
-                        let target = dense_flat_trans[state as usize * 256 + byte as usize];
-                        if target == u32::MAX {
-                            continue;
-                        }
-                        let continuation_matched = dense_finalizer_masks[target as usize] & active;
-                        continuation_match_events += usize::from(continuation_matched != 0);
-                        continuation_match_bits += continuation_matched.count_ones() as usize;
-                        matched[0] |= continuation_matched;
-                        let live = dense_future_masks[target as usize] & active;
-                        next_continuations.merge(target, live);
-                    }
-
-                    followers[0] = 0;
-                    let suffix_word = suffix_viable_masks[split_index];
-                    if matched[0] != 0 && suffix_word != 0 {
-                        split_checks += 1;
-                        if collect_witnesses {
-                            let suffix = [suffix_word];
-                            allowed_pairs += accumulate_terminal_path_boundaries(
-                                &matched,
-                                &suffix,
-                                &allowed_after,
-                                words_per_mask,
-                                candidate_count,
-                                &mut local_two_plus_words,
-                                &mut followers,
-                                Some((
-                                    local_witnesses.as_mut_slice(),
-                                    token_id,
-                                    bytes.as_slice(),
-                                    split_after + 1,
-                                )),
-                            );
-                        } else if let Some((allowed_union, left_with_follow, valid_mask)) =
-                            small_mask_lut.as_ref()
-                        {
-                            let matched_word = matched[0] & *valid_mask;
-                            let suffix_word = suffix_word & *valid_mask;
-                            followers[0] = suffix_word & allowed_union[matched_word as usize];
-                            local_two_plus_words[0] |= followers[0]
-                                | (matched_word & left_with_follow[suffix_word as usize]);
-                            allowed_pairs += followers[0].count_ones() as usize;
-                        } else {
-                            let mut pending_matched = matched[0];
-                            while pending_matched != 0 {
-                                let terminal_1 = pending_matched.trailing_zeros() as usize;
-                                pending_matched &= pending_matched - 1;
-                                if terminal_1 >= candidate_count {
-                                    continue;
-                                }
-                                let accepted = suffix_word & allowed_after[terminal_1];
-                                if accepted == 0 {
-                                    continue;
-                                }
-                                allowed_pairs += accepted.count_ones() as usize;
-                                followers[0] |= accepted;
-                                local_two_plus_words[0] |= accepted | (1u64 << terminal_1);
-                            }
-                        }
-                    }
-                    next_continuations.merge(continuation_reset_state, followers[0]);
-                    std::mem::swap(&mut continuations, &mut next_continuations);
-                }
-            }
-            if super::types::compile_profile_enabled() {
-                eprintln!(
-                    "[glrmask/profile][terminal_path_dense_continuations] states={} entries={} max={} match_events={} match_bits={}",
-                    num_dense_states,
-                    continuation_entries,
-                    continuation_max,
-                    continuation_match_events,
-                    continuation_match_bits,
-                );
-            }
+                    workspace.token(&mut trace, &plan, *id, bytes, split_offsets[entry],
+                        dense_suffixes(entry), token_needs_continuations(entry), &mut result);
+                    (workspace, result)
+                },
+            ).map(|(_, result)| result).reduce(|| BoundaryResult::new(&plan, false), BoundaryResult::merge)
         } else {
-            let mut continuations = Vec::<(u32, u64)>::new();
-            let mut next_continuations = Vec::<(u32, u64)>::new();
-            let mut matched = [0u64; 1];
-            let mut followers = [0u64; 1];
-            for (token_index, (&token_id, bytes)) in vocab.entries_map().iter().enumerate() {
-                let token_needs_continuations = !per_token_boundary_certificate
-                    || per_token_continuations_needed
-                        .as_ref()
-                        .expect("per-token certificate requires prepared suffix metadata")[token_index];
-                continuations.clear();
-                let split_start = split_offsets[token_index];
-                let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
-                    .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
-                else {
-                    continue;
-                };
-                let split_end = split_start + last_candidate_split + 1;
-                let mut prefix_state = prefix_start;
-                for (split_after, split_index) in (split_start..split_end).enumerate() {
-                    let byte = bytes[split_after];
-                    prefix_state = if let (Some(trie), Some(states)) =
-                        (prepared_prefix_trie.as_ref(), prepared_prefix_states.as_ref())
-                    {
-                        states[trie.split_nodes[split_index] as usize]
-                    } else {
-                        prefix_scanner.step(prefix_state, byte)
-                    };
-                    matched[0] = if prefix_state == PREFIX_DEAD_STATE {
-                        0
-                    } else {
-                        prefix_scanner.matched_mask(prefix_state)[0]
-                    };
-                    next_continuations.clear();
-                    if token_needs_continuations {
-                    for &(state, active) in &continuations {
-                        let target = if uses_original_tokenizer {
-                            prefix_scanner.step(state, byte)
-                        } else {
-                            dense_flat_trans[state as usize * 256 + byte as usize]
-                        };
-                        if target == PREFIX_DEAD_STATE || target == u32::MAX {
-                            continue;
-                        }
-                        let (target_matched, target_future) = if uses_original_tokenizer {
-                            (
-                                prefix_scanner.matched_mask(target)[0],
-                                prefix_scanner.future_mask(target)[0],
-                            )
-                        } else {
-                            (
-                                dense_finalizer_masks[target as usize],
-                                dense_future_masks[target as usize],
-                            )
-                        };
-                        matched[0] |= target_matched & active;
-                        let live = target_future & active;
-                        merge_word_continuation(&mut next_continuations, target, live);
-                    }
-                    }
-
-                    followers[0] = 0;
-                    let suffix_word = suffix_viable_masks[split_index];
-                    if matched[0] != 0 && suffix_word != 0 {
-                        split_checks += 1;
-                        if collect_witnesses {
-                            let suffix = [suffix_word];
-                            allowed_pairs += accumulate_terminal_path_boundaries(
-                                &matched,
-                                &suffix,
-                                &allowed_after,
-                                words_per_mask,
-                                candidate_count,
-                                &mut local_two_plus_words,
-                                &mut followers,
-                                Some((
-                                    local_witnesses.as_mut_slice(),
-                                    token_id,
-                                    bytes.as_slice(),
-                                    split_after + 1,
-                                )),
-                            );
-                        } else if let Some((allowed_union, left_with_follow, valid_mask)) =
-                            small_mask_lut.as_ref()
-                        {
-                            let matched_word = matched[0] & *valid_mask;
-                            let suffix_word = suffix_word & *valid_mask;
-                            followers[0] = suffix_word & allowed_union[matched_word as usize];
-                            local_two_plus_words[0] |= followers[0]
-                                | (matched_word & left_with_follow[suffix_word as usize]);
-                            // Diagnostic count only; correctness depends on the masks above.
-                            allowed_pairs += followers[0].count_ones() as usize;
-                        } else {
-                            let mut pending_matched = matched[0];
-                            while pending_matched != 0 {
-                                let terminal_1 = pending_matched.trailing_zeros() as usize;
-                                pending_matched &= pending_matched - 1;
-                                if terminal_1 >= candidate_count {
-                                    continue;
-                                }
-                                let accepted = suffix_word & allowed_after[terminal_1];
-                                if accepted == 0 {
-                                    continue;
-                                }
-                                allowed_pairs += accepted.count_ones() as usize;
-                                followers[0] |= accepted;
-                                local_two_plus_words[0] |= accepted | (1u64 << terminal_1);
-                            }
-                        }
-                    }
-                    if token_needs_continuations {
-                        merge_word_continuation(
-                            &mut next_continuations,
-                            continuation_reset_state,
-                            followers[0],
-                        );
-                        std::mem::swap(&mut continuations, &mut next_continuations);
-                    }
-                }
+            let mut trace = CandidateTrace {
+                scanner: Some(&mut prefix_scanner), prepared_prefix, prefix_words: None, dense: dense_action,
+            };
+            let mut workspace = BoundaryWorkspace::<u64>::new(&plan, dense_slots);
+            let mut result = BoundaryResult::new(&plan, collect_witnesses);
+            let omit_all_continuations = !collect_witnesses && dense_action.is_some() && single_boundary_certified;
+            for (entry, (&id, bytes)) in vocab.entries_map().iter().enumerate() {
+                workspace.token(&mut trace, &plan, id, bytes, split_offsets[entry],
+                    dense_suffixes(entry), !omit_all_continuations && token_needs_continuations(entry), &mut result);
             }
+            result
         }
     } else {
-        let mut continuations = Vec::<(u32, Box<[u64]>)>::new();
-        let mut next_continuations = Vec::<(u32, Box<[u64]>)>::new();
-        let mut matched = vec![0u64; words_per_mask];
-        let mut live = vec![0u64; words_per_mask];
-        let mut followers = vec![0u64; words_per_mask];
-        for (token_index, (&token_id, bytes)) in vocab.entries_map().iter().enumerate() {
-            continuations.clear();
-            let split_start = split_offsets[token_index];
-            let Some(last_candidate_split) = (0..bytes.len().saturating_sub(1))
-                .rfind(|&split_after| split_may_host_boundary(bytes, split_after))
-            else {
-                continue;
-            };
-            let split_end = split_start + last_candidate_split + 1;
-            let mut prefix_state = prefix_start;
-            for (split_after, split_index) in (split_start..split_end).enumerate() {
-                let byte = bytes[split_after];
-                prefix_state = prefix_scanner.step(prefix_state, byte);
-                if prefix_state == PREFIX_DEAD_STATE {
-                    matched.fill(0);
-                } else {
-                    matched.copy_from_slice(prefix_scanner.matched_mask(prefix_state));
-                }
-                next_continuations.clear();
-                for (state, active) in &continuations {
-                    let target = if uses_original_tokenizer {
-                        prefix_scanner.step(*state, byte)
-                    } else {
-                        dense_flat_trans[*state as usize * 256 + byte as usize]
-                    };
-                    if target == PREFIX_DEAD_STATE || target == u32::MAX {
-                        continue;
-                    }
-                    for word_index in 0..words_per_mask {
-                        let target_matched = if uses_original_tokenizer {
-                            prefix_scanner.matched_mask(target)[word_index]
-                        } else {
-                            dense_finalizer_masks[target as usize * words_per_mask + word_index]
-                        };
-                        let target_future = if uses_original_tokenizer {
-                            prefix_scanner.future_mask(target)[word_index]
-                        } else {
-                            dense_future_masks[target as usize * words_per_mask + word_index]
-                        };
-                        matched[word_index] |= target_matched & active[word_index];
-                        live[word_index] = target_future & active[word_index];
-                    }
-                    merge_mask_continuation(&mut next_continuations, target, &live);
-                }
-
-                followers.fill(0);
-                let suffix_base = split_index * words_per_mask;
-                let suffix =
-                    &suffix_viable_masks[suffix_base..suffix_base + words_per_mask];
-                if matched.iter().any(|&word| word != 0)
-                    && suffix.iter().any(|&word| word != 0)
-                {
-                    split_checks += 1;
-                    let witness_context = collect_witnesses.then_some((
-                        local_witnesses.as_mut_slice(),
-                        token_id,
-                        bytes.as_slice(),
-                        split_after + 1,
-                    ));
-                    allowed_pairs += accumulate_terminal_path_boundaries(
-                        &matched,
-                        suffix,
-                        &allowed_after,
-                        words_per_mask,
-                        candidate_count,
-                        &mut local_two_plus_words,
-                        &mut followers,
-                        witness_context,
-                    );
-                }
-                merge_mask_continuation(
-                    &mut next_continuations,
-                    continuation_reset_state,
-                    &followers,
-                );
-                std::mem::swap(&mut continuations, &mut next_continuations);
-            }
+        let mut trace = CandidateTrace {
+            scanner: Some(&mut prefix_scanner), prepared_prefix, prefix_words: None, dense: dense_action,
+        };
+        let mut workspace = BoundaryWorkspace::<Box<[u64]>>::new(&plan, None);
+        let mut result = BoundaryResult::new(&plan, collect_witnesses);
+        for (entry, (&id, bytes)) in vocab.entries_map().iter().enumerate() {
+            workspace.token(&mut trace, &plan, id, bytes, split_offsets[entry],
+                dense_suffixes(entry), true, &mut result);
         }
-    }
+        result
+    };
+    let BoundaryResult { two_plus: local_two_plus_words, witnesses: local_witnesses,
+        split_checks, allowed_pairs } = result;
+    let local_witnesses = local_witnesses.unwrap_or_else(|| vec![None; candidate_count]);
     let mut local_two_plus = BitSet::new(candidate_count);
     for (word_index, &word) in local_two_plus_words.iter().enumerate() {
         let mut pending = word;
@@ -7261,6 +6862,44 @@ mod tests {
             ],
             "C participates in the later WS -> C boundary of A -> WS -> C",
         );
+    }
+
+    #[test]
+    fn sparse_boundary_schedule_retains_intervening_reset_actions() {
+        use super::{BoundaryPlan, BoundaryResult, BoundaryWorkspace, CandidateTrace,
+            DenseCandidateAction, ResetAction, TokenSuffixes};
+        // A completes at 'a'. B is exactly 'bc', and C may follow B at
+        // the third split. There is deliberately no boundary at 'b'.
+        let mut transitions = vec![u32::MAX; 3 * 256];
+        transitions[b'b' as usize] = 1;
+        transitions[256 + b'c' as usize] = 2;
+        let dense = DenseCandidateAction {
+            transitions: &transitions, matched: &[0, 0, 2], future: &[2, 2, 0], width: 1,
+        };
+        let plan = BoundaryPlan {
+            words: 1, candidates: 3, prefix_start: 0, reset: 0,
+            allowed: &[2, 4, 0], lut: None,
+        };
+        let words = [1, 0, 0, 0];
+        let suffix_words = [2, 0, 4, 0];
+        let sparse = [(0, 0, 2), (0, 2, 4)];
+        for dense_slots in [None, Some(3)] {
+            let mut workspace = BoundaryWorkspace::<u64>::new(&plan, dense_slots);
+            for suffixes in [TokenSuffixes::Dense(&suffix_words, 1), TokenSuffixes::Sparse(&sparse)] {
+                let mut trace = CandidateTrace {
+                    scanner: None, prepared_prefix: None, prefix_words: Some(&words), dense: Some(dense),
+                };
+                let mut result = BoundaryResult::new(&plan, true);
+                workspace.token(&mut trace, &plan, 9, b"abcdx", 0, suffixes, true, &mut result);
+                assert_eq!(result.two_plus, vec![7]);
+                let witnesses = result.witnesses.unwrap();
+                assert_eq!(witnesses[2].as_ref().unwrap().split_position, 3);
+            }
+        }
+        let mut reset = ResetAction::Dense(dense);
+        assert_eq!(reset.suffix_word(0, b"b"), 2, "future at whole suffix end");
+        assert_eq!(reset.suffix_word(0, b"bcx"), 2, "completion before dead edge");
+        assert_eq!(reset.suffix_word(0, b"bx"), 0, "future before dead edge is not a completion");
     }
 
     #[test]
