@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from glrmask import Vocab, Grammar, Expr, TokenSet, Module
+from glrmask import Vocab, Grammar, Expr, TokenSet
 
 
 def tokenizer_json():
@@ -33,9 +33,7 @@ def test_hf_vocab_duck_typed():
             assert state.commit_token(token)
             assert state.is_accepting()
         for token in (2, 3, 4):
-            module = Module(Grammar.from_glrm('glrm 1; start s; extern token CONTROL; nt s = CONTROL;'))
-            module.bind('CONTROL', TokenSet([token]))
-            state = module.compile(vocab).start()
+            state = Grammar.from_expr(Expr.sequence(TokenSet([token]))).compile(vocab).start()
             assert state.commit_token(token)
             assert state.is_accepting()
 
