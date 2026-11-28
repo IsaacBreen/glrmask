@@ -3196,7 +3196,7 @@ impl DynamicConstraint {
             .any(|constraint| !constraint.late_grammar_slots.is_empty())
         {
             return Err(crate::Error::Serialization(
-                "dynamic constraint artifact has unresolved slots".to_owned(),
+                "dynamic constraint artifact has unresolved externs".to_owned(),
             ));
         }
         loaded.seed_late_bind_vocab(vocab);

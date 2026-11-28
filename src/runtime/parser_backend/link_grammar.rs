@@ -239,7 +239,7 @@ impl LinkGrammar {
                 return Err("composition grammar terminal layout mismatch".into());
             }
             if slots[index - 1].iter().any(|&slot| slot >= parent.terminal_count) {
-                return Err("composition slot outside parent terminal coordinate".into());
+                return Err("composition extern outside parent terminal coordinate".into());
             }
             let nt_offset = u32::try_from(nonterminals).map_err(|_| "composition nonterminal overflow")?;
             child.root_nonterminal.checked_add(nt_offset).ok_or("composition root overflow")?;

@@ -56,7 +56,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
         if matching.is_empty() { continue; }
         for slot in &matching {
             if !parent_embedding.entries.contains(slot) {
-                return Err(fail(format!("slot {name:?} has no validated template CALL relation")));
+                return Err(fail(format!("extern {name:?} has no validated template CALL relation")));
             }
         }
         if child.deferred_composition_metadata_blob.is_some() && !child.composition_link_metadata_materialized {

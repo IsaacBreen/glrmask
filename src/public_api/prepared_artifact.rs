@@ -237,7 +237,7 @@ pub(super) fn load_budgeted(data: &[u8], supplied: Option<&Vocab>, budget: &Load
         if definition.runnable {
             if !definition.exact_only_token_ids.is_empty() { return Err(error("runnable definition has duplicate event-domain metadata")); }
             if !inner.late_grammar_slots.is_empty() {
-                return Err(error("runnable definition has unresolved slots"));
+                return Err(error("runnable definition has unresolved externs"));
             }
         } else {
             let mut previous=None;

@@ -286,7 +286,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
         if !module.node.prepared.is_empty() || !module.node.bindings.is_empty() {
             let declared = module.node.source.declarations().map_err(|e| err(e.to_string()))?;
             for (name, value) in &module.node.bindings {
-                let kind = *declared.kinds.get(name).ok_or_else(|| err("Module binding has no declared slot"))?;
+                let kind = *declared.kinds.get(name).ok_or_else(|| err("Module binding has no declared extern"))?;
                 check_binding_kind(name, kind, !matches!(value, BoundValue::TokenSet(_))).map_err(|e| err(e.to_string()))?;
             }
             for (&engine, p) in &module.node.prepared {

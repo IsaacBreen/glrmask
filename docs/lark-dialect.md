@@ -58,7 +58,7 @@ grammar; see [Composing grammars](../GUIDE.md#composing-grammars). GLRMask never
 
 ### Token IDs
 
-Grammar source cannot introduce token-level matches: only code binding a TokenSet on a Module can. Numeric token atoms, ranges, complements, wildcard and `@token(...)` are syntax errors. Declare a token slot with `<|name|>` instead. See [token sets](token-sets.md).
+Grammar source cannot introduce token-level matches: only code binding a TokenSet on a Module can. Numeric token atoms, ranges, complements, wildcard and `@token(...)` are syntax errors. Declare a token extern with `<|name|>` instead. See [token sets](token-sets.md).
 
 ### Inline JSON Schema
 

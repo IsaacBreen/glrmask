@@ -383,13 +383,13 @@ pub(super) fn decode(bytes:&[u8])->Result<ParserSeed,String> {
         let return_pop = input.var()?;
         if !matches!(return_pop, 1 | 2) { return Err("invalid embedding return convention".into()); }
         let count = input.variable_count(1)?;
-        if count > terminal_count as usize { return Err("embedding slot inventory exceeds terminals".into()); }
+        if count > terminal_count as usize { return Err("embedding extern inventory exceeds terminals".into()); }
         let mut entries = BTreeSet::new();
         let mut previous = None;
         for _ in 0..count {
             let terminal = input.var()?;
             if terminal >= terminal_count || previous.is_some_and(|old| old >= terminal) {
-                return Err("invalid or unordered embedding slot".into());
+                return Err("invalid or unordered embedding extern".into());
             }
             entries.insert(terminal); previous = Some(terminal);
         }

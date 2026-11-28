@@ -304,7 +304,7 @@ fn preparation_strength(engine: Engine) -> u8 {
 }
 
 /// Source-local work is shared between occurrences. Lark preparations with
-/// bound exact-token slots also contain the resolved bindings, so do not
+/// bound exact-token externs also contain the resolved bindings, so do not
 /// share them between distinct module snapshots.
 fn local_preparation_key(module: &Module) -> (usize, usize) {
     let source = Arc::as_ptr(&module.node.source.parsed_component) as usize;

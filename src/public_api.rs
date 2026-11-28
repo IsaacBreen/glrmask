@@ -464,7 +464,7 @@ impl Engine {
     }
 }
 
-/// Vocabulary-specific compiled machinery, possibly with unresolved slots.
+/// Vocabulary-specific compiled machinery, possibly with unresolved externs.
 ///
 /// Binding changes only this handle; clones and attached children retain independent snapshots.
 #[derive(Debug, Clone)]
@@ -791,7 +791,7 @@ impl Grammar {
         grammar.exact_value=Some(tokens);grammar
     }
 
-    /// Includes unresolved slots in attached open children. Diagnostic expansion is bounded and may return an error for very large shared graphs.
+    /// Includes unresolved externs in attached open children. Diagnostic expansion is bounded and may return an error for very large shared graphs.
     #[cfg(any(test,feature="internal-api"))]
     #[doc(hidden)]
     pub fn requirements(&self) -> Result<Vec<Requirement>> {
@@ -2247,9 +2247,9 @@ impl<'a> ConstraintSpecBuilder<'a> {
         Ok(self)
     }
 
-    /// Finish the specification, retaining any unresolved external slots.
+    /// Finish the specification, retaining any unresolved externs.
     ///
-    /// External slots may remain unresolved. Their names are retained in
+    /// Externs may remain unresolved. Their names are retained in
     /// the compiled constraint and can be supplied later with
     /// [`RuntimeConstraint::bind_grammar`] or [`DynamicConstraint::bind_grammar`].
     pub fn build(self) -> Result<ConstraintSpec<'a>> {
@@ -2678,9 +2678,9 @@ impl RuntimeConstraint {
         ConstraintSpec::builder(grammar, vocab)?.build()?.compile()
     }
 
-    /// Bind one retained `extern NAME;` slot using a fully compiled boundary.
+    /// Bind one retained `extern NAME;` declaration using a fully compiled boundary.
     ///
-    /// Other named slots remain unresolved and may be bound by later calls.
+    /// Other named externs remain unresolved and may be bound by later calls.
     /// The compiled parent and the supplied child's masking backends are reused;
     /// only their cross-boundary behavior is compiled here.
     #[allow(private_bounds)]
@@ -2696,7 +2696,7 @@ impl RuntimeConstraint {
         )
     }
 
-    /// Bind one retained `extern NAME;` slot using the dynamic boundary walker.
+    /// Bind one retained `extern NAME;` declaration using the dynamic boundary walker.
     ///
     /// Component-local masking remains independently static or dynamic according
     /// to the backend with which each component was supplied.
@@ -2770,7 +2770,7 @@ impl DynamicConstraint {
         }
     }
 
-    /// Bind one retained `extern NAME;` slot using a fully compiled boundary.
+    /// Bind one retained `extern NAME;` declaration using a fully compiled boundary.
     ///
     /// Dynamic parent alternatives and dynamic component-local masking remain
     /// dynamic; the boundary choice is independent of component backends.
@@ -2787,7 +2787,7 @@ impl DynamicConstraint {
         )
     }
 
-    /// Bind one retained `extern NAME;` slot using the dynamic boundary walker.
+    /// Bind one retained `extern NAME;` declaration using the dynamic boundary walker.
     #[allow(private_bounds)]
     pub fn bind_grammar_dynamic_boundary<'a, T>(
         &self,
@@ -2973,7 +2973,7 @@ impl PreparedGrammar {
         }
         let direct_slots = self.direct_slot_names();
         if direct_slots.iter().any(|name|!self.slot_kinds.contains_key(*name)) {
-            return Err(Error::Serialization("compiled slot missing from authored interface".into()));
+            return Err(Error::Serialization("compiled extern missing from authored interface".into()));
         }
         if !static_constraint_targets(self.inner.as_ref(),vocab) {
             return Err(Error::Serialization("prepared component targets an incompatible vocabulary".into()));
@@ -2981,7 +2981,7 @@ impl PreparedGrammar {
         for (name, binding) in &self.bindings {
             if name.is_empty() || !self.slot_kinds.contains_key(name) {
                 return Err(Error::Serialization(format!(
-                    "unlinked-constraint binding {name:?} has no compiled linker slot",
+                    "unlinked-constraint binding {name:?} has no compiled linker extern",
                 )));
             }
             check_binding_kind(name,self.slot_kinds[name],!matches!(binding,ModuleBinding::TokenSet(_)))?;
@@ -3016,7 +3016,7 @@ impl PreparedGrammar {
         Ok(())
     }
 
-    /// Unresolved paths, including slots inside attached children. Diagnostic expansion is bounded.
+    /// Unresolved paths, including externs inside attached children. Diagnostic expansion is bounded.
     #[cfg(any(test,feature="internal-api"))]
     #[doc(hidden)]
     pub fn requirements(&self)->Result<Vec<Requirement>> {
@@ -3025,7 +3025,7 @@ impl PreparedGrammar {
 
     pub fn unbound(&self)->Result<Vec<Requirement>> {graph::prepared_requirements(self)}
 
-    /// Authored slots, including bound slots and distinct attached occurrences.
+    /// Authored externs, including bound externs and distinct attached occurrences.
     pub fn externs(&self)->Result<Vec<Requirement>> {
         self.validate_slot_manifest()?;
         let mut pending=vec![(self,Vec::<String>::new())];let mut out=Vec::new();let mut visits=0;
@@ -3098,7 +3098,7 @@ impl PreparedGrammar {
         Ok(next)
     }
 
-    /// Fill a declared slot once with `PreparedGrammar` or `TokenSet`. Attach a parent before binding descendants. Prepared children must use the same byte mapping and special-token IDs. Attached children are snapshots; failed binds leave this handle unchanged.
+    /// Fill a declared extern once with `PreparedGrammar` or `TokenSet`. Attach a parent before binding descendants. Prepared children must use the same byte mapping and special-token IDs. Attached children are snapshots; failed binds leave this handle unchanged.
     #[allow(private_bounds)]
     pub fn bind<'a, T>(&mut self, name: impl AsRef<str>, value: T) -> Result<()>
     where T: IntoUnlinkedValue<'a> {
@@ -3168,7 +3168,7 @@ impl PreparedGrammar {
         )
     }
 
-    /// Requires every slot to be bound. Uses default build options and inherits the prepared boundary request.
+    /// Requires every extern to be bound. Uses default build options and inherits the prepared boundary request.
     pub fn link(&self) -> Result<RuntimeConstraint> {
         self.link_with(BuildOptions::default())
     }
@@ -3229,7 +3229,7 @@ impl PreparedGrammar {
         })?
     }
 
-    /// Requires all slots to be bound. Selects final optimization and root end tokens; an explicit boundary request overrides the prepared request. End tokens become allowed only at acceptance and must be committed before stopping.
+    /// Requires all externs to be bound. Selects final optimization and root end tokens; an explicit boundary request overrides the prepared request. End tokens become allowed only at acceptance and must be committed before stopping.
     pub fn link_with(&self, options: BuildOptions) -> Result<RuntimeConstraint> {
         graph::prepared_preflight(self)?;
         if let Some(name) = self.first_open_slot()? {
@@ -3249,14 +3249,14 @@ impl PreparedGrammar {
         constraint.with_end_tokens(options.end_token_ids())
     }
 
-    /// Preserves compiled machinery, vocabulary and unresolved slots. Shared definitions are serialized once. Artifact compatibility across GLRMask releases is not guaranteed.
+    /// Preserves compiled machinery, vocabulary and unresolved externs. Shared definitions are serialized once. Artifact compatibility across GLRMask releases is not guaranteed.
     pub fn save(&self) -> Vec<u8> {
         with_deep_stack(|| prepared_artifact::save(self))
     }
 
     /// Rejects malformed or incompatible prepared artifacts. The supplied
     /// vocabulary must match the saved token-ID/byte fingerprint; loaded
-    /// definitions share its caches. Open slots and shared definitions are
+    /// definitions share its caches. Open externs and shared definitions are
     /// preserved.
     pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>, vocab: &Vocab) -> Result<Self> {
         with_deep_stack(|| prepared_artifact::load(bytes.into().as_ref(), Some(vocab)))

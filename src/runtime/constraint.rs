@@ -1951,7 +1951,7 @@ impl Constraint {
             let Some((&placeholder_terminal, additional_placeholder_terminals)) = slots.split_first()
             else {
                 return Err(format!(
-                    "recursive compiler-table reconstruction component {component_index} has no linker slot",
+                    "recursive compiler-table reconstruction component {component_index} has no linker extern",
                 ));
             };
             let child = &prepared[component_index];
@@ -2739,7 +2739,7 @@ impl Constraint {
             component_path.pop();
             let [(parent_leaf, local_slot)] = parent_targets.as_slice() else {
                 return Err(format!(
-                    "recursive parser link {link_index} slot terminal {} resolves to {} leaf targets, expected exactly one",
+                    "recursive parser link {link_index} extern terminal {} resolves to {} leaf targets, expected exactly one",
                     link.slot_terminal,
                     parent_targets.len(),
                 ));

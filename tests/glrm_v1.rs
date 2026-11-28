@@ -345,7 +345,7 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
 
     let error = DynamicConstraint::load(&dynamic_parent.save(), &vocab).unwrap_err();
     assert!(
-        error.to_string().contains("unresolved slots"),
+        error.to_string().contains("unresolved externs"),
         "an unresolved parent must not load as a runnable constraint: {error}",
     );
     let loaded_dynamic_parent = PreparedGrammar::load(

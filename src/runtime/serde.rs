@@ -6044,7 +6044,7 @@ impl Constraint {
             let body = Self::load_body_with_vocab_policy(bytes, supplied_vocab, budget)?;
             if !body.late_grammar_slots.is_empty() {
                 return Err(crate::Error::Serialization(
-                    "constraint artifact has unresolved slots; load it as an UnlinkedConstraint instead"
+                    "constraint artifact has unresolved externs; load it as an UnlinkedConstraint instead"
                         .to_owned(),
                 ));
             }
@@ -6078,7 +6078,7 @@ impl Constraint {
             Cow::Borrowed(bytes) => Self::load_body_with_vocab_policy(Cow::Borrowed(&bytes[start..]), supplied_vocab, budget)?,
         };
         if !body.late_grammar_slots.is_empty() {
-            return Err(crate::Error::Serialization("root artifact has unresolved slots".to_owned()));
+            return Err(crate::Error::Serialization("root artifact has unresolved externs".to_owned()));
         }
         if exact_ids.iter().any(|&id| body.token_bytes_for_id(id).is_some()) {
             return Err(crate::Error::Serialization(

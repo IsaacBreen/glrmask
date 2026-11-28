@@ -217,7 +217,7 @@ impl<'a> Lexer<'a> {
             let name=std::str::from_utf8(&self.input[start..self.pos]).map_err(|_|GlrMaskError::GrammarParse("invalid token name".into()))?.to_owned();
             self.pos+=2;return Ok(Token::EventSet(LarkTokenSet::Named(name)));
         }
-        Err(GlrMaskError::GrammarParse("token IDs can't appear in grammar source; declare a token slot with <|name|> and bind a TokenSet on a Module".into()))
+        Err(GlrMaskError::GrammarParse("token IDs can't appear in grammar source; declare a token extern with <|name|> and bind a TokenSet on a Module".into()))
     }
 
     fn lex_json_schema(&mut self)->Result<Token,GlrMaskError> {
@@ -241,7 +241,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_at_reference(&mut self)->Result<Token,GlrMaskError> {
-        if self.input[self.pos..].starts_with(b"token("){return Err(GlrMaskError::GrammarParse("token IDs can't appear in grammar source; declare a token slot with <|name|> and bind a TokenSet on a Module".into()));}
+        if self.input[self.pos..].starts_with(b"token("){return Err(GlrMaskError::GrammarParse("token IDs can't appear in grammar source; declare a token extern with <|name|> and bind a TokenSet on a Module".into()));}
         let first=self.advance().filter(|b|b.is_ascii_alphabetic()||*b==b'_')
             .ok_or_else(||GlrMaskError::GrammarParse("expected external grammar name after @".into()))?;
         let mut name=self.lex_ident(first);

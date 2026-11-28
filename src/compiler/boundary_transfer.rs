@@ -289,7 +289,7 @@ pub(crate) fn validate_slot_entry_shape(
         .any(|&(_, terminal)| terminal == slot_terminal)
     {
         return Err(format!(
-            "static Entry unsupported: forwarded shift involving slot terminal {slot_terminal} needs provider-conformance audit",
+            "static Entry unsupported: forwarded shift involving extern terminal {slot_terminal} needs provider-conformance audit",
         ));
     }
     for state in 0..parent_table.num_states {
@@ -315,14 +315,14 @@ pub(crate) fn validate_slot_entry_shape(
                 accept,
             } if !reduces.is_empty() || *accept => {
                 return Err(format!(
-                    "static Entry unsupported: parent state {state} slot {slot_terminal} has a shift/reduce/accept split (shift={} reduces={} accept={accept}) that the provider drops; refusing to guess call-site semantics",
+                    "static Entry unsupported: parent state {state} extern {slot_terminal} has a shift/reduce/accept split (shift={} reduces={} accept={accept}) that the provider drops; refusing to guess call-site semantics",
                     action.shift_target().is_some(),
                     reduces.len(),
                 ));
             }
             other => {
                 return Err(format!(
-                    "static Entry unsupported: parent state {state} slot {slot_terminal} has action {} which the provider Entry arm does not implement",
+                    "static Entry unsupported: parent state {state} extern {slot_terminal} has action {} which the provider Entry arm does not implement",
                     action_shape_label(other),
                 ));
             }
@@ -1328,7 +1328,7 @@ pub(crate) fn prepare_fragment_transfers(
         .map_err(|error| error.to_string())?;
         let local_slot = slot_characterized.get(&link.slot_terminal).ok_or_else(|| {
             format!(
-                "signed link slot terminal {} has no characterization in parent component {}",
+                "signed link extern terminal {} has no characterization in parent component {}",
                 link.slot_terminal, link.parent_component,
             )
         })?;

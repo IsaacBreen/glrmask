@@ -758,7 +758,7 @@ fn compile_component_shell_using(
     for placeholder in parsed.placeholders {
         let terminals=parent.special_token_terminals.iter().filter(|t|t.token_id==placeholder.token_id)
             .map(|t|t.terminal_id).collect::<BTreeSet<_>>();
-        if terminals.len()>1 {return Err(crate::Error::Compilation(format!("component slot {:?} has multiple internal terminals",placeholder.binding_name)));}
+        if terminals.len()>1 {return Err(crate::Error::Compilation(format!("component extern {:?} has multiple internal terminals",placeholder.binding_name)));}
         // Optimizers may remove an unreachable occurrence, but the prepared
         // artifact's independent authored interface still requires a binding.
         if let Some(&terminal_id)=terminals.first() {

@@ -1778,7 +1778,7 @@ fn map_overlay_slot_terminal(
             }
             if local >= component.constraint.parser_terminal_count() {
                 return Err(format!(
-                    "nested link terminal alias maps slot {slot} outside component {index} domain",
+                    "nested link terminal alias maps extern {slot} outside component {index} domain",
                 ));
             }
             match found {
@@ -1794,27 +1794,27 @@ fn map_overlay_slot_terminal(
         .checked_sub(1)
         .filter(|&owner| owner < components.len())
         .ok_or_else(|| {
-            format!("nested link slot terminal {slot} lies outside the composed terminal domain")
+            format!("nested link extern terminal {slot} lies outside the composed terminal domain")
         })?;
     let start = offsets[owner];
     let local = slot.checked_sub(start).ok_or_else(|| {
-        format!("nested link slot terminal {slot} underflows component {owner} offset {start}")
+        format!("nested link extern terminal {slot} underflows component {owner} offset {start}")
     })?;
     if local >= components[owner].constraint.parser_terminal_count() {
         return Err(format!(
-            "nested link slot terminal {slot} lies outside component {owner} terminal domain",
+            "nested link extern terminal {slot} lies outside component {owner} terminal domain",
         ));
     }
     if ambiguous {
         return Err(format!(
-            "nested link slot terminal {slot} has ambiguous owners (aliases disagree)"
+            "nested link extern terminal {slot} has ambiguous owners (aliases disagree)"
         ));
     }
     match found {
         None => Ok((owner, local)),
         Some(previous) if previous == (owner, local) => Ok(previous),
         Some(_) => Err(format!(
-            "nested link slot terminal {slot} has ambiguous owners (alias and interval disagree)"
+            "nested link extern terminal {slot} has ambiguous owners (alias and interval disagree)"
         )),
     }
 }
@@ -1847,7 +1847,7 @@ fn resolve_expansion_slot(
             })?;
             if slot >= leaf.parser_terminal_count() {
                 return Err(format!(
-                    "nested link slot terminal {slot} lies outside leaf table domain {}",
+                    "nested link extern terminal {slot} lies outside leaf table domain {}",
                     leaf.parser_terminal_count(),
                 ));
             }
@@ -2183,7 +2183,7 @@ pub(crate) fn unbound_link_slot_terminals(
             || (special.token_id != special.token_id_end || parent.token_bytes_for_id(special.token_id).is_none())
         {
             unbound.push(terminal_offsets[0].checked_add(special.terminal_id).ok_or_else(
-                || "unbound parent slot terminal offset overflow".to_string(),
+                || "unbound parent extern terminal offset overflow".to_string(),
             )?);
         }
     }
@@ -2198,7 +2198,7 @@ pub(crate) fn unbound_link_slot_terminals(
                         .checked_add(special.terminal_id)
                         .ok_or_else(|| {
                             format!(
-                                "unbound slot terminal offset overflow for child {child_index}"
+                                "unbound extern terminal offset overflow for child {child_index}"
                             )
                         })?,
                 );
@@ -2403,7 +2403,7 @@ pub(crate) fn build_walk_static_boundary_link(
     for &terminal in &unbound {
         if terminal as usize >= composed.table.num_terminals as usize {
             return Err(format!(
-                "unbound slot terminal {terminal} lies outside the composed terminal domain",
+                "unbound extern terminal {terminal} lies outside the composed terminal domain",
             ));
         }
     }
@@ -2950,7 +2950,7 @@ fn splice_nested_block(
         slots.dedup();
         if slots.is_empty() {
             return Err(format!(
-                "nested link block {root_leaf} has a child block with no slot terminal"
+                "nested link block {root_leaf} has a child block with no extern terminal"
             ));
         }
         let nullable = expansion
@@ -3154,7 +3154,7 @@ fn nested_unbound_slot_terminals(
         .map(|link| {
             expansion.leaf_terminal_offsets[link.parent_component as usize]
                 .checked_add(link.slot_terminal)
-                .ok_or_else(|| "bound slot terminal offset overflow".to_string())
+                .ok_or_else(|| "bound extern terminal offset overflow".to_string())
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
     let mut unbound = Vec::new();
@@ -3163,7 +3163,7 @@ fn nested_unbound_slot_terminals(
             let global = expansion.leaf_terminal_offsets[leaf_index]
                 .checked_add(special.terminal_id)
                 .ok_or_else(|| {
-                    format!("slot terminal offset overflow for leaf {leaf_index}")
+                    format!("extern terminal offset overflow for leaf {leaf_index}")
                 })?;
             if bound.contains(&global) {
                 continue;
@@ -3261,7 +3261,7 @@ fn build_walk_static_boundary_link_nested(
     for &terminal in &unbound {
         if terminal >= expansion.num_terminals {
             return Err(format!(
-                "unbound slot terminal {terminal} lies outside the composed terminal domain",
+                "unbound extern terminal {terminal} lies outside the composed terminal domain",
             ));
         }
     }
