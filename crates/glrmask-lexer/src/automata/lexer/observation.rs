@@ -10,8 +10,20 @@ pub struct ByteRows {
     pub width: usize,
 }
 
+fn column_count(classes: &[u8; 256]) -> usize {
+    let mut seen = [false; 256];
+    let mut width = 0;
+    for &class in classes {
+        let index = class as usize;
+        seen[index] = true;
+        width = width.max(index + 1);
+    }
+    assert!(seen[..width].iter().all(|&present| present), "byte classes must be contiguous");
+    width
+}
+
 pub fn column_representatives(classes: &[u8; 256]) -> Vec<u8> {
-    let width = classes.iter().copied().max().unwrap() as usize + 1;
+    let width = column_count(classes);
     let mut representatives = vec![0; width];
     for byte in (0..=255u8).rev() {
         representatives[classes[byte as usize] as usize] = byte;
@@ -42,7 +54,7 @@ impl ByteRows {
     }
 
     pub fn new(values: Arc<[u32]>, byte_to_column: [u8; 256]) -> Self {
-        let width = byte_to_column.iter().copied().max().unwrap() as usize + 1;
+        let width = column_count(&byte_to_column);
         assert_eq!(values.len() % width, 0, "invalid byte rows");
         Self { values, byte_to_column, width }
     }
@@ -67,21 +79,48 @@ impl ByteRows {
             && (Arc::ptr_eq(&self.values, &other.values) || self.values == other.values)
     }
 
-    /// Materialize an alternative exact layout, or borrow the existing row
-    /// storage by Arc when the requested coordinate is already present.
+    /// Repack the entire represented action. The caller must have proved
+    /// equality of the source columns for every pair of bytes in a class.
+    /// This does not turn a finite-alphabet source into a physical lexer.
     pub fn repack(&self, classes: &[u8; 256], transposed: bool) -> Arc<[u32]> {
-        if !transposed && self.byte_to_column == *classes {
-            return Arc::clone(&self.values);
+        self.repack_relevant(classes, &[true; 256], transposed)
+    }
+
+    /// Repack a certified byte partition on an explicit observation domain.
+    /// Classes must be contiguous; only pairs of observed bytes in each class
+    /// must have equal source actions. Classes with no observed byte are dead.
+    /// In particular the unused finite-vocabulary catch-all cannot acquire the
+    /// action of an arbitrary unobserved physical byte.
+    pub fn repack_relevant(
+        &self, classes: &[u8; 256], relevant: &[bool; 256], transposed: bool,
+    ) -> Arc<[u32]> {
+        let width = column_count(classes);
+        let mut representatives = vec![None; width];
+        for byte in (0..=255u8).rev() {
+            if relevant[byte as usize] {
+                representatives[classes[byte as usize] as usize] = Some(byte);
+            }
         }
-        let representatives = column_representatives(classes);
-        let width = representatives.len();
+        if !transposed && self.byte_to_column == *classes {
+            let unused = representatives.iter().enumerate()
+                .filter_map(|(class, representative)| representative.is_none().then_some(class))
+                .collect::<Vec<_>>();
+            if unused.is_empty() || self.values.chunks_exact(width)
+                .all(|row| unused.iter().all(|&class| row[class] == u32::MAX))
+            {
+                return Arc::clone(&self.values);
+            }
+        }
         let states = self.num_states();
         let mut values = vec![u32::MAX; states * width];
+        let columns = representatives.iter().enumerate()
+            .filter_map(|(class, byte)| byte.map(|b| (class, self.byte_to_column[b as usize] as usize)))
+            .collect::<Vec<_>>();
         for state in 0..states {
             let row = self.row(state);
-            for (class, &byte) in representatives.iter().enumerate() {
+            for &(class, source_column) in &columns {
                 let index = if transposed { class * states + state } else { state * width + class };
-                values[index] = row[self.byte_to_column[byte as usize] as usize];
+                values[index] = row[source_column];
             }
         }
         Arc::from(values)

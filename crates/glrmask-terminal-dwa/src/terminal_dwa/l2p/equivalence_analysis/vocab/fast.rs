@@ -109,6 +109,7 @@ struct Dfa {
 /// equivalence calls.
 pub struct SharedVocabDfaBase {
     byte_to_class: [u8; 256],
+    relevant: [bool; 256],
     pub num_classes: usize,
     /// The two dense compressed layouts are independently lazy. A reduced
     /// representative analysis can use the shared byte partition without
@@ -147,15 +148,16 @@ fn observe_columns(
 
 impl SharedVocabDfaBase {
     fn build_layout(&self, transposed: bool) -> Arc<[u32]> {
-        self.source_transitions.repack(&self.byte_to_class, transposed)
+        self.source_transitions.repack_relevant(&self.byte_to_class, &self.relevant, transposed)
     }
 
-    fn from_observations(dfa: &FlatDfa, byte_to_class: [u8; 256], self_loop_bytes: Vec<U8Set>) -> Self {
+    fn from_observations(dfa: &FlatDfa, byte_to_class: [u8; 256], relevant: &[bool; 256], self_loop_bytes: Vec<U8Set>) -> Self {
         let num_classes = byte_to_class.iter().copied().max().unwrap() as usize + 1;
         let mut h = new_hasher();
         h.write_u8(0);
         Self {
             byte_to_class,
+            relevant: *relevant,
             num_classes,
             trans_by_class: OnceLock::new(),
             trans_by_state_class: OnceLock::new(),
@@ -176,12 +178,19 @@ impl SharedVocabDfaBase {
     ) -> Option<Self> {
         let conservative = conservative_byte_classes(relevant_bytes)?;
         let (classes, loops) = observe_columns(dfa, relevant_bytes, Some(conservative));
-        Some(Self::from_observations(dfa, classes, loops))
+        Some(Self::from_observations(dfa, classes, relevant_bytes, loops))
     }
 
     pub fn build_from_dfa_relevant(dfa: &FlatDfa, relevant_bytes: &[bool; 256]) -> Self {
         let (classes, loops) = observe_columns(dfa, relevant_bytes, None);
-        Self::from_observations(dfa, classes, loops)
+        Self::from_observations(dfa, classes, relevant_bytes, loops)
+    }
+
+    /// The supplied partition must be exact on the requested observation
+    /// domain of this very DFA (not merely on an unrelated raw lexer).
+    pub(crate) fn from_proven_classes(dfa: &FlatDfa, classes: [u8; 256], relevant: &[bool; 256]) -> Self {
+        let (_, loops) = observe_columns(dfa, relevant, Some(classes));
+        Self::from_observations(dfa, classes, relevant, loops)
     }
 
     /// Return the precomputed byte-to-class mapping.
@@ -227,6 +236,8 @@ pub type SharedVocabDfaCache = std::sync::OnceLock<SharedVocabDfaBase>;
 /// DFA itself.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct AnalysisDfaCacheKey {
+    byte_to_class: Option<[u8; 256]>,
+    relevant: [bool; 256],
     num_groups: usize,
     active_group_len: usize,
     active_group_words: Vec<u64>,
@@ -263,10 +274,14 @@ impl AnalysisDfaCacheKey {
         tokenizer: &FlatDfa,
         active_groups: Option<&[bool]>,
         effective_disallowed_follows: &BTreeMap<u32, BitSet>,
+        byte_to_class: Option<&[u8; 256]>,
+        relevant: &[bool; 256],
     ) -> Self {
         let num_groups = dfa_num_groups(tokenizer);
         let (active_group_len, active_group_words) = pack_active_groups(active_groups, num_groups);
         Self {
+            byte_to_class: byte_to_class.copied(),
+            relevant: *relevant,
             num_groups,
             active_group_len,
             active_group_words,
@@ -972,6 +987,18 @@ fn build_dfa_with_group_filter(
     active_groups: Option<&[bool]>,
     shared_cache: Option<&SharedVocabDfaCache>,
 ) -> Dfa {
+    build_dfa_on_domain(tokenizer, disallowed_follows, byte_to_class_override,
+        active_groups, shared_cache, &[true; 256])
+}
+
+fn build_dfa_on_domain(
+    tokenizer: &FlatDfa,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    byte_to_class_override: Option<&[u8; 256]>,
+    active_groups: Option<&[bool]>,
+    shared_cache: Option<&SharedVocabDfaCache>,
+    relevant: &[bool; 256],
+) -> Dfa {
     let dfa = tokenizer;
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
@@ -1014,14 +1041,14 @@ fn build_dfa_with_group_filter(
     // not just with its source rows.
     let compatible_shared_base = shared_base.filter(|base|
         base.is_compatible_with_dfa(dfa)
-            && byte_to_class_override.is_none_or(|classes| *classes == base.byte_to_class));
+            && byte_to_class_override.is_none_or(|classes| *classes == base.byte_to_class)
+            && relevant.iter().zip(base.relevant).all(|(&used, covered)| !used || covered));
     let owned_base;
     let base = if let Some(base) = compatible_shared_base {
         base
     } else {
         owned_base = if let Some(classes) = byte_to_class_override {
-            let (_, loops) = observe_columns(dfa, &[true; 256], Some(*classes));
-            SharedVocabDfaBase::from_observations(dfa, *classes, loops)
+            SharedVocabDfaBase::from_proven_classes(dfa, *classes, relevant)
         } else {
             SharedVocabDfaBase::build_from_dfa(dfa)
         };
@@ -4393,33 +4420,35 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     } else {
         (tokenizer, initial_states, None)
     };
+    let layout_classes = if input_compact_to_original.is_some() { None } else { byte_to_class };
+    // A stage-local base was built for the complete branch alphabet. All
+    // representative token subsets in that branch remain in this domain.
+    // Without it, the override is only guaranteed on these input strings.
+    let relevant = if let Some(base) = shared_cache.and_then(|cache| cache.get())
+        .filter(|base| base.is_compatible_with_dfa(tokenizer_for_dfa)
+            && layout_classes.is_none_or(|classes| *classes == base.byte_to_class))
+    {
+        base.relevant
+    } else if layout_classes.is_some() {
+        let mut relevant = [false; 256];
+        for token in strings {
+            for &byte in token.as_ref() {
+                relevant[byte as usize] = true;
+            }
+        }
+        relevant
+    } else {
+        [true; 256]
+    };
+    let build = || build_dfa_on_domain(tokenizer_for_dfa, disallowed_follows,
+        layout_classes, active_groups, shared_cache, &relevant);
     let dfa = if let Some(cache) = shared_analysis_dfa_cache {
         let key = AnalysisDfaCacheKey::for_analysis_view(
-            tokenizer_for_dfa,
-            active_groups,
-            disallowed_follows,
+            tokenizer_for_dfa, active_groups, disallowed_follows, layout_classes, &relevant,
         );
-        cache.get_or_init(key, || {
-            build_dfa_with_group_filter(
-                tokenizer_for_dfa,
-                disallowed_follows,
-                byte_to_class,
-                active_groups,
-                shared_cache,
-            )
-        })
+        cache.get_or_init(key, build)
     } else {
-        Arc::new(build_dfa_with_group_filter(
-            tokenizer_for_dfa,
-            disallowed_follows,
-            if input_compact_to_original.is_some() {
-                None
-            } else {
-                byte_to_class
-            },
-            active_groups,
-            shared_cache,
-        ))
+        Arc::new(build())
     };
     let build_dfa_ms = build_dfa_started_at.elapsed().as_secs_f64() * 1000.0;
 

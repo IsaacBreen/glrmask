@@ -428,6 +428,32 @@ mod sparse_transition_cache_tests {
     }
 
     #[test]
+    fn restricted_repack_never_inherits_an_unobserved_physical_column() {
+        let mut values = vec![u32::MAX; 2 * 256];
+        values[0] = 1; // first unobserved byte is not dead in the source
+        values[256] = 0;
+        for (state, target) in [(0, 1), (1, 0)] {
+            values[state * 256 + b'a' as usize] = target;
+            values[state * 256 + b'b' as usize] = target;
+        }
+        let rows = ByteRows::dense(values.into());
+        let mut classes = [0u8; 256];
+        classes[b'a' as usize] = 1;
+        classes[b'b' as usize] = 1;
+        let mut relevant = [false; 256];
+        relevant[b'a' as usize] = true;
+        relevant[b'b' as usize] = true;
+        assert_eq!(rows.repack_relevant(&classes, &relevant, false).as_ref(),
+            &[u32::MAX, 1, u32::MAX, 0]);
+        assert_eq!(rows.repack_relevant(&classes, &relevant, true).as_ref(),
+            &[u32::MAX, u32::MAX, 1, 0]);
+        // The already-materialized projection is still a valid borrow.
+        let projected = ByteRows::new(rows.repack_relevant(&classes, &relevant, false), classes);
+        assert!(Arc::ptr_eq(&projected.values,
+            &projected.repack_relevant(&classes, &relevant, false)));
+    }
+
+    #[test]
     fn filtered_byte_classes_ignore_inactive_only_transition_topology() {
         use crate::automata::lexer::ast::Expr;
         use crate::automata::lexer::compile::build_regex_monolithic as build_regex;

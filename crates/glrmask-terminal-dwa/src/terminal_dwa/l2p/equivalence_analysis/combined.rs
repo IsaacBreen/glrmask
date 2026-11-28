@@ -167,6 +167,13 @@ fn first_byte_factored_vocab_classes(
         token_buckets[byte_to_class[bytes[0] as usize] as usize].push(token);
     }
 
+    // Every bucket uses the same complete observation domain. Do not let
+    // the first bucket's subset become the source for later cache hits.
+    let mut relevant = [false; 256];
+    for token in tokens {
+        for &byte in *token { relevant[byte as usize] = true; }
+    }
+    let byte_cache = vocab_equivalence_analysis::SharedVocabDfaCache::new();
     let analysis_dfa_cache = vocab_equivalence_analysis::SharedVocabAnalysisDfaCache::default();
     let bucket_started_at = Instant::now();
     let bucket_results = token_buckets
@@ -183,6 +190,11 @@ fn first_byte_factored_vocab_classes(
                 );
             }
 
+            byte_cache.get_or_init(|| {
+                vocab_equivalence_analysis::SharedVocabDfaBase::from_proven_classes(
+                    tokenizer, *byte_to_class, &relevant,
+                )
+            });
             let first_byte = tokens[bucket[0]][0] as usize;
             let mut source_for_target = BTreeMap::<u32, usize>::new();
             for &source in initial_states {
@@ -199,7 +211,7 @@ fn first_byte_factored_vocab_classes(
                     disallowed_follows,
                     Some(byte_to_class),
                     None,
-                    None,
+                    Some(&byte_cache),
                     Some(&analysis_dfa_cache),
                 );
             let classes = bucket_classes
@@ -255,7 +267,7 @@ fn first_byte_factored_vocab_classes(
             disallowed_follows,
             Some(byte_to_class),
             None,
-            None,
+            Some(&byte_cache),
             Some(&analysis_dfa_cache),
         );
     dfa_build_ms = dfa_build_ms.max(final_build_ms);
