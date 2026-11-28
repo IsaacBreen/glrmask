@@ -124,6 +124,7 @@ pub struct LexicalVocabulary {
     original_to_ordered: OnceLock<Arc<[u32]>>,
     original_order: OnceLock<Arc<[(u32, u32)]>>,
     trie: OnceLock<Arc<vocab_prefix_tree::VocabPrefixTree>>,
+    split_offsets: OnceLock<Box<[usize]>>,
 }
 
 impl VocabDerivedArtifact for LexicalVocabulary {}
@@ -149,6 +150,7 @@ impl LexicalVocabulary {
             original_to_ordered: OnceLock::new(),
             original_order: OnceLock::new(),
             trie: OnceLock::new(),
+            split_offsets: OnceLock::new(),
         }
     }
 
@@ -166,6 +168,19 @@ impl LexicalVocabulary {
         Arc::clone(self.trie.get_or_init(|| Arc::new(
             vocab_prefix_tree::VocabPrefixTree::from_ordered_tokens(Arc::clone(&self.ordered_token_bytes))
         )))
+    }
+
+    /// All positive proper-prefix split positions in lexical spelling order.
+    pub fn split_offsets(&self) -> &[usize] {
+        self.split_offsets.get_or_init(|| {
+            let mut offsets = Vec::with_capacity(self.ordered_token_bytes.len() + 1);
+            offsets.push(0usize);
+            for bytes in self.ordered_token_bytes.iter() {
+                offsets.push(offsets.last().copied().unwrap()
+                    .checked_add(bytes.len().saturating_sub(1)).expect("vocabulary split count"));
+            }
+            offsets.into_boxed_slice()
+        })
     }
 
     pub fn original_order(&self) -> Arc<[(u32, u32)]> {

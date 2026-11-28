@@ -12,6 +12,8 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::Vocab;
+use crate::vocab::LexicalVocabulary;
+use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 
 use super::l2p::equivalence_analysis::compat::{FlatDfa, compute_tokenizer_byte_classes};
 use crate::automata::lexer::observation::{column_representatives, ConfigInterner};
@@ -279,19 +281,10 @@ impl crate::vocab::VocabDerivedArtifact for VocabClassificationFacts {}
 
 #[derive(Debug)]
 struct VocabAdjacentPairIndex {
+    lexical: Arc<LexicalVocabulary>,
     pair_offsets: Box<[u32]>,
-    entry_token_ids: Box<[u32]>,
-    /// Vocabulary entry bytes in the same entry order used by `occurrences`.
-    /// Kept flat so hot per-grammar classifiers can address one entry by index
-    /// without rebuilding an 80k-element pointer vector from the ordered map.
-    entry_byte_offsets: Box<[u32]>,
-    entry_bytes: Box<[u8]>,
-    /// `(entry_index << 32) | split_after`, grouped by adjacent byte pair.
-    /// Entry indices let hot classification loops address a precollected slice
-    /// directly instead of performing one ordered-map lookup per occurrence.
+    /// (lexical spelling index, split after byte), grouped by adjacent pair.
     occurrences: Box<[u64]>,
-    entry_split_offsets: Box<[usize]>,
-    total_splits: usize,
 }
 
 impl crate::vocab::VocabDerivedArtifact for VocabAdjacentPairIndex {}
@@ -303,24 +296,11 @@ struct VocabSuffixTrie {
     /// Incoming byte for every node. The root byte is unused.
     incoming_bytes: Box<[u8]>,
     /// Trie node representing the complete suffix for each vocabulary split.
-    /// Indices use the same flattened split coordinate as `entry_split_offsets`.
+    /// Indices use the vocabulary spelling owner's split coordinate.
     split_nodes: Box<[u32]>,
 }
 
 impl crate::vocab::VocabDerivedArtifact for VocabSuffixTrie {}
-
-#[derive(Debug)]
-struct VocabPrefixTrie {
-    /// Parent node for every trie node; node zero is the root and points to itself.
-    parents: Box<[u32]>,
-    /// Incoming byte for every node. The root byte is unused.
-    incoming_bytes: Box<[u8]>,
-    /// Trie node after consuming bytes `[..=split_after]` for each vocabulary split.
-    /// Indices use the same flattened split coordinate as `entry_split_offsets`.
-    split_nodes: Box<[u32]>,
-}
-
-impl crate::vocab::VocabDerivedArtifact for VocabPrefixTrie {}
 
 const PREPARED_SUFFIX_TRIE_MIN_SPLITS: usize = 32_768;
 
@@ -335,9 +315,11 @@ impl VocabAdjacentPairIndex {
 
     #[inline]
     fn bytes_for_entry(&self, entry_index: usize) -> &[u8] {
-        let start = self.entry_byte_offsets[entry_index] as usize;
-        let end = self.entry_byte_offsets[entry_index + 1] as usize;
-        &self.entry_bytes[start..end]
+        &self.lexical.ordered_token_bytes[entry_index]
+    }
+
+    fn total_splits(&self) -> usize {
+        *self.lexical.split_offsets().last().expect("split offsets include root")
     }
 }
 
@@ -345,51 +327,32 @@ fn vocab_adjacent_pair_index(vocab: &Vocab) -> Arc<VocabAdjacentPairIndex> {
     if let Some(cached) = vocab.vocab_derived_cache_get::<VocabAdjacentPairIndex>() {
         return cached;
     }
-
+    let lexical = vocab.lexical_vocabulary();
+    let total_splits = *lexical.split_offsets().last().unwrap();
+    assert!(total_splits <= u32::MAX as usize, "vocabulary split count exceeds u32");
     let mut counts = vec![0u32; 1 << 16];
-    let mut entry_split_offsets = Vec::with_capacity(vocab.len() + 1);
-    let mut entry_byte_offsets = Vec::with_capacity(vocab.len() + 1);
-    let mut entry_bytes = Vec::<u8>::new();
-    let mut total_splits = 0usize;
-    entry_split_offsets.push(0);
-    entry_byte_offsets.push(0);
-    for bytes in vocab.entries_map().values() {
-        assert!(total_splits <= u32::MAX as usize);
-        assert!(entry_bytes.len() <= u32::MAX as usize);
+    for bytes in lexical.ordered_token_bytes.iter() {
         for pair in bytes.windows(2) {
             counts[((pair[0] as usize) << 8) | pair[1] as usize] += 1;
         }
-        total_splits += bytes.len().saturating_sub(1);
-        entry_split_offsets.push(total_splits);
-        entry_bytes.extend_from_slice(bytes);
-        assert!(entry_bytes.len() <= u32::MAX as usize);
-        entry_byte_offsets.push(entry_bytes.len() as u32);
     }
-
     let mut pair_offsets = vec![0u32; (1 << 16) + 1];
     for pair in 0..(1 << 16) {
         pair_offsets[pair + 1] = pair_offsets[pair] + counts[pair];
     }
     let mut next = pair_offsets[..1 << 16].to_vec();
     let mut occurrences = vec![0u64; total_splits];
-    for (entry_index, bytes) in vocab.entries_map().values().enumerate() {
-        assert!(entry_index <= u32::MAX as usize);
+    for (entry, bytes) in lexical.ordered_token_bytes.iter().enumerate() {
+        assert!(entry <= u32::MAX as usize);
         for (split_after, pair) in bytes.windows(2).enumerate() {
             let pair_id = ((pair[0] as usize) << 8) | pair[1] as usize;
             let slot = &mut next[pair_id];
-            occurrences[*slot as usize] = ((entry_index as u64) << 32) | split_after as u64;
+            occurrences[*slot as usize] = ((entry as u64) << 32) | split_after as u64;
             *slot += 1;
         }
     }
-
     let index = Arc::new(VocabAdjacentPairIndex {
-        pair_offsets: pair_offsets.into_boxed_slice(),
-        entry_token_ids: vocab.entries_map().keys().copied().collect::<Vec<_>>().into_boxed_slice(),
-        entry_byte_offsets: entry_byte_offsets.into_boxed_slice(),
-        entry_bytes: entry_bytes.into_boxed_slice(),
-        occurrences: occurrences.into_boxed_slice(),
-        entry_split_offsets: entry_split_offsets.into_boxed_slice(),
-        total_splits,
+        lexical, pair_offsets: pair_offsets.into_boxed_slice(), occurrences: occurrences.into_boxed_slice(),
     });
     vocab.vocab_derived_cache_set(Arc::clone(&index));
     index
@@ -406,11 +369,11 @@ fn vocab_suffix_trie(vocab: &Vocab) -> Arc<VocabSuffixTrie> {
     let split_index = vocab_adjacent_pair_index(vocab);
     let mut parents = vec![0u32];
     let mut incoming_bytes = vec![0u8];
-    let mut split_nodes = vec![0u32; split_index.total_splits];
+    let mut split_nodes = vec![0u32; split_index.total_splits()];
     let mut child_by_edge = FxHashMap::<(u32, u8), u32>::default();
 
-    for (entry_index, bytes) in vocab.entries_map().values().enumerate() {
-        let split_base = split_index.entry_split_offsets[entry_index];
+    for (entry_index, bytes) in split_index.lexical.ordered_token_bytes.iter().enumerate() {
+        let split_base = split_index.lexical.split_offsets()[entry_index];
         for split_after in 0..bytes.len().saturating_sub(1) {
             let mut node = 0u32;
             for &byte in &bytes[split_after + 1..] {
@@ -431,45 +394,6 @@ fn vocab_suffix_trie(vocab: &Vocab) -> Arc<VocabSuffixTrie> {
     }
 
     let trie = Arc::new(VocabSuffixTrie {
-        parents: parents.into_boxed_slice(),
-        incoming_bytes: incoming_bytes.into_boxed_slice(),
-        split_nodes: split_nodes.into_boxed_slice(),
-    });
-    vocab.vocab_derived_cache_set(Arc::clone(&trie));
-    trie
-}
-
-fn vocab_prefix_trie(vocab: &Vocab) -> Arc<VocabPrefixTrie> {
-    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabPrefixTrie>() {
-        return cached;
-    }
-    let split_index = vocab_adjacent_pair_index(vocab);
-    let mut parents = vec![0u32];
-    let mut incoming_bytes = vec![0u8];
-    let mut split_nodes = vec![0u32; split_index.total_splits];
-    let mut child_by_edge = FxHashMap::<(u32, u8), u32>::default();
-
-    for (entry_index, bytes) in vocab.entries_map().values().enumerate() {
-        let split_base = split_index.entry_split_offsets[entry_index];
-        let mut node = 0u32;
-        for split_after in 0..bytes.len().saturating_sub(1) {
-            let byte = bytes[split_after];
-            let key = (node, byte);
-            node = if let Some(&existing) = child_by_edge.get(&key) {
-                existing
-            } else {
-                let child = u32::try_from(parents.len())
-                    .expect("vocabulary prefix trie exceeds u32 node space");
-                parents.push(node);
-                incoming_bytes.push(byte);
-                child_by_edge.insert(key, child);
-                child
-            };
-            split_nodes[split_base + split_after] = node;
-        }
-    }
-
-    let trie = Arc::new(VocabPrefixTrie {
         parents: parents.into_boxed_slice(),
         incoming_bytes: incoming_bytes.into_boxed_slice(),
         split_nodes: split_nodes.into_boxed_slice(),
@@ -528,43 +452,36 @@ pub fn vocab_tokens_with_adjacent_pairs(
         }
     }
 
-    // Sparse boundary queries usually touch a tiny fraction of the vocabulary.
-    // Avoid allocating/zeroing a full-vocabulary bitmap and scanning every
-    // entry merely to recover those few token ids. Entry indices sort in the
-    // same order as `entry_token_ids`, so this preserves deterministic output.
-    if total_occurrences.saturating_mul(2) <= index.entry_token_ids.len() {
-        let mut selected_entries = Vec::with_capacity(total_occurrences);
+    // Pair queries select spellings; publication expands every alias and
+    // retains original-ID ordering regardless of the lexical coordinate.
+    let groups = &index.lexical.ordered_to_originals;
+    let mut selected = Vec::new();
+    if total_occurrences.saturating_mul(2) <= groups.len() {
+        let mut entries = Vec::with_capacity(total_occurrences);
         for (left, rights) in allowed_pairs.iter().enumerate() {
             for right in rights.iter() {
-                selected_entries.extend(
-                    index
-                        .occurrences_for_pair(left as u8, right)
-                        .iter()
-                        .map(|&occurrence| (occurrence >> 32) as u32),
-                );
+                entries.extend(index.occurrences_for_pair(left as u8, right).iter()
+                    .map(|&occurrence| (occurrence >> 32) as usize));
             }
         }
-        selected_entries.sort_unstable();
-        selected_entries.dedup();
-        return selected_entries
-            .into_iter()
-            .map(|entry| index.entry_token_ids[entry as usize])
-            .collect();
-    }
-
-    let mut selected = vec![false; index.entry_token_ids.len()];
-    for (left, rights) in allowed_pairs.iter().enumerate() {
-        for right in rights.iter() {
-            for &occurrence in index.occurrences_for_pair(left as u8, right) {
-                selected[(occurrence >> 32) as usize] = true;
+        entries.sort_unstable();
+        entries.dedup();
+        for entry in entries { selected.extend_from_slice(&groups[entry]); }
+    } else {
+        let mut entries = vec![false; groups.len()];
+        for (left, rights) in allowed_pairs.iter().enumerate() {
+            for right in rights.iter() {
+                for &occurrence in index.occurrences_for_pair(left as u8, right) {
+                    entries[(occurrence >> 32) as usize] = true;
+                }
             }
         }
+        for (entry, group) in entries.into_iter().zip(groups.iter()) {
+            if entry { selected.extend_from_slice(group); }
+        }
     }
+    selected.sort_unstable();
     selected
-        .into_iter()
-        .enumerate()
-        .filter_map(|(entry, selected)| selected.then_some(index.entry_token_ids[entry]))
-        .collect()
 }
 
 pub fn prepare_vocab_for_terminal_classification(vocab: &Vocab) {
@@ -580,9 +497,11 @@ pub fn prepare_vocab_for_terminal_classification(vocab: &Vocab) {
     // Large terminal-boundary classifiers can amortize a suffix trie across
     // every grammar compiled against this fixed vocabulary. Build it during
     // explicit vocabulary preparation, never on the schema critical path.
-    if prepared_suffix_trie_enabled() && adjacent.total_splits >= PREPARED_SUFFIX_TRIE_MIN_SPLITS {
+    if prepared_suffix_trie_enabled() && adjacent.total_splits() >= PREPARED_SUFFIX_TRIE_MIN_SPLITS {
         let _ = vocab_suffix_trie(vocab);
-        let _ = vocab_prefix_trie(vocab);
+        if std::env::var_os("GLRMASK_CLASSIFY_PREPARED_PREFIX_TRIE").is_some() {
+            let _ = adjacent.lexical.trie();
+        }
     }
 }
 
@@ -3186,8 +3105,7 @@ fn finite_follower_suffix_empty_certificate(
             checked_splits += 1;
             let entry_index = (packed >> 32) as usize;
             let split_after = packed as u32 as usize;
-            let token_id = index.entry_token_ids[entry_index];
-            let bytes = vocab.get(token_id)?;
+            let bytes = index.bytes_for_entry(entry_index);
             let suffix = &bytes[split_after + 1..];
             let mut possible = followers;
             while possible != 0 {
@@ -4010,7 +3928,7 @@ impl<'a> TokenSuffixes<'a> {
 
 struct CandidateTrace<'a, 'b> {
     scanner: Option<&'a mut CandidatePrefixPowerset<'b>>,
-    prepared_prefix: Option<(&'a VocabPrefixTrie, &'a [u32])>,
+    prepared_prefix: Option<&'a [u32]>,
     prefix_words: Option<&'a [u64]>,
     dense: Option<DenseCandidateAction<'a>>,
 }
@@ -4024,7 +3942,7 @@ impl CandidateTrace<'_, '_> {
         }
         let scanner = self.scanner.as_deref_mut().expect("live prefix scanner");
         *state = match self.prepared_prefix {
-            Some((trie, states)) => states[trie.split_nodes[split] as usize],
+            Some(states) => states[split],
             None => scanner.step(*state, byte),
         };
         if *state == PREFIX_DEAD_STATE { matched.fill(0); }
@@ -4279,18 +4197,34 @@ fn execute_prepared_dense_suffix_trie(
     (state_by_node, matched_by_node)
 }
 
-fn execute_prepared_prefix_trie(
-    trie: &VocabPrefixTrie,
-    scanner: &mut CandidatePrefixPowerset<'_>,
-    prefix_start: u32,
+/// Execute each shared radix edge once. Every proper-prefix split is a
+/// projection of that position into its descendant lexical interval.
+fn execute_prepared_prefix_radix(
+    tree: &VocabPrefixTree, split_offsets: &[usize],
+    scanner: &mut CandidatePrefixPowerset<'_>, prefix_start: u32,
 ) -> Vec<u32> {
-    let mut state_by_node = vec![PREFIX_DEAD_STATE; trie.parents.len()];
-    state_by_node[0] = prefix_start;
-    for node in 1..trie.parents.len() {
-        let parent = trie.parents[node] as usize;
-        state_by_node[node] = scanner.step(state_by_node[parent], trie.incoming_bytes[node]);
+    let mut split_states = vec![PREFIX_DEAD_STATE; *split_offsets.last().unwrap()];
+    let mut pending = vec![(tree.root(), prefix_start)];
+    while let Some((node, state)) = pending.pop() {
+        if state == PREFIX_DEAD_STATE { continue; }
+        for (edge, child) in node.iter_children() {
+            let (first, end) = child.lexical_interval();
+            let mut state = state;
+            for (offset, &byte) in edge.iter().enumerate() {
+                state = scanner.step(state, byte);
+                if state == PREFIX_DEAD_STATE { break; }
+                let split = node.prefix_length() + offset;
+                for entry in first as usize..end as usize {
+                    let index = split_offsets[entry] + split;
+                    if index < split_offsets[entry + 1] {
+                        split_states[index] = state;
+                    }
+                }
+            }
+            if state != PREFIX_DEAD_STATE { pending.push((child, state)); }
+        }
     }
-    state_by_node
+    split_states
 }
 
 fn exact_terminal_path_two_plus_candidate_dfa(
@@ -4354,6 +4288,11 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         feasible_follow_bytes_by_last_byte[bytes[split_after] as usize]
             .contains(bytes[split_after + 1])
     };
+    let lexical = vocab.lexical_vocabulary();
+    let words = &lexical.ordered_token_bytes;
+    let aliases = &lexical.ordered_to_originals;
+    let split_offsets = lexical.split_offsets();
+    let total_splits = *split_offsets.last().unwrap();
     let adjacent_pair_index = use_pair_index.then(|| vocab_adjacent_pair_index(vocab));
     let feasible_split_work = if candidate_count < 64 {
         adjacent_pair_index.as_ref().map_or(0usize, |index| {
@@ -4372,18 +4311,16 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let prepared_suffix_trie = (words_per_mask == 1
         && adjacent_pair_index
             .as_ref()
-            .is_some_and(|index| index.total_splits >= PREPARED_SUFFIX_TRIE_MIN_SPLITS)
+            .is_some_and(|index| index.total_splits() >= PREPARED_SUFFIX_TRIE_MIN_SPLITS)
         && prepared_suffix_trie_enabled())
     .then(|| vocab.vocab_derived_cache_get::<VocabSuffixTrie>())
     .flatten();
 
-    let prepared_prefix_trie = (words_per_mask == 1
+    let prepared_prefix_enabled = words_per_mask == 1
         && adjacent_pair_index
             .as_ref()
-            .is_some_and(|index| index.total_splits >= PREPARED_SUFFIX_TRIE_MIN_SPLITS)
-        && std::env::var_os("GLRMASK_CLASSIFY_PREPARED_PREFIX_TRIE").is_some())
-    .then(|| vocab.vocab_derived_cache_get::<VocabPrefixTrie>())
-    .flatten();
+            .is_some_and(|index| index.total_splits() >= PREPARED_SUFFIX_TRIE_MIN_SPLITS)
+        && std::env::var_os("GLRMASK_CLASSIFY_PREPARED_PREFIX_TRIE").is_some();
 
     let compile_started_at = std::time::Instant::now();
     // Reuse the original tokenizer for broad candidate sets and for every
@@ -4456,63 +4393,18 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     let compile_ms = compile_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let analyze_started_at = std::time::Instant::now();
-    let total_splits = adjacent_pair_index.as_ref().map_or_else(
-        || {
-            vocab
-                .entries_map()
-                .values()
-                .map(|bytes| bytes.len().saturating_sub(1))
-                .sum::<usize>()
-        },
-        |index| index.total_splits,
-    );
-
-    // The scanner already interns exact epsilon-closed prefix configurations and
-    // memoizes every (configuration, byte) transition. Store that compact state
-    // ID at each token split directly. A global byte trie duplicates the same
-    // prefixes as nodes and masks, while the downstream pass still visits every
-    // token split in vocabulary order.
     let (mut prefix_scanner, prefix_start, reset_state) = CandidatePrefixPowerset::new(
         candidate_tokenizer,
         words_per_mask,
         terminal_to_local,
         uses_original_tokenizer.then_some(&bytesets.byte_index),
     );
-    let owned_split_offsets;
-    let split_offsets: &[usize] = if let Some(index) = adjacent_pair_index.as_ref() {
-        &index.entry_split_offsets
-    } else {
-        owned_split_offsets = {
-            let mut offsets = Vec::with_capacity(vocab.entries_map().len() + 1);
-            offsets.push(0usize);
-            for bytes in vocab.entries_map().values() {
-                offsets.push(
-                    offsets
-                        .last()
-                        .copied()
-                        .unwrap_or(0usize)
-                        .saturating_add(bytes.len().saturating_sub(1)),
-                );
-            }
-            offsets
-        };
-        &owned_split_offsets
-    };
     let prefix_started_at = std::time::Instant::now();
-    let prepared_prefix_states = prepared_prefix_trie.as_ref().map(|trie| {
-        execute_prepared_prefix_trie(trie, &mut prefix_scanner, prefix_start)
+    let prepared_prefix_states = prepared_prefix_enabled.then(|| {
+        execute_prepared_prefix_radix(&lexical.trie(), split_offsets, &mut prefix_scanner, prefix_start)
     });
     let prefix_ms = prefix_started_at.elapsed().as_secs_f64() * 1000.0;
     let trie_ms = 0.0;
-    if super::types::compile_profile_enabled()
-        && let (Some(trie), Some(_)) = (prepared_prefix_trie.as_ref(), prepared_prefix_states.as_ref()) {
-            eprintln!(
-                "[glrmask/profile][terminal_path_prefix_trie] nodes={} splits={} execute_ms={:.3}",
-                trie.parents.len(),
-                trie.split_nodes.len(),
-                prefix_ms,
-            );
-        }
 
     let suffix_started_at = std::time::Instant::now();
     let mut dense_flat_trans = Vec::new();
@@ -4580,7 +4472,6 @@ fn exact_terminal_path_two_plus_candidate_dfa(
     {
         let all_local = (1u64 << candidate_count) - 1;
         if let Some(index) = adjacent_pair_index.as_ref() {
-            let vocab_entries = vocab.entries_map().iter().collect::<Vec<_>>();
             'probe: for left in 0u8..=u8::MAX {
                 for right in feasible_follow_bytes_by_last_byte[left as usize].iter() {
                     // Sampling a few occurrences of every semantically feasible
@@ -4589,7 +4480,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     for &packed in index.occurrences_for_pair(left, right).iter().take(4) {
                         let entry_index = (packed >> 32) as usize;
                         let split_after = packed as u32 as usize;
-                        let (&_token_id, bytes) = vocab_entries[entry_index];
+                        let bytes = index.bytes_for_entry(entry_index);
                         let mut prefix_state = prefix_start;
                         for &byte in &bytes[..=split_after] {
                             prefix_state = prefix_scanner.step(prefix_state, byte);
@@ -4678,85 +4569,17 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         })
         .unwrap_or(true);
 
-    // For the common text-vocabulary case the adjacent-byte proof leaves only
-    // a tiny fraction of token splits as possible boundaries.  The historical
-    // path nevertheless allocates a dense mask for *every* token split before
-    // discovering that none of those few feasible suffixes can start/continue
-    // a candidate terminal.  Probe the sparse feasible set first.  A miss is an
-    // exact proof of an empty L2+ relation and avoids both the dense allocation
-    // and the subsequent all-split combine pass.  A hit simply falls through to
-    // the existing exact implementation.
-    let sparse_empty_probe = early_empty_suffix_enabled
-        && words_per_mask == 1
-        && uses_original_tokenizer
-        && adjacent_pair_index.is_some()
+    let sparse_empty_probe = early_empty_suffix_enabled && uses_original_tokenizer
         && std::env::var_os("GLRMASK_DISABLE_SPARSE_EMPTY_SUFFIX_PROBE").is_none()
         && feasible_split_work.saturating_mul(16) < total_splits;
-    if sparse_empty_probe {
-        let sparse_started_at = std::time::Instant::now();
-        let index = adjacent_pair_index.as_ref().expect("checked above");
-        let indexed_entry_bytes = std::env::var("GLRMASK_CLASSIFY_INDEXED_ENTRY_BYTES")
-            .map(|value| {
-                let value = value.trim();
-                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
-            })
-            // The adjacent-pair index is prepared once per vocabulary. Reuse
-            // its compact entry-byte view instead of rebuilding an indexable
-            // Vec by walking every BTreeMap entry on each grammar compile.
-            .unwrap_or(true);
-        let vocab_entries = (!indexed_entry_bytes)
-            .then(|| vocab.entries_map().values().collect::<Vec<_>>());
-        let mut any_viable = false;
-        'pairs: for left in 0u8..=u8::MAX {
-            for right in feasible_follow_bytes_by_last_byte[left as usize].iter() {
-                for &packed in index.occurrences_for_pair(left, right) {
-                    let entry_index = (packed >> 32) as usize;
-                    let split_after = packed as u32 as usize;
-                    let bytes = if indexed_entry_bytes {
-                        index.bytes_for_entry(entry_index)
-                    } else {
-                        vocab_entries
-                            .as_ref()
-                            .expect("non-indexed sparse probe requires entry view")[entry_index]
-                            .as_slice()
-                    };
-                    let matched = reset_action(&mut prefix_scanner, dense_action)
-                        .suffix_word(continuation_reset_state, &bytes[split_after + 1..]);
-                    if matched != 0 {
-                        any_viable = true;
-                        break 'pairs;
-                    }
-                }
-            }
-        }
-        if !any_viable {
-            if super::types::compile_profile_enabled() {
-                eprintln!(
-                    "[glrmask/profile][terminal_path_sparse_empty_suffix] tokens={} candidates={} total_splits={} feasible_splits={} ms={:.3}",
-                    vocab.len(),
-                    candidate_count,
-                    total_splits,
-                    feasible_split_work,
-                    sparse_started_at.elapsed().as_secs_f64() * 1000.0,
-                );
-            }
-            return ExactTerminalPathTwoPlus {
-                two_plus: BitSet::new(candidates.len()),
-                witnesses: vec![None; candidates.len()],
-            };
-        }
-    }
-
-    let sparse_suffix_direct = words_per_mask == 1
+    let direct_sparse_enabled = std::env::var("GLRMASK_CLASSIFY_DIRECT_SPARSE_SUFFIX")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        }).unwrap_or(true);
+    let sparse_suffix_direct = words_per_mask == 1 && candidate_count < 64
         && adjacent_pair_index.is_some()
-        && feasible_split_work != 0
-        && feasible_split_work.saturating_mul(32) < total_splits
-        && std::env::var("GLRMASK_CLASSIFY_DIRECT_SPARSE_SUFFIX")
-            .map(|value| {
-                let value = value.trim();
-                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(true);
+        && (sparse_empty_probe || (direct_sparse_enabled && feasible_split_work.saturating_mul(32) < total_splits));
     let mut suffix_viable_masks = if sparse_suffix_direct {
         Vec::new()
     } else {
@@ -4785,14 +4608,13 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             .unwrap_or(true);
     if sparse_suffix_direct {
         let index = adjacent_pair_index.as_ref().expect("checked above");
-        let vocab_entries = vocab.entries_map().iter().collect::<Vec<_>>();
         let mut splits = Vec::<(usize, usize, u64)>::with_capacity(feasible_split_work);
         for left in 0u8..=u8::MAX {
             for right in feasible_follow_bytes_by_last_byte[left as usize].iter() {
                 for &packed in index.occurrences_for_pair(left, right) {
                     let entry_index = (packed >> 32) as usize;
                     let split_after = packed as u32 as usize;
-                    let (&_token_id, bytes) = vocab_entries[entry_index];
+                    let bytes = index.bytes_for_entry(entry_index);
                     candidate_splits += 1;
                     let matched = reset_action(&mut prefix_scanner, dense_action)
                         .suffix_word(continuation_reset_state, &bytes[split_after + 1..]);
@@ -4811,7 +4633,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             .as_ref()
             .expect("prepared suffix trie route requires a cached artifact");
         debug_assert_eq!(trie.parents.len(), trie.incoming_bytes.len());
-        debug_assert_eq!(trie.split_nodes.len(), index.total_splits);
+        debug_assert_eq!(trie.split_nodes.len(), index.total_splits());
 
         // Node IDs are created only after their parent, so one forward pass is
         // an exact shared execution of every suffix prefix from the reset state.
@@ -4827,13 +4649,13 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         );
 
         let token_continuations_needed =
-            per_token_continuations_needed.get_or_insert_with(|| vec![false; vocab.len()]);
+            per_token_continuations_needed.get_or_insert_with(|| vec![false; words.len()]);
         for left in 0u8..=u8::MAX {
             for right in feasible_follow_bytes_by_last_byte[left as usize].iter() {
                 for &packed in index.occurrences_for_pair(left, right) {
                     let entry_index = (packed >> 32) as usize;
                     let split_after = packed as u32 as usize;
-                    let split_index = index.entry_split_offsets[entry_index] + split_after;
+                    let split_index = split_offsets[entry_index] + split_after;
                     let node = trie.split_nodes[split_index] as usize;
                     if node != 0 {
                         let parent = trie.parents[node] as usize;
@@ -4867,7 +4689,6 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             );
         }
     } else if parallel_dense_suffix {
-        let vocab_entries = vocab.entries_map().iter().collect::<Vec<_>>();
         // Each token owns one disjoint interval of `suffix_viable_masks`, so the
         // suffix proof is embarrassingly parallel.  Compute several token
         // intervals per Rayon worker into private buffers, then copy them back
@@ -4875,11 +4696,11 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         // the only cross-token aggregate is OR (`any_viable_suffix`) and the
         // count of inspected feasible splits.
         let workers = rayon::current_num_threads().max(1);
-        let token_chunk_size = vocab_entries
+        let token_chunk_size = words
             .len()
             .div_ceil(workers.saturating_mul(4))
             .max(64);
-        let chunk_results = vocab_entries
+        let chunk_results = words
             .par_chunks(token_chunk_size)
             .enumerate()
             .map(|(chunk_index, entries)| {
@@ -4889,7 +4710,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 let mut local_masks = vec![0u64; split_end - split_base];
                 let mut local_candidate_splits = 0usize;
                 let mut local_any_viable_suffix = false;
-                for (entry_offset, (_token_id, bytes)) in entries.iter().enumerate() {
+                for (entry_offset, bytes) in entries.iter().enumerate() {
                     let token_index = first_token + entry_offset;
                     let token_split_start = split_offsets[token_index];
                     for split_after in 0..bytes.len().saturating_sub(1) {
@@ -4919,24 +4740,23 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         }
     } else if words_per_mask == 1 && adjacent_pair_index.is_some() {
         let index = adjacent_pair_index.as_ref().expect("checked above");
-        let vocab_entries = vocab.entries_map().iter().collect::<Vec<_>>();
         for left in 0u8..=u8::MAX {
             for right in feasible_follow_bytes_by_last_byte[left as usize].iter() {
                 for &packed in index.occurrences_for_pair(left, right) {
                     let entry_index = (packed >> 32) as usize;
                     let split_after = packed as u32 as usize;
-                    let (&_token_id, bytes) = vocab_entries[entry_index];
+                    let bytes = index.bytes_for_entry(entry_index);
                     candidate_splits += 1;
                     let matched = reset_action(&mut prefix_scanner, dense_action)
                         .suffix_word(continuation_reset_state, &bytes[split_after + 1..]);
                     any_viable_suffix |= matched != 0;
-                    let split_index = index.entry_split_offsets[entry_index] + split_after;
+                    let split_index = split_offsets[entry_index] + split_after;
                     suffix_viable_masks[split_index] = matched;
                 }
             }
         }
     } else if words_per_mask == 1 {
-        for (token_index, bytes) in vocab.entries_map().values().enumerate() {
+        for (token_index, bytes) in words.iter().enumerate() {
             let split_start = split_offsets[token_index];
             for split_after in 0..bytes.len().saturating_sub(1) {
                 if !split_may_host_boundary(bytes, split_after) {
@@ -4951,7 +4771,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         }
     } else {
         let mut matched = vec![0u64; words_per_mask];
-        for (token_index, bytes) in vocab.entries_map().values().enumerate() {
+        for (token_index, bytes) in words.iter().enumerate() {
             let split_start = split_offsets[token_index];
             for split_after in 0..bytes.len().saturating_sub(1) {
                 if !split_may_host_boundary(bytes, split_after) {
@@ -5055,7 +4875,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         !per_token_boundary_certificate
             || per_token_continuations_needed.as_ref().expect("per-token certificate")[entry]
     };
-    let prepared_prefix = prepared_prefix_trie.as_deref().zip(prepared_prefix_states.as_deref());
+    let prepared_prefix = prepared_prefix_states.as_deref();
     let dense_suffixes = |entry: usize| TokenSuffixes::Dense(
         &suffix_viable_masks[split_offsets[entry] * words_per_mask
             ..split_offsets[entry + 1] * words_per_mask], words_per_mask,
@@ -5080,7 +4900,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     for &packed in index.occurrences_for_pair(left, right) {
                         let entry_index = (packed >> 32) as usize;
                         let split_after = packed as u32 as usize;
-                        let split_index = index.entry_split_offsets[entry_index] + split_after;
+                        let split_index = split_offsets[entry_index] + split_after;
                         let suffix_word = suffix_viable_masks[split_index];
                         if suffix_word != 0 {
                             splits.push((entry_index, split_after, suffix_word));
@@ -5102,7 +4922,6 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             && std::env::var_os("GLRMASK_CLASSIFY_DENSE_WORD_CONTINUATIONS").is_some())
             .then(|| candidate_tokenizer.num_states() as usize);
         if let Some(splits) = sparse.as_ref() {
-            let entries = vocab.entries_map().iter().collect::<Vec<_>>();
             let mut trace = CandidateTrace {
                 scanner: Some(&mut prefix_scanner), prepared_prefix, prefix_words: None, dense: dense_action,
             };
@@ -5114,13 +4933,13 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 let begin = cursor;
                 cursor += 1;
                 while cursor < splits.len() && splits[cursor].0 == entry { cursor += 1; }
-                let (&id, bytes) = entries[entry];
+                let id = aliases[entry][0];
+                let bytes = &words[entry];
                 workspace.token(&mut trace, &plan, id, bytes, split_offsets[entry],
                     TokenSuffixes::Sparse(&splits[begin..cursor]), token_needs_continuations(entry), &mut result);
             }
             result
         } else if parallel_combine {
-            let entries = vocab.entries_map().iter().collect::<Vec<_>>();
             // Publish the same prefix observation once, then run independent
             // token recurrences in parallel using the immutable reset action.
             let mut prefix_words = vec![0u64; total_splits];
@@ -5128,7 +4947,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 let mut trace = CandidateTrace {
                     scanner: Some(&mut prefix_scanner), prepared_prefix, prefix_words: None, dense: dense_action,
                 };
-                for (entry, (_, bytes)) in entries.iter().enumerate() {
+                for (entry, bytes) in words.iter().enumerate() {
                     let mut prefix = prefix_start;
                     let limit = dense_suffixes(entry).limit();
                     let base = split_offsets[entry];
@@ -5138,14 +4957,14 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     }
                 }
             }
-            entries.par_iter().enumerate().fold(
+            words.par_iter().enumerate().fold(
                 || (BoundaryWorkspace::<u64>::new(&plan, Some(candidate_tokenizer.num_states() as usize)),
                     BoundaryResult::new(&plan, false)),
-                |(mut workspace, mut result), (entry, &(id, bytes))| {
+                |(mut workspace, mut result), (entry, bytes)| {
                     let mut trace = CandidateTrace {
                         scanner: None, prepared_prefix: None, prefix_words: Some(&prefix_words), dense: dense_action,
                     };
-                    workspace.token(&mut trace, &plan, *id, bytes, split_offsets[entry],
+                    workspace.token(&mut trace, &plan, aliases[entry][0], bytes, split_offsets[entry],
                         dense_suffixes(entry), token_needs_continuations(entry), &mut result);
                     (workspace, result)
                 },
@@ -5157,8 +4976,8 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             let mut workspace = BoundaryWorkspace::<u64>::new(&plan, dense_slots);
             let mut result = BoundaryResult::new(&plan, collect_witnesses);
             let omit_all_continuations = !collect_witnesses && dense_action.is_some() && single_boundary_certified;
-            for (entry, (&id, bytes)) in vocab.entries_map().iter().enumerate() {
-                workspace.token(&mut trace, &plan, id, bytes, split_offsets[entry],
+            for (entry, bytes) in words.iter().enumerate() {
+                workspace.token(&mut trace, &plan, aliases[entry][0], bytes, split_offsets[entry],
                     dense_suffixes(entry), !omit_all_continuations && token_needs_continuations(entry), &mut result);
             }
             result
@@ -5169,8 +4988,8 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         };
         let mut workspace = BoundaryWorkspace::<Box<[u64]>>::new(&plan, None);
         let mut result = BoundaryResult::new(&plan, collect_witnesses);
-        for (entry, (&id, bytes)) in vocab.entries_map().iter().enumerate() {
-            workspace.token(&mut trace, &plan, id, bytes, split_offsets[entry],
+        for (entry, bytes) in words.iter().enumerate() {
+            workspace.token(&mut trace, &plan, aliases[entry][0], bytes, split_offsets[entry],
                 dense_suffixes(entry), true, &mut result);
         }
         result
@@ -6545,6 +6364,8 @@ mod tests {
     use crate::ds::bitset::BitSet;
     use crate::ds::u8set::U8Set;
     use crate::Vocab;
+use crate::vocab::LexicalVocabulary;
+use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 
     fn reference_bytesets(tokenizer: &Tokenizer, num_terminals: u32) -> SharedClassifyBytesets {
         let nt = num_terminals as usize;
@@ -6601,6 +6422,21 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_pairs_project_to_every_original_alias() {
+        use super::vocab_tokens_with_adjacent_pairs;
+        let vocab = Vocab::from_entries_unchecked(vec![
+            (9, b"cab".to_vec()), (1, b"x".to_vec()), (4, b"cab".to_vec()),
+            (6, b"ab".to_vec()), (12, b"ba".to_vec()),
+        ]);
+        let mut pairs = [crate::ds::u8set::U8Set::empty(); 256];
+        pairs[b'a' as usize].insert(b'b');
+        assert_eq!(vocab_tokens_with_adjacent_pairs(&vocab, &pairs), vec![4, 6, 9]);
+        let index = vocab_adjacent_pair_index(&vocab);
+        assert_eq!(index.occurrences_for_pair(b'a', b'b').len(), 2);
+        assert_eq!(index.total_splits(), 4);
+    }
+
+    #[test]
     fn prepared_suffix_trie_matches_scalar_dense_suffix_execution() {
         let vocab = Vocab::from_entries_unchecked(vec![
             (0, b"zbc".to_vec()),
@@ -6641,8 +6477,9 @@ mod tests {
         );
         let split_index = vocab_adjacent_pair_index(&vocab);
 
-        for (entry_index, bytes) in vocab.entries_map().values().enumerate() {
-            let split_base = split_index.entry_split_offsets[entry_index];
+        for (&id, bytes) in vocab.entries_map() {
+            let entry_index = split_index.lexical.original_to_ordered()[id as usize] as usize;
+            let split_base = split_index.lexical.split_offsets()[entry_index];
             for split_after in 0..bytes.len().saturating_sub(1) {
                 let mut state = reset;
                 let mut scalar_matched = 0u64;
