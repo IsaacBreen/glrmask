@@ -165,31 +165,12 @@ fn build_identity_common(
         internal_to_originals: groups,
     };
     let map_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let length_count = |bound| vocab.entries_map().values().filter(|w| w.len() > bound).count();
-    // The private common-builder transport accepts a map regardless of whether
-    // it was obtained by optional compression or by exact identity refinement.
-    // Keep that distinction at this typed public entry point, not in callers.
-    let shared = l2p::SharedL2pEquivalence {
-        id_map: InternalIdMap { tokenizer_states: states, vocab_tokens: tokens,
-            deferred_vocab_singleton_original_ids: None },
-        id_map_ms: map_ms,
-        profile: l2p::equivalence_analysis::combined::CombinedEquivalenceProfile {
-            initial_states_considered: scope.initial_states().len(), max_length_skipped: true,
-            max_token_len: vocab.max_token_byte_len(), token_len_gt_4: length_count(4),
-            token_len_gt_8: length_count(8), token_len_gt_16: length_count(16),
-            token_len_gt_32: length_count(32), token_len_gt_64: length_count(64),
-            raw_analysis_base_init_ms: 0.0, analysis_view_build_ms: 0.0,
-            active_mask_filter_ms: 0.0, effective_follows_normalize_ms: 0.0,
-            prepare_inputs_ms: 0.0, byte_class_setup_ms: 0.0,
-            vocab_analysis_dfa_build_ms: 0.0, token_dedup_ms: map_ms,
-            restricted_observation_state_equiv_ms: 0.0, max_length_state_equiv_ms: 0.0,
-            vocab_equiv_ms: 0.0, exact_state_equiv_ms: 0.0, id_map_finalize_ms: 0.0,
-            restricted_observation_reps: n as usize, max_length_reps: n as usize,
-            exact_reps: n as usize, exact_rep_confirmation_used: false,
-        },
+    let id_map = InternalIdMap {
+        tokenizer_states: states, vocab_tokens: tokens,
+        deferred_vocab_singleton_original_ids: None,
     };
     let options = l2p::L2pShardBuildOptions {
-        shared_equivalence: Some(&shared), skip_ti_discovery: true,
+        identity_map: Some(&id_map), skip_ti_discovery: true,
         ti_candidate_groups: None,
         crossing_filter: scope.require_crossing().then_some(l2p::L2pCrossingFilter {
             ownership: scope.ownership(), start_component: scope.start_component(),
@@ -206,7 +187,7 @@ fn build_identity_common(
         &TerminalColoring::identity(active.len()), false, ignore_terminal, grammar,
         &always, &active, disallowed_follows,
         None, None, None, None, None, None, Some(&flat_trans), None,
-        Some(&shared.id_map.tokenizer_states), false,
+        Some(&id_map.tokenizer_states), false,
         Some(scope.initial_states().keep_raw()), Some(&options),
         )
     };
@@ -214,8 +195,8 @@ fn build_identity_common(
         &&crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_EVENT_PIPELINE")
         &&crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_TERMINAL_ALGEBRA"))
         .then(||if let Some(map)=borrowed{l2p::native_identity::try_build_borrowed(tokenizer,vocab,ignore_terminal,grammar,
-            disallowed_follows,Some(&flat_trans),scope,&shared.id_map,map)}else{l2p::native_identity::try_build(tokenizer,vocab,ignore_terminal,grammar,
-            disallowed_follows,Some(&flat_trans),scope,&shared.id_map)}).flatten();
+            disallowed_follows,Some(&flat_trans),scope,&id_map,map)}else{l2p::native_identity::try_build(tokenizer,vocab,ignore_terminal,grammar,
+            disallowed_follows,Some(&flat_trans),scope,&id_map)}).flatten();
     let (mut output, fixed_point)=match direct {
         Some(candidate)=>{
             if borrowed.is_none() && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_DIRECT_IDENTITY").is_some(){

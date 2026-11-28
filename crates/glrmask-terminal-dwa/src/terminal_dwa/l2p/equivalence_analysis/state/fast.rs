@@ -3,7 +3,7 @@
 //! Performs full token-based refinement over the supplied tokenizer states.
 //! Any coarse max-length reduction happens in combined equivalence analysis.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use rayon::prelude::*;
@@ -11,8 +11,6 @@ use rayon::prelude::*;
 use super::super::compat::FlatDfa;
 use super::super::vocab::fast::SharedVocabDfaBase;
 use crate::ds::bitset::BitSet;
-
-/// The result of state equivalence analysis: sets of state IDs that behave identically.
 
 #[derive(Clone, Copy)]
 struct WalkFrame {

@@ -545,7 +545,7 @@ fn prepare_equivalence_inputs<'a>(
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CombinedEquivalenceProfile {
     pub initial_states_considered: usize,
     pub max_length_skipped: bool,
@@ -573,6 +573,23 @@ pub struct CombinedEquivalenceProfile {
     pub max_length_reps: usize,
     pub exact_reps: usize,
     pub exact_rep_confirmation_used: bool,
+}
+
+impl CombinedEquivalenceProfile {
+    pub fn identity(vocab: &Vocab, map: &InternalIdMap) -> Self {
+        let count = map.tokenizer_states.num_internal_ids() as usize;
+        let stats = token_length_stats(vocab.entries_map().values().map(Vec::as_slice));
+        Self {
+            initial_states_considered: count,
+            max_length_skipped: true,
+            max_token_len: vocab.max_token_byte_len(),
+            token_len_gt_4: stats.gt_4, token_len_gt_8: stats.gt_8,
+            token_len_gt_16: stats.gt_16, token_len_gt_32: stats.gt_32,
+            token_len_gt_64: stats.gt_64,
+            restricted_observation_reps: count, max_length_reps: count, exact_reps: count,
+            ..Self::default()
+        }
+    }
 }
 
 struct TokenLengthStats {
@@ -819,7 +836,7 @@ fn prefer_vocab_first_equivalence(token_count: usize, state_count: usize) -> boo
             && token_count.saturating_mul(state_count) >= VOCAB_FIRST_WORK_MIN_PAIRS)
 }
 
-fn token_length_stats(tokens: &[&[u8]]) -> TokenLengthStats {
+fn token_length_stats<'a>(tokens: impl IntoIterator<Item = &'a [u8]>) -> TokenLengthStats {
     let mut stats = TokenLengthStats {
         gt_4: 0,
         gt_8: 0,
@@ -966,7 +983,7 @@ fn try_analyze_equivalences_with_token_position_partition(
     if prepared.token_bytes.is_empty() {
         return None;
     }
-    let token_len_stats = token_length_stats(&prepared.token_bytes);
+    let token_len_stats = token_length_stats(prepared.token_bytes.iter().copied());
     let max_token_len = prepared
         .token_bytes
         .iter()
@@ -1304,7 +1321,7 @@ fn try_analyze_equivalences_with_raw_quotient(
 
     let prepare_inputs_started_at = Instant::now();
     let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
-    let token_len_stats = token_length_stats(&prepared.token_bytes);
+    let token_len_stats = token_length_stats(prepared.token_bytes.iter().copied());
     let prepare_inputs_ms = prepare_inputs_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // The direct raw refinement sees every byte that can occur in this local
@@ -2002,7 +2019,7 @@ fn analyze_vocab_first_transition_prepartition(
 
     let prepare_started_at = Instant::now();
     let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
-    let token_len_stats = token_length_stats(&prepared.token_bytes);
+    let token_len_stats = token_length_stats(prepared.token_bytes.iter().copied());
     let max_token_len = prepared.token_bytes.iter().map(|token| token.len()).max().unwrap_or(0);
     let prepare_inputs_ms = prepare_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -2190,7 +2207,7 @@ fn analyze_equivalences_impl(
 
         let prepare_started_at = Instant::now();
         let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
-        let token_len_stats = token_length_stats(&prepared.token_bytes);
+        let token_len_stats = token_length_stats(prepared.token_bytes.iter().copied());
         let prepare_inputs_ms = prepare_started_at.elapsed().as_secs_f64() * 1000.0;
 
         let token_dedup_started_at = Instant::now();
@@ -3260,7 +3277,7 @@ fn analyze_equivalences_impl(
 
     let prepare_inputs_started_at = Instant::now();
     let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
-    let token_len_stats = token_length_stats(&prepared.token_bytes);
+    let token_len_stats = token_length_stats(prepared.token_bytes.iter().copied());
     let prepare_inputs_ms = prepare_inputs_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let raw_analysis_base_started_at = Instant::now();

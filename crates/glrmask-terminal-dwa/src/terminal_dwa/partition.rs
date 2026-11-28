@@ -1034,7 +1034,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
         )
     });
     let scoped_l2p_options = boundary_scope.map(|scope| super::l2p::L2pShardBuildOptions {
-        shared_equivalence: None,
+        identity_map: None,
         // Scoped boundary TI is attempted only for the narrow pre-certified
         // families above; the ordinary exact witness oracle is still the
         // authority for every actual merge.

@@ -603,23 +603,6 @@ fn quotient_exact_duplicate_states(dwa: DWA) -> DWA {
     DWA::from_parts(new_states, new_start)
 }
 
-/// Seed-independent L2P equivalence result, computed once per link and shared
-/// by every boundary-shard build over the same merged tokenizer.
-///
-/// The analysis depends only on (tokenizer, vocab, disallowed follows,
-/// grammar observation scope, active terminals, initial state map) — never on
-/// the shard's seed-state subset — so shard builds may reuse one instance.
-/// It is always computed with terminal-interchangeability discovery disabled:
-/// TI-off is the exact baseline construction (the strict-reference machinery
-/// validates TI-on against TI-off), and on shard inputs discovery always
-/// aborts anyway, so skipping it changes nothing but the ~2 s cost.
-#[derive(Debug, Clone)]
-pub struct SharedL2pEquivalence {
-    pub id_map: InternalIdMap,
-    pub profile: CombinedEquivalenceProfile,
-    pub id_map_ms: f64,
-}
-
 /// Crossing-path filter for boundary-shard builds (step 2 of the static-link
 /// redesign): keep only NWA paths that emit a terminal owned by a component
 /// other than `start_component`. Terminal ownership comes from the composed
@@ -634,11 +617,9 @@ pub struct L2pCrossingFilter<'a> {
 /// preserves the established single-build behavior exactly.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct L2pShardBuildOptions<'a> {
-    /// Reuse this precomputed equivalence instead of running Step 1. The
-    /// caller must have computed it for the same (tokenizer, vocab,
-    /// disallowed follows, grammar, active terminals, initial state map).
-    /// Implies `skip_ti_discovery`.
-    pub shared_equivalence: Option<&'a SharedL2pEquivalence>,
+    /// An already chosen exact input coordinate for the identity boundary path.
+    /// This is not an alternative equivalence analysis.
+    pub identity_map: Option<&'a InternalIdMap>,
     /// Skip terminal-interchangeability discovery rounds (exact: TI-off is
     /// the baseline construction; discovery aborts on shard inputs).
     pub skip_ti_discovery: bool,
@@ -822,94 +803,6 @@ pub fn scoped_terminal_interchangeability_candidate_groups(
     groups
 }
 
-/// Run only the Step 1 equivalence analysis for a shard build, with the exact
-/// arguments the entry point would use with TI discovery disabled.
-///
-/// This mirrors the Step 1 argument setup in
-/// `build_l2p_id_map_and_terminal_dwa_mode` for the TI-off case (no TI seed,
-/// no precomputed raw observations, analysis-active terminals = the passed
-/// active set). Keep the two in sync; the selected10 shard tests guard the
-/// shared path against drift.
-#[allow(clippy::too_many_arguments)]
-pub fn compute_shared_l2p_equivalence(
-    partition_label: &str,
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    ignore_terminal: Option<TerminalID>,
-    grammar: &AnalyzedGrammar,
-    active_terminals: &[bool],
-    disallowed_follows: &BTreeMap<u32, BitSet>,
-    token_path_disallowed_follows: Option<&BTreeMap<u32, BitSet>>,
-    normalized_token_path_disallowed_follows: Option<&[BitSet]>,
-    shared_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
-    shared_original_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
-    shared_original_vocab_analysis_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
-    flat_trans: Option<&std::sync::Arc<[u32]>>,
-    prebuilt_token_trie: Option<
-        &equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
-    >,
-    initial_state_map: Option<&ManyToOneIdMap>,
-) -> Option<SharedL2pEquivalence> {
-    if vocab.is_empty() {
-        return None;
-    }
-    debug_assert!(
-        !matches!(partition_label, "p7" | "p8"),
-        "shared L2P equivalence does not support token-position partitions",
-    );
-    let id_map_started_at = Instant::now();
-    let equivalence_vocab_dfa_cache = shared_original_vocab_dfa_cache.or(shared_vocab_dfa_cache);
-    let shared_analysis_dfa_cache = shared_original_vocab_analysis_dfa_cache;
-    // TI-off mirror of the entry-point setup: no coalesced follows, no TI
-    // seed, analysis-active terminals = the passed active set.
-    let equivalence_uses_pre_normalized_follows =
-        token_path_disallowed_follows.is_some() && normalized_token_path_disallowed_follows.is_some();
-    let equivalence_disallowed_follows =
-        token_path_disallowed_follows.unwrap_or(disallowed_follows);
-    let equivalence_active_groups = (!grammar.requires_global_terminal_observation)
-        .then_some(active_terminals);
-    let (id_map, profile) = equivalence_analysis::combined::analyze_equivalences_with_group_filter(
-        partition_label,
-        tokenizer,
-        vocab,
-        equivalence_disallowed_follows,
-        ignore_terminal,
-        equivalence_uses_pre_normalized_follows,
-        equivalence_uses_pre_normalized_follows
-            .then_some(normalized_token_path_disallowed_follows)
-            .flatten(),
-        equivalence_active_groups,
-        equivalence_vocab_dfa_cache,
-        shared_analysis_dfa_cache,
-        0.0,
-        flat_trans,
-        initial_state_map,
-        false,
-        None,
-        None,
-        None,
-        prebuilt_token_trie,
-    );
-    let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
-    if l2p_timing_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][l2p_shared_equivalence] partition={} vocab_tokens={} initial_states_considered={} exact_reps={} vocab_equiv_ms={:.3} exact_state_equiv_ms={:.3} id_map_ms={:.3}",
-            partition_label,
-            vocab.entries_map().len(),
-            profile.initial_states_considered,
-            profile.exact_reps,
-            profile.vocab_equiv_ms,
-            profile.exact_state_equiv_ms,
-            id_map_ms,
-        );
-    }
-    Some(SharedL2pEquivalence {
-        id_map,
-        profile,
-        id_map_ms,
-    })
-}
-
 /// Build an L2+ id_map and terminal DWA for the given vocab and terminal set.
 ///
 /// Builds its own id_map via `InternalIdMap::build_with_group_filter` (full DFA-
@@ -1007,14 +900,9 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     if vocab.is_empty() {
         return None;
     }
-    // A shared equivalence forces the TI-off path: it was computed without
-    // discovery, and re-running discovery could only waste ~2 s (its seed
-    // feeds Step 1 alone, which is skipped) or perturb the analysis-active
-    // terminal set the shared map was built under.
+    let identity_map = shard_options.and_then(|options| options.identity_map);
     let skip_ti_discovery = shard_options
-        .is_some_and(|options| options.skip_ti_discovery || options.shared_equivalence.is_some());
-    let shared_equivalence = shard_options.and_then(|options| options.shared_equivalence);
-
+        .is_some_and(|options| options.skip_ti_discovery || identity_map.is_some());
     let total_started_at = Instant::now();
     let num_original_states = tokenizer.num_states() as usize;
     let num_active_terminals = active_terminals.iter().filter(|&&active| active).count();
@@ -1420,12 +1308,8 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     } else {
         equivalence_analysis::combined::analyze_equivalences_with_group_filter
     };
-    // A shared equivalence is the same full exact analysis the shard would
-    // run itself (same tokenizer, vocab, follows, grammar scope, active set),
-    // computed once per link — a cache, not a shortcut, so the note above
-    // still holds. The id_map boundary below reports 0 ms for the reuse.
-    let (mut simplified_id_map, equiv_profile) = match shared_equivalence {
-        Some(shared) => (shared.id_map.clone(), shared.profile.clone()),
+    let (mut simplified_id_map, equiv_profile) = match identity_map {
+        Some(map) => (map.clone(), CombinedEquivalenceProfile::identity(vocab, map)),
         None => analyze_equivalences(
             partition_label,
             tokenizer_for_build,
@@ -1535,10 +1419,8 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     let mut ti_canonicalize_transport_modes_ms = 0.0;
     let mut ti_transport_coordinate_quotient_ms = 0.0;
 
-    // A shared equivalence was computed once per link by the caller; report
-    // 0 here so per-shard id_map time is honest (the once-time is reported
-    // by `compute_shared_l2p_equivalence`'s own profile line).
-    let id_map_ms = if shared_equivalence.is_some() {
+    // The identity entry point accounts for its own map construction.
+    let id_map_ms = if identity_map.is_some() {
         0.0
     } else {
         id_map_started_at.elapsed().as_secs_f64() * 1000.0
@@ -2560,7 +2442,7 @@ mod ti_mre_tests {
         let seed_filter = vec![true; state_count];
         let permitted = vec![vec![0, 1]];
         let options = L2pShardBuildOptions {
-            shared_equivalence: None,
+            identity_map: None,
             skip_ti_discovery: false,
             ti_candidate_groups: Some(&permitted),
             crossing_filter: None,
@@ -2654,7 +2536,7 @@ mod ti_mre_tests {
         let seed_filter = vec![true; state_count];
         let permitted = vec![vec![0, 1]];
         let options = L2pShardBuildOptions {
-            shared_equivalence: None,
+            identity_map: None,
             skip_ti_discovery: false,
             ti_candidate_groups: Some(&permitted),
             crossing_filter: None,
