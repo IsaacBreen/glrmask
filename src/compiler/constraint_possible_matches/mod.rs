@@ -18,14 +18,10 @@ use crate::compiler::constraint_possible_matches::collector::{
 use crate::compiler::pm_profile::elapsed_ms;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap, MappedArtifact};
-use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::{
-    FlatDfa, FlatDfaState, TokenizerView,
-};
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     VocabPartitionDfa,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaFamilies;
-use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::vocab::fast as vocab_equivalence_analysis;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
@@ -240,16 +236,6 @@ struct SweepBuildStats {
     group_label_refs: usize,
     total_intervals: usize,
     total_events: usize,
-}
-
-pub(crate) fn build_internal_token_bytes_from_groups(
-    vocab: &Vocab,
-    internal_to_originals: &[Vec<u32>],
-) -> BTreeMap<u32, Vec<u8>> {
-    internal_to_originals.iter().enumerate().filter_map(|(internal_token_id, originals)| {
-        let bytes = originals.iter().find_map(|original| vocab.entries_map().get(original))?.clone();
-        Some((internal_token_id as u32, bytes))
-    }).collect()
 }
 
 fn build_ordered_vocab(token_bytes: &BTreeMap<u32, Vec<u8>>) -> OrderedVocab {
@@ -647,569 +633,6 @@ fn range_set_from_u128_mask(mask: u128) -> RangeSetBlaze<u32> {
     RangeSetBlaze::from_iter(ranges)
 }
 
-#[inline]
-fn pm_vocab_equiv_enabled() -> bool {
-    crate::env::var("GLRMASK_PM_VOCAB_EQUIV")
-        .map(|value| {
-            let trimmed = value.trim();
-            trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
-        })
-        .unwrap_or(false)
-}
-
-#[inline]
-fn pm_vocab_equiv_supported(tokenizer: &Tokenizer) -> bool {
-    let _ = tokenizer;
-    true
-}
-
-#[derive(Clone, Copy)]
-struct PmTokenOutcome {
-    terminals: u128,
-    end_state: u32,
-}
-
-#[derive(Clone, Copy)]
-struct NfaPmTokenOutcome {
-    terminal_set: u32,
-    end_config: u32,
-}
-
-#[derive(Default)]
-struct NfaPmAnalysis<'a> {
-    tokenizer: Option<&'a Tokenizer>,
-    config_ids: FxHashMap<Vec<u32>, u32>,
-    configs: Vec<Box<[u32]>>,
-    transitions: FxHashMap<(u32, u8), u32>,
-    terminal_set_ids: FxHashMap<Vec<u64>, u32>,
-    terminal_sets: Vec<Box<[u64]>>,
-    union_cache: FxHashMap<(u32, u32), u32>,
-}
-
-impl<'a> NfaPmAnalysis<'a> {
-    fn new(tokenizer: &'a Tokenizer) -> Self {
-        let mut analysis = Self {
-            tokenizer: Some(tokenizer),
-            ..Self::default()
-        };
-        analysis.intern_terminal_set(Vec::new());
-        analysis
-    }
-
-    #[inline]
-    fn tokenizer(&self) -> &'a Tokenizer {
-        self.tokenizer.expect("NFA PM tokenizer missing")
-    }
-
-    fn intern_config(&mut self, states: Vec<u32>) -> u32 {
-        if let Some(&id) = self.config_ids.get(&states) {
-            return id;
-        }
-        let id = self.configs.len() as u32;
-        self.config_ids.insert(states.clone(), id);
-        self.configs.push(states.into_boxed_slice());
-        id
-    }
-
-    fn config_for_raw_state(&mut self, raw_state: u32) -> u32 {
-        let closure = self.tokenizer().execute_from_state_end_only(&[], raw_state);
-        self.intern_config(closure.to_vec())
-    }
-
-    fn step_config(&mut self, config: u32, byte: u8) -> u32 {
-        if let Some(&target) = self.transitions.get(&(config, byte)) {
-            return target;
-        }
-        let states = self.configs[config as usize].to_vec();
-        let targets = self.tokenizer().step_all(&states, byte);
-        let target = if targets.is_empty() {
-            u32::MAX
-        } else {
-            self.intern_config(targets.to_vec())
-        };
-        self.transitions.insert((config, byte), target);
-        target
-    }
-
-    fn intern_terminal_set(&mut self, words: Vec<u64>) -> u32 {
-        if let Some(&id) = self.terminal_set_ids.get(&words) {
-            return id;
-        }
-        let id = self.terminal_sets.len() as u32;
-        self.terminal_set_ids.insert(words.clone(), id);
-        self.terminal_sets.push(words.into_boxed_slice());
-        id
-    }
-
-    fn matched_terminal_set_for_config(&mut self, config: u32) -> u32 {
-        let word_count = (self.tokenizer().num_terminals() as usize).div_ceil(64);
-        let mut words = vec![0u64; word_count];
-        for &state in self.configs[config as usize].iter() {
-            for terminal in self.tokenizer().matched_terminals_iter(state) {
-                let terminal = terminal as usize;
-                words[terminal >> 6] |= 1u64 << (terminal & 63);
-            }
-        }
-        self.intern_terminal_set(words)
-    }
-
-    fn union_terminal_sets(&mut self, left: u32, right: u32) -> u32 {
-        if left == 0 {
-            return right;
-        }
-        if right == 0 || left == right {
-            return left;
-        }
-        let key = if left < right { (left, right) } else { (right, left) };
-        if let Some(&id) = self.union_cache.get(&key) {
-            return id;
-        }
-        let left_words = self.terminal_sets[left as usize].to_vec();
-        let right_words = &self.terminal_sets[right as usize];
-        let mut words = left_words;
-        if words.len() < right_words.len() {
-            words.resize(right_words.len(), 0);
-        }
-        for (word, &right_word) in words.iter_mut().zip(right_words.iter()) {
-            *word |= right_word;
-        }
-        let id = self.intern_terminal_set(words);
-        self.union_cache.insert(key, id);
-        id
-    }
-
-    fn advance_outcomes(
-        &mut self,
-        parent: &[NfaPmTokenOutcome],
-        segment: &[u8],
-    ) -> Vec<NfaPmTokenOutcome> {
-        let mut child = Vec::with_capacity(parent.len());
-        for &outcome in parent {
-            let mut terminal_set = outcome.terminal_set;
-            let mut current_config = outcome.end_config;
-            if current_config != u32::MAX {
-                for &byte in segment {
-                    current_config = self.step_config(current_config, byte);
-                    if current_config == u32::MAX {
-                        break;
-                    }
-                    let matched = self.matched_terminal_set_for_config(current_config);
-                    terminal_set = self.union_terminal_sets(terminal_set, matched);
-                }
-            }
-            child.push(NfaPmTokenOutcome {
-                terminal_set,
-                end_config: current_config,
-            });
-        }
-        child
-    }
-}
-
-struct NfaPmVocabEquivBuilder<'a, 'b> {
-    ordered_vocab: &'a OrderedVocab,
-    analysis: &'b mut NfaPmAnalysis<'a>,
-    signature_buckets: FxHashMap<u64, Vec<u32>>,
-    signatures: Vec<Vec<u32>>,
-    original_to_internal: Vec<u32>,
-    internal_to_originals: Vec<Vec<u32>>,
-    representative_original_ids: Vec<u32>,
-}
-
-impl<'a, 'b> NfaPmVocabEquivBuilder<'a, 'b> {
-    fn new(ordered_vocab: &'a OrderedVocab, analysis: &'b mut NfaPmAnalysis<'a>) -> Self {
-        Self {
-            ordered_vocab,
-            analysis,
-            signature_buckets: FxHashMap::default(),
-            signatures: Vec::new(),
-            original_to_internal: vec![u32::MAX; ordered_vocab.original_slot_count],
-            internal_to_originals: Vec::new(),
-            representative_original_ids: Vec::new(),
-        }
-    }
-
-    fn signature_hash(outcomes: &[NfaPmTokenOutcome]) -> u64 {
-        outcomes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, outcome| {
-            mix_pm_signature_word(hash, outcome.terminal_set as u64)
-        })
-    }
-
-    fn intern_signature(&mut self, outcomes: &[NfaPmTokenOutcome]) -> u32 {
-        let hash = Self::signature_hash(outcomes);
-        if let Some(bucket) = self.signature_buckets.get(&hash) {
-            for &signature_id in bucket {
-                let signature = &self.signatures[signature_id as usize];
-                if signature.len() == outcomes.len()
-                    && signature
-                        .iter()
-                        .zip(outcomes.iter())
-                        .all(|(&left, right)| left == right.terminal_set)
-                {
-                    return signature_id;
-                }
-            }
-        }
-        let signature_id = self.signatures.len() as u32;
-        self.signatures.push(outcomes.iter().map(|outcome| outcome.terminal_set).collect());
-        self.signature_buckets.entry(hash).or_default().push(signature_id);
-        signature_id
-    }
-
-    fn record_token(&mut self, ordered_token_id: usize, outcomes: &[NfaPmTokenOutcome]) {
-        let class_id = self.intern_signature(outcomes);
-        let class_idx = class_id as usize;
-        while self.internal_to_originals.len() <= class_idx {
-            self.internal_to_originals.push(Vec::new());
-            self.representative_original_ids.push(u32::MAX);
-        }
-        let Some(originals) = self.ordered_vocab.ordered_to_originals.get(ordered_token_id) else {
-            return;
-        };
-        for &original in originals {
-            if let Some(slot) = self.original_to_internal.get_mut(original as usize) {
-                *slot = class_id;
-            }
-            if self.representative_original_ids[class_idx] == u32::MAX {
-                self.representative_original_ids[class_idx] = original;
-            }
-            self.internal_to_originals[class_idx].push(original);
-        }
-    }
-
-    fn visit(&mut self, node: &VocabPrefixTreeNode, outcomes: &[NfaPmTokenOutcome]) {
-        if node.has_token() {
-            self.record_token(node.token_id(), outcomes);
-        }
-        for (segment, child) in node.iter_children() {
-            let child_outcomes = self.analysis.advance_outcomes(outcomes, segment);
-            self.visit(child, &child_outcomes);
-        }
-    }
-
-    fn finish(mut self) -> ManyToOneIdMap {
-        for originals in &mut self.internal_to_originals {
-            originals.sort_unstable();
-            originals.dedup();
-        }
-        ManyToOneIdMap {
-            original_to_internal: self.original_to_internal,
-            internal_to_originals: self.internal_to_originals,
-            representative_original_ids: self.representative_original_ids,
-        }
-    }
-}
-
-#[inline]
-fn mix_pm_signature_word(hash: u64, word: u64) -> u64 {
-    let mixed = word.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    hash ^ mixed
-        .wrapping_add(hash << 6)
-        .wrapping_add(hash >> 2)
-        .wrapping_mul(0x517c_c1b7_2722_0a95)
-}
-
-fn pm_signature_hash(outcomes: &[PmTokenOutcome]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for outcome in outcomes {
-        hash = mix_pm_signature_word(hash, outcome.terminals as u64);
-        hash = mix_pm_signature_word(hash, (outcome.terminals >> 64) as u64);
-    }
-    hash
-}
-
-fn pm_signature_matches(signature: &[u128], outcomes: &[PmTokenOutcome]) -> bool {
-    signature.len() == outcomes.len()
-        && signature
-            .iter()
-            .zip(outcomes.iter())
-            .all(|(&left, right)| left == right.terminals)
-}
-
-fn intern_pm_token_signature(
-    outcomes: &[PmTokenOutcome],
-    buckets: &mut FxHashMap<u64, Vec<u32>>,
-    signatures: &mut Vec<Vec<u128>>,
-) -> u32 {
-    let hash = pm_signature_hash(outcomes);
-    if let Some(bucket) = buckets.get(&hash) {
-        for &signature_id in bucket {
-            if pm_signature_matches(&signatures[signature_id as usize], outcomes) {
-                return signature_id;
-            }
-        }
-    }
-
-    let signature_id = signatures.len() as u32;
-    let signature = outcomes
-        .iter()
-        .map(|outcome| outcome.terminals)
-        .collect::<Vec<_>>();
-    signatures.push(signature);
-    buckets.entry(hash).or_default().push(signature_id);
-    signature_id
-}
-
-fn advance_pm_token_outcomes(
-    parent: &[PmTokenOutcome],
-    segment: &[u8],
-    byte_transitions: &[Vec<u32>],
-    matched_terminal_masks: &[u128],
-) -> Vec<PmTokenOutcome> {
-    let mut child = Vec::with_capacity(parent.len());
-    for &outcome in parent {
-        let mut terminals = outcome.terminals;
-        let mut current_state = outcome.end_state;
-        if current_state != u32::MAX {
-            for &byte in segment {
-                let next_state = byte_transitions[byte as usize][current_state as usize];
-                if next_state == u32::MAX {
-                    current_state = u32::MAX;
-                    break;
-                }
-                current_state = next_state;
-                terminals |= matched_terminal_masks[current_state as usize];
-            }
-        }
-        child.push(PmTokenOutcome {
-            terminals,
-            end_state: current_state,
-        });
-    }
-    child
-}
-
-struct PmVocabEquivBuilder<'a> {
-    ordered_vocab: &'a OrderedVocab,
-    byte_transitions: &'a [Vec<u32>],
-    matched_terminal_masks: &'a [u128],
-    signature_buckets: FxHashMap<u64, Vec<u32>>,
-    signatures: Vec<Vec<u128>>,
-    original_to_internal: Vec<u32>,
-    internal_to_originals: Vec<Vec<u32>>,
-    representative_original_ids: Vec<u32>,
-}
-
-impl<'a> PmVocabEquivBuilder<'a> {
-    fn new(
-        ordered_vocab: &'a OrderedVocab,
-        byte_transitions: &'a [Vec<u32>],
-        matched_terminal_masks: &'a [u128],
-    ) -> Self {
-        Self {
-            ordered_vocab,
-            byte_transitions,
-            matched_terminal_masks,
-            signature_buckets: FxHashMap::default(),
-            signatures: Vec::new(),
-            original_to_internal: vec![u32::MAX; ordered_vocab.original_slot_count],
-            internal_to_originals: Vec::new(),
-            representative_original_ids: Vec::new(),
-        }
-    }
-
-    fn record_token(&mut self, ordered_token_id: usize, outcomes: &[PmTokenOutcome]) {
-        let class_id = intern_pm_token_signature(
-            outcomes,
-            &mut self.signature_buckets,
-            &mut self.signatures,
-        );
-        let class_idx = class_id as usize;
-        while self.internal_to_originals.len() <= class_idx {
-            self.internal_to_originals.push(Vec::new());
-            self.representative_original_ids.push(u32::MAX);
-        }
-        let Some(originals) = self.ordered_vocab.ordered_to_originals.get(ordered_token_id) else {
-            return;
-        };
-        for &original in originals {
-            if let Some(slot) = self.original_to_internal.get_mut(original as usize) {
-                *slot = class_id;
-            }
-            if self.representative_original_ids[class_idx] == u32::MAX {
-                self.representative_original_ids[class_idx] = original;
-            }
-            self.internal_to_originals[class_idx].push(original);
-        }
-    }
-
-    fn visit(&mut self, node: &VocabPrefixTreeNode, outcomes: &[PmTokenOutcome]) {
-        if node.has_token() {
-            self.record_token(node.token_id(), outcomes);
-        }
-        for (segment, child) in node.iter_children() {
-            let child_outcomes = advance_pm_token_outcomes(
-                outcomes,
-                segment,
-                self.byte_transitions,
-                self.matched_terminal_masks,
-            );
-            self.visit(child, &child_outcomes);
-        }
-    }
-
-    fn finish(mut self) -> ManyToOneIdMap {
-        for originals in &mut self.internal_to_originals {
-            originals.sort_unstable();
-            originals.dedup();
-        }
-        ManyToOneIdMap {
-            original_to_internal: self.original_to_internal,
-            internal_to_originals: self.internal_to_originals,
-            representative_original_ids: self.representative_original_ids,
-        }
-    }
-}
-
-fn compute_pm_vocab_equivalence_map(
-    tokenizer: &Tokenizer,
-    ordered_vocab: &OrderedVocab,
-    trie: &VocabPrefixTree,
-) -> ManyToOneIdMap {
-    if tokenizer.has_epsilon_transitions() {
-        let mut analysis = NfaPmAnalysis::new(tokenizer);
-        let root_outcomes = (0..tokenizer.num_states())
-            .map(|state| NfaPmTokenOutcome {
-                terminal_set: 0,
-                end_config: analysis.config_for_raw_state(state),
-            })
-            .collect::<Vec<_>>();
-        let mut builder = NfaPmVocabEquivBuilder::new(ordered_vocab, &mut analysis);
-        builder.visit(&trie.root, &root_outcomes);
-        return builder.finish();
-    }
-    let num_states = tokenizer.num_states() as usize;
-    let mut byte_transitions = vec![vec![u32::MAX; num_states]; 256];
-    for state_idx in 0..num_states {
-        for (byte, target) in tokenizer.transitions_from(state_idx as u32) {
-            byte_transitions[byte as usize][state_idx] = target;
-        }
-    }
-
-    let mut matched_terminal_masks = Vec::with_capacity(num_states);
-    for state in 0..tokenizer.num_states() {
-        let mut mask = 0u128;
-        for terminal in tokenizer.matched_terminals_iter(state) {
-            if terminal < 128 {
-                mask |= 1u128 << terminal;
-            }
-        }
-        matched_terminal_masks.push(mask);
-    }
-
-    // For a deterministic-component dispatch, the synthetic reset state's PM
-    // behavior is the union of the component-root behaviors.  Equality at all
-    // physical component states therefore implies equality at the dispatch
-    // state, so including it as a dead scalar row would be both unnecessary
-    // and incorrect.
-    let dispatch_start = tokenizer
-        .has_deterministic_dispatch()
-        .then(|| tokenizer.start_state());
-    let root_outcomes = (0..tokenizer.num_states())
-        .filter(|state| Some(*state) != dispatch_start)
-        .map(|state| PmTokenOutcome {
-            terminals: 0,
-            end_state: state,
-        })
-        .collect::<Vec<_>>();
-    let mut builder = PmVocabEquivBuilder::new(
-        ordered_vocab,
-        &byte_transitions,
-        &matched_terminal_masks,
-    );
-    builder.visit(&trie.root, &root_outcomes);
-    builder.finish()
-}
-
-fn compute_pm_vocab_equivalence_map_fast(
-    tokenizer: &Tokenizer,
-    ordered_vocab: &OrderedVocab,
-) -> ManyToOneIdMap {
-    let num_states = tokenizer.num_states() as usize;
-    let mut transitions = vec![u32::MAX; num_states * 256];
-    let states = (0..num_states)
-        .map(|state_idx| {
-            let base = state_idx * 256;
-            for (byte, target) in tokenizer.transitions_from(state_idx as u32) {
-                transitions[base + byte as usize] = target;
-            }
-            FlatDfaState {
-                finalizers: tokenizer
-                    .matched_terminals_iter(state_idx as u32)
-                    .map(|terminal| terminal as usize)
-                    .collect(),
-                // The equivalence signature is based on terminals actually
-                // reached while consuming a token, but the fast walker also
-                // uses future groups to identify genuinely dead states.  An
-                // empty vector here marks every non-final state dead and can
-                // collapse the entire vocabulary into one bogus class.
-                possible_future_group_ids: tokenizer
-                    .possible_future_terminals_iter(state_idx as u32)
-                    .map(|terminal| terminal as usize)
-                    .collect(),
-            }
-        })
-        .collect::<Vec<_>>();
-    let tokenizer_view = TokenizerView {
-        flat_dfa: FlatDfa {
-            states,
-            start_state: tokenizer.start_state() as usize,
-            transitions: Arc::from(transitions),
-        },
-    };
-    let strings = ordered_vocab
-        .ordered_token_bytes
-        .iter()
-        .map(|bytes| bytes.as_slice())
-        .collect::<Vec<_>>();
-    let dispatch_start = tokenizer
-        .has_deterministic_dispatch()
-        .then(|| tokenizer.start_state() as usize);
-    let initial_states = (0..tokenizer.num_states() as usize)
-        .filter(|state| Some(*state) != dispatch_start)
-        .collect::<Vec<_>>();
-    let disallowed_follows = BTreeMap::<u32, BitSet>::new();
-    let classes = vocab_equivalence_analysis::find_vocab_equivalence_classes_with_group_filter(
-        &tokenizer_view,
-        &strings,
-        &initial_states,
-        &disallowed_follows,
-        None,
-        None,
-        None,
-        None,
-    );
-
-    let mut original_to_internal = vec![u32::MAX; ordered_vocab.original_slot_count];
-    let mut internal_to_originals = Vec::new();
-    let mut representative_original_ids = Vec::new();
-    for class in classes {
-        let internal = internal_to_originals.len() as u32;
-        let mut originals = Vec::new();
-        for ordered_id in class {
-            if let Some(ordered_originals) = ordered_vocab.ordered_to_originals.get(ordered_id) {
-                for &original in ordered_originals {
-                    if let Some(slot) = original_to_internal.get_mut(original as usize) {
-                        *slot = internal;
-                    }
-                    originals.push(original);
-                }
-            }
-        }
-        originals.sort_unstable();
-        originals.dedup();
-        let representative = originals.first().copied().unwrap_or(u32::MAX);
-        internal_to_originals.push(originals);
-        representative_original_ids.push(representative);
-    }
-
-    ManyToOneIdMap {
-        original_to_internal,
-        internal_to_originals,
-        representative_original_ids,
-    }
-}
-
 fn used_state_class_ids(state_classes: &[u32]) -> Vec<u32> {
     let mut ids: Vec<u32> = state_classes.iter().copied().filter(|&class_id| class_id != u32::MAX).collect();
     ids.sort_unstable();
@@ -1439,13 +862,6 @@ fn build_possible_match_vocab_and_weights_from_interval_maps(
     let pmv_detail_enabled = crate::env::var("GLRMASK_PROFILE_PMV_DETAIL")
         .map(|value| value == "1")
         .unwrap_or(false);
-
-    if group_pmv_legacy_enabled() {
-        if pmv_detail_enabled {
-            eprintln!("[glrmask/profile][pmv_detail] stage=legacy_expanded enabled=1");
-        }
-        return build_legacy_possible_match_vocab_and_weights_from_interval_maps(class_maps, state_classes, ordered_vocab);
-    }
 
     let sweep_events_started_at = Instant::now();
     let (events, event_positions, groups, labels_by_id, sweep_build_stats) =
@@ -1975,12 +1391,6 @@ fn validate_group_pmv_outputs(
 
 fn group_pmv_validation_enabled() -> bool {
     crate::env::var("GLRMASK_VALIDATE_GROUP_PMV")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-fn group_pmv_legacy_enabled() -> bool {
-    crate::env::var("GLRMASK_PM_USE_LEGACY_PMV")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
 }
@@ -3152,31 +2562,6 @@ fn attach_structured_dispatch_possible_matches(
     }
 }
 
-pub(crate) fn compute_constraint_possible_matches(
-    tokenizer: &Tokenizer,
-    token_bytes: &BTreeMap<u32, Vec<u8>>,
-    config: ConstraintPossibleMatchesConfig,
-) -> ConstraintPossibleMatchesComputation {
-    let artifacts_and_profile = get_ordered_vocab_trie_artifacts(token_bytes);
-    if config.defer_to_dynamic_mask {
-        let (artifacts, profile) = artifacts_and_profile;
-        emit_ordered_vocab_cache_profile(profile);
-        let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&artifacts);
-        return empty_possible_matches_computation(
-            tokenizer,
-            token_bytes.len(),
-            runtime_dynamic_vocab,
-        );
-    }
-    compute_constraint_possible_matches_with_artifacts(
-        tokenizer,
-        token_bytes.len(),
-        artifacts_and_profile,
-        None,
-        None,
-    )
-}
-
 fn prepared_runtime_dynamic_vocab(
     artifacts: &OrderedVocabTrieArtifacts,
 ) -> &Arc<DynamicMaskVocab> {
@@ -3706,7 +3091,6 @@ fn compute_constraint_possible_matches_with_artifacts(
     tokenizer: &Tokenizer,
     original_token_count: usize,
     artifacts_and_profile: (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile),
-    initial_vocab_map: Option<&ManyToOneIdMap>,
     raw_byte_to_class: Option<&[u8; 256]>,
 ) -> ConstraintPossibleMatchesComputation {
     let pm_started_at = Instant::now();
@@ -3785,7 +3169,8 @@ fn compute_constraint_possible_matches_with_artifacts(
         || (sparse_root_collect_enabled()
             && trie_build_states.len() <= sparse_root_state_limit()
             && root_terminal_union <= sparse_root_terminal_limit());
-    let use_batched_demand_collect = batched_demand_collect_enabled(scalar_dispatch)
+    let use_batched_demand_collect = root_terminal_union <= 128
+        && batched_demand_collect_enabled(scalar_dispatch)
         && (!tokenizer.has_epsilon_transitions() || scalar_dispatch);
 
     let mut trie_class_result = if use_batched_demand_collect {
@@ -3844,7 +3229,7 @@ fn compute_constraint_possible_matches_with_artifacts(
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(512);
         let powerset_batched =
-            powerset_batched_requested && view_entries.len() <= powerset_batched_max_states;
+            root_terminal_union <= 128 && powerset_batched_requested && view_entries.len() <= powerset_batched_max_states;
         let view_result = if powerset_batched {
             collect_batched_demand_possible_matches_precomputed(
                 &trie.root,
@@ -4033,16 +3418,10 @@ fn compute_constraint_possible_matches_with_artifacts(
     let possible_match_vocab_started_at = Instant::now();
     let (possible_match_vocab, possible_matches) = build_possible_match_vocab_and_weights_from_interval_maps(&trie_class_result.class_maps, &trie_class_result.state_classes, ordered_vocab.as_ref());
 
-    let local_vocab_map = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+    let vocab_tokens = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
         possible_match_vocab.original_to_internal.clone(),
         possible_match_vocab.internal_to_originals.len() as u32,
     );
-    let vocab_tokens = if let Some(initial_vocab_map) = initial_vocab_map {
-        initial_vocab_map.compose(&local_vocab_map)
-    } else {
-        local_vocab_map
-    };
-
     let possible_matches_id_map = InternalIdMap {
         tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
             trie_class_result.state_classes.clone(),
@@ -4102,60 +3481,10 @@ fn compute_constraint_possible_matches_for_vocab_impl(
         );
     }
 
-    if pm_vocab_equiv_enabled() && pm_vocab_equiv_supported(tokenizer) {
-        let (full_artifacts, full_profile) = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
-        let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&full_artifacts);
-        emit_ordered_vocab_cache_profile(full_profile);
-        let vocab_equiv_started_at = Instant::now();
-        let use_naive = crate::env::var("GLRMASK_PM_VOCAB_EQUIV_NAIVE")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-        let pm_vocab_map = if use_naive || tokenizer.has_epsilon_transitions() {
-            compute_pm_vocab_equivalence_map(
-                tokenizer,
-                full_artifacts.ordered_vocab.as_ref(),
-                full_artifacts.trie.as_ref(),
-            )
-        } else {
-            compute_pm_vocab_equivalence_map_fast(tokenizer, full_artifacts.ordered_vocab.as_ref())
-        };
-        if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-            || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
-        {
-            eprintln!(
-                "[glrmask/profile][pm_vocab_equiv] original_tokens={} pm_vocab_classes={} mode={} ms={:.3}",
-                vocab.entries_map().len(),
-                pm_vocab_map.internal_to_originals.len(),
-                if tokenizer.has_epsilon_transitions() {
-                    "nfa_exact"
-                } else if use_naive {
-                    "naive"
-                } else {
-                    "fast"
-                },
-                elapsed_ms(vocab_equiv_started_at),
-            );
-        }
-        let compact_token_bytes =
-            build_internal_token_bytes_from_groups(vocab, &pm_vocab_map.internal_to_originals);
-        let vocab_equiv_ms = elapsed_ms(vocab_equiv_started_at);
-        let mut computation = compute_constraint_possible_matches_with_artifacts(
-            tokenizer,
-            vocab.entries_map().len(),
-            get_ordered_vocab_trie_artifacts(&compact_token_bytes),
-            Some(&pm_vocab_map),
-            raw_byte_to_class,
-        );
-        computation.runtime_dynamic_vocab = runtime_dynamic_vocab;
-        computation.profile.vocab_equiv_ms = vocab_equiv_ms;
-        return computation;
-    }
-
     compute_constraint_possible_matches_with_artifacts(
         tokenizer,
         vocab.entries_map().len(),
         get_ordered_vocab_trie_artifacts_for_vocab(vocab),
-        None,
         raw_byte_to_class,
     )
 }
@@ -4354,7 +3683,6 @@ mod tests {
             &[0, 1, 2, 2],
         );
         assert!(tokenizer.has_deterministic_dispatch());
-        assert!(pm_vocab_equiv_supported(&tokenizer));
 
         let entries = vec![
             (0, b"a".to_vec()),
@@ -4588,32 +3916,28 @@ mod tests {
     }
 
     #[test]
-    fn epsilon_pm_vocab_equivalence_distinguishes_terminals_above_127() {
+    fn demanded_possible_matches_distinguish_terminals_above_127() {
         let mut expressions = Vec::new();
         let mut partitions = Vec::new();
         for terminal in 0..130u32 {
-            expressions.push(Expr::U8Seq(vec![terminal as u8]));
+            let atom = Expr::U8Seq(vec![terminal as u8]);
+            expressions.push(if terminal >= 128 {
+                Expr::Repeat { expr: Box::new(atom), min: 1, max: None }
+            } else {
+                atom
+            });
             partitions.push(terminal % 3);
         }
         let tokenizer = build_tokenizer_from_exprs_partitioned(
-            &expressions,
-            None,
-            &partitions,
+            &expressions, None, &partitions,
         );
-        assert!(tokenizer.has_epsilon_transitions());
-
-        let vocab = Vocab::from_entries_unchecked(vec![(0, vec![128]), (1, vec![129])]);
-        let full_artifacts = get_ordered_vocab_trie_artifacts_for_vocab(&vocab).0;
-        let classes = compute_pm_vocab_equivalence_map(
-            &tokenizer,
-            full_artifacts.ordered_vocab.as_ref(),
-            full_artifacts.trie.as_ref(),
-        );
-
-        assert_ne!(
-            classes.original_to_internal[0],
-            classes.original_to_internal[1],
-            "PM vocab equivalence must include terminal IDs above the old u128 ceiling",
-        );
+        let demand = delayed_terminal_demand(&tokenizer);
+        assert!(demand.terminals.contains(128));
+        assert!(demand.terminals.contains(129));
+        let entries = vec![
+            (0, vec![128]), (1, vec![129]), (2, vec![128, 129]),
+            (3, vec![129, 129]), (4, Vec::new()),
+        ];
+        assert_demanded_pm_matches_direct(&tokenizer, &entries, "high terminal IDs");
     }
 }
