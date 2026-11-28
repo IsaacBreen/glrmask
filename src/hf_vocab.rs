@@ -5,7 +5,7 @@ use toktrie_hf_tokenizers::ByteTokenizer;
 
 /// Hugging Face vocabulary constructors (feature `hf`).
 /// Import this trait alongside `Vocab`. Special and padded IDs have empty
-/// byte spellings. SentencePiece's initial dummy space remains in the bytes.
+/// byte spellings (including toktrie's angle-bracketed added controls). SentencePiece's initial dummy space remains in the bytes.
 pub trait VocabFromTokenizer: Sized {
     /// Loads a serialized Hugging Face tokenizer, optionally padding to the model vocabulary size.
     fn from_tokenizer_json(json: &str, vocab_size: Option<usize>) -> Result<Self>;
@@ -77,11 +77,14 @@ fn extract(json: &str, vocab_size: Option<usize>) -> Result<Vec<(u32, Vec<u8>)>>
     let mut entries = Vec::with_capacity(target);
     for (id, mut bytes) in bytes.into_iter().enumerate() {
         let id = id as u32;
-        // Upstream's marker (0xff) is also a valid ordinary byte. Use
-        // metadata, including ordinary angle-bracketed added tokens.
-        if let Some(&(text, special)) = added.get(&id) {
-            bytes = if special { Vec::new() } else { text.as_bytes().to_vec() };
-        } else if (unk.is_some() && unk == ids.get(&id).copied()) || unk_id == Some(id as u64) {
+        // Mirror toktrie's special classification using metadata, not its
+        // marker byte (0xff can also be the first byte of an ordinary token).
+        // Ordinary additions must retain toktrie's decoder conversion:
+        // Gemma, for example, adds whitespace spellings containing metaspace.
+        let special = added.get(&id).is_some_and(|&(text, special)| {
+            special || (text.starts_with('<') && text.ends_with('>'))
+        }) || (unk.is_some() && unk == ids.get(&id).copied()) || unk_id == Some(id as u64);
+        if special {
             bytes.clear();
         } else if bytes.is_empty() {
             return Err(invalid(format!("no byte spelling for token {id}")));
@@ -139,7 +142,7 @@ mod tests {
         }"#;
         assert_eq!(extract(json, Some(5)).unwrap(), vec![
             (0,b"a".to_vec()), (1,vec![255]), (2,vec![]),
-            (3,b"<ordinary>".to_vec()), (4,vec![]),
+            (3,vec![]), (4,vec![]),
         ]);
         assert!(extract(json, Some(3)).is_err());
         assert!(extract("{}", None).is_err());
