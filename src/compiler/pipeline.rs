@@ -4312,7 +4312,7 @@ fn compile_prepared_with_profile_and_table_construction(
             && flat_trans.num_states() == tokenizer.num_states() as usize
             && env_flag_enabled_by_default("GLRMASK_REUSE_COMPILE_FLAT_TRANSITIONS");
         let prebuilt_tokenizer_fast_transitions = if reuse_compile_flat_transitions {
-            crate::runtime::FastTokenizerTransitions::Classed(flat_trans)
+            crate::runtime::FastTokenizerTransitions::Classed { rows: flat_trans, state_to_row: None }
         } else {
             crate::runtime::FastTokenizerTransitions::default()
         };

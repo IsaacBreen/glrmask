@@ -152,6 +152,12 @@ impl ByteRows {
     pub fn from_tokenizer(tokenizer: &Tokenizer) -> Self {
         ByteRows::from_tokenizer_mapped(tokenizer, |target| target)
     }
+
+    /// Rows in the supplied source order, with unchanged target coordinates.
+    /// The caller owns the original-state to selected-row map.
+    pub fn from_tokenizer_subset(tokenizer: &Tokenizer, states: &[u32]) -> Self {
+        ByteRows::from_tokenizer_states_mapped(tokenizer, Some(states), |target| target)
+    }
 }
 
 impl<C: Copy + PartialEq> ByteRows<C> {
@@ -160,27 +166,43 @@ impl<C: Copy + PartialEq> ByteRows<C> {
     /// the target (including the dead sentinel), never of the source byte.
     pub fn from_tokenizer_mapped(tokenizer: &Tokenizer, encode: impl Fn(u32) -> C + Sync) -> Self
     where C: Send + Sync {
+        Self::from_tokenizer_states_mapped(tokenizer, None, encode)
+    }
+
+    fn from_tokenizer_states_mapped(
+        tokenizer: &Tokenizer,
+        selected: Option<&[u32]>,
+        encode: impl Fn(u32) -> C + Sync,
+    ) -> Self
+    where C: Send + Sync {
         let virtual_rows = tokenizer.has_any_virtual_runtime();
+        let states = selected.map_or(tokenizer.num_states() as usize, <[u32]>::len);
+        let source = |row: usize| selected.map_or(row as u32, |ids| ids[row]);
         let classes = if virtual_rows {
             std::array::from_fn(|byte| byte as u8)
         } else {
-            compute_tokenizer_byte_classes(tokenizer)
+            let mut partition = ColumnPartition::new(&[true; 256], false);
+            for row in 0..states {
+                if partition.complete() { break; }
+                partition.refine(tokenizer.transitions_from(source(row)));
+            }
+            partition.classes
         };
         let representatives = column_representatives(&classes);
         let width = representatives.len();
         use rayon::prelude::*;
-        let states = tokenizer.num_states() as usize;
         let mut values = vec![encode(u32::MAX); states.checked_mul(width).expect("byte row domain")];
-        let build = |(state, output): (usize, &mut [C])| {
+        let build = |(row, output): (usize, &mut [C])| {
+            let state = source(row);
             if virtual_rows || width >= 32 {
-                let mut row = [u32::MAX; 256];
-                tokenizer.fill_transition_row(state as u32, &mut row);
+                let mut raw = [u32::MAX; 256];
+                tokenizer.fill_transition_row(state, &mut raw);
                 for (cell, &byte) in output.iter_mut().zip(&representatives) {
-                    *cell = encode(row[byte as usize]);
+                    *cell = encode(raw[byte as usize]);
                 }
             } else {
                 for (cell, &byte) in output.iter_mut().zip(&representatives) {
-                    *cell = encode(tokenizer.get_transition(state as u32, byte));
+                    *cell = encode(tokenizer.get_transition(state, byte));
                 }
             }
         };
@@ -712,6 +734,16 @@ mod config_action_tests {
             let rows = ByteRows::from_tokenizer(&tokenizer);
             assert_eq!(rows.num_states(), tokenizer.num_states() as usize);
             assert!(rows.width < 256);
+            let selected = (0..tokenizer.num_states()).rev().filter(|state| state % 2 == 0).collect::<Vec<_>>();
+            let subset = ByteRows::from_tokenizer_subset(&tokenizer, &selected);
+            assert_eq!(subset.num_states(), selected.len());
+            for (row, state) in selected.into_iter().enumerate() {
+                let mut expected = [u32::MAX; 256];
+                tokenizer.fill_transition_row(state, &mut expected);
+                for (byte, target) in expected.into_iter().enumerate() {
+                    assert_eq!(subset.trans(row, byte), target);
+                }
+            }
             for state in 0..tokenizer.num_states() {
                 let mut expected = [u32::MAX; 256];
                 tokenizer.fill_transition_row(state, &mut expected);

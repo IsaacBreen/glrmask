@@ -8363,35 +8363,28 @@ impl Constraint {
         if tokenizer.has_packed_runtime_transitions() {
             return FastTokenizerTransitions::Fallback(num_states as usize);
         }
-        let has_compressed =
-            (0..num_states).any(|state| tokenizer.has_compressed_transition_state(state));
-        if !has_compressed {
-            return FastTokenizerTransitions::Classed(
-                crate::automata::lexer::observation::ByteRows::from_tokenizer(tokenizer),
-            );
+        use crate::automata::lexer::observation::ByteRows;
+        if !(0..num_states).any(|state| tokenizer.has_compressed_transition_state(state)) {
+            return FastTokenizerTransitions::Classed {
+                rows: ByteRows::from_tokenizer(tokenizer),
+                state_to_row: None,
+            };
         }
 
-        let dense_states = (0..num_states)
-            .filter(|&state| !tokenizer.has_compressed_transition_state(state))
-            .collect::<Vec<_>>();
-        let dense_rows = if rayon::current_num_threads() == 1 {
-            dense_states
-                .iter()
-                .map(|&state| *tokenizer.transition_row(state))
-                .collect::<Vec<_>>()
-        } else {
-            dense_states
-                .par_iter()
-                .map(|&state| *tokenizer.transition_row(state))
-                .collect::<Vec<_>>()
-        };
-        let mut state_to_dense_row = vec![u32::MAX; num_states as usize];
-        for (row, &state) in dense_states.iter().enumerate() {
-            state_to_dense_row[state as usize] = row as u32;
+        let mut state_to_row = vec![u32::MAX; num_states as usize];
+        let mut selected = Vec::new();
+        for state in 0..num_states {
+            if !tokenizer.has_compressed_transition_state(state) {
+                state_to_row[state as usize] = selected.len() as u32;
+                selected.push(state);
+            }
         }
-        FastTokenizerTransitions::Hybrid {
-            state_to_dense_row,
-            dense_rows,
+        if selected.is_empty() {
+            return FastTokenizerTransitions::Fallback(num_states as usize);
+        }
+        FastTokenizerTransitions::Classed {
+            rows: ByteRows::from_tokenizer_subset(tokenizer, &selected),
+            state_to_row: Some(Arc::from(state_to_row)),
         }
     }
 

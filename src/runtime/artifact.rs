@@ -1271,7 +1271,12 @@ pub(crate) type IndexedDagDenseTransitions = Vec<IndexedDagDenseTransitionRow>;
 
 #[derive(Debug, Clone)]
 pub(crate) enum FastTokenizerTransitions {
-    Classed(ByteRows),
+    Classed {
+        rows: ByteRows,
+        /// Absent for the identity source coordinate. Missing entries use
+        /// the canonical tokenizer rather than an invented cached row.
+        state_to_row: Option<Arc<[u32]>>,
+    },
     /// Compact exact byte-class DFA rows for tokenizers with fewer than 32,768
     /// states. The high bit marks a target state with at least one finalizer;
     /// u16::MAX is the dead-transition sentinel.
@@ -1291,10 +1296,7 @@ pub(crate) enum FastTokenizerTransitions {
     /// Runtime tokenizer already owns an allocation-light exact transition
     /// table; call through instead of rebuilding a second dense table.
     Fallback(usize),
-    Hybrid {
-        state_to_dense_row: Vec<u32>,
-        dense_rows: Vec<[u32; 256]>,
-    },
+
 }
 
 impl Default for FastTokenizerTransitions {
@@ -1415,13 +1417,15 @@ impl FastTokenizerTransitions {
         byte: u8,
     ) -> u32 {
         match self {
-            Self::Classed(rows) => {
-                if (state as usize) < rows.num_states() {
-                    rows.trans(state as usize, byte as usize)
+            Self::Classed { rows, state_to_row } => {
+                let row = state_to_row.as_ref().map_or(state, |map|
+                    map.get(state as usize).copied().unwrap_or(u32::MAX));
+                if (row as usize) < rows.num_states() {
+                    rows.trans(row as usize, byte as usize)
                 } else {
                     tokenizer.get_transition(state, byte)
                 }
-            },
+            }
             Self::Flat16 { transitions, .. } => {
                 if state as usize >= transitions.num_states() {
                     return tokenizer.get_transition(state, byte);
@@ -1437,33 +1441,17 @@ impl FastTokenizerTransitions {
                 if cell == u32::MAX { u32::MAX } else { cell & 0x7fff_ffff }
             }
             Self::Fallback(_) => tokenizer.get_transition(state, byte),
-            Self::Hybrid {
-                state_to_dense_row,
-                dense_rows,
-            } => {
-                let dense = state_to_dense_row
-                    .get(state as usize)
-                    .copied()
-                    .unwrap_or(u32::MAX);
-                if dense == u32::MAX {
-                    tokenizer.get_transition(state, byte)
-                } else {
-                    dense_rows[dense as usize][byte as usize]
-                }
-            }
+
         }
     }
 
     pub(crate) fn len(&self) -> usize {
         match self {
-            Self::Classed(rows) => rows.num_states(),
+            Self::Classed { rows, state_to_row } => state_to_row.as_ref().map_or(rows.num_states(), |map| map.len()),
             Self::Flat16 { transitions, .. } => transitions.num_states(),
             Self::Flat32 { transitions, .. } => transitions.num_states(),
             Self::Fallback(len) => *len,
-            Self::Hybrid {
-                state_to_dense_row,
-                ..
-            } => state_to_dense_row.len(),
+
         }
     }
 }
