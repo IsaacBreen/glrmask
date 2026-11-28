@@ -258,20 +258,13 @@ pub fn refine_observation_classes(
     }
 
     let views = inputs.iter().map(|map| MembershipView::new(map)).collect::<Vec<_>>();
-    let (mut result, signatures) = partition_observation_domain(
-        (0..num_originals).map(|original| original as u32), inputs.len(),
-        |original, key| {
-            for (value, view) in key.iter_mut().zip(&views) {
-                *value = view.class(original);
-            }
-        },
+    partition_observation_domain(
+        (0..num_originals).map(|original| original as u32),
+        &views,
         Some(num_originals),
         if allow_unmapped { Unobserved::Omit } else { Unobserved::Merge },
-    );
-    if lexicographic {
-        reorder_common_classes(signatures, &mut result);
-    }
-    result
+        lexicographic,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -286,30 +279,50 @@ enum Unobserved {
 /// is not equivalent to an unobserved member of the requested domain.
 fn partition_observation_domain(
     originals: impl IntoIterator<Item = u32>,
-    source_count: usize,
-    mut observe: impl FnMut(u32, &mut [u32]),
+    views: &[MembershipView<'_>],
     dense_len: Option<usize>,
     unobserved: Unobserved,
-) -> (ManyToOneIdMap, FxHashMap<Box<[u32]>, u32>) {
-    let mut signatures = FxHashMap::<Box<[u32]>, u32>::default();
-    let mut key = vec![u32::MAX; source_count];
+    lexicographic: bool,
+) -> ManyToOneIdMap {
+    // Terminal routing normally has at most three families. Keep their
+    // signature keys inline, rather than allocating one box per class.
+    if views.len() <= 4 {
+        partition_domain_with_key(originals, views, dense_len, unobserved,
+            lexicographic, [u32::MAX; 4])
+    } else {
+        partition_domain_with_key(originals, views, dense_len, unobserved,
+            lexicographic, vec![u32::MAX; views.len()].into_boxed_slice())
+    }
+}
+
+fn partition_domain_with_key<K: AsRef<[u32]> + AsMut<[u32]> + Clone + Eq + Ord + std::hash::Hash>(
+    originals: impl IntoIterator<Item = u32>,
+    views: &[MembershipView<'_>],
+    dense_len: Option<usize>,
+    unobserved: Unobserved,
+    lexicographic: bool,
+    mut key: K,
+) -> ManyToOneIdMap {
+    let mut signatures = FxHashMap::<K, u32>::default();
     let mut result = ManyToOneIdMap {
         original_to_internal: vec![u32::MAX; dense_len.unwrap_or(0)],
         internal_to_originals: Vec::new(),
         representative_original_ids: Vec::new(),
     };
     for original in originals {
-        observe(original, &mut key);
-        let absent = key.iter().all(|&value| value == u32::MAX);
+        for (value, view) in key.as_mut().iter_mut().zip(views) {
+            *value = view.class(original);
+        }
+        let absent = key.as_ref().iter().all(|&value| value == u32::MAX);
         if absent && matches!(unobserved, Unobserved::Omit) {
             continue;
         }
         let singleton = absent && matches!(unobserved, Unobserved::Singleton);
-        let existing = if singleton { None } else { signatures.get(key.as_slice()).copied() };
+        let existing = if singleton { None } else { signatures.get(&key).copied() };
         let class = existing.unwrap_or_else(|| {
             let class = result.internal_to_originals.len() as u32;
             if !singleton {
-                signatures.insert(key.clone().into_boxed_slice(), class);
+                signatures.insert(key.clone(), class);
             }
             result.internal_to_originals.push(Vec::new());
             result.representative_original_ids.push(original);
@@ -320,7 +333,10 @@ fn partition_observation_domain(
         }
         result.internal_to_originals[class as usize].push(original);
     }
-    (result, signatures)
+    if lexicographic {
+        reorder_common_classes(signatures, &mut result);
+    }
+    result
 }
 
 /// First-original ordering on an explicit sparse vocabulary domain.
@@ -335,15 +351,11 @@ pub fn refine_vocab_observations(
 ) -> ManyToOneIdMap {
     let views = inputs.iter().map(MembershipView::new).collect::<Vec<_>>();
     partition_observation_domain(
-        originals, inputs.len(),
-        |original, key| {
-            for (value, view) in key.iter_mut().zip(&views) {
-                *value = view.class(original);
-            }
-        },
+        originals, &views,
         dense_len,
         if merge_unobserved { Unobserved::Merge } else { Unobserved::Singleton },
-    ).0
+        false,
+    )
 }
 /// A persistent signature prefix, interned once for each distinct
 /// membership extension. An original carries only its current head ID.

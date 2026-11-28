@@ -1724,131 +1724,12 @@ fn common_refine_partition_maps_impl(
     maps: &[ManyToOneIdMap],
     merge_uncovered: bool,
 ) -> ManyToOneIdMap {
-    let force_generic = std::env::var("GLRMASK_VOCAB_PARTITION_GENERIC_REFINE")
-        .ok()
-        .is_some_and(|value| {
-            let value = value.trim();
-            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
-        });
-    // The specialized two-map paths preserve the historical conservative
-    // singleton treatment for uncovered tokens.
-    if !merge_uncovered && !force_generic && maps.len() == 2 {
-        let left_singleton = maps[0].internal_to_originals.iter().all(|class| class.len() == 1);
-        let right_singleton = maps[1].internal_to_originals.iter().all(|class| class.len() == 1);
-        let left_full = vocab.entries_map().keys().all(|&token_id| {
-            maps[0]
-                .original_to_internal
-                .get(token_id as usize)
-                .is_some_and(|&class| class != u32::MAX)
-        });
-        let right_full = vocab.entries_map().keys().all(|&token_id| {
-            maps[1]
-                .original_to_internal
-                .get(token_id as usize)
-                .is_some_and(|&class| class != u32::MAX)
-        });
-        if left_singleton && right_full {
-            return refine_full_map_with_sparse_singletons(vocab, &maps[1], &maps[0]);
-        }
-        if right_singleton && left_full {
-            return refine_full_map_with_sparse_singletons(vocab, &maps[0], &maps[1]);
-        }
-        let disjoint = vocab.entries_map().keys().all(|&token_id| {
-            let left = maps[0]
-                .original_to_internal
-                .get(token_id as usize)
-                .is_some_and(|&class| class != u32::MAX);
-            let right = maps[1]
-                .original_to_internal
-                .get(token_id as usize)
-                .is_some_and(|&class| class != u32::MAX);
-            !(left && right)
-        });
-        if disjoint {
-            return concatenate_disjoint_partition_maps(vocab, maps);
-        }
-    }
     glrmask_artifact::__private::mapped_artifact::refine_vocab_observations(
         maps, vocab.entries_map().keys().copied(),
         (!merge_uncovered).then(|| vocab.max_token_id() as usize + 1),
         merge_uncovered,
     )
 }
-fn refine_full_map_with_sparse_singletons(
-    vocab: &Vocab,
-    full: &ManyToOneIdMap,
-    singleton: &ManyToOneIdMap,
-) -> ManyToOneIdMap {
-    let mut original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
-    let mut internal_to_originals = Vec::<Vec<u32>>::new();
-    let mut representative_original_ids = Vec::<u32>::new();
-    for class in &full.internal_to_originals {
-        let mut ordinary = Vec::new();
-        for &token_id in class {
-            let is_singleton = singleton
-                .original_to_internal
-                .get(token_id as usize)
-                .is_some_and(|&mapped| mapped != u32::MAX);
-            if is_singleton {
-                let internal = internal_to_originals.len() as u32;
-                original_to_internal[token_id as usize] = internal;
-                representative_original_ids.push(token_id);
-                internal_to_originals.push(vec![token_id]);
-            } else {
-                ordinary.push(token_id);
-            }
-        }
-        if !ordinary.is_empty() {
-            let internal = internal_to_originals.len() as u32;
-            for &token_id in &ordinary {
-                original_to_internal[token_id as usize] = internal;
-            }
-            representative_original_ids.push(ordinary[0]);
-            internal_to_originals.push(ordinary);
-        }
-    }
-    ManyToOneIdMap {
-        original_to_internal,
-        internal_to_originals,
-        representative_original_ids,
-    }
-}
-
-fn concatenate_disjoint_partition_maps(
-    vocab: &Vocab,
-    maps: &[ManyToOneIdMap],
-) -> ManyToOneIdMap {
-    let mut original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
-    let mut internal_to_originals = Vec::<Vec<u32>>::new();
-    let mut representative_original_ids = Vec::<u32>::new();
-    for map in maps {
-        for class in &map.internal_to_originals {
-            let internal = internal_to_originals.len() as u32;
-            for &token_id in class {
-                debug_assert_eq!(original_to_internal[token_id as usize], u32::MAX);
-                original_to_internal[token_id as usize] = internal;
-            }
-            if let Some(&representative) = class.first() {
-                representative_original_ids.push(representative);
-                internal_to_originals.push(class.clone());
-            }
-        }
-    }
-    for &token_id in vocab.entries_map().keys() {
-        if original_to_internal[token_id as usize] == u32::MAX {
-            let internal = internal_to_originals.len() as u32;
-            original_to_internal[token_id as usize] = internal;
-            representative_original_ids.push(token_id);
-            internal_to_originals.push(vec![token_id]);
-        }
-    }
-    ManyToOneIdMap {
-        original_to_internal,
-        internal_to_originals,
-        representative_original_ids,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1908,6 +1789,26 @@ mod tests {
         assert_ne!(class_for(0), class_for(1));
         assert_eq!(class_for(2), class_for(3));
         assert_eq!(merged.num_internal_ids(), 3);
+    }
+
+    #[test]
+    fn conservative_vocab_refinement_uses_sparse_memberships_and_keeps_unseen_singletons() {
+        let vocab = Vocab::from_entries_unchecked([2, 7, 9, 11, 18, 22, 31]
+            .into_iter().map(|id| (id, vec![id as u8])).collect());
+        let left = ManyToOneIdMap {
+            original_to_internal: Vec::new(),
+            internal_to_originals: vec![vec![2, 7, 9]],
+            representative_original_ids: vec![2],
+        };
+        let right = ManyToOneIdMap {
+            original_to_internal: Vec::new(),
+            internal_to_originals: vec![vec![7, 9], vec![11, 18]],
+            representative_original_ids: vec![7, 11],
+        };
+        let result = common_refine_partition_maps_impl(&vocab, &[left, right], false);
+        assert_eq!(result.internal_to_originals, [vec![2], vec![7,9], vec![11,18], vec![22], vec![31]]);
+        assert_eq!(result.original_to_internal[0], u32::MAX);
+        assert_eq!(result.original_to_internal[9], 1);
     }
 
     #[test]
