@@ -59,7 +59,9 @@ while True:
 
 ## Composing grammars
 
-GLRMask compiles grammars in parts and links them later. A `Module` is a grammar with named externs. Bind each extern to another grammar, a compiled constraint or a token set, then compile. Parts that are already compiled are reused, so linking avoids recompiling them from scratch.
+In a typical serving setup, a grammar constraint is one main grammar with smaller grammars nested inside it, some of which, like tool schemas, change from request to request. GLRMask is built to make this kind of composition cheap. Like modules in a program, grammars can be written and compiled as separate parts and combined later.
+
+A server compiles its main grammar once as a `Module` with named externs. Each tool's schema is compiled on its own, in parallel or on another machine. Per request, GLRMask composes the main grammar with the compiled schemas by filling in the externs. Resolving the interactions between the grammars requires some extra *boundary* work. However, since this work is usually small compared with compiling the grammars themselves, composition remains cheap even when the grammars are large.
 
 ```python
 # Token ID -> exact bytes from tokenizer

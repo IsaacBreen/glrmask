@@ -114,7 +114,7 @@ def document(flavor):
                               install(flavor, '## Installation', MSRV if flavor == 'rust' else ''), '## Usage\n\n' + read('usage'),
                               quickstart(flavor, '## Quickstart'), composition_section(languages=(flavor,)), more, read('native-bindings'), LICENSE]) + '\n'
     return '\n\n'.join(['# GLRMask', NOTICE, read('introduction').replace('with extremely low tail latency', 'with low tail latency') if flavor == 'github' else read('introduction'), links(flavor),
-                          '## Benchmarks\n\n' + benchmark_body(flavor), getting_started(flavor), composition_section(),
+                          '## Benchmarks\n\n' + benchmark_body(flavor), getting_started(flavor), composition_section() + '\n\nSee the [guide](' + REPO + '/blob/v' + tomllib.loads((ROOT / 'Cargo.toml').read_text(encoding='utf-8'))['package']['version'] + '/GUIDE.md#composing-grammars) for the API.',
                           '## How it works\n\n' + read('how-it-works'), LICENSE]) + '\n'
 
 
