@@ -19,7 +19,6 @@ use crate::automata::lexer::compile::{
     build_regex_partitioned_with_options,
     build_regex_with_profile_labels,
     compile_terminal_expr_dfa,
-    compile_terminal_expression_pair_with_structural_map,
     compile_terminal_expression_pair_with_vocabulary_token_quotient,
     max_direct_bounded_suffix_state_count_estimate,
     expression_contains_large_bounded_repeat,
@@ -28,7 +27,6 @@ use crate::automata::lexer::compile::{
     expression_supports_deferred_dense_runtime,
     factor_regex_expr, factor_regex_expr_with_shared_cache,
     prepare_bounded_code_mask_component,
-    prepare_partitioned_expression_pair_with_structural_map,
     prepare_partitioned_expression_pair_with_vocabulary_token_quotient,
     virtual_binary_bounded_repeat_intersection_descriptor,
     virtual_large_bounded_repeat_descriptor,
@@ -2181,7 +2179,7 @@ mod lexer_partition_plan_tests {
         )
             .expect("large bounded terminal should be selected for synthesis");
         let (synthesized, full, certified) =
-            prepare_structural_tokenizer_pair(&grammar, &plan, &vocab, true)
+            prepare_structural_tokenizer_pair(&grammar, &plan, &vocab)
                 .expect("nullable structural pair");
         let full = full.finish();
 
@@ -2454,27 +2452,8 @@ fn terminal_expr(terminal: &Terminal) -> Expr {
 
 struct SyntheticTokenizerPlan {
     full_expressions: Vec<Expr>,
-    synthesized_expressions: Vec<Expr>,
-    changed_terminal_ids: Vec<u32>,
-    partition_ids: Vec<u32>,
-    residual_isolation_classes: Vec<Option<u32>>,
-    changed_terminal_count: usize,
+    local: Arc<PartitionLocalPlan>,
     repeat_horizons: Arc<crate::automata::lexer::compile::VocabularyRepeatHorizonCache>,
-}
-
-fn synthetic_state_reduction_is_profitable(full_states: usize, synthesized_states: usize) -> bool {
-    // Certification walks the vocabulary from both state domains. Do not pay
-    // that fixed cost for a modest quotient: the exact full tokenizer is
-    // already the fallback and is usually faster at this scale. Keep this gate
-    // deliberately conservative; it affects only whether the optimization is
-    // attempted, never language correctness.
-    const MIN_ABSOLUTE_STATE_SAVING: usize = 250_000;
-    const MIN_REDUCTION_NUMERATOR: usize = 1;
-    const MIN_REDUCTION_DENOMINATOR: usize = 2;
-
-    full_states.saturating_sub(synthesized_states) >= MIN_ABSOLUTE_STATE_SAVING
-        && synthesized_states.saturating_mul(MIN_REDUCTION_DENOMINATOR)
-            <= full_states.saturating_mul(MIN_REDUCTION_NUMERATOR)
 }
 
 fn structural_state_reduction_is_profitable(
@@ -2742,38 +2721,17 @@ fn plan_synthetic_tokenizer_enabled(
 
     Some(SyntheticTokenizerPlan {
         full_expressions,
-        synthesized_expressions: synthesized.expressions,
-        changed_terminal_ids,
-        partition_ids,
-        residual_isolation_classes,
-        changed_terminal_count,
+        local: Arc::new(PartitionLocalPlan {
+            expressions: Arc::from(synthesized.expressions),
+            partition_ids: Arc::from(partition_ids),
+            residual_isolation_classes: Arc::from(residual_isolation_classes),
+            protected_terminal_ids: Arc::from(changed_terminal_ids),
+            labels: Arc::from((0..grammar.num_terminals())
+                .map(|terminal| grammar.terminal_display_name(terminal)).collect::<Vec<_>>()),
+            global_max_token_len: vocab.max_token_byte_len(),
+        }),
         repeat_horizons,
     })
-}
-
-fn build_tokenizer_from_planned_expressions(
-    grammar: &GrammarDef,
-    plan: &SyntheticTokenizerPlan,
-    expressions: &[Expr],
-) -> Tokenizer {
-    let expressions = expressions
-        .iter()
-        .cloned()
-        .map(factor_regex_expr)
-        .collect::<Vec<_>>();
-    let labels = grammar
-        .terminals
-        .iter()
-        .enumerate()
-        .map(|(index, _)| grammar.terminal_display_name(index as u32))
-        .collect::<Vec<_>>();
-    build_tokenizer_from_exprs_partitioned_impl(
-        &expressions,
-        Some(&labels),
-        &plan.partition_ids,
-        Some(&plan.residual_isolation_classes),
-        false,
-    )
 }
 
 fn build_vocab_partition_ordinary_compile_tokenizer(grammar: &GrammarDef) -> Tokenizer {
@@ -2804,9 +2762,7 @@ enum DeferredRuntimeTokenizer {
     Ready(Tokenizer),
     Partitioned {
         full: DeferredPartitionedRegex,
-        num_terminals: u32,
         expressions: Arc<[Expr]>,
-        num_states: usize,
     },
 }
 
@@ -2814,7 +2770,7 @@ impl DeferredRuntimeTokenizer {
     fn num_states(&self) -> usize {
         match self {
             Self::Ready(tokenizer) => tokenizer.num_states() as usize,
-            Self::Partitioned { num_states, .. } => *num_states,
+            Self::Partitioned { full, .. } => full.num_states(),
         }
     }
 
@@ -2835,12 +2791,10 @@ impl DeferredRuntimeTokenizer {
             Self::Ready(tokenizer) => tokenizer,
             Self::Partitioned {
                 full,
-                num_terminals,
                 expressions,
-                ..
             } => {
                 let mut tokenizer =
-                    full.finish_runtime_tokenizer(num_terminals, expressions);
+                    full.finish_runtime_tokenizer(expressions.len() as u32, expressions);
                 let nullable = tokenizer.isolate_start_state_and_drain_nullable_terminals();
                 debug_assert!(
                     nullable.is_empty(),
@@ -2856,7 +2810,6 @@ fn prepare_structural_tokenizer_pair(
     grammar: &GrammarDef,
     plan: &SyntheticTokenizerPlan,
     vocab: &Vocab,
-    vocabulary_token_quotient: bool,
 ) -> Option<(
     Tokenizer,
     DeferredRuntimeTokenizer,
@@ -2877,7 +2830,7 @@ fn prepare_structural_tokenizer_pair(
         .map(factor_regex_expr)
         .collect::<Vec<_>>();
     let synthesized_expressions = plan
-        .synthesized_expressions
+        .local.expressions
         .iter()
         .cloned()
         .map(factor_regex_expr)
@@ -2888,25 +2841,10 @@ fn prepare_structural_tokenizer_pair(
     let expression_count = full_expressions.len() as u32;
     let (synthesized_regex, full, full_to_synthesized, effective_synthesized_expressions) =
         if full_expressions.len() == 1 {
-            let pair = if vocabulary_token_quotient {
-                compile_terminal_expression_pair_with_vocabulary_token_quotient(
-                    &full_expressions[0],
-                    &synthesized_expressions[0],
-                    vocab,
-                    plan.repeat_horizons.as_ref(),
-                    max_token_len,
-                    &relevant_bytes,
-                )
-            } else {
-                compile_terminal_expression_pair_with_structural_map(
-                    &full_expressions[0],
-                    &synthesized_expressions[0],
-                    vocab,
-                    plan.repeat_horizons.as_ref(),
-                    max_token_len,
-                    &relevant_bytes,
-                )
-            }?;
+            let pair = compile_terminal_expression_pair_with_vocabulary_token_quotient(
+                &full_expressions[0], &synthesized_expressions[0], vocab,
+                plan.repeat_horizons.as_ref(), max_token_len, &relevant_bytes,
+            )?;
             let mut full = pair.full.into_tokenizer(
                 expression_count,
                 Some(Arc::from(full_expressions.clone().into_boxed_slice())),
@@ -2922,47 +2860,18 @@ fn prepare_structural_tokenizer_pair(
                 vec![pair.synthesized_expression],
             )
         } else {
-            let labels = grammar
-                .terminals
-                .iter()
-                .enumerate()
-                .map(|(index, _)| grammar.terminal_display_name(index as u32))
-                .collect::<Vec<_>>();
-            let pair = if vocabulary_token_quotient {
-                prepare_partitioned_expression_pair_with_vocabulary_token_quotient(
-                    &full_expressions,
-                    &synthesized_expressions,
-                    Some(&labels),
-                    &plan.partition_ids,
-                    &plan.residual_isolation_classes,
-                    vocab,
-                    plan.repeat_horizons.as_ref(),
-                    max_token_len,
-                    &relevant_bytes,
-                )
-            } else {
-                prepare_partitioned_expression_pair_with_structural_map(
-                    &full_expressions,
-                    &synthesized_expressions,
-                    Some(&labels),
-                    &plan.partition_ids,
-                    &plan.residual_isolation_classes,
-                    vocab,
-                    plan.repeat_horizons.as_ref(),
-                    max_token_len,
-                    &relevant_bytes,
-                )
-            }?;
-            let full_num_states = pair.full_num_states();
+            let pair = prepare_partitioned_expression_pair_with_vocabulary_token_quotient(
+                &full_expressions, &synthesized_expressions, Some(&plan.local.labels),
+                &plan.local.partition_ids, &plan.local.residual_isolation_classes,
+                vocab, plan.repeat_horizons.as_ref(), max_token_len, &relevant_bytes,
+            )?;
             let (synthesized, full, full_to_synthesized, effective_synthesized_expressions) =
                 pair.into_parts();
             (
                 synthesized,
                 DeferredRuntimeTokenizer::Partitioned {
                     full,
-                    num_terminals: expression_count,
                     expressions: Arc::from(full_expressions.clone().into_boxed_slice()),
-                    num_states: full_num_states,
                 },
                 full_to_synthesized,
                 effective_synthesized_expressions,
@@ -3010,33 +2919,10 @@ pub(crate) fn build_vocab_partition_compile_context(
     // than O3.  It remains the exact fallback when synthesis is unavailable or
     // not profitable.
     let plan = plan_synthetic_tokenizer(grammar, vocab);
-    let partition_local_synthesis_plan = plan.as_ref().map(|plan| {
-        Arc::new(
-            crate::compiler::stages::id_map_and_terminal_dwa::PartitionLocalSynthesisPlan {
-                expressions: Arc::from(plan.synthesized_expressions.clone().into_boxed_slice()),
-                partition_ids: Arc::from(plan.partition_ids.clone().into_boxed_slice()),
-                residual_isolation_classes: Arc::from(
-                    plan.residual_isolation_classes.clone().into_boxed_slice(),
-                ),
-                protected_terminal_ids: Arc::from(
-                    plan.changed_terminal_ids.clone().into_boxed_slice(),
-                ),
-                labels: Arc::from(
-                    grammar
-                        .terminals
-                        .iter()
-                        .enumerate()
-                        .map(|(index, _)| grammar.terminal_display_name(index as u32))
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                ),
-                global_max_token_len: vocab.max_token_byte_len(),
-            },
-        )
-    });
+    let partition_local_synthesis_plan = plan.as_ref().map(|plan| Arc::clone(&plan.local));
 
     let select_pair = |plan: &SyntheticTokenizerPlan| {
-        prepare_structural_tokenizer_pair(grammar, plan, vocab, true).and_then(
+        prepare_structural_tokenizer_pair(grammar, plan, vocab).and_then(
             |(synthesized, full, certified)| {
                 structural_state_reduction_is_profitable(
                     full.num_states(),
@@ -3059,7 +2945,7 @@ pub(crate) fn build_vocab_partition_compile_context(
     // only a compile-strategy choice and cannot change partition semantics.
     const MAX_STRUCTURAL_CERT_LAYERED_STATES: usize = 10_000;
     let structural_pair_preflight_ok = plan.as_ref().is_none_or(|plan| {
-        plan.changed_terminal_ids.iter().copied().all(|terminal| {
+        plan.local.protected_terminal_ids.iter().copied().all(|terminal| {
             max_direct_bounded_suffix_state_count_estimate(
                 &plan.full_expressions[terminal as usize],
             )
@@ -3070,7 +2956,7 @@ pub(crate) fn build_vocab_partition_compile_context(
         && let Some(plan) = plan.as_ref()
     {
         let estimates = plan
-            .changed_terminal_ids
+            .local.protected_terminal_ids
             .iter()
             .copied()
             .filter_map(|terminal| {
@@ -3321,12 +3207,52 @@ struct TokenizerDagLane {
     tokenizer_ready_ms: f64,
 }
 
+/// An exact runtime lexer can share the compiler coordinate or carry one
+/// certified finite-token projection. The proof and its exact owner move
+/// together; neither can exist without the other.
+enum MaskCoordinate {
+    WholeToken(CertifiedFullToSynthesizedStateMap),
+    VirtualResidual(Vec<VirtualResidualMaskProjection>),
+}
+
+impl MaskCoordinate {
+    fn install(self, mask: Tokenizer, vocab: &mut crate::runtime::DynamicMaskVocab) {
+        match self {
+            Self::WholeToken(certified) => vocab.set_mask_tokenizer_quotient(mask, certified.full_to_synthesized),
+            Self::VirtualResidual(projections) => vocab.set_virtual_residuals_mask_projection(mask, projections),
+        }
+    }
+}
+
 struct RuntimeTokenizerDagResult {
-    runtime_tokenizer: Option<Tokenizer>,
-    full_to_synthesized_state_map: Option<CertifiedFullToSynthesizedStateMap>,
-    virtual_residual_projections:
-        Vec<crate::automata::lexer::tokenizer::VirtualResidualMaskProjection>,
+    separate: Option<(Tokenizer, MaskCoordinate)>,
     finish_ms: f64,
+}
+
+impl RuntimeTokenizerDagResult {
+    fn exact<'a>(&'a self, observation: &'a Tokenizer) -> &'a Tokenizer {
+        self.separate.as_ref().map_or(observation, |(exact, _)| exact)
+    }
+
+    fn lift(&self, observation: &ManyToOneIdMap) -> ManyToOneIdMap {
+        if let Some((_, MaskCoordinate::WholeToken(certified))) = &self.separate {
+            certified.lift_internal_tsid_map(observation)
+                .expect("certified full lexer state map must lift the final synthesized TSID map")
+        } else {
+            observation.clone()
+        }
+    }
+
+    fn into_runtime(self, observation: Tokenizer, vocab: &mut crate::runtime::DynamicMaskVocab) -> Tokenizer {
+        match self.separate {
+            None => observation,
+            Some((exact, MaskCoordinate::WholeToken(_))) => exact,
+            Some((exact, projection @ MaskCoordinate::VirtualResidual(_))) => {
+                projection.install(observation, vocab);
+                exact
+            }
+        }
+    }
 }
 
 struct FlatGlobalDagLane {
@@ -3784,21 +3710,17 @@ type PartitionLocalPlan = crate::compiler::stages::id_map_and_terminal_dwa::Part
 enum StaticRuntimeLexer {
     Shared,
     Virtual(Tokenizer, Vec<VirtualResidualMaskProjection>),
-    Deferred(DeferredRuntimeTokenizer, Option<CertifiedFullToSynthesizedStateMap>),
+    Deferred(DeferredRuntimeTokenizer, CertifiedFullToSynthesizedStateMap),
 }
 
 impl StaticRuntimeLexer {
     fn finish(self) -> RuntimeTokenizerDagResult {
         match self {
-            Self::Shared => RuntimeTokenizerDagResult {
-                runtime_tokenizer: None, full_to_synthesized_state_map: None,
-                virtual_residual_projections: Vec::new(), finish_ms: 0.0,
-            },
+            Self::Shared => RuntimeTokenizerDagResult { separate: None, finish_ms: 0.0 },
             Self::Virtual(exact, projections) => RuntimeTokenizerDagResult {
-                runtime_tokenizer: Some(exact), full_to_synthesized_state_map: None,
-                virtual_residual_projections: projections, finish_ms: 0.0,
+                separate: Some((exact, MaskCoordinate::VirtualResidual(projections))), finish_ms: 0.0,
             },
-            Self::Deferred(deferred, full_to_synthesized_state_map) => {
+            Self::Deferred(deferred, certificate) => {
                 let start_delay_ms = crate::env::var("GLRMASK_DEFERRED_RUNTIME_START_DELAY_MS")
                     .ok().and_then(|value| value.parse::<u64>().ok())
                     .unwrap_or_else(|| deferred.default_start_delay_ms());
@@ -3806,15 +3728,14 @@ impl StaticRuntimeLexer {
                     std::thread::sleep(std::time::Duration::from_millis(start_delay_ms));
                 }
                 let started = Instant::now();
-                let runtime_tokenizer = deferred.finish();
+                let exact = deferred.finish();
                 let finish_ms = elapsed_ms(started);
                 if crate::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
                     eprintln!("[glrmask/profile][tokenizer] deferred_runtime_finish states={} transitions={} start_delay_ms={} elapsed_ms={:.3}",
-                        runtime_tokenizer.num_states(), runtime_tokenizer.transition_count(), start_delay_ms, finish_ms);
+                        exact.num_states(), exact.transition_count(), start_delay_ms, finish_ms);
                 }
                 RuntimeTokenizerDagResult {
-                    runtime_tokenizer: Some(runtime_tokenizer), full_to_synthesized_state_map,
-                    virtual_residual_projections: Vec::new(), finish_ms,
+                    separate: Some((exact, MaskCoordinate::WholeToken(certificate))), finish_ms,
                 }
             }
         }
@@ -3825,9 +3746,9 @@ fn prepare_static_lexer(
     prepared_grammar_ref: &GrammarDef,
     vocab: &Vocab,
     synthetic_tokenizer_plan_ref: Option<&SyntheticTokenizerPlan>,
-    partition_local_synthesis_plan_ref: Option<&Arc<PartitionLocalPlan>>,
     analysis_started_at: Instant,
 ) -> (TokenizerDagLane, StaticRuntimeLexer) {
+    let partition_local_synthesis_plan_ref = synthetic_tokenizer_plan_ref.map(|plan| &plan.local);
     let tok_started = Instant::now();
     let static_virtual_pair = if static_virtual_residual_candidate(
         prepared_grammar_ref,
@@ -3847,19 +3768,18 @@ fn prepare_static_lexer(
     let build_global_tokenizer = || {
         if let Some(plan) = synthetic_tokenizer_plan_ref {
             if let Some((synthesized, full, certified)) =
-                prepare_structural_tokenizer_pair(prepared_grammar_ref, plan, vocab, true)
+                prepare_structural_tokenizer_pair(prepared_grammar_ref, plan, vocab)
                     .filter(|(synthesized, full, _)| structural_state_reduction_is_profitable(
                         full.num_states(), synthesized.num_states() as usize,
                     ))
             {
-                return (synthesized, Some(full), Some(certified));
+                return (synthesized, StaticRuntimeLexer::Deferred(full, certified));
             }
         }
-        (build_tokenizer(prepared_grammar_ref), None, None)
+        (build_tokenizer(prepared_grammar_ref), StaticRuntimeLexer::Shared)
     };
     let prebuild_partition_locals = partition_local_synthesis_plan_ref.is_some()
         && crate::compiler::stages::id_map_and_terminal_dwa::prebuild_partition_local_synthesis_enabled();
-    let mut static_virtual_runtime = None;
     let (global_tokenizer_result, prepared_partition_local_tokenizers) =
         if let Some((mask_tokenizer, exact_tokenizer, projections)) = static_virtual_pair {
             if crate::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
@@ -3870,8 +3790,7 @@ fn prepare_static_lexer(
                     mask_tokenizer.transition_count(),
                 );
             }
-            static_virtual_runtime = Some((exact_tokenizer, projections));
-            ((mask_tokenizer, None, None), None)
+            ((mask_tokenizer, StaticRuntimeLexer::Virtual(exact_tokenizer, projections)), None)
         } else if prebuild_partition_locals {
             macro_join(
                 "global_tokenizer_and_partition_locals",
@@ -3888,21 +3807,19 @@ fn prepare_static_lexer(
         } else {
             (build_global_tokenizer(), None)
         };
-    let (mut tokenizer, deferred_runtime_tokenizer, full_to_synthesized_state_map) =
-        global_tokenizer_result;
+    let (mut tokenizer, runtime) = global_tokenizer_result;
+    let synthetic_token_quotient_certified = matches!(&runtime, StaticRuntimeLexer::Deferred(..));
     let tokenizer_construct_ms = elapsed_ms(tok_started);
     let isolate_started = Instant::now();
-    if deferred_runtime_tokenizer.is_none()
-        && static_virtual_runtime.is_none()
-    {
+    if matches!(&runtime, StaticRuntimeLexer::Shared) {
         tokenizer.isolate_start_state_and_drain_nullable_terminals();
     }
     if crate::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some() {
-        if full_to_synthesized_state_map.is_some() {
+        if synthetic_token_quotient_certified {
             eprintln!(
                 "[glrmask/profile][tokenizer] token_quotient_compile_coordinate=synthesized compile_states={} runtime_deferred={}",
                 tokenizer.num_states(),
-                deferred_runtime_tokenizer.is_some(),
+                true,
             );
         }
         eprintln!(
@@ -3914,14 +3831,11 @@ fn prepare_static_lexer(
     }
     let compile_tokenizer_states = tokenizer.num_states() as usize;
     let compile_tokenizer_transitions = tokenizer.transition_count();
-    let synthetic_token_quotient_certified = full_to_synthesized_state_map.is_some();
     let synthetic_observation_states = compile_tokenizer_states;
-    let partition_local_synthesis_plan = deferred_runtime_tokenizer
-        .is_some()
+    let partition_local_synthesis_plan = synthetic_token_quotient_certified
         .then(|| partition_local_synthesis_plan_ref.cloned())
         .flatten();
-    let prepared_partition_local_tokenizers = deferred_runtime_tokenizer
-        .is_some()
+    let prepared_partition_local_tokenizers = synthetic_token_quotient_certified
         .then_some(prepared_partition_local_tokenizers)
         .flatten();
 
@@ -3930,7 +3844,7 @@ fn prepare_static_lexer(
         partition_local_synthesis_plan,
         prepared_partition_local_tokenizers,
         synthetic_candidate_terminals: synthetic_tokenizer_plan_ref
-            .map_or(0, |plan| plan.changed_terminal_count),
+            .map_or(0, |plan| plan.local.protected_terminal_ids.len()),
         synthetic_token_quotient_certified,
         synthetic_observation_states,
         synthetic_certification_ms: 0.0,
@@ -3940,13 +3854,6 @@ fn prepare_static_lexer(
         tokenizer_ready_ms: elapsed_ms(analysis_started_at),
     };
 
-    let runtime = if let Some((exact, projections)) = static_virtual_runtime {
-        StaticRuntimeLexer::Virtual(exact, projections)
-    } else if let Some(deferred) = deferred_runtime_tokenizer {
-        StaticRuntimeLexer::Deferred(deferred, full_to_synthesized_state_map)
-    } else {
-        StaticRuntimeLexer::Shared
-    };
     (tokenizer_lane, runtime)
 }
 
@@ -4174,7 +4081,7 @@ impl TableStage {
         }
         let mut protected = analysis.analyzed_grammar.residual_isolation_classes.keys().copied().collect::<Vec<_>>();
         if let Some(plan) = plan {
-            protected.extend(plan.changed_terminal_ids.iter().copied());
+            protected.extend(plan.local.protected_terminal_ids.iter().copied());
             protected.sort_unstable();
             protected.dedup();
         }
@@ -4234,30 +4141,6 @@ fn compile_prepared_with_profile_and_table_construction(
             elapsed_ms(synthetic_plan_started_at),
         );
     }
-    let partition_local_synthesis_plan = synthetic_tokenizer_plan.as_ref().map(|plan| {
-        Arc::new(
-            crate::compiler::stages::id_map_and_terminal_dwa::PartitionLocalSynthesisPlan {
-                expressions: Arc::from(plan.synthesized_expressions.clone().into_boxed_slice()),
-                partition_ids: Arc::from(plan.partition_ids.clone().into_boxed_slice()),
-                residual_isolation_classes: Arc::from(
-                    plan.residual_isolation_classes.clone().into_boxed_slice(),
-                ),
-                protected_terminal_ids: Arc::from(
-                    plan.changed_terminal_ids.clone().into_boxed_slice(),
-                ),
-                labels: Arc::from(
-                    prepared_grammar
-                        .terminals
-                        .iter()
-                        .enumerate()
-                        .map(|(index, _)| prepared_grammar.terminal_display_name(index as u32))
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                ),
-                global_max_token_len: vocab.max_token_byte_len(),
-            },
-        )
-    });
     let interner_cleanup = crate::ds::weight::defer_weight_interner_cleanup();
     let result = run_with_compile_thread_pool(|| {
         let compile_started_at = Instant::now();
@@ -4277,7 +4160,7 @@ fn compile_prepared_with_profile_and_table_construction(
             || {
                 let (lexer, runtime) = prepare_static_lexer(
                     &prepared_grammar, vocab, synthetic_tokenizer_plan.as_ref(),
-                    partition_local_synthesis_plan.as_ref(), analysis_started_at,
+                    analysis_started_at,
                 );
                 let flat = FlatTransitionsStage::build(&lexer.tokenizer, compile_started_at);
                 (lexer, runtime, flat)
@@ -4339,10 +4222,8 @@ fn compile_prepared_with_profile_and_table_construction(
                 },
             );
         let (table, terminal, templates, parser) = *parser_result?;
-        let RuntimeTokenizerDagResult {
-            mut runtime_tokenizer, full_to_synthesized_state_map, virtual_residual_projections,
-            finish_ms: runtime_tokenizer_finish_ms,
-        } = runtime_tokenizer_result;
+        let runtime_lexer = runtime_tokenizer_result;
+        let runtime_tokenizer_finish_ms = runtime_lexer.finish_ms;
         let TokenizerDagLane {
             tokenizer, synthetic_candidate_terminals, synthetic_token_quotient_certified,
             synthetic_observation_states, synthetic_certification_ms, compile_tokenizer_states,
@@ -4398,11 +4279,11 @@ fn compile_prepared_with_profile_and_table_construction(
             .unwrap_or_else(|_| panic!("analyzed grammar references outlived compile DAG"));
 
         profile.tokenizer_build_ms = tokenizer_build_ms;
-        let final_tokenizer = runtime_tokenizer.as_ref().unwrap_or(&tokenizer);
+        let final_tokenizer = runtime_lexer.exact(&tokenizer);
         profile.tokenizer_final_states = final_tokenizer.num_states() as usize;
         profile.tokenizer_final_transitions = final_tokenizer.transition_count();
         profile.synthetic_candidate_terminals = synthetic_candidate_terminals;
-        profile.synthetic_certified = runtime_tokenizer.is_some();
+        profile.synthetic_certified = runtime_lexer.separate.is_some();
         profile.synthetic_token_quotient_certified = synthetic_token_quotient_certified;
         profile.synthetic_observation_states = synthetic_observation_states;
         profile.synthetic_compile_states = compile_tokenizer_states;
@@ -4509,12 +4390,7 @@ fn compile_prepared_with_profile_and_table_construction(
             "runtime_state_map_and_token_projection",
             || {
                 let started = Instant::now();
-                let map = match full_to_synthesized_state_map.as_ref() {
-                    Some(certified) => certified
-                        .lift_internal_tsid_map(&internal_ids.tokenizer_states)
-                        .expect("certified full lexer state map must lift the final synthesized TSID map"),
-                    None => internal_ids.tokenizer_states.clone(),
-                };
+                let map = runtime_lexer.lift(&internal_ids.tokenizer_states);
                 (map, elapsed_ms(started))
             },
             || {
@@ -4530,9 +4406,7 @@ fn compile_prepared_with_profile_and_table_construction(
                 "[glrmask/profile][runtime_tokenizer_join] finish_ms={:.3} state_map_lift_ms={:.3} runtime_states={} synthesized_states={}",
                 runtime_tokenizer_finish_ms,
                 runtime_state_map_lift_ms,
-                runtime_tokenizer
-                    .as_ref()
-                    .map_or(tokenizer.num_states(), Tokenizer::num_states),
+                runtime_lexer.exact(&tokenizer).num_states(),
                 tokenizer.num_states(),
             );
         }
@@ -4607,7 +4481,7 @@ fn compile_prepared_with_profile_and_table_construction(
         let ignore_expr = prepared_grammar
             .ignore_terminal
             .and_then(|terminal| tokenizer.terminal_expr(terminal).cloned());
-        let reuse_compile_flat_transitions = runtime_tokenizer.is_none()
+        let reuse_compile_flat_transitions = runtime_lexer.separate.is_none()
             && flat_trans.len() == tokenizer.num_states() as usize * 256
             && env_flag_enabled_by_default("GLRMASK_REUSE_COMPILE_FLAT_TRANSITIONS");
         let prebuilt_tokenizer_fast_transitions = if reuse_compile_flat_transitions {
@@ -4620,18 +4494,7 @@ fn compile_prepared_with_profile_and_table_construction(
         )
         .is_none()
         .then(|| composition_grammar_summary_from_analysis(&analyzed_grammar));
-        let mut tokenizer = if virtual_residual_projections.is_empty() {
-            runtime_tokenizer.unwrap_or(tokenizer)
-        } else {
-            let exact = runtime_tokenizer
-                .take()
-                .expect("static virtual residual projection requires an exact runtime tokenizer");
-            dynamic_mask_vocab.set_virtual_residuals_mask_projection(
-                tokenizer,
-                virtual_residual_projections,
-            );
-            exact
-        };
+        let mut tokenizer = runtime_lexer.into_runtime(tokenizer, &mut dynamic_mask_vocab);
         if !crate::automata::lexer::tokenizer::artifact_serde::compact_large_runtime(&mut tokenizer) {
             crate::automata::lexer::tokenizer::artifact_serde::compact_large_fast_runtime(&mut tokenizer);
         }
@@ -5059,12 +4922,7 @@ pub(crate) fn compile_dynamic_owned_unfinalized_with_backend(
 /// coordinate. These two projection forms are mutually exclusive.
 struct DynamicTokenizerLaneResult {
     tokenizer: Tokenizer,
-    mask: Option<DynamicMaskProjection>,
-}
-
-enum DynamicMaskProjection {
-    TokenQuotient(Tokenizer, Vec<u32>),
-    VirtualResidual(Tokenizer, Vec<VirtualResidualMaskProjection>),
+    mask: Option<(Tokenizer, MaskCoordinate)>,
 }
 
 fn finish_dynamic_compile(
@@ -5095,12 +4953,8 @@ fn finish_dynamic_compile(
     )?;
     constraint.inner.install_grammar_markers(&prepared_grammar)
         .map_err(crate::Error::Compilation)?;
-    match lexer.mask {
-        Some(DynamicMaskProjection::TokenQuotient(mask, map)) =>
-            constraint.inner.dynamic_mask_vocab.set_mask_tokenizer_quotient(mask, map),
-        Some(DynamicMaskProjection::VirtualResidual(mask, projections)) =>
-            constraint.inner.dynamic_mask_vocab.set_virtual_residuals_mask_projection(mask, projections),
-        None => {}
+    if let Some((mask, projection)) = lexer.mask {
+        projection.install(mask, &mut constraint.inner.dynamic_mask_vocab);
     }
     if finalize_runtime {
         let _span = crate::dynamic_constraint::remainder_trace::Span::new(
@@ -5149,14 +5003,14 @@ fn build_dynamic_tokenizer_lane(
         .then(|| plan_synthetic_tokenizer(grammar, vocab))
         .flatten()
         .and_then(|plan| {
-            prepare_structural_tokenizer_pair(grammar, &plan, vocab, true)
+            prepare_structural_tokenizer_pair(grammar, &plan, vocab)
         });
     let has_virtual_runtime = virtual_tokenizer.is_some();
     let (mut tokenizer, mask_tokenizer_quotient) =
         if let Some((synthesized, full, certified)) = quotient_pair {
             (
                 full.finish(),
-                Some((synthesized, certified.full_to_synthesized)),
+                Some((synthesized, certified)),
             )
         } else {
             let mut tokenizer = match virtual_tokenizer {
@@ -5192,7 +5046,7 @@ fn build_dynamic_tokenizer_lane(
     } else {
         None
     };
-    if !has_virtual_runtime && tokenizer.has_epsilon_transitions() {
+    if !has_virtual_runtime && mask_tokenizer_quotient.is_none() && tokenizer.has_epsilon_transitions() {
         let source_states = tokenizer.num_states();
         let source_transitions = tokenizer.transition_count();
         let source_state_limit = crate::env::var("GLRMASK_DYNAMIC_LEXER_MAX_SOURCE_STATES")
@@ -5233,8 +5087,8 @@ fn build_dynamic_tokenizer_lane(
         DynamicTokenizerLaneResult {
             tokenizer,
             mask: match (mask_tokenizer_quotient, prebuilt_virtual_residual_projection) {
-                (Some((mask, map)), None) => Some(DynamicMaskProjection::TokenQuotient(mask, map)),
-                (None, Some((mask, projections))) => Some(DynamicMaskProjection::VirtualResidual(mask, projections)),
+                (Some((mask, map)), None) => Some((mask, MaskCoordinate::WholeToken(map))),
+                (None, Some((mask, projections))) => Some((mask, MaskCoordinate::VirtualResidual(projections))),
                 (None, None) => None,
                 (Some(_), Some(_)) => unreachable!("mutually exclusive lexer projections"),
             },
@@ -5487,7 +5341,6 @@ fn compile_dynamic_owned_impl(
                     &prepared_grammar,
                     plan,
                     vocab,
-                    true,
                 )
             });
             let pair_ms = elapsed_ms(pair_started_at);
