@@ -540,50 +540,150 @@ pub(crate) struct PrefixUnions {
     pub columns: Vec<Vec<u32>>,
     pub word_columns: Vec<Vec<usize>>,
 }
-/// Transpose immutable component observations once. Each group is the exact
-/// class support of one nonempty completion observation at a prefix column.
-/// This is independent of future seeds, vocabulary subset and composition.
-pub(crate) struct FirstUnionIndex{
-    context:Arc<CompletionContext>,
-    groups:Vec<Vec<(usize,Vec<u64>)>>,
-    pub groups_count:usize,
-    pub cells:usize,
+/// Optional acceleration of union queries. A column can be scanned
+/// directly from the certified observations, or group equal nonempty
+/// observations by their exact supporting classes. Sparse groups cost
+/// proportional to membership, not the entire class alphabet.
+enum ClassSupport {
+    Sparse(Box<[u32]>),
+    Dense(Box<[u64]>),
 }
-impl FirstUnionIndex{
-    pub fn prepare(context:Arc<CompletionContext>)->Result<Self>{
-        let words=context.data.signatures.len().div_ceil(64);let mut groups=Vec::with_capacity(context.data.columns);let mut cells=0usize;let mut groups_count=0;
-        for col in 0..context.data.columns{
-            let mut index=FxHashMap::<usize,usize>::default();let mut entries=Vec::<(usize,Vec<u64>)>::new();
-            for(class,sig)in context.data.signatures.iter().enumerate(){let observation=sig[col]as usize;if context.data.observations[observation].is_empty(){continue}
-                let id=if let Some(&id)=index.get(&observation){id}else{
-                    cells=cells.checked_add(words).ok_or(Error::ResourceLimit)?;if cells>4_000_000{return Err(Error::ResourceLimit)}
-                    let id=entries.len();index.insert(observation,id);entries.push((observation,vec![0u64;words]));id
-                };entries[id].1[class/64]|=1u64<<(class%64);
-            }
-            groups_count+=entries.len();groups.push(entries);
+
+impl ClassSupport {
+    fn intersects(&self, active: &[u64]) -> bool {
+        match self {
+            Self::Sparse(classes) => classes.iter().any(|&class| class_active(active, class as usize)),
+            Self::Dense(words) => words.iter().zip(active).any(|(&left, &right)| left & right != 0),
         }
-+
-+    pub fn source(&self)    }
-        Ok(Self{context,groups,paths,groups_count,cells})
     }
-    pub fn source(&self)->&Tokenizer{self.context.source()}
-    pub fn query(&self,seeds:&[bool],words:&[Vec<u8>])->Result<PrefixUnions>{
-        let result=self.query_borrowed(seeds,&words.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
-        Ok(result)
+}
+
+struct ObservationGroup {
+    observation: u32,
+    support: ClassSupport,
+}
+
+enum UnionColumn {
+    Scan,
+    Grouped(Box<[ObservationGroup]>),
+}
+
+pub(crate) struct FirstUnionIndex {
+    context: Arc<CompletionContext>,
+    columns: Box<[UnionColumn]>,
+}
+
+impl FirstUnionIndex {
+    pub fn prepare(context: Arc<CompletionContext>) -> Result<Self> {
+        const MAX_ACCELERATOR_BYTES: usize = 32 * 1024 * 1024;
+        let classes = context.data.signatures.len();
+        let words = classes.div_ceil(64);
+        let mut columns = Vec::with_capacity(context.data.columns);
+        let mut retained = 0usize;
+        for column in 0..context.data.columns {
+            let mut groups = FxHashMap::<u32, Vec<u32>>::default();
+            for (class, signature) in context.data.signatures.iter().enumerate() {
+                let observation = signature[column];
+                if observation != 0 {
+                    groups.entry(observation).or_default().push(class as u32);
+                }
+            }
+            let bytes = groups.values().map(|members| {
+                std::mem::size_of::<ObservationGroup>()
+                    + (members.len() * std::mem::size_of::<u32>())
+                        .min(words * std::mem::size_of::<u64>())
+            }).sum::<usize>();
+            let checks = groups.values().map(|members| members.len().min(words)).sum::<usize>();
+            // Avoid retaining an expensive transpose if it does not reduce
+            // observation traversal. Fall back exactly, not conservatively.
+            if bytes > MAX_ACCELERATOR_BYTES.saturating_sub(retained)
+                || checks >= classes && groups.len() >= classes / 2
+            {
+                columns.push(UnionColumn::Scan);
+                continue;
+            }
+            retained += bytes;
+            let groups = groups.into_iter().map(|(observation, members)| {
+                let support = if members.len() * 4 <= words * 8 {
+                    ClassSupport::Sparse(members.into_boxed_slice())
+                } else {
+                    let mut bits = vec![0u64; words];
+                    for class in members {
+                        bits[class as usize / 64] |= 1u64 << (class % 64);
+                    }
+                    ClassSupport::Dense(bits.into_boxed_slice())
+                };
+                ObservationGroup { observation, support }
+            }).collect::<Vec<_>>();
+            columns.push(UnionColumn::Grouped(groups.into_boxed_slice()));
+        }
+
+        // Validate whole-whitelist coverage and its original path budget
+        // without retaining all paths a second time.
+        let mut path_cells = 0usize;
+        for word in &context.covered_words {
+            path_cells = path_cells.checked_add(word.len()).and_then(|n| n.checked_add(1))
+                .ok_or(Error::ResourceLimit)?;
+            if path_cells > 8_000_000 { return Err(Error::ResourceLimit); }
+            let mut state = 0usize;
+            for &byte in word {
+                let row = &context.transitions[state];
+                let edge = row.binary_search_by_key(&byte, |&(label, _)| label)
+                    .map_err(|_| Error::CertificateMismatch)?;
+                state = row[edge].1 as usize;
+            }
+        }
+        Ok(Self { context, columns: columns.into_boxed_slice() })
     }
-    pub fn query_borrowed(&self,seeds:&[bool],words:&[&[u8]])->Result<PrefixUnions>{
+
+    pub fn source(&self) -> &Tokenizer { self.context.source() }
+
+    pub fn query(&self, seeds: &[bool], words: &[Vec<u8>]) -> Result<PrefixUnions> {
+        self.query_borrowed(seeds, &words.iter().map(Vec::as_slice).collect::<Vec<_>>())
+    }
+
+    pub fn query_borrowed(&self, seeds: &[bool], words: &[&[u8]]) -> Result<PrefixUnions> {
         let ctx = self.context.as_ref();
         let active = ctx.data.active_classes(seeds)?;
         let PrefixSelection { columns: selected, paths: word_columns } =
             select_prefixes(&ctx.transitions, &ctx.covered_words, words, true, true)?;
-        let mut seen=vec![0u32;ctx.source.num_terminals()as usize];let mut columns=vec![Vec::new();ctx.data.columns];
-        for(generation,&col)in selected.iter().enumerate(){let epoch=generation as u32+1;
-            for (observation,classes)in &self.groups[col]{if !active.iter().zip(classes).any(|(&a,&b)|a&b!=0){continue}
-                for &terminal in &ctx.data.observations[*observation]{let old=seen.get_mut(terminal as usize).ok_or(Error::Malformed)?;if *old!=epoch{*old=epoch;columns[col].push(terminal);}}
+        let active_classes = (0..ctx.data.signatures.len())
+            .filter(|&class| class_active(&active, class)).collect::<Vec<_>>();
+        let mut seen_labels = vec![0u32; ctx.source.num_terminals() as usize];
+        let mut seen_observations = vec![0u32; ctx.data.observations.len()];
+        let mut columns = vec![Vec::new(); ctx.data.columns];
+        for (generation, column) in selected.into_iter().enumerate() {
+            let epoch = generation as u32 + 1;
+            let mut include = |observation: u32| -> Result<()> {
+                if observation == 0 { return Ok(()); }
+                let seen = &mut seen_observations[observation as usize];
+                if *seen == epoch { return Ok(()); }
+                *seen = epoch;
+                for &terminal in &ctx.data.observations[observation as usize] {
+                    let old = seen_labels.get_mut(terminal as usize).ok_or(Error::Malformed)?;
+                    if *old != epoch {
+                        *old = epoch;
+                        columns[column].push(terminal);
+                    }
+                }
+                Ok(())
+            };
+            match &self.columns[column] {
+                UnionColumn::Scan => {
+                    for &class in &active_classes {
+                        include(ctx.data.signatures[class][column])?;
+                    }
+                }
+                UnionColumn::Grouped(groups) => {
+                    for group in groups {
+                        if group.support.intersects(&active) {
+                            include(group.observation)?;
+                        }
+                    }
+                }
             }
-            columns[col].sort_unstable();
+            columns[column].sort_unstable();
         }
-        Ok(PrefixUnions{columns,word_columns})
+        Ok(PrefixUnions { columns, word_columns })
     }
 }
-
