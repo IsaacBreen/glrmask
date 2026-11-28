@@ -119,14 +119,18 @@ struct PartitionLocalTokenizer {
     build_ms: f64,
 }
 
-struct PreparedPartitionLocalTokenizer {
-    vocab_len: usize,
+struct LocalSynthesisCandidate {
     rebuilt_expressions: Arc<[Expr]>,
     local_expressions: Arc<[Expr]>,
-    protected_terminal_ids: Arc<[u32]>,
-    relevant_bytes: Arc<[u8]>,
-    pairs: Arc<PrecompiledFurtherSynthesisPairs>,
     max_token_len: usize,
+    relevant_bytes: Arc<[u8]>,
+}
+
+struct PreparedPartitionLocalTokenizer {
+    vocab: Vocab,
+    candidate: LocalSynthesisCandidate,
+    protected_terminal_ids: Arc<[u32]>,
+    pairs: Arc<PrecompiledFurtherSynthesisPairs>,
     build_ms: f64,
 }
 
@@ -296,42 +300,32 @@ pub fn grammar_def_uses_global_single_terminal_l1(grammar: &GrammarDef) -> bool 
     )
 }
 
+impl ReadyPartitionLocalTokenizer {
+    fn new(local: PartitionLocalTokenizer) -> Self {
+        let flat_trans = Arc::from(l1::build_flat_transition_table(&local.tokenizer));
+        let classify_cache = classify::SharedClassifyCache::new();
+        classify::prewarm_shared_classify_cache(
+            &local.tokenizer, local.tokenizer.num_terminals(), &classify_cache,
+        );
+        Self { local, flat_trans, classify_cache }
+    }
+}
+
 impl PreparedPartitionLocalTokenizers {
     fn prepare_if_available(
-        &self,
-        partition: usize,
-        global_tokenizer: &Tokenizer,
-        vocab: &Vocab,
+        &self, partition: usize, global_tokenizer: &Tokenizer, vocab: &Vocab,
     ) -> Option<ReadyPartitionLocalTokenizer> {
-        let mut slot = self
-            .entries
-            .get(partition)?
-            .lock()
-            .expect("prepared partition-local tokenizer slot poisoned");
-        if slot.as_ref().is_some_and(|prepared| prepared.vocab_len != vocab.entries_map().len()) {
-            return None;
-        }
-        let prepared = slot.take()?;
-        finish_prepared_partition_local_tokenizer(
-            global_tokenizer,
-            prepared,
-            vocab,
-        )
-        .map(|local| {
-            let flat_trans: Arc<[u32]> =
-                Arc::from(l1::build_flat_transition_table(&local.tokenizer));
-            let classify_cache = classify::SharedClassifyCache::new();
-            classify::prewarm_shared_classify_cache(
-                &local.tokenizer,
-                local.tokenizer.num_terminals(),
-                &classify_cache,
-            );
-            ReadyPartitionLocalTokenizer {
-                local,
-                flat_trans,
-                classify_cache,
+        let prepared = {
+            let mut slot = self.entries.get(partition)?.lock()
+                .expect("prepared partition-local tokenizer slot poisoned");
+            // A speculative proof is vocabulary-specific, not length-specific.
+            if slot.as_ref().is_some_and(|p| p.vocab.entries_map() != vocab.entries_map()) {
+                return None;
             }
-        })
+            slot.take()?
+        };
+        finish_prepared_partition_local_tokenizer(global_tokenizer, prepared, vocab)
+            .map(ReadyPartitionLocalTokenizer::new)
     }
 }
 
@@ -589,416 +583,166 @@ fn short_horizon_partition_local_synthesis_estimate_is_profitable(
         >= PARTITION_LOCAL_SHORT_HORIZON_MIN_ESTIMATED_SAVING
 }
 
-fn build_partition_local_tokenizer(
-    global_tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    plan: &PartitionLocalSynthesisPlan,
-) -> Option<PartitionLocalTokenizer> {
-    let reject = |stage: &str, horizon: usize| {
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][partition_local_synthesis] selected=false stage={} horizon={} global_states={}",
-                stage,
-                horizon,
-                global_tokenizer.num_states(),
-            );
-        }
-        None
-    };
-    if !partition_local_synthesis_enabled() || vocab.is_empty() {
-        return None;
-    }
-    let max_token_len = vocab.entries_map().values().map(Vec::len).max().unwrap_or(0);
-    if max_token_len == 0 || max_token_len >= plan.global_max_token_len {
-        return None;
-    }
-    let allow_half_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_ALLOW_HALF_HORIZON")
+fn allow_half_horizon() -> bool {
+    std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_ALLOW_HALF_HORIZON")
         .map(|value| {
             let value = value.trim();
             !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
         })
-        .unwrap_or(true);
-    // A local structural pair has a non-trivial fixed construction cost. The
-    // ordinary path therefore keeps a vocabulary and horizon floor. A separate
-    // short-horizon path admits smaller partitions only when the raw
-    // state-token product justifies a cheap AST probe. The estimated expression
-    // reduction below must then be large before any tokenizer is constructed.
-    // This chooses an optimization strategy only; the ordinary global tokenizer
-    // remains the exact fallback.
-    let min_local_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_MIN_HORIZON")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(8);
-    let min_local_vocab = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_MIN_VOCAB")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(2_000);
-    let ordinary_candidate = vocab.len() >= min_local_vocab && max_token_len >= min_local_horizon;
-    let short_horizon_probe = short_horizon_partition_local_synthesis_probe_selected(
-        global_tokenizer.num_states() as usize,
-        vocab.len(),
-        max_token_len,
-    );
-    if (!ordinary_candidate && !short_horizon_probe)
-        || if allow_half_horizon {
-            max_token_len.saturating_mul(2) > plan.global_max_token_len
-        } else {
-            max_token_len.saturating_mul(2) >= plan.global_max_token_len
-        }
-    {
-        return None;
-    }
-
-    let started_at = Instant::now();
-    let protected = plan
-        .protected_terminal_ids
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    let candidate_started_at = Instant::now();
-    let mut candidate = synthetic_state_map::synthesize_terminal_expressions_for_horizon(
-        &plan.expressions,
-        max_token_len,
-    );
-    let mut changed = false;
-    for terminal in 0..candidate.expressions.len() {
-        if protected.contains(&(terminal as u32)) {
-            changed |= candidate.expressions[terminal] != plan.expressions[terminal];
-        } else {
-            candidate.expressions[terminal] = plan.expressions[terminal].clone();
-        }
-    }
-    if !changed {
-        return reject("unchanged_candidate", max_token_len);
-    }
-    if !ordinary_candidate {
-        let (full_estimate, local_estimate) = plan
-            .protected_terminal_ids
-            .iter()
-            .copied()
-            .fold((0u128, 0u128), |(full, local), terminal| {
-                let terminal = terminal as usize;
-                (
-                    full.saturating_add(synthetic_state_map::estimated_synthesis_state_volume(
-                        &plan.expressions[terminal],
-                    )),
-                    local.saturating_add(synthetic_state_map::estimated_synthesis_state_volume(
-                        &candidate.expressions[terminal],
-                    )),
-                )
-            });
-        let selected = short_horizon_partition_local_synthesis_estimate_is_profitable(
-            full_estimate,
-            local_estimate,
-        );
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][partition_local_synthesis_estimate] horizon={} source_states={} vocab_tokens={} protected_terminals={} full_volume={} local_volume={} saving_volume={} probe_ms={:.3} selected={}",
-                max_token_len,
-                global_tokenizer.num_states(),
-                vocab.len(),
-                plan.protected_terminal_ids.len(),
-                full_estimate,
-                local_estimate,
-                full_estimate.saturating_sub(local_estimate),
-                candidate_started_at.elapsed().as_secs_f64() * 1000.0,
-                selected,
-            );
-        }
-        if !selected {
-            return reject("insufficient_estimated_reduction", max_token_len);
-        }
-    }
-
-    let rebuilt_expressions = plan
-        .expressions
-        .iter()
-        .cloned()
-        .map(factor_regex_expr)
-        .collect::<Vec<_>>();
-    let local_expressions = candidate
-        .expressions
-        .into_iter()
-        .map(factor_regex_expr)
-        .collect::<Vec<_>>();
-    let mut relevant_bytes = vocab
-        .entries_map()
-        .values()
-        .flat_map(|bytes| bytes.iter().copied())
-        .collect::<Vec<_>>();
-    relevant_bytes.sort_unstable();
-    relevant_bytes.dedup();
-    if fast_partition_local_synthesis_enabled()
-        && let Some((mut local_tokenizer, global_to_local)) =
-            compile_further_synthesized_tokenizer_with_structural_map(
-                global_tokenizer,
-                &rebuilt_expressions,
-                &local_expressions,
-                &plan.protected_terminal_ids,
-                vocab,
-                &VocabularyRepeatHorizonCache::new(),
-                max_token_len,
-                &relevant_bytes,
-                None,
-            )
-    {
-        let local_nullable = local_tokenizer.isolate_start_state_and_drain_nullable_terminals();
-        if local_nullable.is_empty() {
-            let local_states = local_tokenizer.num_states() as usize;
-            let global_states = global_tokenizer.num_states() as usize;
-            let ratio_rejected = if allow_half_horizon {
-                local_states.saturating_mul(20) > global_states.saturating_mul(19)
-            } else {
-                local_states.saturating_mul(4) > global_states.saturating_mul(3)
-            };
-            if local_states < global_states
-                && global_states.saturating_sub(local_states) >= 1_024
-                && !ratio_rejected
-            {
-                if compile_profile_enabled() {
-                    eprintln!(
-                        "[glrmask/profile][partition_local_synthesis_fast] horizon={} global_states={} local_states={} local_transitions={} build_ms={:.3} selected=true",
-                        max_token_len,
-                        global_states,
-                        local_states,
-                        local_tokenizer.transition_count(),
-                        started_at.elapsed().as_secs_f64() * 1000.0,
-                    );
-                }
-                return Some(PartitionLocalTokenizer {
-                    tokenizer: local_tokenizer,
-                    global_to_local: synthetic_state_map::CertifiedFullToSynthesizedStateMap {
-                        full_to_synthesized: global_to_local,
-                    },
-                    build_ms: started_at.elapsed().as_secs_f64() * 1000.0,
-                });
-            }
-        }
-    }
-    let Some(pair) = compile_partitioned_expression_pair_with_structural_map(
-        &rebuilt_expressions,
-        &local_expressions,
-        Some(&plan.labels),
-        &plan.partition_ids,
-        &plan.residual_isolation_classes,
-        vocab,
-        &VocabularyRepeatHorizonCache::new(),
-        max_token_len,
-        &relevant_bytes,
-    ) else {
-        return reject("structural_pair", max_token_len);
-    };
-    let terminal_count = plan.expressions.len() as u32;
-    let mut rebuilt_tokenizer = pair.full.into_tokenizer(
-        terminal_count,
-        Some(Arc::from(rebuilt_expressions.into_boxed_slice())),
-    );
-    let rebuilt_nullable = rebuilt_tokenizer.isolate_start_state_and_drain_nullable_terminals();
-    if !rebuilt_nullable.is_empty() {
-        return reject("rebuilt_nullable", max_token_len);
-    }
-    let mut local_tokenizer = pair.synthesized.into_tokenizer(
-        terminal_count,
-        Some(Arc::from(local_expressions.into_boxed_slice())),
-    );
-    let local_nullable = local_tokenizer.isolate_start_state_and_drain_nullable_terminals();
-    if !local_nullable.is_empty() {
-        return reject("local_nullable", max_token_len);
-    }
-    let Some(global_to_local) = local_tokenizer.augment_from_verified_component_prefixes(
-        global_tokenizer,
-        &rebuilt_tokenizer,
-        &pair.full_to_synthesized,
-    ) else {
-        return reject("component_prefix", max_token_len);
-    };
-    let local_states = local_tokenizer.num_states() as usize;
-    let global_states = global_tokenizer.num_states() as usize;
-    let ratio_rejected = if allow_half_horizon {
-        local_states.saturating_mul(20) > global_states.saturating_mul(19)
-    } else {
-        local_states.saturating_mul(4) > global_states.saturating_mul(3)
-    };
-    if local_states >= global_states
-        || global_states.saturating_sub(local_states) < 1_024
-        || ratio_rejected
-    {
-        return reject("insufficient_reduction", max_token_len);
-    }
-    Some(PartitionLocalTokenizer {
-        tokenizer: local_tokenizer,
-        global_to_local: synthetic_state_map::CertifiedFullToSynthesizedStateMap {
-            full_to_synthesized: global_to_local,
-        },
-        build_ms: started_at.elapsed().as_secs_f64() * 1000.0,
-    })
+        .unwrap_or(true)
 }
 
-fn prepare_partition_local_tokenizer(
-    vocab: &Vocab,
-    plan: &PartitionLocalSynthesisPlan,
-) -> Option<PreparedPartitionLocalTokenizer> {
-    if !partition_local_synthesis_enabled() || vocab.is_empty() {
-        return None;
-    }
-    let max_token_len = vocab.entries_map().values().map(Vec::len).max().unwrap_or(0);
-    if max_token_len == 0 || max_token_len >= plan.global_max_token_len {
-        return None;
-    }
-    let allow_half_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_ALLOW_HALF_HORIZON")
-        .map(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+impl LocalSynthesisCandidate {
+    /// Candidate selection is an effort policy only. The same exact proof
+    /// construction and publication apply to either scheduling choice.
+    fn select(vocab: &Vocab, plan: &PartitionLocalSynthesisPlan, source_states: Option<usize>) -> Option<Self> {
+        if !partition_local_synthesis_enabled() || vocab.is_empty() { return None; }
+        let max_token_len = vocab.max_token_byte_len();
+        if max_token_len == 0 || max_token_len >= plan.global_max_token_len { return None; }
+        let twice = max_token_len.saturating_mul(2);
+        if twice > plan.global_max_token_len
+            || (!allow_half_horizon() && twice == plan.global_max_token_len)
+        { return None; }
+        let min_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_MIN_HORIZON")
+            .ok().and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(if source_states.is_some() { 8 } else { 16 });
+        let min_vocab = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_MIN_VOCAB")
+            .ok().and_then(|value| value.trim().parse::<usize>().ok()).unwrap_or(2_000);
+        let ordinary = vocab.len() >= min_vocab && max_token_len >= min_horizon;
+        if !ordinary && !source_states.is_some_and(|states|
+            short_horizon_partition_local_synthesis_probe_selected(states, vocab.len(), max_token_len))
+        { return None; }
+
+        let started = Instant::now();
+        let mut candidate = synthetic_state_map::synthesize_terminal_expressions_for_horizon(
+            &plan.expressions, max_token_len,
+        );
+        let protected = plan.protected_terminal_ids.iter().copied().collect::<std::collections::BTreeSet<_>>();
+        let mut changed = false;
+        for (terminal, expr) in candidate.expressions.iter_mut().enumerate() {
+            if protected.contains(&(terminal as u32)) {
+                changed |= *expr != plan.expressions[terminal];
+            } else {
+                *expr = plan.expressions[terminal].clone();
+            }
+        }
+        if !changed { return None; }
+        if !ordinary {
+            let (full, local) = plan.protected_terminal_ids.iter().fold((0u128, 0u128), |(full, local), &terminal| {
+                let terminal = terminal as usize;
+                (full.saturating_add(synthetic_state_map::estimated_synthesis_state_volume(&plan.expressions[terminal])),
+                 local.saturating_add(synthetic_state_map::estimated_synthesis_state_volume(&candidate.expressions[terminal])))
+            });
+            let selected = short_horizon_partition_local_synthesis_estimate_is_profitable(full, local);
+            if compile_profile_enabled() {
+                eprintln!("[glrmask/profile][partition_local_synthesis_estimate] horizon={} source_states={} vocab_tokens={} protected_terminals={} full_volume={} local_volume={} saving_volume={} probe_ms={:.3} selected={}",
+                    max_token_len, source_states.unwrap_or(0), vocab.len(), plan.protected_terminal_ids.len(),
+                    full, local, full.saturating_sub(local), started.elapsed().as_secs_f64()*1000.0, selected);
+            }
+            if !selected { return None; }
+        }
+        Some(Self {
+            rebuilt_expressions: Arc::from(plan.expressions.iter().cloned().map(factor_regex_expr).collect::<Vec<_>>()),
+            local_expressions: Arc::from(candidate.expressions.into_iter().map(factor_regex_expr).collect::<Vec<_>>()),
+            max_token_len,
+            relevant_bytes: vocab.relevant_bytes(),
         })
-        .unwrap_or(true);
-    let min_local_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_MIN_HORIZON")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(16);
-    let min_local_vocab = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_MIN_VOCAB")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(2_000);
-    if vocab.len() < min_local_vocab
-        || max_token_len < min_local_horizon
-        || if allow_half_horizon {
-            max_token_len.saturating_mul(2) > plan.global_max_token_len
-        } else {
-            max_token_len.saturating_mul(2) >= plan.global_max_token_len
-        }
+    }
+
+    fn component_pair(
+        &self, global: &Tokenizer, protected: &[u32], vocab: &Vocab,
+        pairs: Option<&PrecompiledFurtherSynthesisPairs>, started: Instant,
+    ) -> Option<PartitionLocalTokenizer> {
+        let (mut tokenizer, map) = compile_further_synthesized_tokenizer_with_structural_map(
+            global, &self.rebuilt_expressions, &self.local_expressions, protected,
+            vocab, &VocabularyRepeatHorizonCache::new(), self.max_token_len,
+            &self.relevant_bytes, pairs,
+        )?;
+        if !tokenizer.isolate_start_state_and_drain_nullable_terminals().is_empty() { return None; }
+        self.publish(global, tokenizer, map, started)
+    }
+
+    fn publish(&self, global: &Tokenizer, tokenizer: Tokenizer, map: Vec<u32>, started: Instant)
+        -> Option<PartitionLocalTokenizer>
     {
-        return None;
-    }
-
-    let protected = plan
-        .protected_terminal_ids
-        .iter()
-        .copied()
-        .collect::<std::collections::BTreeSet<_>>();
-    let mut candidate = synthetic_state_map::synthesize_terminal_expressions_for_horizon(
-        &plan.expressions,
-        max_token_len,
-    );
-    let mut changed = false;
-    for terminal in 0..candidate.expressions.len() {
-        if protected.contains(&(terminal as u32)) {
-            changed |= candidate.expressions[terminal] != plan.expressions[terminal];
+        let local = tokenizer.num_states() as usize;
+        let full = global.num_states() as usize;
+        let ratio_rejected = if allow_half_horizon() {
+            local.saturating_mul(20) > full.saturating_mul(19)
         } else {
-            candidate.expressions[terminal] = plan.expressions[terminal].clone();
-        }
+            local.saturating_mul(4) > full.saturating_mul(3)
+        };
+        if local >= full || full.saturating_sub(local) < 1_024 || ratio_rejected { return None; }
+        Some(PartitionLocalTokenizer {
+            tokenizer,
+            global_to_local: synthetic_state_map::CertifiedFullToSynthesizedStateMap { full_to_synthesized: map },
+            build_ms: started.elapsed().as_secs_f64() * 1000.0,
+        })
     }
-    if !changed {
-        return None;
-    }
+}
 
-    let rebuilt_expressions: Arc<[Expr]> = Arc::from(
-        plan.expressions
-            .iter()
-            .cloned()
-            .map(factor_regex_expr)
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
-    );
-    let local_expressions: Arc<[Expr]> = Arc::from(
-        candidate
-            .expressions
-            .into_iter()
-            .map(factor_regex_expr)
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
-    );
-    let mut relevant_bytes = vocab
-        .entries_map()
-        .values()
-        .flat_map(|bytes| bytes.iter().copied())
-        .collect::<Vec<_>>();
-    relevant_bytes.sort_unstable();
-    relevant_bytes.dedup();
-    let relevant_bytes: Arc<[u8]> = Arc::from(relevant_bytes.into_boxed_slice());
+fn build_partition_local_tokenizer(
+    global: &Tokenizer, vocab: &Vocab, plan: &PartitionLocalSynthesisPlan,
+) -> Option<PartitionLocalTokenizer> {
+    let started = Instant::now();
+    let candidate = LocalSynthesisCandidate::select(vocab, plan, Some(global.num_states() as usize))?;
+    if fast_partition_local_synthesis_enabled()
+        && let Some(local) = candidate.component_pair(global, &plan.protected_terminal_ids, vocab, None, started)
+    {
+        if compile_profile_enabled() {
+            eprintln!("[glrmask/profile][partition_local_synthesis_fast] horizon={} global_states={} local_states={} local_transitions={} build_ms={:.3} selected=true",
+                candidate.max_token_len, global.num_states(), local.tokenizer.num_states(),
+                local.tokenizer.transition_count(), local.build_ms);
+        }
+        return Some(local);
+    }
+    // If an actual dispatch component cannot be reused, certify a rebuilt
+    // structural pair and extend it over the source's entered residuals.
+    let pair = compile_partitioned_expression_pair_with_structural_map(
+        &candidate.rebuilt_expressions, &candidate.local_expressions,
+        Some(&plan.labels), &plan.partition_ids, &plan.residual_isolation_classes,
+        vocab, &VocabularyRepeatHorizonCache::new(), candidate.max_token_len,
+        &candidate.relevant_bytes,
+    )?;
+    let terminal_count = plan.expressions.len() as u32;
+    let mut rebuilt = pair.full.into_tokenizer(terminal_count, Some(Arc::clone(&candidate.rebuilt_expressions)));
+    let mut local = pair.synthesized.into_tokenizer(terminal_count, Some(Arc::clone(&candidate.local_expressions)));
+    if !rebuilt.isolate_start_state_and_drain_nullable_terminals().is_empty()
+        || !local.isolate_start_state_and_drain_nullable_terminals().is_empty()
+    { return None; }
+    let map = local.augment_from_verified_component_prefixes(global, &rebuilt, &pair.full_to_synthesized)?;
+    candidate.publish(global, local, map, started)
+}
+
+fn prepare_partition_local_tokenizer(vocab: &Vocab, plan: &PartitionLocalSynthesisPlan)
+    -> Option<PreparedPartitionLocalTokenizer>
+{
+    let candidate = LocalSynthesisCandidate::select(vocab, plan, None)?;
     let pairs = precompile_further_synthesis_pairs(
-        &rebuilt_expressions,
-        &local_expressions,
-        &plan.protected_terminal_ids,
-        vocab,
-        &VocabularyRepeatHorizonCache::new(),
-        max_token_len,
-        &relevant_bytes,
+        &candidate.rebuilt_expressions, &candidate.local_expressions,
+        &plan.protected_terminal_ids, vocab, &VocabularyRepeatHorizonCache::new(),
+        candidate.max_token_len, &candidate.relevant_bytes,
     )?;
     let build_ms = pairs.build_ms;
     Some(PreparedPartitionLocalTokenizer {
-        vocab_len: vocab.entries_map().len(),
-        rebuilt_expressions,
-        local_expressions,
-        protected_terminal_ids: Arc::clone(&plan.protected_terminal_ids),
-        relevant_bytes,
-        pairs,
-        max_token_len,
-        build_ms,
+        vocab: vocab.clone(), candidate,
+        protected_terminal_ids: Arc::clone(&plan.protected_terminal_ids), pairs, build_ms,
     })
 }
 
 fn finish_prepared_partition_local_tokenizer(
-    global_tokenizer: &Tokenizer,
-    prepared: PreparedPartitionLocalTokenizer,
-    vocab: &Vocab,
+    global: &Tokenizer, prepared: PreparedPartitionLocalTokenizer, vocab: &Vocab,
 ) -> Option<PartitionLocalTokenizer> {
-    let finish_started_at = Instant::now();
-    let (mut local_tokenizer, global_to_local) =
-        compile_further_synthesized_tokenizer_with_structural_map(
-            global_tokenizer,
-            &prepared.rebuilt_expressions,
-            &prepared.local_expressions,
-            &prepared.protected_terminal_ids,
-            vocab,
-            &VocabularyRepeatHorizonCache::new(),
-            prepared.max_token_len,
-            &prepared.relevant_bytes,
-            Some(&prepared.pairs),
-        )?;
-    if !local_tokenizer
-        .isolate_start_state_and_drain_nullable_terminals()
-        .is_empty()
-    {
-        return None;
-    }
-    let local_states = local_tokenizer.num_states() as usize;
-    let global_states = global_tokenizer.num_states() as usize;
-    let allow_half_horizon = std::env::var("GLRMASK_PARTITION_LOCAL_SYNTHESIS_ALLOW_HALF_HORIZON")
-        .map(|value| {
-            let value = value.trim();
-            !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(true);
-    let ratio_rejected = if allow_half_horizon {
-        local_states.saturating_mul(20) > global_states.saturating_mul(19)
-    } else {
-        local_states.saturating_mul(4) > global_states.saturating_mul(3)
-    };
-    if local_states >= global_states
-        || global_states.saturating_sub(local_states) < 1_024
-        || ratio_rejected
-    {
-        return None;
-    }
-    let finish_ms = finish_started_at.elapsed().as_secs_f64() * 1000.0;
+    let started = Instant::now();
+    let local = prepared.candidate.component_pair(
+        global, &prepared.protected_terminal_ids, vocab, Some(&prepared.pairs), started,
+    )?;
     if compile_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][partition_local_synthesis_prebuilt] horizon={} global_states={} local_states={} local_transitions={} precompile_ms={:.3} finish_ms={:.3} selected=true",
-            prepared.max_token_len,
-            global_states,
-            local_states,
-            local_tokenizer.transition_count(),
-            prepared.build_ms,
-            finish_ms,
-        );
+        eprintln!("[glrmask/profile][partition_local_synthesis_prebuilt] horizon={} global_states={} local_states={} local_transitions={} precompile_ms={:.3} finish_ms={:.3} selected=true",
+            prepared.candidate.max_token_len, global.num_states(), local.tokenizer.num_states(),
+            local.tokenizer.transition_count(), prepared.build_ms, local.build_ms);
     }
-    Some(PartitionLocalTokenizer {
-        tokenizer: local_tokenizer,
-        global_to_local: synthetic_state_map::CertifiedFullToSynthesizedStateMap {
-            full_to_synthesized: global_to_local,
-        },
-        build_ms: finish_ms,
-    })
+    Some(local)
 }
 
 pub fn prepare_partition_local_tokenizers(
@@ -2443,32 +2187,15 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         }
         let boundary_scope = local_boundary_scope.as_ref().or(boundary_scope);
 
-        let ready_local = boundary_scope.is_none().then(|| {
-            prepared_partition_local_tokenizers
-                .and_then(|prepared| prepared.prepare_if_available(idx, tokenizer, sub_vocab))
-                .or_else(|| {
-                    partition_local_synthesis_plan
+        let ready_local = (!id_map_only && boundary_scope.is_none() && partition_local_synthesis_selected(&label))
+            .then(|| {
+                prepared_partition_local_tokenizers
+                    .and_then(|prepared| prepared.prepare_if_available(idx, tokenizer, sub_vocab))
+                    .or_else(|| partition_local_synthesis_plan
                         .and_then(|plan| build_partition_local_tokenizer(tokenizer, sub_vocab, plan))
-                        .map(|local| {
-                        let flat_trans: Arc<[u32]> =
-                            Arc::from(l1::build_flat_transition_table(&local.tokenizer));
-                        let classify_cache = classify::SharedClassifyCache::new();
-                        classify::prewarm_shared_classify_cache(
-                            &local.tokenizer,
-                            local.tokenizer.num_terminals(),
-                            &classify_cache,
-                        );
-                            ReadyPartitionLocalTokenizer {
-                                local,
-                                flat_trans,
-                                classify_cache,
-                            }
-                        })
-                })
-        }).flatten();
-        if !id_map_only && partition_local_synthesis_selected(&label)
-            && let Some(ready) = ready_local
-        {
+                        .map(ReadyPartitionLocalTokenizer::new))
+            }).flatten();
+        if let Some(ready) = ready_local {
             let local = &ready.local;
             let local_vocab_dfa_cache =
                 l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache::new();
