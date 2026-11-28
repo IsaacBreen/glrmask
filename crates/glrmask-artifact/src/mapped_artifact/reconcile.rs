@@ -31,12 +31,14 @@ pub(super) fn reconcile_weight_id_maps(
         &left_tsid_map,
         &left_token_map,
         common_id_map.num_tsids() as usize,
+        common_id_map.num_internal_tokens() as usize,
     );
     remap_weights_with_maps(
         right_weights,
         &right_tsid_map,
         &right_token_map,
         common_id_map.num_tsids() as usize,
+        common_id_map.num_internal_tokens() as usize,
     );
 
     *left_id_map = common_id_map.clone();
@@ -112,6 +114,7 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
                     &left_tsid_map,
                     &left_token_map,
                     common_tsid_count,
+                    common_id_map.num_internal_tokens() as usize,
                 );
                 (
                     started
@@ -127,6 +130,7 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
                     &right_tsid_map,
                     &right_token_map,
                     common_tsid_count,
+                    common_id_map.num_internal_tokens() as usize,
                 );
                 (
                     started
@@ -143,6 +147,7 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
             &left_tsid_map,
             &left_token_map,
             common_tsid_count,
+            common_id_map.num_internal_tokens() as usize,
         );
         let left_ms = left_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
@@ -153,6 +158,7 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
             &right_tsid_map,
             &right_token_map,
             common_tsid_count,
+            common_id_map.num_internal_tokens() as usize,
         );
         let right_ms = right_started
             .map(|started| started.elapsed().as_secs_f64() * 1000.0)
@@ -246,6 +252,7 @@ pub(super) fn remap_weights_into_existing_common(
         &tsid_map,
         &token_map,
         common_id_map.num_tsids() as usize,
+        common_id_map.num_internal_tokens() as usize,
     );
 }
 
@@ -1348,6 +1355,7 @@ pub fn remap_weights_with_maps(
     local_to_common_tsids: &[Vec<u32>],
     local_to_common_tokens: &[Vec<u32>],
     common_tsid_count: usize,
+    common_token_count: usize,
 ) {
     let profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
@@ -1355,12 +1363,6 @@ pub fn remap_weights_with_maps(
     let tsid_map = InjectiveLocalMap::from_local_to_common(local_to_common_tsids, common_tsid_count);
     let tsid_run_map =
         DisjointRunLocalMap::from_local_to_common(local_to_common_tsids, common_tsid_count);
-    let common_token_count = local_to_common_tokens
-        .iter()
-        .flatten()
-        .copied()
-        .max()
-        .map_or(0, |maximum| maximum as usize + 1);
     let token_map = InjectiveLocalMap::from_local_to_common(
         local_to_common_tokens,
         common_token_count,
@@ -1551,7 +1553,7 @@ pub fn remap_weights_with_maps(
     let remap_one =
         |weight: &Weight,
          precomputed_token_sets: Option<&FxHashMap<usize, SharedTokenSet>>| {
-            if identity_tsids {
+            if identity_tsids && !weight.is_full() {
                 return remap_weight_with_identity_tsids(
                     weight,
                     token_map.as_ref(),
@@ -1905,12 +1907,14 @@ mod tests {
             &left_tsid_map,
             &left_token_map,
             common_id_map.num_tsids() as usize,
+            common_id_map.num_internal_tokens() as usize,
         );
         remap_weights_with_maps(
             &mut [right_weight],
             &right_tsid_map,
             &right_token_map,
             common_id_map.num_tsids() as usize,
+            common_id_map.num_internal_tokens() as usize,
         );
 
         *left_id_map = common_id_map.clone();

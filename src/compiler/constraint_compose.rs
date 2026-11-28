@@ -894,7 +894,7 @@ pub(super) fn prepared_leaf_possible_matches(
     for (component,maps) in components.iter().zip(maps) {
         let mut local=component_possible_matches(component,component.terminal_offset)?;
         remap_weights_with_maps(&mut local.weight_refs_mut(),&maps.local_to_global_tsids,
-            &maps.local_to_global_tokens,id_map.num_tsids() as usize);
+            &maps.local_to_global_tokens,id_map.num_tsids() as usize,id_map.num_internal_tokens() as usize);
         for (terminal,weight) in local {
             if weight.is_empty() {continue;}
             possible.entry(terminal).and_modify(|existing|*existing=existing.union(&weight)).or_insert(weight);
