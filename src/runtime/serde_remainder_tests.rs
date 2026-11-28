@@ -1,4 +1,3 @@
-use glrmask_vocab::__private::VocabExt as _;
 use super::*;
 
 fn old_runtime_wire(

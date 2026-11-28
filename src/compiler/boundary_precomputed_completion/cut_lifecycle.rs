@@ -1,4 +1,3 @@
-use glrmask_vocab::__private::VocabExt as _;
 use super::*;
 use glrmask_terminal_dwa::__private::terminal_dwa::{l1,scope::{BoundaryOwnership,ImmediateComponentId}};
 use std::collections::BTreeMap;
