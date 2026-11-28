@@ -140,37 +140,7 @@ fn build_has_any_transition_labels(dfa: &FlatDfa) -> Vec<bool> {
         .collect()
 }
 
-#[inline]
-fn byte_is_relevant(byte: usize, relevant_bytes: Option<&[bool; 256]>) -> bool {
-    relevant_bytes.is_none_or(|bytes| bytes[byte])
-}
-
-fn active_byte_representatives(
-    relevant_bytes: Option<&[bool; 256]>,
-    byte_to_class: Option<&[u8; 256]>,
-) -> Vec<u8> {
-    if let Some(byte_to_class) = byte_to_class {
-        let num_classes = *byte_to_class.iter().max().unwrap_or(&0) as usize + 1;
-        let mut class_rep: Vec<Option<u8>> = vec![None; num_classes];
-
-        for byte in 0..256usize {
-            if !byte_is_relevant(byte, relevant_bytes) {
-                continue;
-            }
-            let class = byte_to_class[byte] as usize;
-            if class_rep[class].is_none() {
-                class_rep[class] = Some(byte as u8);
-            }
-        }
-
-        class_rep.into_iter().flatten().collect()
-    } else {
-        (0..256usize)
-            .filter(|&byte| byte_is_relevant(byte, relevant_bytes))
-            .map(|byte| byte as u8)
-            .collect()
-    }
-}
+use super::super::state_equivalence::max_length::active_byte_representatives;
 
 fn build_initial_label_partition(
     dfa: &FlatDfa,

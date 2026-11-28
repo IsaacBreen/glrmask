@@ -1075,39 +1075,23 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
     const COMPACT_THRESHOLD_STATES: usize = 16_000;
     let num_dfa_states = dfa.states.len();
     let identity_byte_class: [u8; 256] = std::array::from_fn(|i| i as u8);
-    let compatible_shared_base = shared_base.filter(|base| base.is_compatible_with_dfa(dfa));
-    let use_compact = !force_raw_transitions
-        && (num_dfa_states >= COMPACT_THRESHOLD_STATES || compatible_shared_base.is_some());
-    let computed_byte_class = (use_compact && compatible_shared_base.is_none())
+    let compatible_shared_base = shared_base.filter(|base| !force_raw_transitions && base.is_compatible_with_dfa(dfa));
+    let computed_byte_class = (!force_raw_transitions && compatible_shared_base.is_none()
+        && num_dfa_states >= COMPACT_THRESHOLD_STATES && dfa.transitions.width == 256)
         .then(|| super::super::compat::compute_byte_classes(dfa));
-    let byte_to_class: &[u8; 256] = compatible_shared_base
+    let byte_to_class = compatible_shared_base
         .map(SharedVocabDfaBase::byte_to_class_ref)
         .or(computed_byte_class.as_ref())
-        .unwrap_or(&identity_byte_class);
-    let num_bc = compatible_shared_base
-        .map(|base| base.num_classes)
-        .or_else(|| {
-            computed_byte_class
-                .as_ref()
-                .map(|classes| classes.iter().copied().max().map_or(0usize, |max| max as usize + 1))
-        })
-        .unwrap_or(256);
-    let compact_transitions: std::borrow::Cow<'_, [u32]> = if let Some(base) = compatible_shared_base {
-        std::borrow::Cow::Borrowed(base.transitions_by_state_class())
-    } else if let Some(classes) = computed_byte_class.as_ref() {
-        let mut transitions = vec![NONE_STATE; num_dfa_states * num_bc];
-        let raw = &dfa.transitions;
-        for state in 0..num_dfa_states {
-            let raw_base = state * 256;
-            let compact_base = state * num_bc;
-            for byte in 0..256u16 {
-                let class = classes[byte as usize] as usize;
-                transitions[compact_base + class] = raw[raw_base + byte as usize];
-            }
-        }
-        std::borrow::Cow::Owned(transitions)
+        .unwrap_or(if force_raw_transitions { &identity_byte_class } else { &dfa.transitions.byte_to_column });
+    let num_bc = byte_to_class.iter().copied().max().unwrap() as usize + 1;
+    let repacked;
+    let compact_transitions: &[u32] = if let Some(base) = compatible_shared_base {
+        base.transitions_by_state_class()
+    } else if *byte_to_class == dfa.transitions.byte_to_column {
+        &dfa.transitions.values
     } else {
-        std::borrow::Cow::Borrowed(&dfa.transitions)
+        repacked = dfa.transitions.repack(byte_to_class, false);
+        &repacked
     };
 
     let dfa_finalizers: Vec<&[usize]> = dfa
@@ -1227,7 +1211,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
                             Some(build_token_suffix_hashes_fused(
                                 token,
                                 reset_state,
-                                compact_transitions.as_ref(),
+                                compact_transitions,
                                 byte_to_class,
                                 num_bc,
                                 &dfa_finalizers,
@@ -1695,7 +1679,7 @@ pub fn mapping_to_equivalence_classes(
 #[cfg(test)]
 mod state_batch_scratch_pool_tests {
     use super::*;
-    use super::super::super::compat::{FlatDfa, FlatDfaState, TokenizerView};
+    use super::super::super::compat::{ByteRows, FlatDfa, FlatDfaState, TokenizerView};
     use std::sync::Arc;
 
     #[test]
@@ -1828,7 +1812,7 @@ mod state_batch_scratch_pool_tests {
         let view = TokenizerView {
             flat_dfa: FlatDfa {
                 start_state: 0,
-                transitions: Arc::from(transitions),
+                transitions: ByteRows::dense(Arc::from(transitions)),
                 states: vec![
                     FlatDfaState {
                         finalizers: vec![],

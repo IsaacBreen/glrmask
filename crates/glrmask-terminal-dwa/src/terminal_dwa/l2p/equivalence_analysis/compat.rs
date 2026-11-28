@@ -7,16 +7,6 @@ use std::time::Instant;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
-fn build_transition_table(
-    transitions: impl Iterator<Item = (u8, u32)>,
-) -> [u32; 256] {
-    let mut table = [u32::MAX; 256];
-    for (byte, target) in transitions {
-        table[byte as usize] = target;
-    }
-    table
-}
-
 fn normalize_group_ids(mut groups: Vec<usize>) -> Vec<usize> {
     groups.sort_unstable();
     groups.dedup();
@@ -49,129 +39,202 @@ pub struct FlatDfaState {
     pub possible_future_group_ids: Vec<usize>,
 }
 
-/// Pre-extracted DFA in the format used by equivalence analysis.
-/// Transitions are stored contiguously in a flat table (`transitions[state * 256 + byte]`),
-/// separated from per-state metadata to enable zero-copy sharing across partitions via `Arc`.
+/// An exact byte action on the represented alphabet. Dense physical rows and
+/// finite-vocabulary quotient rows differ only in their column map. The rows
+/// always exist; derived transposes must never stand in for missing topology.
+#[derive(Debug, Clone)]
+pub struct ByteRows {
+    pub(super) values: Arc<[u32]>,
+    pub(super) byte_to_column: [u8; 256],
+    pub(super) width: usize,
+}
+
+pub(super) fn column_representatives(classes: &[u8; 256]) -> Vec<u8> {
+    let width = classes.iter().copied().max().unwrap() as usize + 1;
+    let mut representatives = vec![0; width];
+    for byte in (0..=255u8).rev() {
+        representatives[classes[byte as usize] as usize] = byte;
+    }
+    representatives
+}
+
+/// Give every relevant byte a column, reserving zero for the unused domain.
+/// A wider alphabet can use the dense representation without expansion.
+pub(super) fn conservative_byte_classes(relevant: &[bool; 256]) -> Option<[u8; 256]> {
+    if relevant.iter().filter(|&&active| active).count() >= 255 {
+        return None;
+    }
+    let mut classes = [0; 256];
+    let mut next = 1u8;
+    for (byte, &active) in relevant.iter().enumerate() {
+        if active {
+            classes[byte] = next;
+            next += 1;
+        }
+    }
+    Some(classes)
+}
+
+impl ByteRows {
+    pub fn dense(values: Arc<[u32]>) -> Self {
+        Self::new(values, std::array::from_fn(|byte| byte as u8))
+    }
+
+    pub fn new(values: Arc<[u32]>, byte_to_column: [u8; 256]) -> Self {
+        let width = byte_to_column.iter().copied().max().unwrap() as usize + 1;
+        assert_eq!(values.len() % width, 0, "invalid byte rows");
+        Self { values, byte_to_column, width }
+    }
+
+    pub fn num_states(&self) -> usize {
+        self.values.len() / self.width
+    }
+
+    #[inline]
+    pub fn row(&self, state: usize) -> &[u32] {
+        let base = state * self.width;
+        &self.values[base..base + self.width]
+    }
+
+    #[inline]
+    pub fn trans(&self, state: usize, byte: usize) -> u32 {
+        self.values[state * self.width + self.byte_to_column[byte] as usize]
+    }
+
+    pub fn same_topology(&self, other: &Self) -> bool {
+        self.byte_to_column == other.byte_to_column
+            && (Arc::ptr_eq(&self.values, &other.values) || self.values == other.values)
+    }
+
+    /// Materialize an alternative exact layout, or borrow the existing row
+    /// storage by Arc when the requested coordinate is already present.
+    pub(super) fn repack(&self, classes: &[u8; 256], transposed: bool) -> Arc<[u32]> {
+        if !transposed && self.byte_to_column == *classes {
+            return Arc::clone(&self.values);
+        }
+        let representatives = column_representatives(classes);
+        let width = representatives.len();
+        let states = self.num_states();
+        let mut values = vec![u32::MAX; states * width];
+        for state in 0..states {
+            let row = self.row(state);
+            for (class, &byte) in representatives.iter().enumerate() {
+                let index = if transposed { class * states + state } else { state * width + class };
+                values[index] = row[self.byte_to_column[byte as usize] as usize];
+            }
+        }
+        Arc::from(values)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FlatDfa {
     pub states: Vec<FlatDfaState>,
     pub start_state: usize,
-    /// Flat transition table: `transitions[state * 256 + byte] = target_state`.
-    /// Shared via `Arc` to avoid 35MB duplication per partition.
-    pub transitions: Arc<[u32]>,
+    pub transitions: ByteRows,
 }
+pub(super) const BYTE_COLUMN_HASH_MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
 
-const BYTE_COLUMN_HASH_MULTIPLIER: u64 = 0x517c_c1b7_2722_0a95;
-
-fn byte_classes_from_column_hashes(
-    transitions: &[u32],
+pub(super) fn byte_classes_from_column_hashes(
     num_states: usize,
     column_hashes: &[u64; 256],
+    relevant: &[bool; 256],
+    target: impl Fn(usize, usize) -> u32,
 ) -> [u8; 256] {
-    let mut sorted_indices: [u8; 256] = std::array::from_fn(|i| i as u8);
-    sorted_indices.sort_unstable_by_key(|&byte| column_hashes[byte as usize]);
+    let mut sorted: Vec<u8> = (0..=255).filter(|&byte| relevant[byte as usize]).collect();
+    sorted.sort_unstable_by_key(|&byte| column_hashes[byte as usize]);
 
-    let mut byte_to_class = [0u8; 256];
-    let mut next_class = 0u8;
-    byte_to_class[sorted_indices[0] as usize] = 0;
-    for i in 1..256 {
-        let current = sorted_indices[i];
-        let hash = column_hashes[current as usize];
-        if hash != column_hashes[sorted_indices[i - 1] as usize] {
-            next_class += 1;
-            byte_to_class[current as usize] = next_class;
-            continue;
-        }
-
-        // A hash match is only a candidate. The final relation remains the
-        // exact equality of the 256-byte transition columns.
-        let mut assigned = false;
-        for j in (0..i).rev() {
-            let previous = sorted_indices[j];
-            if column_hashes[previous as usize] != hash {
-                break;
-            }
-            let same = (0..num_states).all(|state| {
-                let base = state * 256;
-                transitions[base + current as usize] == transitions[base + previous as usize]
-            });
-            if same {
-                byte_to_class[current as usize] = byte_to_class[previous as usize];
-                assigned = true;
-                break;
-            }
-        }
-        if !assigned {
-            next_class += 1;
-            byte_to_class[current as usize] = next_class;
-        }
+    let mut classes = [0; 256];
+    // Keep one unused catch-all column only for restricted alphabets.
+    let mut next = if sorted.len() == 256 { 0 } else { 1 };
+    for (i, &byte) in sorted.iter().enumerate() {
+        let hash = column_hashes[byte as usize];
+        let prior = sorted[..i].iter().rev()
+            .take_while(|&&previous| column_hashes[previous as usize] == hash)
+            .find(|&&previous| (0..num_states).all(|state|
+                target(state, byte as usize) == target(state, previous as usize)));
+        classes[byte as usize] = if let Some(&previous) = prior {
+            classes[previous as usize]
+        } else {
+            let class = u8::try_from(next).expect("byte class domain");
+            next += 1;
+            class
+        };
     }
-    byte_to_class
+    classes
 }
-
 pub fn compute_physical_byte_classes(tokenizer: &Tokenizer, transitions: &[u32]) -> [u8; 256] {
     let num_states = tokenizer.num_states() as usize;
-    let dead = u32::MAX;
     assert_eq!(transitions.len(), num_states * 256);
 
-    // h(v_0..v_n) = Σ v_i M^(n-1-i). Starting from the all-dead
-    // column, each sparse edge changes just one term in that sum.
-    let mut row_weight = vec![0u64; num_states];
+    let hashes = physical_column_hashes(tokenizer, Some(transitions));
+    byte_classes_from_column_hashes(num_states, &hashes, &[true; 256],
+        |state, byte| transitions[state * 256 + byte])
+}
+
+/// Polynomial column hashes derived from sparse rows. The default is the
+/// all-dead column; each present edge changes just its weighted term.
+fn physical_column_hashes(tokenizer: &Tokenizer, flat: Option<&[u32]>) -> [u64; 256] {
     let mut power = 1u64;
-    for state in (0..num_states).rev() {
-        row_weight[state] = power;
+    let mut dead_hash = 0u64;
+    let mut deltas = [0u64; 256];
+    for state in (0..tokenizer.num_states()).rev() {
+        dead_hash = dead_hash.wrapping_add((u32::MAX as u64).wrapping_mul(power));
+        for (byte, target) in tokenizer.transitions_from(state) {
+            debug_assert!(flat.is_none_or(|rows| rows[state as usize * 256 + byte as usize] == target));
+            deltas[byte as usize] = deltas[byte as usize]
+                .wrapping_add((target as u64).wrapping_sub(u32::MAX as u64).wrapping_mul(power));
+        }
         power = power.wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER);
     }
-    let mut all_dead_hash = 0u64;
-    for _ in 0..num_states {
-        all_dead_hash = all_dead_hash
-            .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
-            .wrapping_add(dead as u64);
-    }
-    let mut column_hashes = [all_dead_hash; 256];
-
-    for state in 0..num_states {
-        let base = state * 256;
-        for (byte, target) in tokenizer.transitions_from(state as u32) {
-            let actual = transitions[base + byte as usize];
-            debug_assert_eq!(actual, target);
-            let delta = (target as u64).wrapping_sub(dead as u64);
-            column_hashes[byte as usize] = column_hashes[byte as usize]
-                .wrapping_add(delta.wrapping_mul(row_weight[state]));
-        }
-    }
-
-    byte_classes_from_column_hashes(transitions, num_states, &column_hashes)
+    deltas.map(|delta| delta.wrapping_add(dead_hash))
 }
 
+/// Same physical observation without allocating a dense table.
+pub(super) fn compute_tokenizer_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
+    byte_classes_from_column_hashes(tokenizer.num_states() as usize,
+        &physical_column_hashes(tokenizer, None), &[true; 256],
+        |state, byte| tokenizer.get_transition(state as u32, byte as u8))
+}
+
+/// Scan the represented byte action once. Dense physical rows have no
+/// indirection in the inner loop; a finite alphabet visits only its columns.
+pub(super) fn scan_byte_columns(
+    rows: &ByteRows,
+    relevant: &[bool; 256],
+    mut observe: impl FnMut(usize, usize, u32),
+) {
+    let bytes: Vec<usize> = (0..256).filter(|&byte| relevant[byte]).collect();
+    if bytes.len() == 256 && rows.width == 256
+        && rows.byte_to_column.iter().enumerate().all(|(byte, &column)| byte == column as usize)
+    {
+        for (state, row) in rows.values.chunks_exact(256).enumerate() {
+            for (byte, &target) in row.iter().enumerate() {
+                observe(state, byte, target);
+            }
+        }
+    } else {
+        for state in 0..rows.num_states() {
+            let row = rows.row(state);
+            for &byte in &bytes {
+                observe(state, byte, row[rows.byte_to_column[byte] as usize]);
+            }
+        }
+    }
+}
 
 pub fn compute_byte_classes(dfa: &FlatDfa) -> [u8; 256] {
-    let mut column_hashes = [0u64; 256];
-    for row in dfa.transitions.as_chunks::<256>().0.iter() {
-        for (hash, &target) in column_hashes.iter_mut().zip(row) {
-            *hash = hash
-                .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
-                .wrapping_add(target as u64);
-        }
-    }
-    byte_classes_from_column_hashes(&dfa.transitions, dfa.states.len(), &column_hashes)
+    let mut hashes = [0u64; 256];
+    scan_byte_columns(&dfa.transitions, &[true; 256], |_, byte, target| {
+        hashes[byte] = hashes[byte].wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
+            .wrapping_add(target as u64);
+    });
+    byte_classes_from_column_hashes(dfa.states.len(), &hashes, &[true; 256],
+        |state, byte| dfa.trans(state, byte))
 }
 
-
-/// Exact byte congruence of the selected terminal languages.
-///
-/// The shared lexer can retain inactive product/component coordinates even
-/// after its output labels are filtered. Recompile the active expressions as
-/// independent deterministic components and compare byte transition columns
-/// across all of their residual states. Two bytes in one class therefore have
-/// identical action from every residual of every active terminal language.
-/// Replacing one by the other preserves active-terminal match positions and
-/// residuals; grammar follow constraints only filter terminal labels later.
-/// Exact byte congruence read directly from the already-built physical lexer.
-/// This can be finer than recompiling active terminal definitions independently,
-/// but never coarser: two bytes are merged only when every active-language
-/// physical source has the same active-language target for both bytes.  States
-/// and targets carrying no active terminal language are semantically dead.
+/// Exact byte congruence of the physical lexer projected onto the selected
+/// terminal languages. Dead sources and destinations have no active action.
 pub fn compute_active_physical_byte_classes_from_flat_trans(
     tokenizer: &Tokenizer,
     active_groups: &[bool],
@@ -214,227 +277,82 @@ pub fn compute_active_physical_byte_classes_from_flat_trans(
                 .wrapping_add(projected_target(flat_trans, &active_language, source, byte) as u64);
         }
     }
-    let mut classes = [0u8; 256];
-    let mut representatives = Vec::<usize>::new();
-    for byte in 0..256 {
-        let mut found = None;
-        for (class, &representative) in representatives.iter().enumerate() {
-            if hashes[byte] != hashes[representative] {
-                continue;
-            }
-            let equal = (0..states).all(|source| {
-                projected_target(flat_trans, &active_language, source, byte)
-                    == projected_target(flat_trans, &active_language, source, representative)
-            });
-            if equal {
-                found = Some(class as u8);
-                break;
-            }
-        }
-        classes[byte] = found.unwrap_or_else(|| {
-            let class = representatives.len();
-            representatives.push(byte);
-            class as u8
-        });
-    }
-    classes
+    byte_classes_from_column_hashes(states, &hashes, &[true; 256],
+        |source, byte| projected_target(flat_trans, &active_language, source, byte))
 }
-
-
-pub fn compute_active_terminal_language_byte_classes(
-    tokenizer: &Tokenizer,
-    active_groups: &[bool],
-) -> Option<[u8; 256]> {
-    let active_exprs = active_groups
-        .iter()
-        .enumerate()
-        .filter_map(|(terminal, &active)| active.then_some(terminal as u32))
-        .map(|terminal| tokenizer.terminal_expr(terminal).cloned())
-        .collect::<Option<Vec<_>>>()?;
-    if active_exprs.is_empty() {
-        return Some([0u8; 256]);
-    }
-    let partitions = (0..active_exprs.len() as u32).collect::<Vec<_>>();
-    let regex = crate::automata::lexer::compile::build_regex_partitioned(
-        &active_exprs,
-        &partitions);
-    let terminal_count = active_exprs.len() as u32;
-    let active_tokenizer = regex.into_tokenizer(
-        terminal_count,
-        Some(Arc::from(active_exprs.into_boxed_slice())),
-    );
-    let active_view = TokenizerView::new(&active_tokenizer);
-    Some(compute_byte_classes(active_view.dfa()))
-}
-
-
 #[inline]
 fn state_has_active_language(state: &FlatDfaState) -> bool {
     !state.finalizers.is_empty() || !state.possible_future_group_ids.is_empty()
 }
 
-/// Erase topology whose target language is empty under already-filtered state
-/// metadata. Missing edges and edges into an active-dead state are the same
-/// transition in the active-terminal language. Rows of active-dead sources are
-/// empty for the same reason.
-fn project_filtered_transition_topology(
-    states: &[FlatDfaState],
-    transitions: &[u32],
-) -> Arc<[u32]> {
-    assert_eq!(transitions.len(), states.len() * 256);
-    let active_language = states
-        .iter()
-        .map(state_has_active_language)
-        .collect::<Vec<_>>();
-    let mut projected = transitions.to_vec();
-    for source in 0..states.len() {
-        let row = &mut projected[source * 256..(source + 1) * 256];
-        if !active_language[source] {
-            row.fill(u32::MAX);
-            continue;
-        }
-        for target in row {
-            if *target != u32::MAX && !active_language[*target as usize] {
-                *target = u32::MAX;
-            }
-        }
-    }
-    Arc::from(projected)
+fn tokenizer_state(tokenizer: &Tokenizer, state: u32, active: Option<&[bool]>) -> FlatDfaState {
+    let finalizers = tokenizer.matched_terminals_iter(state);
+    let futures = tokenizer.possible_future_terminals_iter(state);
+    let (finalizers, possible_future_group_ids) = match active {
+        Some(active) => (collect_filtered_group_ids(finalizers, active), collect_filtered_group_ids(futures, active)),
+        None => (collect_group_ids(finalizers), collect_group_ids(futures)),
+    };
+    FlatDfaState { finalizers, possible_future_group_ids }
 }
 
 impl FlatDfa {
-    /// Get the transition target for a given state and byte.
     #[inline]
     pub fn trans(&self, state: usize, byte: usize) -> u32 {
-        self.transitions[state * 256 + byte]
+        self.transitions.trans(state, byte)
     }
 
-    /// Get the 256-entry transition slice for a given state.
     #[inline]
     pub fn transitions_for(&self, state: usize) -> &[u32] {
-        let base = state * 256;
-        &self.transitions[base..base + 256]
+        self.transitions.row(state)
     }
+
+    fn from_tokenizer_parts(tokenizer: &Tokenizer, active: Option<&[bool]>, flat: Option<&Arc<[u32]>>) -> Self {
+        let num_states = tokenizer.num_states() as usize;
+        let states: Vec<_> = (0..num_states).map(|state| tokenizer_state(tokenizer, state as u32, active)).collect();
+        let transitions = if let Some(flat) = flat.filter(|_| active.is_none()) {
+            Arc::clone(flat)
+        } else {
+            let alive: Vec<_> = states.iter().map(state_has_active_language).collect();
+            let mut rows = vec![u32::MAX; num_states * 256];
+            for state in 0..num_states {
+                if active.is_some() && !alive[state] { continue; }
+                let row = &mut rows[state * 256..(state + 1) * 256];
+                if let Some(flat) = flat {
+                    row.copy_from_slice(&flat[state * 256..(state + 1) * 256]);
+                    if active.is_some() {
+                        for target in row {
+                            if *target != u32::MAX && !alive[*target as usize] { *target = u32::MAX; }
+                        }
+                    }
+                } else {
+                    for (byte, target) in tokenizer.transitions_from(state as u32) {
+                        if active.is_none() || alive[target as usize] {
+                            row[byte as usize] = target;
+                        }
+                    }
+                }
+            }
+            Arc::from(rows)
+        };
+        Self { states, start_state: tokenizer.start_state() as usize, transitions: ByteRows::dense(transitions) }
+    }
+
     pub fn from_tokenizer(tokenizer: &Tokenizer) -> Self {
-        let start_state = tokenizer.start_state() as usize;
-        let num_states = tokenizer.num_states() as usize;
-        let mut transitions = vec![u32::MAX; num_states * 256];
-        let states: Vec<FlatDfaState> = (0..num_states)
-            .map(|i| {
-                let base = i * 256;
-                for (byte, target) in tokenizer.transitions_from(i as u32) {
-                    transitions[base + byte as usize] = target;
-                }
-                let finalizers = collect_group_ids(tokenizer.matched_terminals_iter(i as u32));
-                let possible_future_group_ids =
-                    collect_group_ids(tokenizer.possible_future_terminals_iter(i as u32));
-
-                FlatDfaState {
-                    finalizers,
-                    possible_future_group_ids,
-                }
-            })
-            .collect();
-
-        FlatDfa {
-            states,
-            start_state,
-            transitions: Arc::from(transitions),
-        }
+        Self::from_tokenizer_parts(tokenizer, None, None)
     }
 
-    /// Build a DFA view of the active-terminal language. Besides filtering
-    /// finalizers/futures, transitions from or into states with empty active
-    /// language are canonicalized to dead.
     pub fn from_tokenizer_filtered(tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
-        let start_state = tokenizer.start_state() as usize;
-        let num_states = tokenizer.num_states() as usize;
-        let mut transitions = vec![u32::MAX; num_states * 256];
-        let states: Vec<FlatDfaState> = (0..num_states)
-            .map(|i| {
-                let base = i * 256;
-                for (byte, target) in tokenizer.transitions_from(i as u32) {
-                    transitions[base + byte as usize] = target;
-                }
-                let finalizers = collect_filtered_group_ids(
-                    tokenizer.matched_terminals_iter(i as u32),
-                    active_groups,
-                );
-                let possible_future_group_ids = collect_filtered_group_ids(
-                    tokenizer.possible_future_terminals_iter(i as u32),
-                    active_groups,
-                );
-
-                FlatDfaState {
-                    finalizers,
-                    possible_future_group_ids,
-                }
-            })
-            .collect();
-
-        let transitions = project_filtered_transition_topology(&states, &transitions);
-        FlatDfa {
-            states,
-            start_state,
-            transitions,
-        }
+        Self::from_tokenizer_parts(tokenizer, Some(active_groups), None)
     }
 
-    /// Build a FlatDfa using a pre-built flat transition table, sharing the
-    /// transition data via Arc. Copies all finalizers/futures without filtering.
-    pub fn from_flat_trans(
-        flat_trans: &Arc<[u32]>,
-        tokenizer: &Tokenizer,
-    ) -> Self {
-        let start_state = tokenizer.start_state() as usize;
-        let states: Vec<FlatDfaState> = (0..tokenizer.num_states() as usize)
-            .map(|i| {
-                let finalizers = collect_group_ids(tokenizer.matched_terminals_iter(i as u32));
-                let possible_future_group_ids =
-                    collect_group_ids(tokenizer.possible_future_terminals_iter(i as u32));
-                FlatDfaState {
-                    finalizers,
-                    possible_future_group_ids,
-                }
-            })
-            .collect();
-        FlatDfa { states, start_state, transitions: Arc::clone(flat_trans) }
+    pub fn from_flat_trans(flat_trans: &Arc<[u32]>, tokenizer: &Tokenizer) -> Self {
+        Self::from_tokenizer_parts(tokenizer, None, Some(flat_trans))
     }
 
-    /// Build an active-terminal DFA view from a shared raw transition table.
-    /// The raw table is projected to dead for active-dead sources and targets.
-    pub fn from_flat_trans_filtered(
-        flat_trans: &Arc<[u32]>,
-        tokenizer: &Tokenizer,
-        active_groups: &[bool],
-    ) -> Self {
-        let start_state = tokenizer.start_state() as usize;
-        let states: Vec<FlatDfaState> = (0..tokenizer.num_states() as usize)
-            .map(|i| {
-                let finalizers = collect_filtered_group_ids(
-                    tokenizer.matched_terminals_iter(i as u32),
-                    active_groups,
-                );
-                let possible_future_group_ids = collect_filtered_group_ids(
-                    tokenizer.possible_future_terminals_iter(i as u32),
-                    active_groups,
-                );
-                FlatDfaState {
-                    finalizers,
-                    possible_future_group_ids,
-                }
-            })
-            .collect();
-        let transitions = project_filtered_transition_topology(&states, flat_trans);
-        FlatDfa {
-            states,
-            start_state,
-            transitions,
-        }
+    pub fn from_flat_trans_filtered(flat_trans: &Arc<[u32]>, tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
+        Self::from_tokenizer_parts(tokenizer, Some(active_groups), Some(flat_trans))
     }
-
 }
-
 /// A thin wrapper around glrmask's `Tokenizer` that exposes the flattened DFA.
 ///
 /// The equivalence-analysis code calls `dfa()` and accesses `.states` and
@@ -489,68 +407,9 @@ impl TokenizerView {
         self.flat_dfa.start_state
     }
 
-    /// Build a filtered quotient directly from the shared raw transition table.
-    /// This is used only after a raw-coordinate congruence certificate, so one
-    /// representative row per state class preserves every vocabulary-byte walk.
-    pub fn new_filtered_quotient_from_flat_trans(
-        flat_trans: &Arc<[u32]>,
-        tokenizer: &Tokenizer,
-        active_groups: &[bool],
-        state_map: &ManyToOneIdMap,
-    ) -> (Self, f64) {
-        let raw_states = tokenizer.num_states() as usize;
-        assert_eq!(flat_trans.len(), raw_states * 256, "invalid raw transition table");
-        assert_eq!(state_map.original_to_internal.len(), raw_states, "invalid state map");
-        let quotient_states = state_map.internal_to_originals.len();
-        let mut transitions = vec![u32::MAX; quotient_states * 256];
-        let mut states = Vec::with_capacity(quotient_states);
-        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
-        let filter_started_at = profile_timing.then(Instant::now);
-        for (internal, &representative) in state_map.representative_original_ids.iter().enumerate() {
-            let representative = representative as usize;
-            assert!(representative < raw_states, "invalid quotient representative");
-            let finalizers = collect_filtered_group_ids(
-                tokenizer.matched_terminals_iter(representative as u32),
-                active_groups,
-            );
-            let possible_future_group_ids = collect_filtered_group_ids(
-                tokenizer.possible_future_terminals_iter(representative as u32),
-                active_groups,
-            );
-            states.push(FlatDfaState {
-                finalizers,
-                possible_future_group_ids,
-            });
-            let raw_base = representative * 256;
-            let quotient_base = internal * 256;
-            for byte in 0..256usize {
-                let target = flat_trans[raw_base + byte];
-                transitions[quotient_base + byte] = if target == u32::MAX {
-                    u32::MAX
-                } else {
-                    let mapped = state_map.original_to_internal[target as usize];
-                    assert_ne!(mapped, u32::MAX, "quotient target must be mapped");
-                    mapped
-                };
-            }
-        }
-        let transitions = project_filtered_transition_topology(&states, &transitions);
-        let start_state = state_map.original_to_internal[tokenizer.start_state() as usize];
-        assert_ne!(start_state, u32::MAX, "quotient start state must be mapped");
-        (
-            Self {
-                flat_dfa: FlatDfa {
-                    states,
-                    start_state: start_state as usize,
-                    transitions,
-                },
-            },
-            filter_started_at
-                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-                .unwrap_or(0.0),
-        )
-    }
-
+    /// Materialize the same certified quotient in either the dense byte
+    /// coordinate or the finite-vocabulary column coordinate. The irrelevant
+    /// catch-all is dead; the certificate concerns only the observed alphabet.
     pub fn new_filtered_quotient_from_flat_trans_with_observation_cache(
         flat_trans: &Arc<[u32]>,
         tokenizer: &Tokenizer,
@@ -558,152 +417,45 @@ impl TokenizerView {
         state_map: &ManyToOneIdMap,
         raw_observation_ids: &[u32],
         observation_representatives: &[u32],
+        relevant_bytes: Option<&[bool; 256]>,
     ) -> (Self, f64) {
         let raw_states = tokenizer.num_states() as usize;
         assert_eq!(flat_trans.len(), raw_states * 256, "invalid raw transition table");
         assert_eq!(state_map.original_to_internal.len(), raw_states, "invalid state map");
         assert_eq!(raw_observation_ids.len(), raw_states, "invalid observation IDs");
-
-        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
-        let started_at = profile_timing.then(Instant::now);
-        let observation_states = observation_representatives
-            .iter()
-            .map(|&representative| {
-                let representative = representative as usize;
-                assert!(representative < raw_states, "invalid observation representative");
-                FlatDfaState {
-                    finalizers: collect_filtered_group_ids(
-                        tokenizer.matched_terminals_iter(representative as u32),
-                        active_groups,
-                    ),
-                    possible_future_group_ids: collect_filtered_group_ids(
-                        tokenizer.possible_future_terminals_iter(representative as u32),
-                        active_groups,
-                    ),
+        let started_at = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some().then(Instant::now);
+        let observations: Vec<_> = observation_representatives.iter()
+            .map(|&state| tokenizer_state(tokenizer, state, Some(active_groups))).collect();
+        let states: Vec<_> = state_map.representative_original_ids.iter()
+            .map(|&state| observations[raw_observation_ids[state as usize] as usize].clone()).collect();
+        let compact = relevant_bytes.and_then(conservative_byte_classes);
+        let classes = compact.unwrap_or_else(|| std::array::from_fn(|byte| byte as u8));
+        let representatives = column_representatives(&classes);
+        let width = representatives.len();
+        let alive: Vec<_> = states.iter().map(state_has_active_language).collect();
+        let mut rows = vec![u32::MAX; states.len() * width];
+        for (internal, &raw) in state_map.representative_original_ids.iter().enumerate() {
+            if !alive[internal] { continue; }
+            let source = raw as usize * 256;
+            let row = &mut rows[internal * width..(internal + 1) * width];
+            for (class, &byte) in representatives.iter().enumerate() {
+                if compact.is_some() && class == 0 { continue; }
+                let target = flat_trans[source + byte as usize];
+                if target == u32::MAX { continue; }
+                let mapped = state_map.original_to_internal[target as usize];
+                if mapped != u32::MAX && alive[mapped as usize] {
+                    row[class] = mapped;
                 }
-            })
-            .collect::<Vec<_>>();
-
-        let quotient_states = state_map.internal_to_originals.len();
-        let mut transitions = vec![u32::MAX; quotient_states * 256];
-        let mut states = Vec::with_capacity(quotient_states);
-        for (internal, &representative) in state_map.representative_original_ids.iter().enumerate() {
-            let representative = representative as usize;
-            let observation = raw_observation_ids[representative] as usize;
-            states.push(
-                observation_states
-                    .get(observation)
-                    .expect("invalid observation class")
-                    .clone(),
-            );
-            let raw_base = representative * 256;
-            let quotient_base = internal * 256;
-            for byte in 0..256usize {
-                let target = flat_trans[raw_base + byte];
-                transitions[quotient_base + byte] = if target == u32::MAX {
-                    u32::MAX
-                } else {
-                    state_map.original_to_internal[target as usize]
-                };
             }
         }
-        let transitions = project_filtered_transition_topology(&states, &transitions);
         let start_state = state_map.original_to_internal[tokenizer.start_state() as usize];
         assert_ne!(start_state, u32::MAX, "quotient start state must be mapped");
         (
-            Self {
-                flat_dfa: FlatDfa {
-                    states,
-                    start_state: start_state as usize,
-                    transitions,
-                },
-            },
-            started_at
-                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-                .unwrap_or(0.0),
+            Self { flat_dfa: FlatDfa { states, start_state: start_state as usize,
+                transitions: ByteRows::new(Arc::from(rows), classes) } },
+            started_at.map(|start| start.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0),
         )
     }
-
-    /// Build the filtered quotient metadata together with a precompressed
-    /// finite-vocabulary transition base. The returned view deliberately has
-    /// no dense 256-column transition table; callers must use the returned
-    /// compatible base for all token walks.
-    pub fn new_filtered_quotient_from_flat_trans_with_observation_cache_and_relevant_base(
-        flat_trans: &Arc<[u32]>,
-        tokenizer: &Tokenizer,
-        active_groups: &[bool],
-        state_map: &ManyToOneIdMap,
-        raw_observation_ids: &[u32],
-        observation_representatives: &[u32],
-        relevant_bytes: &[bool; 256],
-    ) -> Option<(Self, super::vocab::fast::SharedVocabDfaBase, f64)> {
-        let raw_states = tokenizer.num_states() as usize;
-        if flat_trans.len() != raw_states * 256
-            || state_map.original_to_internal.len() != raw_states
-            || raw_observation_ids.len() != raw_states
-        {
-            return None;
-        }
-        let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
-        let started_at = profile_timing.then(Instant::now);
-        let observation_states = observation_representatives
-            .iter()
-            .map(|&representative| {
-                let representative = representative as usize;
-                if representative >= raw_states {
-                    return None;
-                }
-                Some(FlatDfaState {
-                    finalizers: collect_filtered_group_ids(
-                        tokenizer.matched_terminals_iter(representative as u32),
-                        active_groups,
-                    ),
-                    possible_future_group_ids: collect_filtered_group_ids(
-                        tokenizer.possible_future_terminals_iter(representative as u32),
-                        active_groups,
-                    ),
-                })
-            })
-            .collect::<Option<Vec<_>>>()?;
-
-        let mut states = Vec::with_capacity(state_map.internal_to_originals.len());
-        for &representative in &state_map.representative_original_ids {
-            let representative = representative as usize;
-            if representative >= raw_states {
-                return None;
-            }
-            let observation = raw_observation_ids[representative] as usize;
-            states.push(observation_states.get(observation)?.clone());
-        }
-        let start_state = state_map.original_to_internal[tokenizer.start_state() as usize];
-        if start_state == u32::MAX {
-            return None;
-        }
-        let active_dead_classes = states
-            .iter()
-            .map(|state| !state_has_active_language(state))
-            .collect::<Vec<_>>();
-        let base = super::vocab::fast::SharedVocabDfaBase::build_from_raw_quotient_for_relevant_bytes(
-            flat_trans,
-            state_map,
-            relevant_bytes,
-            Some(&active_dead_classes),
-        )?;
-        Some((
-            Self {
-                flat_dfa: FlatDfa {
-                    states,
-                    start_state: start_state as usize,
-                    transitions: Arc::from(Vec::<u32>::new()),
-                },
-            },
-            base,
-            started_at
-                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-                .unwrap_or(0.0),
-        ))
-    }
-
     /// Verify that `state_map` is an output-labelled right congruence for every
     /// byte that may occur in the active vocabulary. This is the exact condition
     /// needed to evaluate token paths in the quotient DFA.
@@ -766,51 +518,57 @@ impl TokenizerView {
         true
     }
 
-    /// Materialize the exact active-byte quotient after a congruence check. The
-    /// returned view owns only one row and observation pair per state class.
+    /// Materialize the certified quotient without changing the byte coordinate.
     pub fn quotient_by_state_map(&self, state_map: &ManyToOneIdMap) -> Self {
         let dfa = self.dfa();
-        let quotient_states = state_map.internal_to_originals.len();
-        let mut transitions = vec![u32::MAX; quotient_states * 256];
-        let mut states = Vec::with_capacity(quotient_states);
-        for (internal, &representative) in state_map.representative_original_ids.iter().enumerate() {
-            let representative = representative as usize;
-            assert!(representative < dfa.states.len(), "invalid quotient representative");
-            let source = &dfa.states[representative];
-            states.push(FlatDfaState {
-                finalizers: source.finalizers.clone(),
-                possible_future_group_ids: source.possible_future_group_ids.clone(),
-            });
-            let base = internal * 256;
-            for byte in 0..256usize {
-                let target = dfa.trans(representative, byte);
-                transitions[base + byte] = if target == u32::MAX {
-                    u32::MAX
-                } else {
-                    let mapped = state_map.original_to_internal[target as usize];
-                    assert_ne!(mapped, u32::MAX, "quotient target must be mapped");
-                    mapped
-                };
+        let states: Vec<_> = state_map.representative_original_ids.iter()
+            .map(|&raw| dfa.states[raw as usize].clone()).collect();
+        let alive: Vec<_> = states.iter().map(state_has_active_language).collect();
+        let width = dfa.transitions.width;
+        let mut rows = vec![u32::MAX; states.len() * width];
+        for (internal, &raw) in state_map.representative_original_ids.iter().enumerate() {
+            if !alive[internal] { continue; }
+            for (column, &target) in dfa.transitions.row(raw as usize).iter().enumerate() {
+                if target == u32::MAX { continue; }
+                let mapped = state_map.original_to_internal[target as usize];
+                assert_ne!(mapped, u32::MAX, "quotient target must be mapped");
+                if alive[mapped as usize] { rows[internal * width + column] = mapped; }
             }
         }
-        let transitions = project_filtered_transition_topology(&states, &transitions);
         let start_state = state_map.original_to_internal[dfa.start_state];
         assert_ne!(start_state, u32::MAX, "quotient start state must be mapped");
-        Self {
-            flat_dfa: FlatDfa {
-                states,
-                start_state: start_state as usize,
-                transitions,
-            },
-        }
+        Self { flat_dfa: FlatDfa { states, start_state: start_state as usize,
+            transitions: ByteRows::new(Arc::from(rows), dfa.transitions.byte_to_column) } }
     }
-
 }
-
-
 #[cfg(test)]
 mod sparse_transition_cache_tests {
     use super::*;
+
+    #[test]
+    fn compact_rows_share_storage_and_compare_topology_not_shape() {
+        let mut classes = [0; 256];
+        classes[b'a' as usize] = 1;
+        classes[b'b' as usize] = 1;
+        classes[b'c' as usize] = 2;
+        let values: Arc<[u32]> = Arc::from(vec![u32::MAX, 1, 0, u32::MAX, 0, 1]);
+        let rows = ByteRows::new(Arc::clone(&values), classes);
+        assert!(Arc::ptr_eq(&rows.repack(&classes, false), &values));
+        assert_eq!(rows.repack(&classes, true).as_ref(), &[u32::MAX, u32::MAX, 1, 0, 0, 1]);
+        for state in 0..2 {
+            for byte in 0..256 {
+                let expected = match byte as u8 {
+                    b'a' | b'b' => 1 - state as u32,
+                    b'c' => state as u32,
+                    _ => u32::MAX,
+                };
+                assert_eq!(rows.trans(state, byte), expected);
+            }
+        }
+        let mut different = classes;
+        different[b'a' as usize] = 2;
+        assert!(!rows.same_topology(&ByteRows::new(values, different)));
+    }
 
     #[test]
     fn filtered_byte_classes_ignore_inactive_only_transition_topology() {
@@ -932,10 +690,17 @@ mod sparse_transition_cache_tests {
                 })
                 .collect(),
             start_state: 0,
-            transitions: Arc::from(transitions),
+            transitions: ByteRows::dense(Arc::from(transitions)),
         };
+        let classes = compute_byte_classes(&dfa);
+        for left in 0..256 {
+            for right in 0..256 {
+                assert_eq!(classes[left] == classes[right],
+                    (0..num_states).all(|state| dfa.trans(state, left) == dfa.trans(state, right)));
+            }
+        }
         assert_eq!(
-            byte_classes_from_column_hashes(&dfa.transitions, num_states, &sparse_hashes),
+            byte_classes_from_column_hashes(num_states, &sparse_hashes, &[true; 256], |state, byte| dfa.trans(state, byte)),
             compute_byte_classes(&dfa),
         );
     }

@@ -1680,57 +1680,22 @@ fn try_analyze_equivalences_with_raw_quotient(
     let observation_representatives = raw_restricted.observation_representatives;
     let pre_state_map = raw_restricted.state_map;
 
-    let use_compact_quotient_view = partition_label == "p7"
-        && !super::super::l2p_terminal_interchangeability_strict_reference_enabled();
+    let use_compact_quotient_view = !super::super::l2p_terminal_interchangeability_strict_reference_enabled();
     let view_build_started_at = Instant::now();
-    let (analysis_view, prebuilt_local_base, active_mask_filter_ms) = if use_compact_quotient_view {
-        if let Some((view, base, build_ms)) =
-            TokenizerView::new_filtered_quotient_from_flat_trans_with_observation_cache_and_relevant_base(
-                flat_trans,
-                tokenizer,
-                active_groups,
-                &pre_state_map,
-                &raw_observation_ids,
-                &observation_representatives,
-                &raw_relevant_bytes,
-            )
-        {
-            (view, Some(base), build_ms)
-        } else {
-            let (view, build_ms) =
-                TokenizerView::new_filtered_quotient_from_flat_trans_with_observation_cache(
-                    flat_trans,
-                    tokenizer,
-                    active_groups,
-                    &pre_state_map,
-                    &raw_observation_ids,
-                    &observation_representatives,
-                );
-            (view, None, build_ms)
-        }
-    } else {
-        let (view, build_ms) =
-            TokenizerView::new_filtered_quotient_from_flat_trans_with_observation_cache(
-                flat_trans,
-                tokenizer,
-                active_groups,
-                &pre_state_map,
-                &raw_observation_ids,
-                &observation_representatives,
-            );
-        (view, None, build_ms)
-    };
+    let (analysis_view, active_mask_filter_ms) =
+        TokenizerView::new_filtered_quotient_from_flat_trans_with_observation_cache(
+            flat_trans, tokenizer, active_groups, &pre_state_map,
+            &raw_observation_ids, &observation_representatives,
+            use_compact_quotient_view.then_some(&raw_relevant_bytes),
+        );
     let analysis_view_build_ms = view_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
     // This exact byte partition is now over at most a few hundred quotient
     // rows. It replaces the previous 18k-state shared-base cold setup.
     let byte_class_setup_started_at = Instant::now();
-    let local_shared_base = prebuilt_local_base.or_else(|| {
-        super::vocab::fast::SharedVocabDfaBase::build_from_dfa_for_relevant_bytes(
-            analysis_view.dfa(),
-            &raw_relevant_bytes,
-        )
-    });
+    let local_shared_base = super::vocab::fast::SharedVocabDfaBase::build_from_dfa_for_relevant_bytes(
+        analysis_view.dfa(), &raw_relevant_bytes,
+    );
     let byte_to_class = local_shared_base
         .as_ref()
         .map(|base| base.byte_to_class())
@@ -3841,7 +3806,7 @@ fn analyze_equivalences_impl(
 mod prepass_selection_tests {
     use super::*;
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::{
-        FlatDfa, FlatDfaState,
+        ByteRows, FlatDfa, FlatDfaState,
     };
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::shared::representative_tokens_for_vocab_classes;
     use std::sync::Arc;
@@ -3952,7 +3917,7 @@ mod prepass_selection_tests {
         TokenizerView {
             flat_dfa: FlatDfa {
                 start_state: 0,
-                transitions: Arc::from(transitions),
+                transitions: ByteRows::dense(Arc::from(transitions)),
                 states: vec![
                     FlatDfaState {
                         finalizers: vec![],

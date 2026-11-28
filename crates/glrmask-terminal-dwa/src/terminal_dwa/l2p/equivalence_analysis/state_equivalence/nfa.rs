@@ -8,7 +8,7 @@ use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::{SingletonEpsilonClosures, Tokenizer};
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
-use super::super::compat::{FlatDfa, FlatDfaState, TokenizerView};
+use super::super::compat::{ByteRows, FlatDfa, FlatDfaState, TokenizerView};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RawPowersetTargetMode {
@@ -131,7 +131,7 @@ impl RelevantPowersetView {
             flat_dfa: FlatDfa {
                 states: self.states,
                 start_state: self.start_state,
-                transitions: Arc::from(transitions),
+                transitions: ByteRows::dense(Arc::from(transitions)),
             },
         }
     }
@@ -346,7 +346,7 @@ pub fn build_bounded_analysis_view_from_relevant_powerset(
             flat_dfa: FlatDfa {
                 states,
                 start_state: start_state as usize,
-                transitions: Arc::from(transitions),
+                transitions: ByteRows::dense(Arc::from(transitions)),
             },
         },
         raw_start_to_view,
@@ -1841,7 +1841,7 @@ fn materialize_bounded_analysis_view(
             flat_dfa: FlatDfa {
                 states,
                 start_state,
-                transitions,
+                transitions: ByteRows::dense(transitions),
             },
         },
         raw_start_to_view,

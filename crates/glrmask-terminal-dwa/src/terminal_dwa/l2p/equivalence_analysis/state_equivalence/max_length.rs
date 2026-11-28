@@ -156,60 +156,6 @@ pub fn active_byte_representatives(
     }
 }
 
-fn compute_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
-    let num_states = tokenizer.num_states() as usize;
-    let mut column_hashes = [0u64; 256];
-
-    for state in 0..num_states {
-        for byte in 0..256usize {
-            column_hashes[byte] = column_hashes[byte]
-                .wrapping_mul(0x517cc1b727220a95)
-                .wrapping_add(tokenizer.get_transition(state as u32, byte as u8) as u64);
-        }
-    }
-
-    let mut sorted_indices: [u8; 256] = std::array::from_fn(|i| i as u8);
-    sorted_indices.sort_unstable_by_key(|&byte| column_hashes[byte as usize]);
-
-    let mut byte_to_class = [0u8; 256];
-    let mut next_class = 0u8;
-    byte_to_class[sorted_indices[0] as usize] = 0;
-
-    for i in 1..256 {
-        let curr = sorted_indices[i];
-        let hash = column_hashes[curr as usize];
-        if hash != column_hashes[sorted_indices[i - 1] as usize] {
-            next_class += 1;
-            byte_to_class[curr as usize] = next_class;
-            continue;
-        }
-
-        let mut assigned = false;
-        for j in (0..i).rev() {
-            let prev = sorted_indices[j];
-            if column_hashes[prev as usize] != hash {
-                break;
-            }
-            let same = (0..num_states).all(|state| {
-                tokenizer.get_transition(state as u32, curr)
-                    == tokenizer.get_transition(state as u32, prev)
-            });
-            if same {
-                byte_to_class[curr as usize] = byte_to_class[prev as usize];
-                assigned = true;
-                break;
-            }
-        }
-
-        if !assigned {
-            next_class += 1;
-            byte_to_class[curr as usize] = next_class;
-        }
-    }
-
-    byte_to_class
-}
-
 fn stable_representatives(
     tokenizer: &Tokenizer,
     active_groups: Option<&[bool]>,
@@ -298,7 +244,7 @@ pub fn compute_state_map(
     let byte_to_class = if let Some(byte_to_class) = kbounded_byte_to_class {
         byte_to_class
     } else {
-        owned_byte_to_class = compute_byte_classes(tokenizer);
+        owned_byte_to_class = super::super::compat::compute_tokenizer_byte_classes(tokenizer);
         &owned_byte_to_class
     };
     let active_bytes =

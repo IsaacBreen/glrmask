@@ -3,7 +3,7 @@
 //! Each token is classified by its match positions, suffix structure, and end
 //! states across all tokenizer starts.
 
-use super::super::compat::{compute_byte_classes, FlatDfa, TokenizerView};
+use super::super::compat::{byte_classes_from_column_hashes, conservative_byte_classes, compute_byte_classes, scan_byte_columns, ByteRows, FlatDfa, TokenizerView, BYTE_COLUMN_HASH_MULTIPLIER};
 use ahash::{AHasher, RandomState};
 use hashbrown::HashMap;
 use once_cell::sync::Lazy;
@@ -18,7 +18,6 @@ use std::time::Instant;
 use super::super::disallowed_follows::normalize_disallowed_follows;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
-use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::compile_profile_enabled;
 
 pub type VocabEquivalenceResult = BTreeSet<Vec<usize>>;
@@ -109,7 +108,6 @@ struct Dfa {
 pub struct SharedVocabDfaBase {
     byte_to_class: [u8; 256],
     pub num_classes: usize,
-    class_representatives: Arc<[u8]>,
     /// The two dense compressed layouts are independently lazy. A reduced
     /// representative analysis can use the shared byte partition without
     /// paying to materialize raw-state layouts it never walks.
@@ -119,381 +117,69 @@ pub struct SharedVocabDfaBase {
     self_loop_bytes: Arc<[U8Set]>,
     none_completion_hash: u64,
     /// Exact source table for pointer-fast and value-exact compatibility checks.
-    source_transitions: Arc<[u32]>,
+    source_transitions: ByteRows,
 }
 
-fn compute_byte_classes_and_self_loops(
-    dfa: &super::super::compat::FlatDfa,
+fn observe_columns(
+    dfa: &FlatDfa,
+    relevant: &[bool; 256],
+    conservative: Option<[u8; 256]>,
 ) -> ([u8; 256], Vec<U8Set>) {
-    // Exact byte-class discovery already requires a full DFA-table pass. Build
-    // self-loop masks in that same pass rather than paying for another scan.
-    let mut column_hashes = [0u64; 256];
-    let mut self_loop_bytes = Vec::with_capacity(dfa.states.len());
-    for state in 0..dfa.states.len() {
-        let mut self_loops = U8Set::empty();
-        let base = state * 256;
-        for byte in 0..256usize {
-            let target = dfa.transitions[base + byte];
-            column_hashes[byte] = column_hashes[byte]
-                .wrapping_mul(0x517cc1b727220a95)
-                .wrapping_add(target as u64);
-            if target == state as u32 {
-                self_loops.insert(byte as u8);
-            }
-        }
-        self_loop_bytes.push(self_loops);
-    }
-
-    let mut sorted_indices: [u8; 256] = std::array::from_fn(|i| i as u8);
-    sorted_indices.sort_unstable_by_key(|&byte| column_hashes[byte as usize]);
-    let mut byte_to_class = [0u8; 256];
-    let mut next_class = 0u8;
-    byte_to_class[sorted_indices[0] as usize] = 0;
-    for i in 1..256 {
-        let current = sorted_indices[i];
-        let hash = column_hashes[current as usize];
-        if hash != column_hashes[sorted_indices[i - 1] as usize] {
-            next_class += 1;
-            byte_to_class[current as usize] = next_class;
-            continue;
-        }
-        let mut assigned = false;
-        for j in (0..i).rev() {
-            let previous = sorted_indices[j];
-            if column_hashes[previous as usize] != hash {
-                break;
-            }
-            let same = (0..dfa.states.len()).all(|state| {
-                let base = state * 256;
-                dfa.transitions[base + current as usize]
-                    == dfa.transitions[base + previous as usize]
-            });
-            if same {
-                byte_to_class[current as usize] = byte_to_class[previous as usize];
-                assigned = true;
-                break;
-            }
-        }
-        if !assigned {
-            next_class += 1;
-            byte_to_class[current as usize] = next_class;
-        }
-    }
-    (byte_to_class, self_loop_bytes)
-}
-
-/// Discover byte classes while observing only bytes used by the partition.
-/// Irrelevant columns collapse into reserved class zero and are never walked by
-/// these callers.
-fn compute_byte_classes_and_self_loops_relevant(
-    dfa: &super::super::compat::FlatDfa,
-    relevant_bytes: &[bool; 256],
-) -> ([u8; 256], Vec<U8Set>) {
-    let relevant: Vec<usize> = (0..256usize).filter(|&byte| relevant_bytes[byte]).collect();
-    if relevant.len() == 256 {
-        // There is no irrelevant catch-all byte to reserve as class zero, and
-        // 256 distinct relevant columns cannot be represented as classes 1..=256
-        // in the u8 class table. The full exact builder already handles the
-        // all-bytes case with classes 0..=255.
-        return compute_byte_classes_and_self_loops(dfa);
-    }
     let mut hashes = [0u64; 256];
-    let mut self_loop_bytes = Vec::with_capacity(dfa.states.len());
-    for state in 0..dfa.states.len() {
-        let mut self_loops = U8Set::empty();
-        let base = state * 256;
-        for &byte in &relevant {
-            let target = dfa.transitions[base + byte];
+    let mut self_loop_bytes = vec![U8Set::empty(); dfa.states.len()];
+    let hash_columns = conservative.is_none();
+    scan_byte_columns(&dfa.transitions, relevant, |state, byte, target| {
+        if hash_columns {
             hashes[byte] = hashes[byte]
-                .wrapping_mul(0x517cc1b727220a95)
-                .wrapping_add(target as u64 + 1);
-            if target == state as u32 {
-                self_loops.insert(byte as u8);
-            }
+                .wrapping_mul(BYTE_COLUMN_HASH_MULTIPLIER)
+                .wrapping_add(target as u64);
         }
-        self_loop_bytes.push(self_loops);
-    }
-
-    let mut byte_to_class = [0u8; 256];
-    let mut sorted = relevant;
-    sorted.sort_unstable_by_key(|&byte| hashes[byte]);
-    let mut next_class = 0u8;
-    for (index, &byte) in sorted.iter().enumerate() {
-        let hash = hashes[byte];
-        let mut matching_class = None;
-        for &previous in sorted[..index].iter().rev() {
-            if hashes[previous] != hash {
-                break;
-            }
-            let same_column = (0..dfa.states.len()).all(|state| {
-                let base = state * 256;
-                dfa.transitions[base + byte] == dfa.transitions[base + previous]
-            });
-            if same_column {
-                matching_class = Some(byte_to_class[previous]);
-                break;
-            }
+        if target == state as u32 {
+            self_loop_bytes[state].insert(byte as u8);
         }
-        if let Some(class) = matching_class {
-            byte_to_class[byte] = class;
-        } else {
-            next_class = next_class
-                .checked_add(1)
-                .expect("relevant byte classes must fit in the reserved u8 domain");
-            byte_to_class[byte] = next_class;
-        }
-    }
-    (byte_to_class, self_loop_bytes)
+    });
+    let classes = conservative.unwrap_or_else(|| byte_classes_from_column_hashes(
+        dfa.states.len(), &hashes, relevant, |state, byte| dfa.trans(state, byte)));
+    (classes, self_loop_bytes)
 }
 
 impl SharedVocabDfaBase {
-    fn class_representatives(byte_to_class: &[u8; 256], num_classes: usize) -> Arc<[u8]> {
-        let mut representatives = vec![0u8; num_classes];
-        let mut seen = vec![false; num_classes];
-        for byte in 0..=255u8 {
-            let class = byte_to_class[byte as usize] as usize;
-            if !seen[class] {
-                seen[class] = true;
-                representatives[class] = byte;
-            }
-        }
-        Arc::from(representatives)
-    }
-
     fn build_layout(&self, transposed: bool) -> Arc<[u32]> {
-        let num_states = self.source_transitions.len() / 256;
-        let mut transitions = vec![NONE; self.num_classes * num_states];
-        for state in 0..num_states {
-            let source_base = state * 256;
-            for class in 0..self.num_classes {
-                let target = self.source_transitions
-                    [source_base + self.class_representatives[class] as usize];
-                let destination = if transposed {
-                    class * num_states + state
-                } else {
-                    state * self.num_classes + class
-                };
-                transitions[destination] = target;
-            }
-        }
-        Arc::from(transitions)
+        self.source_transitions.repack(&self.byte_to_class, transposed)
     }
 
-    /// Build from a FlatDfa. Called lazily via OnceLock on first use.
-    pub fn build_from_dfa(dfa: &super::super::compat::FlatDfa) -> Self {
-        let (byte_to_class, self_loop_bytes) = compute_byte_classes_and_self_loops(dfa);
-        let num_classes = byte_to_class
-            .iter()
-            .copied()
-            .max()
-            .map_or(0usize, |max_class| max_class as usize + 1);
-        let none_completion_hash = {
-            let mut h = new_hasher();
-            h.write_u8(0);
-            h.finish()
-        };
+    fn from_observations(dfa: &FlatDfa, byte_to_class: [u8; 256], self_loop_bytes: Vec<U8Set>) -> Self {
+        let num_classes = byte_to_class.iter().copied().max().unwrap() as usize + 1;
+        let mut h = new_hasher();
+        h.write_u8(0);
         Self {
             byte_to_class,
             num_classes,
-            class_representatives: Self::class_representatives(&byte_to_class, num_classes),
             trans_by_class: OnceLock::new(),
             trans_by_state_class: OnceLock::new(),
             self_loop_bytes: Arc::from(self_loop_bytes),
-            none_completion_hash,
-            source_transitions: Arc::clone(&dfa.transitions),
+            none_completion_hash: h.finish(),
+            source_transitions: dfa.transitions.clone(),
         }
     }
 
-    /// Build a conservative local byte layout for a finite vocabulary. Every
-    /// relevant byte receives its own class; all other bytes share an unused
-    /// catch-all class. Token walks only observe relevant bytes, so this is an
-    /// exact replacement for full 256-column class discovery on that walk.
+    pub fn build_from_dfa(dfa: &FlatDfa) -> Self {
+        Self::build_from_dfa_relevant(dfa, &[true; 256])
+    }
+
+    /// A cheap conservative partition for tiny finite vocabularies.
     pub fn build_from_dfa_for_relevant_bytes(
-        dfa: &super::super::compat::FlatDfa,
+        dfa: &FlatDfa,
         relevant_bytes: &[bool; 256],
     ) -> Option<Self> {
-        let relevant_count = relevant_bytes.iter().filter(|&&relevant| relevant).count();
-        if relevant_count >= 255 {
-            return None;
-        }
-        let mut byte_to_class = [0u8; 256];
-        let mut next_class = 1u8;
-        for byte in 0..=255u8 {
-            if relevant_bytes[byte as usize] {
-                byte_to_class[byte as usize] = next_class;
-                next_class += 1;
-            }
-        }
-        let num_classes = next_class as usize;
-        let mut self_loop_bytes = Vec::with_capacity(dfa.states.len());
-        for state in 0..dfa.states.len() {
-            let mut self_loops = U8Set::empty();
-            let base = state * 256;
-            for byte in 0..=255u8 {
-                if relevant_bytes[byte as usize]
-                    && dfa.transitions[base + byte as usize] == state as u32
-                {
-                    self_loops.insert(byte);
-                }
-            }
-            self_loop_bytes.push(self_loops);
-        }
-        let none_completion_hash = {
-            let mut h = new_hasher();
-            h.write_u8(0);
-            h.finish()
-        };
-        Some(Self {
-            byte_to_class,
-            num_classes,
-            class_representatives: Self::class_representatives(&byte_to_class, num_classes),
-            trans_by_class: OnceLock::new(),
-            trans_by_state_class: OnceLock::new(),
-            self_loop_bytes: Arc::from(self_loop_bytes),
-            none_completion_hash,
-            source_transitions: Arc::clone(&dfa.transitions),
-        })
+        let conservative = conservative_byte_classes(relevant_bytes)?;
+        let (classes, loops) = observe_columns(dfa, relevant_bytes, Some(conservative));
+        Some(Self::from_observations(dfa, classes, loops))
     }
 
-    /// Build a byte-class base that only distinguishes the *relevant* bytes
-    /// (those marked `true`), collapsing every other byte into a single class.
-    ///
-    /// This is exact for any analysis whose transition walks only ever follow
-    /// relevant bytes — e.g. the C-seeded L2P state/vocab equivalence, which
-    /// only steps through the partition's token bytes. Because irrelevant byte
-    /// columns are never indexed, merging them is unobservable. Restricting the
-    /// scan to relevant columns makes construction proportional to the number
-    /// of relevant bytes instead of the full 256-wide alphabet.
-    pub fn build_from_dfa_relevant(
-        dfa: &super::super::compat::FlatDfa,
-        relevant_bytes: &[bool; 256],
-    ) -> Self {
-        let (byte_to_class, self_loop_bytes) =
-            compute_byte_classes_and_self_loops_relevant(dfa, relevant_bytes);
-        let num_classes = byte_to_class
-            .iter()
-            .copied()
-            .max()
-            .map_or(0usize, |max_class| max_class as usize + 1);
-        let none_completion_hash = {
-            let mut h = new_hasher();
-            h.write_u8(0);
-            h.finish()
-        };
-        Self {
-            byte_to_class,
-            num_classes,
-            class_representatives: Self::class_representatives(&byte_to_class, num_classes),
-            trans_by_class: OnceLock::new(),
-            trans_by_state_class: OnceLock::new(),
-            self_loop_bytes: Arc::from(self_loop_bytes),
-            none_completion_hash,
-            source_transitions: Arc::clone(&dfa.transitions),
-        }
-    }
-
-    /// Build a quotient's finite-vocabulary byte layout directly from raw
-    /// representative rows. This avoids materializing an otherwise-unused
-    /// quotient `states × 256` table: every relevant byte gets its own exact
-    /// class and all remaining bytes share a catch-all class.
-    pub fn build_from_raw_quotient_for_relevant_bytes(
-        raw_transitions: &Arc<[u32]>,
-        state_map: &ManyToOneIdMap,
-        relevant_bytes: &[bool; 256],
-        active_dead_classes: Option<&[bool]>,
-    ) -> Option<Self> {
-        let relevant_count = relevant_bytes.iter().filter(|&&relevant| relevant).count();
-        if relevant_count >= 255 {
-            return None;
-        }
-        let raw_states = state_map.original_to_internal.len();
-        if raw_transitions.len() != raw_states * 256 {
-            return None;
-        }
-
-        let mut byte_to_class = [0u8; 256];
-        let mut next_class = 1u8;
-        for byte in 0..=255u8 {
-            if relevant_bytes[byte as usize] {
-                byte_to_class[byte as usize] = next_class;
-                next_class += 1;
-            }
-        }
-        let num_classes = next_class as usize;
-        let class_representatives = Self::class_representatives(&byte_to_class, num_classes);
-        let quotient_states = state_map.internal_to_originals.len();
-        if active_dead_classes.is_some_and(|dead| dead.len() != quotient_states) {
-            return None;
-        }
-        let mut row_major = vec![NONE; quotient_states * num_classes];
-        let mut self_loop_bytes = Vec::with_capacity(quotient_states);
-        for (internal, &raw_representative) in state_map.representative_original_ids.iter().enumerate() {
-            let raw_representative = raw_representative as usize;
-            if raw_representative >= raw_states {
-                return None;
-            }
-            let source_dead = active_dead_classes.is_some_and(|dead| dead[internal]);
-            let raw_base = raw_representative * 256;
-            if !source_dead {
-                for class in 0..num_classes {
-                    let target = raw_transitions[raw_base + class_representatives[class] as usize];
-                    row_major[internal * num_classes + class] = if target == NONE {
-                        NONE
-                    } else {
-                        let mapped = state_map.original_to_internal[target as usize];
-                        if active_dead_classes.is_some_and(|dead| dead[mapped as usize]) {
-                            NONE
-                        } else {
-                            mapped
-                        }
-                    };
-                }
-            }
-            let mut self_loops = U8Set::empty();
-            for byte in 0..=255u8 {
-                if !relevant_bytes[byte as usize] {
-                    continue;
-                }
-                if source_dead {
-                    continue;
-                }
-                let target = raw_transitions[raw_base + byte as usize];
-                if target != NONE {
-                    let mapped = state_map.original_to_internal[target as usize];
-                    if mapped == internal as u32
-                        && !active_dead_classes.is_some_and(|dead| dead[mapped as usize])
-                    {
-                        self_loops.insert(byte);
-                    }
-                }
-            }
-            self_loop_bytes.push(self_loops);
-        }
-        let mut class_major = vec![NONE; quotient_states * num_classes];
-        for state in 0..quotient_states {
-            for class in 0..num_classes {
-                class_major[class * quotient_states + state] = row_major[state * num_classes + class];
-            }
-        }
-        let row_lock = OnceLock::new();
-        let _ = row_lock.set(Arc::from(row_major));
-        let class_lock = OnceLock::new();
-        let _ = class_lock.set(Arc::from(class_major));
-        let none_completion_hash = {
-            let mut h = new_hasher();
-            h.write_u8(0);
-            h.finish()
-        };
-        Some(Self {
-            byte_to_class,
-            num_classes,
-            class_representatives,
-            trans_by_class: class_lock,
-            trans_by_state_class: row_lock,
-            self_loop_bytes: Arc::from(self_loop_bytes),
-            none_completion_hash,
-            source_transitions: Arc::from(Vec::<u32>::new()),
-        })
+    pub fn build_from_dfa_relevant(dfa: &FlatDfa, relevant_bytes: &[bool; 256]) -> Self {
+        let (classes, loops) = observe_columns(dfa, relevant_bytes, None);
+        Self::from_observations(dfa, classes, loops)
     }
 
     /// Return the precomputed byte-to-class mapping.
@@ -526,22 +212,11 @@ impl SharedVocabDfaBase {
 
     /// Check full compatibility without forcing either lazy layout.
     pub fn is_compatible_with_dfa(&self, dfa: &super::super::compat::FlatDfa) -> bool {
-        let num_dfa_states = dfa.states.len();
-        if self.source_transitions.is_empty() {
-            return self.self_loop_bytes.len() == num_dfa_states
-                && self
-                    .trans_by_state_class
-                    .get()
-                    .is_some_and(|transitions| transitions.len() == num_dfa_states * self.num_classes);
-        }
-        self.self_loop_bytes.len() == num_dfa_states
-            && self.source_transitions.len() == dfa.transitions.len()
-            && (Arc::ptr_eq(&self.source_transitions, &dfa.transitions)
-                || self.source_transitions.as_ref() == dfa.transitions.as_ref())
+        self.source_transitions.num_states() == dfa.states.len()
+            && self.source_transitions.same_topology(&dfa.transitions)
     }
 }
 
-/// Cache type for lazy SharedVocabDfaBase initialization across partitions.
 pub type SharedVocabDfaCache = std::sync::OnceLock<SharedVocabDfaBase>;
 
 /// Deterministic stage-local identity for one immutable vocabulary-analysis
@@ -1333,64 +1008,27 @@ fn build_dfa_with_group_filter(
 
     let num_dfa_states = dfa.states.len();
 
-    // Use shared base if available and compatible, otherwise compute from scratch.
-    let compatible_shared_base = shared_base.filter(|base| {
+    // A caller's explicit byte coordinate must agree with the cached layout,
+    // not just with its source rows.
+    let compatible_shared_base = shared_base.filter(|base|
         base.is_compatible_with_dfa(dfa)
-    });
-    let (byte_to_class, trans_by_class, self_loop_bytes, none_completion_hash) =
-        if let Some(base) = compatible_shared_base {
-            let btc = byte_to_class_override.copied().unwrap_or(base.byte_to_class);
-            (
-                btc,
-                base.transitions_by_class_arc(),
-                Arc::clone(&base.self_loop_bytes),
-                base.none_completion_hash,
-            )
+            && byte_to_class_override.is_none_or(|classes| *classes == base.byte_to_class));
+    let owned_base;
+    let base = if let Some(base) = compatible_shared_base {
+        base
+    } else {
+        owned_base = if let Some(classes) = byte_to_class_override {
+            let (_, loops) = observe_columns(dfa, &[true; 256], Some(*classes));
+            SharedVocabDfaBase::from_observations(dfa, *classes, loops)
         } else {
-            let btc = byte_to_class_override.copied().unwrap_or_else(|| compute_byte_classes(dfa));
-            let num_classes = btc
-                .iter()
-                .copied()
-                .max()
-                .map_or(0usize, |max_class| max_class as usize + 1);
-            let mut class_repr = vec![0u8; num_classes];
-            let mut class_seen = vec![false; num_classes];
-            for b in 0..=255u8 {
-                let class = btc[b as usize] as usize;
-                if !class_seen[class] {
-                    class_seen[class] = true;
-                    class_repr[class] = b;
-                }
-            }
-
-            let mut tbc = vec![NONE; num_classes * num_dfa_states];
-            for c in 0..num_classes {
-                let repr = class_repr[c] as usize;
-                let bbase = c * num_dfa_states;
-                for s in 0..num_dfa_states {
-                    tbc[bbase + s] = dfa.trans(s, repr);
-                }
-            }
-
-            let mut slb = Vec::with_capacity(num_dfa_states);
-            for s in 0..dfa.states.len() {
-                let mut bits = U8Set::empty();
-                for (byte_idx, &target) in dfa.transitions_for(s).iter().enumerate() {
-                    if target == s as u32 {
-                        bits.insert(byte_idx as u8);
-                    }
-                }
-                slb.push(bits);
-            }
-
-            let nch = {
-                let mut h = new_hasher();
-                h.write_u8(0);
-                h.finish()
-            };
-
-            (btc, Arc::from(tbc), Arc::from(slb), nch)
+            SharedVocabDfaBase::build_from_dfa(dfa)
         };
+        &owned_base
+    };
+    let byte_to_class = base.byte_to_class;
+    let trans_by_class = base.transitions_by_class_arc();
+    let self_loop_bytes = Arc::clone(&base.self_loop_bytes);
+    let none_completion_hash = base.none_completion_hash;
 
     Dfa {
         start_state: dfa.start_state,
@@ -4132,11 +3770,13 @@ fn compact_tokenizer_view_for_tokens<S: AsRef<[u8]>>(
         }
     }
 
-    let mut transitions = vec![NONE; reachable_count * 256];
+    let classes = conservative_byte_classes(&relevant_bytes).unwrap_or_else(|| std::array::from_fn(|byte| byte as u8));
+    let width = classes.iter().copied().max().unwrap() as usize + 1;
+    let mut transitions = vec![NONE; reachable_count * width];
     let mut states = Vec::with_capacity(reachable_count);
     for (compact, &original) in compact_to_original.iter().enumerate() {
         states.push(source.states[original].clone());
-        let compact_base = compact * 256;
+        let compact_base = compact * width;
         for (byte, &used) in relevant_bytes.iter().enumerate() {
             if !used {
                 continue;
@@ -4145,7 +3785,7 @@ fn compact_tokenizer_view_for_tokens<S: AsRef<[u8]>>(
             if target != NONE {
                 let mapped = original_to_compact[target as usize];
                 debug_assert_ne!(mapped, NONE, "reachable token edge omitted from compact view");
-                transitions[compact_base + byte] = mapped;
+                transitions[compact_base + classes[byte] as usize] = mapped;
             }
         }
     }
@@ -4160,7 +3800,7 @@ fn compact_tokenizer_view_for_tokens<S: AsRef<[u8]>>(
             flat_dfa: FlatDfa {
                 states,
                 start_state,
-                transitions: Arc::from(transitions),
+                transitions: ByteRows::new(Arc::from(transitions), classes),
             },
         },
         compact_initial,
@@ -4319,7 +3959,7 @@ fn finite_token_probe_view<S: AsRef<[u8]>>(
             flat_dfa: FlatDfa {
                 states,
                 start_state,
-                transitions: Arc::from(transitions),
+                transitions: ByteRows::dense(Arc::from(transitions)),
             },
         },
         compact_initial,
@@ -5571,7 +5211,7 @@ mod shared_base_tests {
             TokenizerView {
                 flat_dfa: FlatDfa {
                     start_state: 0,
-                    transitions: Arc::from(transitions),
+                    transitions: ByteRows::dense(Arc::from(transitions)),
                     states: vec![
                         FlatDfaState {
                             finalizers: vec![],
@@ -5644,7 +5284,7 @@ mod shared_base_tests {
                 },
             ],
             start_state: 0,
-            transitions: Arc::from(transitions),
+            transitions: ByteRows::dense(Arc::from(transitions)),
         }
     }
 
@@ -5733,7 +5373,7 @@ mod shared_base_tests {
                 },
             ],
             start_state: 0,
-            transitions: Arc::from(transitions),
+            transitions: ByteRows::dense(Arc::from(transitions)),
         }
     }
 
@@ -6082,7 +5722,7 @@ mod shared_base_tests {
                 flat_dfa: FlatDfa {
                     states,
                     start_state: next(&mut random) as usize % state_count,
-                    transitions: Arc::from(transitions),
+                    transitions: ByteRows::dense(Arc::from(transitions)),
                 },
             };
             let mut tokens = vec![
@@ -6241,9 +5881,9 @@ mod shared_base_tests {
             finalizers: Vec::new(),
             possible_future_group_ids: Vec::new(),
         });
-        let mut transitions = dfa.transitions.to_vec();
+        let mut transitions = dfa.transitions.values.to_vec();
         transitions.resize(target_state_count * 256, u32::MAX);
-        dfa.transitions = Arc::from(transitions);
+        dfa.transitions = ByteRows::dense(Arc::from(transitions));
         dfa
     }
 
@@ -6330,9 +5970,9 @@ mod shared_base_tests {
     #[test]
     fn trie_noop_self_loop_skip_matches_independent_token_scans() {
         let mut flat_dfa = sample_dfa();
-        let mut transitions = flat_dfa.transitions.to_vec();
+        let mut transitions = flat_dfa.transitions.values.to_vec();
         transitions[b'a' as usize] = 0;
-        flat_dfa.transitions = Arc::from(transitions);
+        flat_dfa.transitions = ByteRows::dense(Arc::from(transitions));
         let view = TokenizerView { flat_dfa };
         let disallowed = BTreeMap::<u32, BitSet>::new();
         let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
@@ -6578,7 +6218,7 @@ mod shared_base_tests {
         let view = TokenizerView {
             flat_dfa: sample_dfa(),
         };
-        assert!(view.dfa().transitions.contains(&u32::MAX));
+        assert!(view.dfa().transitions.values.contains(&u32::MAX));
 
         let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa"];
         let disallowed = BTreeMap::<u32, BitSet>::new();
@@ -6998,7 +6638,7 @@ mod shared_base_tests {
         let independently_allocated = FlatDfa {
             states: dfa.states.clone(),
             start_state: dfa.start_state,
-            transitions: Arc::from(dfa.transitions.to_vec()),
+            transitions: ByteRows::dense(Arc::from(dfa.transitions.values.to_vec())),
         };
         assert!(base.is_compatible_with_dfa(&independently_allocated));
     }
