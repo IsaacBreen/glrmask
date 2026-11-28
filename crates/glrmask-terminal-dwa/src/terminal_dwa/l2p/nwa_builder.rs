@@ -35,7 +35,29 @@ type TokenizerState = u32;
 type LeafTokenIds = SmallVec<[u32; 8]>;
 type DeferredFutureStateGroups = SmallVec<[(TokenizerState, LeafTokenIds); 4]>;
 type DeferredUncoloredFutureLeafBuffer = Vec<DeferredFutureStateGroups>;
-type FutureTerminalColorGroups = SmallVec<[(ColorId, SmallVec<[TerminalID; 4]>); 8]>;
+/// One active future-terminal relation per logical scanner state. The color
+/// projection is derived once, only on colored builders. Its first-seen color
+/// order is retained separately from the sorted color-to-terminals lookup.
+struct FutureObservation {
+    terminals: Arc<[TerminalID]>,
+    ignore_present: bool,
+    colored: Option<Box<ColoredFuture>>,
+}
+
+struct ColoredFuture {
+    groups: SmallVec<[(ColorId, SmallVec<[TerminalID; 4]>); 8]>,
+    colors: SmallVec<[ColorId; 8]>,
+}
+
+impl FutureObservation {
+    fn terminals_for_color(&self, color: ColorId) -> &[TerminalID] {
+        let Some(colored) = &self.colored else { return &[]; };
+        match colored.groups.binary_search_by_key(&color, |(key, _)| *key) {
+            Ok(index) => &colored.groups[index].1,
+            Err(_) => &[],
+        }
+    }
+}
 
 /// Scalar access is an acceleration of the same epsilon-closed byte action.
 /// A borrowed induced view must additionally prove that every observed raw
@@ -481,10 +503,7 @@ struct TerminalNwaBuilder<'tok, 'pm, 'nwa, S: EventSink = NWA> {
     borrowed_cursor:Option<native_borrowed_cursor::BorrowedScalarCache<'tok>>,
     mapping_failed:bool,
     terminal_coloring: TerminalColoring,
-    possible_future_terminals: FxHashMap<TokenizerState, Vec<TerminalID>>,
-    future_terminal_color_groups: FxHashMap<TokenizerState, FutureTerminalColorGroups>,
-    future_terminal_colors: FxHashMap<TokenizerState, SmallVec<[ColorId; 8]>>,
-    ignore_terminal_possible: FxHashMap<TokenizerState, bool>,
+    future_observations: FxHashMap<TokenizerState, FutureObservation>,
     possible_matches: &'pm mut PossibleMatchesComputer<'tok>,
     nwa: &'nwa mut S,
     num_tsids: u32,
@@ -585,10 +604,7 @@ impl<'tok, 'pm, 'nwa, S: EventSink> TerminalNwaBuilder<'tok, 'pm, 'nwa, S> {
             borrowed_cursor:None,
             mapping_failed:false,
             terminal_coloring,
-            possible_future_terminals: FxHashMap::default(),
-            future_terminal_color_groups: FxHashMap::default(),
-            future_terminal_colors: FxHashMap::default(),
-            ignore_terminal_possible: FxHashMap::default(),
+            future_observations: FxHashMap::default(),
             possible_matches,
             nwa,
             num_tsids,
@@ -687,85 +703,50 @@ impl<'tok, 'pm, 'nwa, S: EventSink> TerminalNwaBuilder<'tok, 'pm, 'nwa, S> {
         })
     }
 
-    fn possible_future_terminals_for_state(&mut self, tokenizer_state: TokenizerState) -> Vec<TerminalID> {
-        if let Some(existing)=self.possible_future_terminals.get(&tokenizer_state){return existing.clone()}
-        let active = self.active_terminals.clone();
-        let original=self.original_state(tokenizer_state);
-        self.possible_future_terminals
-            .entry(tokenizer_state)
-            .or_insert_with(|| {
-                self.tokenizer
-                    .possible_future_terminals_iter(original)
-                    .filter(|&terminal| active.as_ref().is_none_or(|mask| {
-                        mask.get(terminal as usize).copied().unwrap_or(false)
-                    }))
-                    .collect()
-            })
-            .clone()
+    fn future_observation(&mut self, state: TokenizerState) -> &FutureObservation {
+        let original = self.original_state(state);
+        let tokenizer = self.tokenizer;
+        let active = self.active_terminals.as_deref();
+        let ignore = self.ignore_terminal;
+        let coloring = self.use_terminal_coloring.then_some(&self.terminal_coloring);
+        self.future_observations.entry(state).or_insert_with(|| {
+            let terminals: Arc<[TerminalID]> = tokenizer.possible_future_terminals_iter(original)
+                .filter(|&terminal| active.is_none_or(|mask| {
+                    mask.get(terminal as usize).copied().unwrap_or(false)
+                }))
+                .collect::<Vec<_>>().into();
+            let ignore_present = ignore.is_some_and(|terminal| terminals.contains(&terminal));
+            let colored = coloring.map(|coloring| {
+                let mut groups = BTreeMap::<ColorId, SmallVec<[TerminalID; 4]>>::new();
+                let mut colors = SmallVec::new();
+                for &terminal in terminals.iter() {
+                    if Some(terminal) == ignore {
+                        continue;
+                    }
+                    let color = coloring.color_for(terminal);
+                    let entry = groups.entry(color).or_default();
+                    if entry.is_empty() {
+                        colors.push(color);
+                    }
+                    entry.push(terminal);
+                }
+                Box::new(ColoredFuture { groups: groups.into_iter().collect(), colors })
+            });
+            FutureObservation { terminals, ignore_present, colored }
+        })
     }
 
-    fn populate_future_terminal_color_cache(&mut self, tokenizer_state: TokenizerState) {
-        if self.future_terminal_color_groups.contains_key(&tokenizer_state) {
-            return;
-        }
-
-        let mut groups = BTreeMap::<ColorId, SmallVec<[TerminalID; 4]>>::new();
-        let mut colors = SmallVec::<[ColorId; 8]>::new();
-        let mut ignore_present = false;
-
-        for terminal_id in self.tokenizer.possible_future_terminals_iter(self.original_state(tokenizer_state)) {
-            if !self.terminal_is_active(terminal_id) {
-                continue;
-            }
-            if Some(terminal_id) == self.ignore_terminal {
-                ignore_present = true;
-                continue;
-            }
-            let color = self.terminal_coloring.color_for(terminal_id);
-            let entry = groups.entry(color).or_default();
-            if entry.is_empty() {
-                colors.push(color);
-            }
-            entry.push(terminal_id);
-        }
-
-        self.future_terminal_color_groups
-            .insert(tokenizer_state, groups.into_iter().collect());
-        self.future_terminal_colors.insert(tokenizer_state, colors);
-        self.ignore_terminal_possible
-            .insert(tokenizer_state, ignore_present);
+    fn possible_future_terminals_for_state(&mut self, state: TokenizerState) -> Arc<[TerminalID]> {
+        Arc::clone(&self.future_observation(state).terminals)
     }
 
-    fn ignore_terminal_possible_for_state(&mut self, tokenizer_state: TokenizerState) -> bool {
-        if self.ignore_terminal.is_none() {
-            return false;
-        }
-        self.populate_future_terminal_color_cache(tokenizer_state);
-        self.ignore_terminal_possible
-            .get(&tokenizer_state)
-            .copied()
-            .unwrap_or(false)
+    fn ignore_terminal_possible_for_state(&mut self, state: TokenizerState) -> bool {
+        self.ignore_terminal.is_some() && self.future_observation(state).ignore_present
     }
 
-    fn future_terminal_colors_for_state(
-        &mut self,
-        tokenizer_state: TokenizerState,
-    ) -> SmallVec<[ColorId; 8]> {
-        self.populate_future_terminal_color_cache(tokenizer_state);
-        self.future_terminal_colors
-            .get(&tokenizer_state)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    fn future_terminal_color_groups_for_state(
-        &mut self,
-        tokenizer_state: TokenizerState,
-    ) -> FutureTerminalColorGroups {
-        self.populate_future_terminal_color_cache(tokenizer_state);
-        self.future_terminal_color_groups
-            .get(&tokenizer_state)
-            .cloned()
+    fn future_terminal_colors_for_state(&mut self, state: TokenizerState) -> SmallVec<[ColorId; 8]> {
+        self.future_observation(state).colored.as_ref()
+            .map(|colored| colored.colors.clone())
             .unwrap_or_default()
     }
 
@@ -820,7 +801,7 @@ impl<'tok, 'pm, 'nwa, S: EventSink> TerminalNwaBuilder<'tok, 'pm, 'nwa, S> {
             let future_terminals = self.possible_future_terminals_for_state(tokenizer_state);
             self.profile.future_terminal_additions +=
                 (sources.len() * future_terminals.len()) as u64;
-            for terminal_id in future_terminals {
+            for &terminal_id in future_terminals.iter() {
                 self.add_leaf_token_from_sources(sources, terminal_id, internal_token_id);
             }
             return;
@@ -850,7 +831,7 @@ impl<'tok, 'pm, 'nwa, S: EventSink> TerminalNwaBuilder<'tok, 'pm, 'nwa, S> {
             let future_terminals = self.possible_future_terminals_for_state(tokenizer_state);
             self.profile.future_terminal_additions +=
                 (sources.len() * future_terminals.len()) as u64;
-            for terminal_id in future_terminals {
+            for &terminal_id in future_terminals.iter() {
                 self.add_match_from_sources(sources, terminal_id, self.leaf_state, weight);
             }
             return;
@@ -1126,73 +1107,34 @@ impl<'tok, 'pm, 'nwa, S: EventSink> TerminalNwaBuilder<'tok, 'pm, 'nwa, S> {
         }
         let flush_leaf_ms = flush_start.elapsed().as_secs_f64() * 1000.0;
 
-        let deferred_uncolored =
-            std::mem::take(&mut self.deferred_uncolored_future_leaf_buffer);
-        if deferred_uncolored.iter().any(|groups| !groups.is_empty()) {
-            let mut terminal_cache = FxHashMap::<TokenizerState, Vec<TerminalID>>::default();
-            for groups in &deferred_uncolored {
-                for &(tokenizer_state, _) in groups {
-                    terminal_cache.entry(tokenizer_state).or_insert_with(|| {
-                        self.possible_future_terminals_for_state(tokenizer_state)
-                    });
+        let deferred = std::mem::take(&mut self.deferred_uncolored_future_leaf_buffer);
+        let ignore = self.ignore_terminal;
+        let mut future_additions = 0;
+        for (source, groups) in deferred.into_iter().enumerate() {
+            for (state, token_ids) in groups {
+                if token_ids.is_empty() {
+                    continue;
                 }
-            }
-
-            for (source, groups) in deferred_uncolored.into_iter().enumerate() {
-                for (tokenizer_state, token_ids) in groups {
-                    if token_ids.is_empty() {
+                for &terminal in self.future_observation(state).terminals.iter() {
+                    if Some(terminal) == ignore {
                         continue;
                     }
-                    let token_id_count = token_ids.len() as u64;
-                    let terminals = &terminal_cache[&tokenizer_state];
-                    for &terminal_id in terminals {
-                        if Some(terminal_id) == self.ignore_terminal {
-                            continue;
-                        }
-                        // Preserve the historical profile counter semantics: it
-                        // counts logical terminal-token additions, even though the
-                        // deferred path now realizes the whole token set at once.
-                        self.profile.future_terminal_additions += token_id_count;
-                        let entry = leaf_transition_buckets[source]
-                            .entry(terminal_id as i32)
-                            .or_default();
-                        // Keep deferred future leaves as raw token IDs until the
-                        // existing final per-(source, terminal) bucket pass.  The
-                        // older deferred implementation eagerly materialized a
-                        // coefficient for every (source, scanner-state) group and then
-                        // repeatedly unioned those weights here, which moved work
-                        // out of the trie only to make flush substantially slower.
-                        // Appending IDs preserves the exact eager semantics and
-                        // lets `cached_leaf_weight` run once for the final bucket.
-                        entry.token_ids.extend_from_slice(&token_ids);
-                    }
+                    future_additions += token_ids.len() as u64;
+                    leaf_transition_buckets[source].entry(terminal as i32)
+                        .or_default().token_ids.extend_from_slice(&token_ids);
                 }
             }
         }
+        self.profile.future_terminal_additions += future_additions;
 
         let flush_future_start = std::time::Instant::now();
         let buffer = std::mem::take(&mut self.future_leaf_buffer);
-
-        // Pre-compute terminal lookups to avoid repeated clone+find_map (157K→~100 unique keys)
-        let mut terminal_cache: FxHashMap<(TokenizerState, ColorId), SmallVec<[TerminalID; 4]>> =
-            FxHashMap::default();
-        for &(_, tokenizer_state, color) in buffer.keys() {
-            terminal_cache
-                .entry((tokenizer_state, color))
-                .or_insert_with(|| {
-                    let groups = self.future_terminal_color_groups_for_state(tokenizer_state);
-                    groups
-                        .iter()
-                        .find_map(|(gc, ts)| (*gc == color).then_some(ts.clone()))
-                        .unwrap_or_default()
-                });
-        }
 
         for ((source, tokenizer_state, color), buffered) in buffer {
             if buffered.token_ids.is_empty() && buffered.weight.as_ref().is_none_or(|w| w.is_empty()) {
                 continue;
             }
-            let terminals = &terminal_cache[&(tokenizer_state, color)];
+            let terminals = self.future_observation(tokenizer_state).terminals_for_color(color);
             for &terminal_id in terminals {
                 let entry = leaf_transition_buckets[source as usize]
                     .entry(terminal_id as i32)
@@ -1277,7 +1219,8 @@ impl<'tok, 'pm, 'nwa, S: EventSink> TerminalNwaBuilder<'tok, 'pm, 'nwa, S> {
             let id=coefficients.len()as u32;coefficients.push(weight);entries.push((source,label,id));
         }
         let deferred=std::mem::take(&mut self.deferred_uncolored_future_leaf_buffer);
-        let mut future_cache=FxHashMap::<u32,Vec<u32>>::default();
+        let ignore = self.ignore_terminal;
+        let mut future_additions = 0u64;
         for (source,groups)in deferred.into_iter().enumerate(){
             for (state,tokens)in groups {
                 if tokens.is_empty(){continue}
@@ -1285,17 +1228,18 @@ impl<'tok, 'pm, 'nwa, S: EventSink> TerminalNwaBuilder<'tok, 'pm, 'nwa, S> {
                 if coefficients.len()>=100_000{self.leaf_flush_failed=true;return}
                 let weight=self.cached_leaf_weight(tokens);
                 let id=coefficients.len()as u32;coefficients.push(weight);
-                let terminals=future_cache.entry(state).or_insert_with(||self.possible_future_terminals_for_state(state));
+                let terminals = &self.future_observation(state).terminals;
                 for &terminal in terminals.iter(){
-                    if self.ignore_terminal==Some(terminal){continue}
-                    if entries.len()>=100_000{self.leaf_flush_failed=true;return}
-                    self.profile.future_terminal_additions+=count;
+                    if ignore == Some(terminal) { continue; }
+                    if entries.len() >= 100_000 { self.leaf_flush_failed = true; return; }
+                    future_additions += count;
                     entries.push((source as u32,terminal,id));
                 }
                 if entries.len()>100_000||coefficients.len()>100_000{self.leaf_flush_failed=true;return}
             }
         }
         if entries.len()>100_000||coefficients.len()>100_000{self.leaf_flush_failed=true;return}
+        self.profile.future_terminal_additions += future_additions;
         // Keep all non-leaf transitions exactly as before, before appending
         // any leaf branch. Duplicate targets must not be coalesced here.
         self.flush_non_leaf_events();
@@ -1529,8 +1473,7 @@ impl<'tok, 'pm, 'nwa, S: EventSink> TerminalNwaBuilder<'tok, 'pm, 'nwa, S> {
                         && ((self.has_epsilon_transitions
                             && !self.scalar_deterministic_dispatch)
                             || !end_states.iter().copied().any(|s| {
-                                self.possible_future_terminals_for_state(s)
-                                    .contains(&matched.id)
+                                self.future_observation(s).terminals.contains(&matched.id)
                             }))
                     {
                         self.profile.match_transition_additions += source_nodes.len() as u64;
@@ -3556,7 +3499,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
         let future = self
             .base
             .possible_future_terminals_for_state(context.scanner_state);
-        for terminal in future {
+        for &terminal in future.iter() {
             let mapped_labels = self.mapped_labels(context, terminal);
             if mapped_labels.is_empty() {
                 continue;
@@ -3674,8 +3617,7 @@ impl<'tok, 'pm, 'nwa, 'm> TransportNwaBuilder<'tok, 'pm, 'nwa, 'm> {
                         && child_node.has_token()
                         && !end_state.is_some_and(|state| {
                             self.base
-                                .possible_future_terminals_for_state(state)
-                                .contains(&matched.id)
+                                .future_observation(state).terminals.contains(&matched.id)
                         })
                     {
                         self.base.profile.match_transition_additions +=
