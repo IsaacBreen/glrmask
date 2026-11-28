@@ -172,13 +172,6 @@ pub struct VocabularyRepeatHorizonCache {
     horizons: Mutex<FxHashMap<RepeatBodyLanguageKey, Option<usize>>>,
 }
 
-#[derive(Debug)]
-struct RepeatHorizonLongestTokens {
-    tokens: Vec<Vec<u8>>,
-}
-
-impl glrmask_vocab::__private::VocabDerivedArtifact for RepeatHorizonLongestTokens {}
-
 #[doc(hidden)]
 pub fn build_bounded_code_mask_component_for_vocab(
     expr: &Expr,
@@ -428,18 +421,9 @@ fn max_repeat_translation_over_vocab_suffixes(
         // This small witness set depends only on the immutable vocabulary.
         // Prepare it on first use inside build and share it across schemas;
         // avoid a vocabulary-length scan for each new repeat-body language.
-        let longest = vocab.vocab_derived_cache_get::<RepeatHorizonLongestTokens>()
-            .unwrap_or_else(|| {
-                let longest = std::sync::Arc::new(RepeatHorizonLongestTokens {
-                    tokens: vocab.entries_map().values()
-                        .filter(|token| token.len() == max_token_len).map(<[u8]>::to_vec).collect(),
-                });
-                vocab.vocab_derived_cache_set(std::sync::Arc::clone(&longest));
-                longest
-            });
         let mut current = vec![i32::MIN; automaton.transitions.len()];
         let mut next = current.clone();
-        for token in &longest.tokens {
+        for token in vocab.longest_tokens() {
             if max_repeat_translation_over_token(automaton, token, &mut current, &mut next) == upper_bound {
                 return upper_bound;
             }

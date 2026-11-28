@@ -253,6 +253,7 @@ struct VocabData {
     event_token_ranges: Box<[(u32, u32)]>,
     byte_token_ranges: Box<[(u32, u32)]>,
     max_token_byte_len: usize,
+    longest_entries: OnceLock<Box<[usize]>>,
     byte_facts: OnceLock<Arc<VocabByteFacts>>,
     lexical: OnceLock<Arc<LexicalVocabulary>>,
     artifacts: Mutex<BTreeMap<TypeId, Arc<dyn Any + Send + Sync>>>,
@@ -493,6 +494,7 @@ impl Vocab {
         let max_token_byte_len = entries.values().map(<[u8]>::len).max().unwrap_or(0);
         Self(Arc::new(VocabData {
             entries, event_token_ranges, byte_token_ranges, max_token_byte_len,
+            longest_entries: OnceLock::new(),
             byte_facts: OnceLock::new(),
             lexical: OnceLock::new(),
             artifacts: Mutex::default(),
@@ -548,6 +550,17 @@ impl Vocab {
     #[doc(hidden)]
     pub fn max_token_byte_len(&self) -> usize {
         self.0.max_token_byte_len
+    }
+
+    /// Borrow all longest token witnesses from the shared byte slab.
+    /// Cache ordinals, not copies of the token strings.
+    #[doc(hidden)]
+    pub fn longest_tokens(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.0.longest_entries.get_or_init(|| {
+            self.0.entries.values().enumerate()
+                .filter_map(|(ordinal, bytes)| (bytes.len() == self.max_token_byte_len()).then_some(ordinal))
+                .collect()
+        }).iter().map(|&ordinal| self.0.entries.bytes_at(ordinal))
     }
 
     /// Sorted byte alphabet observed anywhere in the vocabulary.
@@ -811,6 +824,7 @@ mod tests {
         assert_eq!(vocab.byte_facts().follow_words(b'a'), [0, 1u64 << (b'b' % 64), 0, 0]);
         assert_eq!(vocab.byte_facts().follow_words(b'c'), [0; 4]);
         assert_eq!(vocab.max_token_byte_len(), 2);
+        assert_eq!(vocab.longest_tokens().collect::<Vec<_>>(), vec![b"ab".as_slice(), b"bc".as_slice()]);
         assert!(vocab.relevant_byte_mask()[b'b' as usize]);
         assert!(!vocab.relevant_byte_mask()[b'z' as usize]);
         assert_eq!(vocab.compiler_cache_entry_count(), 1);
