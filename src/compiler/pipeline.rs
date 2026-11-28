@@ -3247,33 +3247,59 @@ impl RuntimeTokenizerDagResult {
     }
 }
 
-struct AnalysisDagLane {
-    analyzed_grammar: Arc<AnalyzedGrammar>,
-    analyze_grammar_ms: f64,
-    disallowed_follows: Arc<BTreeMap<u32, BitSet>>,
-    always_allowed_follows: Arc<[Vec<u32>]>,
-    disallowed_follows_ms: f64,
-    analysis_ready_ms: f64,
+/// Timing records do not own compile artifacts. The same representation
+/// measures every sibling task on the compile DAG.
+#[derive(Clone, Copy)]
+struct StageSpan {
+    start: Instant,
+    end: Instant,
 }
 
-struct ColoringDagLane {
-    terminal_coloring: TerminalColoring,
-    terminal_coloring_ms: f64,
+impl StageSpan {
+    fn duration(self) -> f64 {
+        self.end.duration_since(self.start).as_secs_f64() * 1000.0
+    }
+
+    fn start_ms(self, epoch: Instant) -> f64 {
+        self.start.duration_since(epoch).as_secs_f64() * 1000.0
+    }
+
+    fn end_ms(self, epoch: Instant) -> f64 {
+        self.end.duration_since(epoch).as_secs_f64() * 1000.0
+    }
 }
 
-struct TerminalDagResult {
-    terminal_coloring_ms: f64,
+fn measure_stage<T>(work: impl FnOnce() -> T) -> (T, StageSpan) {
+    let start = Instant::now();
+    let product = work();
+    (product, StageSpan { start, end: Instant::now() })
+}
+
+/// Own the grammar analysis and its distinct follow obligations. All
+/// concurrent consumers borrow these values; no shared-ownership handoff.
+struct StaticGrammarAnalysis {
+    analyzed_grammar: AnalyzedGrammar,
+    disallowed_follows: BTreeMap<u32, BitSet>,
+    always_allowed_follows: Vec<Vec<TerminalID>>,
+    analysis: StageSpan,
+    follows: StageSpan,
+}
+
+/// Only these products survive the parser lane. The intermediate GLR table
+/// and template relation are released at the end of their last consumer.
+struct StaticParserProduct {
     terminal_dwas: TerminalDwaFamilies,
     terminal_phase_profile: TerminalDwaPhaseProfile,
-    started_ms: f64,
-    finished_ms: f64,
-}
-struct TemplatesDagResult {
-    templates: Templates,
+    families: ParserFamilyInventory,
     prepared_parser: crate::runtime::parser_backend::PreparedTemplateParser,
-        templates_ms: f64,
-    templates_started_ms: f64,
-    templates_finished_ms: f64,
+    table: StageSpan,
+    global: StageSpan,
+    classification: StageSpan,
+    templates: StageSpan,
+    terminals: StageSpan,
+    parser: StageSpan,
+    coloring_ms: f64,
+    collapse_ms: f64,
 }
 
 fn build_parser_dwa_for_terminal_family(
@@ -3816,171 +3842,124 @@ fn prepare_static_lexer<'v>(
         tokenizer_build_ms, tokenizer_ready_ms, flat_trans_ms, flat_started_ms,
     }, runtime)
 }
-fn classify_static_lexer(
-    prepared_grammar: &GrammarDef, tokenizer: &StaticLexicalPlan<'_>,
-    analysis: &AnalysisDagLane, compile_started_at: Instant,
-) -> (f64, f64, f64) {
-    let token_path_disallowed_follows = ignore_transparent_disallowed_follows(
-        &analysis.disallowed_follows,
-        prepared_grammar.ignore_terminal,
-    );
-    let classify_started_ms = elapsed_ms(compile_started_at);
-    let classify_started_at = Instant::now();
-    if crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
-        eprintln!(
-            "[glrmask/profile][compile_dag_classify_start] tokenizer_states={} terminals={} disallowed={}",
-            tokenizer.source.tokenizer.num_states(),
-            analysis.analyzed_grammar.num_terminals,
-            token_path_disallowed_follows.len(),
-        );
-    }
-    tokenizer.source.classification(analysis.analyzed_grammar.num_terminals);
-    let classify_ms = elapsed_ms(classify_started_at);
-    if crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
-        eprintln!(
-            "[glrmask/profile][compile_dag_classify_end] ms={:.3}",
-            classify_ms,
-        );
-    }
-    let classify_finished_ms = elapsed_ms(compile_started_at);
-
-    (classify_ms, classify_started_ms, classify_finished_ms)
-}
-
-fn build_static_terminal_families(
-    prepared_grammar: &GrammarDef, tokenizer: &StaticLexicalPlan<'_>,
-    analysis: &AnalysisDagLane,
-    coloring: ColoringDagLane,
-    use_terminal_coloring: bool, compile_started_at: Instant,
-) -> TerminalDagResult {
-    let ColoringDagLane { terminal_coloring, terminal_coloring_ms } = coloring;
-    let terminal_dwa_started_ms = elapsed_ms(compile_started_at);
-    let (mut terminal_dwas, mut terminal_phase_profile) =
-        tokenizer.source.terminal_families(
-            &terminal_coloring, use_terminal_coloring, prepared_grammar.ignore_terminal,
-            &analysis.analyzed_grammar, &analysis.disallowed_follows,
-            &analysis.always_allowed_follows,
-        );
-    let special_started_at = Instant::now();
-    let special_token_terminals = collect_special_token_terminals(prepared_grammar);
-    terminal_dwas.special = build_special_token_terminal_family(
-        &tokenizer.source.tokenizer,
-        &special_token_terminals,
-    );
-    terminal_phase_profile.terminal_dwa_ms += elapsed_ms(special_started_at);
-    let terminal_dwa_finished_ms = elapsed_ms(compile_started_at);
-
-    TerminalDagResult {
-        terminal_coloring_ms, terminal_dwas, terminal_phase_profile,
-        started_ms: terminal_dwa_started_ms, finished_ms: terminal_dwa_finished_ms,
-    }
-}
-struct ParserDagResult {
-    families: ParserFamilyInventory,
-    parser_dwa_ms: f64,
-    parser_dwa_started_ms: f64,
-    parser_dwa_finished_ms: f64,
-    terminal_run_collapse_ms: f64,
-}
-
-fn build_static_parser(
-    vocab: &Vocab, tokenizer: &StaticLexicalPlan<'_>,
-    analysis: &AnalysisDagLane, table: &GLRTable, templates: &Templates,
-    terminal_dwas: &mut TerminalDwaFamilies,
-    compile_started_at: Instant,
-) -> ParserDagResult {
-    let collapse_started = Instant::now();
-    let collapse = crate::compiler::terminal_run_collapse::collapse_certified_terminal_runs(
-        terminal_dwas, table, &analysis.analyzed_grammar, templates, vocab,
-    );
-    let terminal_run_collapse_ms = elapsed_ms(collapse_started);
-    debug_assert!(terminal_run_collapse_ms + 0.001 >= collapse.certificate_ms + collapse.rewrite_ms);
-    let parser_started = Instant::now();
-    let parser_dwa_started_ms = elapsed_ms(compile_started_at);
-    let families = build_parser_dwa_families(
-        terminal_dwas, table, &analysis.analyzed_grammar,
-        templates, &tokenizer.source.tokenizer, vocab,
-    );
-    ParserDagResult {
-        families, parser_dwa_ms: elapsed_ms(parser_started), parser_dwa_started_ms,
-        parser_dwa_finished_ms: elapsed_ms(compile_started_at),
-        terminal_run_collapse_ms,
-    }
-}
-
 fn analyze_static_grammar(
-    grammar: &GrammarDef, protected: Option<&[u32]>, analysis_started_at: Instant,
-) -> crate::Result<AnalysisDagLane> {
-    let started = Instant::now();
-    let analyzed_grammar = Arc::new(match protected {
+    grammar: &GrammarDef,
+    protected: Option<&[u32]>,
+) -> crate::Result<StaticGrammarAnalysis> {
+    let (analyzed_grammar, analysis) = measure_stage(|| match protected {
         Some(protected) => AnalyzedGrammar::from_grammar_def_with_protected_shift_terminals(
             grammar, protected.iter().copied(),
         ),
         None => AnalyzedGrammar::from_grammar_def(grammar),
     });
-    let analyze_grammar_ms = elapsed_ms(started);
     analyzed_grammar.check_table_build_normal_form().map_err(|message|
         crate::Error::StrategyUnsupported(format!("grammar precondition violations:\n{message}")))?;
-    let started = Instant::now();
-    let (ever, always) = compute_allowed_follow_sets(&analyzed_grammar);
-    let disallowed_follows = Arc::new(compute_disallowed_follows_from_ever(
-        analyzed_grammar.num_terminals, &ever,
-    ));
-    Ok(AnalysisDagLane {
-        analyzed_grammar, analyze_grammar_ms, disallowed_follows, always_allowed_follows: always.into(),
-        disallowed_follows_ms: elapsed_ms(started), analysis_ready_ms: elapsed_ms(analysis_started_at),
+    let ((disallowed_follows, always_allowed_follows), follows) = measure_stage(|| {
+        let (ever, always) = compute_allowed_follow_sets(&analyzed_grammar);
+        (compute_disallowed_follows_from_ever(analyzed_grammar.num_terminals, &ever), always)
+    });
+    Ok(StaticGrammarAnalysis {
+        analyzed_grammar, disallowed_follows, always_allowed_follows, analysis, follows,
     })
 }
 
-struct TableStage {
-    table: GLRTable,
-    glr_table_ms: f64,
-    glr_ready_ms: f64,
-}
-
-impl TableStage {
-    fn build(analysis: &AnalysisDagLane, construction: GlrTableConstruction, analysis_started_at: Instant) -> Self {
-        let started = Instant::now();
-        let table = GLRTable::build_with_default_construction(&analysis.analyzed_grammar, construction);
-        let glr_table_ms = elapsed_ms(started);
-        if crate::env::var_os("GLRMASK_STOP_AFTER_GLR_TABLE").is_some() {
-            panic!("[glrmask] stopped after GLR table build by GLRMASK_STOP_AFTER_GLR_TABLE");
-        }
-        Self { table, glr_table_ms, glr_ready_ms: elapsed_ms(analysis_started_at) }
-    }
-
-    fn color(&self, analysis: &AnalysisDagLane, plan: Option<&SyntheticTokenizerPlan>, enabled: bool) -> ColoringDagLane {
-        if !enabled {
-            return ColoringDagLane {
-                terminal_coloring: TerminalColoring::identity(analysis.analyzed_grammar.num_terminals as usize),
-                terminal_coloring_ms: 0.0,
+fn build_static_parser_product(
+    grammar: &GrammarDef,
+    vocab: &Vocab,
+    source: &LexicalObservationSource<'_>,
+    analysis: &StaticGrammarAnalysis,
+    synthesis: Option<&SyntheticTokenizerPlan>,
+    construction: GlrTableConstruction,
+    use_coloring: bool,
+) -> crate::Result<Box<StaticParserProduct>> {
+    let (((_, global_span), (_, classify_span)), (table, table_span)) = macro_join(
+        "compile_terminal_coordinates_and_table",
+        || macro_join(
+            "compile_global_and_classify",
+            || measure_stage(|| source.global_map()),
+            || measure_stage(|| {
+                let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
+                if profile {
+                    let follows = ignore_transparent_disallowed_follows(
+                        &analysis.disallowed_follows, grammar.ignore_terminal,
+                    );
+                    eprintln!(
+                        "[glrmask/profile][compile_dag_classify_start] tokenizer_states={} terminals={} disallowed={}",
+                        source.tokenizer.num_states(), analysis.analyzed_grammar.num_terminals, follows.len(),
+                    );
+                }
+                let started = Instant::now();
+                source.classification(analysis.analyzed_grammar.num_terminals);
+                if profile {
+                    eprintln!("[glrmask/profile][compile_dag_classify_end] ms={:.3}", elapsed_ms(started));
+                }
+            }),
+        ),
+        || {
+            let result = measure_stage(|| GLRTable::build_with_default_construction(
+                &analysis.analyzed_grammar, construction,
+            ));
+            if crate::env::var_os("GLRMASK_STOP_AFTER_GLR_TABLE").is_some() {
+                panic!("[glrmask] stopped after GLR table build by GLRMASK_STOP_AFTER_GLR_TABLE");
+            }
+            result
+        },
+    );
+    let (((mut terminal_dwas, terminal_phase_profile), terminal_span, coloring_ms),
+        (templates, template_span)) = macro_join(
+        "compile_terminal_families_and_templates",
+        || {
+            let (coloring, coloring_ms) = if use_coloring {
+                let mut protected = analysis.analyzed_grammar.residual_isolation_classes
+                    .keys().copied().collect::<Vec<_>>();
+                if let Some(plan) = synthesis {
+                    protected.extend(plan.local.protected_terminal_ids.iter().copied());
+                    protected.sort_unstable();
+                    protected.dedup();
+                }
+                let (coloring, span) = measure_stage(|| {
+                    let mut coloring = compute_terminal_coloring(&table);
+                    coloring.isolate_terminals(protected);
+                    coloring
+                });
+                (coloring, span.duration())
+            } else {
+                (TerminalColoring::identity(analysis.analyzed_grammar.num_terminals as usize), 0.0)
             };
-        }
-        let mut protected = analysis.analyzed_grammar.residual_isolation_classes.keys().copied().collect::<Vec<_>>();
-        if let Some(plan) = plan {
-            protected.extend(plan.local.protected_terminal_ids.iter().copied());
-            protected.sort_unstable();
-            protected.dedup();
-        }
-        let started = Instant::now();
-        let mut terminal_coloring = compute_terminal_coloring(&self.table);
-        terminal_coloring.isolate_terminals(protected);
-        ColoringDagLane { terminal_coloring, terminal_coloring_ms: elapsed_ms(started) }
-    }
-
-    fn templates(&self, grammar: &GrammarDef, analysis: &AnalysisDagLane, compile_started_at: Instant) -> crate::Result<TemplatesDagResult> {
-        let templates_started_ms = elapsed_ms(compile_started_at);
-        let started = Instant::now();
-        let (prepared_parser, templates) =
-            crate::runtime::parser_backend::PreparedTemplateParser::compile_static(
-                &self.table, analysis.analyzed_grammar.direct_regular_automaton.as_ref(), grammar.ignore_terminal,
-            )?;
-        let templates_ms = elapsed_ms(started);
-        Ok(TemplatesDagResult {
-            templates, prepared_parser,
-            templates_ms, templates_started_ms, templates_finished_ms: elapsed_ms(compile_started_at),
-        })
-    }
+            let (product, span) = measure_stage(|| {
+                let (mut families, mut profile) = source.terminal_families(
+                    &coloring, use_coloring, grammar.ignore_terminal, &analysis.analyzed_grammar,
+                    &analysis.disallowed_follows, &analysis.always_allowed_follows,
+                );
+                let (special, span) = measure_stage(|| build_special_token_terminal_family(
+                    &source.tokenizer, &collect_special_token_terminals(grammar),
+                ));
+                families.special = special;
+                profile.terminal_dwa_ms += span.duration();
+                (families, profile)
+            });
+            (product, span, coloring_ms)
+        },
+        || measure_stage(|| crate::runtime::parser_backend::PreparedTemplateParser::compile_static(
+            &table, analysis.analyzed_grammar.direct_regular_automaton.as_ref(), grammar.ignore_terminal,
+        )),
+    );
+    let (prepared_parser, templates) = templates?;
+    let (collapse, collapse_span) = measure_stage(||
+        crate::compiler::terminal_run_collapse::collapse_certified_terminal_runs(
+            &mut terminal_dwas, &table, &analysis.analyzed_grammar, &templates, vocab,
+        ));
+    let collapse_ms = collapse_span.duration();
+    debug_assert!(collapse_ms + 0.001 >= collapse.certificate_ms + collapse.rewrite_ms);
+    let (families, parser_span) = measure_stage(|| build_parser_dwa_families(
+        &terminal_dwas, &table, &analysis.analyzed_grammar, &templates, &source.tokenizer, vocab,
+    ));
+    Ok(Box::new(StaticParserProduct {
+        terminal_dwas, terminal_phase_profile, families, prepared_parser,
+        table: table_span, global: global_span, classification: classify_span,
+        templates: template_span, terminals: terminal_span, parser: parser_span,
+        coloring_ms, collapse_ms,
+    }))
 }
 
 fn compile_prepared_with_profile(
@@ -4042,7 +4021,6 @@ fn compile_prepared_with_profile_and_table_construction(
             },
             || analyze_static_grammar(
                 &prepared_grammar, protected_shift_terminals.as_deref().map(Vec::as_slice),
-                analysis_started_at,
             ),
         );
         let analysis = analysis?;
@@ -4065,46 +4043,17 @@ fn compile_prepared_with_profile_and_table_construction(
                         (result, started, finished)
                     },
                 ),
-                || -> crate::Result<_> {
-                    let (((global_max_length_ms, flat_global_finished_ms), (classify_ms, classify_started_ms, classify_finished_ms)), table) = macro_join(
-                        "compile_terminal_coordinates_and_table",
-                        || macro_join(
-                            "compile_global_and_classify",
-                            || {
-                                let started = Instant::now();
-                                tokenizer_lane.source.global_map();
-                                (elapsed_ms(started), elapsed_ms(compile_started_at))
-                            },
-                            || classify_static_lexer(
-                                &prepared_grammar, &tokenizer_lane, &analysis, compile_started_at,
-                            ),
-                        ),
-                        || TableStage::build(&analysis, default_table_construction, analysis_started_at),
-                    );
-                    let (mut terminal, templates) = macro_join(
-                        "compile_terminal_families_and_templates",
-                        || {
-                            let coloring = table.color(&analysis, synthetic_tokenizer_plan.as_ref(), use_terminal_coloring);
-                            build_static_terminal_families(
-                                &prepared_grammar, &tokenizer_lane,
-                                &analysis, coloring, use_terminal_coloring, compile_started_at,
-                            )
-                        },
-                        || table.templates(&prepared_grammar, &analysis, compile_started_at),
-                    );
-                    let templates = templates?;
-                    let parser = build_static_parser(
-                        vocab, &tokenizer_lane, &analysis, &table.table,
-                        &templates.templates, &mut terminal.terminal_dwas, compile_started_at,
-                    );
-                    Ok(Box::new((table, terminal, templates, parser,
-                        (global_max_length_ms, flat_global_finished_ms),
-                        (classify_ms, classify_started_ms, classify_finished_ms))))
-                },
+                || build_static_parser_product(
+                    &prepared_grammar, vocab, &tokenizer_lane.source, &analysis,
+                    synthetic_tokenizer_plan.as_ref(), default_table_construction, use_terminal_coloring,
+                ),
             );
-        let (table, terminal, templates, parser,
-            (global_max_length_ms, flat_global_finished_ms),
-            (classify_ms, classify_started_ms, classify_finished_ms)) = *parser_result?;
+        let StaticParserProduct {
+            terminal_dwas, mut terminal_phase_profile, families, prepared_parser,
+            table: table_span, global: global_span, classification: classify_span,
+            templates: template_span, terminals: terminal_span, parser: parser_span,
+            coloring_ms: terminal_coloring_ms, collapse_ms: terminal_run_collapse_ms,
+        } = *parser_result?;
         let runtime_lexer = runtime_tokenizer_result;
         let runtime_tokenizer_finish_ms = runtime_lexer.finish_ms;
         let StaticLexicalPlan {
@@ -4117,22 +4066,27 @@ fn compile_prepared_with_profile_and_table_construction(
             Some((_, MaskCoordinate::WholeToken(_))));
         let compile_tokenizer_states = source.tokenizer.num_states() as usize;
         let compile_tokenizer_transitions = source.tokenizer.transition_count();
-        let AnalysisDagLane {
-            analyzed_grammar, analyze_grammar_ms, disallowed_follows_ms, analysis_ready_ms, ..
+        let StaticGrammarAnalysis {
+            analyzed_grammar, analysis: analysis_span, follows: follow_span, ..
         } = analysis;
-        let TableStage { table, glr_table_ms, glr_ready_ms } = table;
-        let TerminalDagResult {
-            terminal_coloring_ms, terminal_dwas, mut terminal_phase_profile,
-            started_ms: terminal_dwa_started_ms, finished_ms: terminal_dwa_finished_ms,
-        } = terminal;
-        let TemplatesDagResult {
-            templates, prepared_parser,
-            templates_ms, templates_started_ms, templates_finished_ms,
-        } = templates;
-        let ParserDagResult {
-            families, parser_dwa_ms, parser_dwa_started_ms, parser_dwa_finished_ms,
-            terminal_run_collapse_ms,
-        } = parser;
+        let analyze_grammar_ms = analysis_span.duration();
+        let disallowed_follows_ms = follow_span.duration();
+        let analysis_ready_ms = follow_span.end_ms(analysis_started_at);
+        let glr_table_ms = table_span.duration();
+        let glr_ready_ms = table_span.end_ms(analysis_started_at);
+        let global_max_length_ms = global_span.duration();
+        let flat_global_finished_ms = global_span.end_ms(compile_started_at);
+        let classify_ms = classify_span.duration();
+        let classify_started_ms = classify_span.start_ms(compile_started_at);
+        let classify_finished_ms = classify_span.end_ms(compile_started_at);
+        let templates_ms = template_span.duration();
+        let templates_started_ms = template_span.start_ms(compile_started_at);
+        let templates_finished_ms = template_span.end_ms(compile_started_at);
+        let terminal_dwa_started_ms = terminal_span.start_ms(compile_started_at);
+        let terminal_dwa_finished_ms = terminal_span.end_ms(compile_started_at);
+        let parser_dwa_ms = parser_span.duration();
+        let parser_dwa_started_ms = parser_span.start_ms(compile_started_at);
+        let parser_dwa_finished_ms = parser_span.end_ms(compile_started_at);
         maybe_dump_terminal_dwa_experiment(
             &terminal_dwas,
             &analyzed_grammar.terminal_display_names,
@@ -4156,8 +4110,6 @@ fn compile_prepared_with_profile_and_table_construction(
             }
         }
         let LexicalObservationSource { tokenizer, flat_trans, .. } = *source;
-        let analyzed_grammar = Arc::try_unwrap(analyzed_grammar)
-            .unwrap_or_else(|_| panic!("analyzed grammar references outlived compile DAG"));
 
         profile.tokenizer_build_ms = tokenizer_build_ms;
         let final_tokenizer = runtime_lexer.exact(&tokenizer);
@@ -4251,6 +4203,7 @@ fn compile_prepared_with_profile_and_table_construction(
             0
         };
 
+        drop(terminal_dwas);
         // All weighted projections are now complete. Refine their observation
         // coordinates together and transport each source before any union.
         let shared_id_reconcile_started_at = Instant::now();
@@ -4379,8 +4332,6 @@ fn compile_prepared_with_profile_and_table_construction(
         if !crate::automata::lexer::tokenizer::artifact_serde::compact_large_runtime(&mut tokenizer) {
             crate::automata::lexer::tokenizer::artifact_serde::compact_large_fast_runtime(&mut tokenizer);
         }
-        drop(templates);
-        drop(table);
         let mut constraint = Constraint::from_data(crate::runtime::ConstraintData {
             end_tokens: std::sync::Arc::from([]),
             marker_queries: None,
