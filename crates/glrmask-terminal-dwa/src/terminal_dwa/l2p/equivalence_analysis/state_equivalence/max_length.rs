@@ -8,21 +8,10 @@ use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use super::build_state_map_from_subset_representatives;
 use super::super::compat::TokenizerView;
 
-const MISSING_BLOCK: u32 = u32::MAX;
-
 #[derive(Debug, Clone, Copy)]
 pub enum MaxLengthMode {
     StableByteRestricted,
     KBoundedByteRestricted,
-}
-
-impl MaxLengthMode {
-    pub fn name(self) -> &'static str {
-        match self {
-            MaxLengthMode::StableByteRestricted => "max_length_stable",
-            MaxLengthMode::KBoundedByteRestricted => "max_length_kbounded",
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -45,16 +34,6 @@ impl MaxLengthStatistic {
     pub fn relevant_bytes(&self) -> &[bool; 256] {
         &self.relevant_bytes
     }
-}
-
-#[inline(always)]
-fn mix_u64(mut x: u64) -> u64 {
-    x ^= x >> 30;
-    x = x.wrapping_mul(0xbf58476d1ce4e5b9);
-    x ^= x >> 27;
-    x = x.wrapping_mul(0x94d049bb133111eb);
-    x ^= x >> 31;
-    x
 }
 
 fn is_active_group(group_id: usize, active_groups: Option<&[bool]>) -> bool {
@@ -231,253 +210,24 @@ fn compute_byte_classes(tokenizer: &Tokenizer) -> [u8; 256] {
     byte_to_class
 }
 
-fn same_partition(left: &[u32], left_count: usize, right: &[u32], right_count: usize) -> bool {
-    if left.len() != right.len() || left_count != right_count {
-        return false;
-    }
-
-    let mut left_to_right = vec![u32::MAX; left_count];
-    let mut right_to_left = vec![u32::MAX; right_count];
-
-    for (&l, &r) in left.iter().zip(right.iter()) {
-        let li = l as usize;
-        let ri = r as usize;
-        if li >= left_count || ri >= right_count {
-            return false;
-        }
-        if left_to_right[li] == u32::MAX {
-            left_to_right[li] = r;
-        } else if left_to_right[li] != r {
-            return false;
-        }
-
-        if right_to_left[ri] == u32::MAX {
-            right_to_left[ri] = l;
-        } else if right_to_left[ri] != l {
-            return false;
-        }
-    }
-
-    true
-}
-
-fn refine_once_sorted(
-    tokenizer: &Tokenizer,
-    active_bytes: &[u8],
-    label_ids: &[u32],
-    prev_blocks: &[u32],
-    signatures: &mut [u32],
-    row_hashes: &mut [u64],
-    order: &mut [usize],
-) -> (Vec<u32>, usize) {
-    let n = prev_blocks.len();
-    let width = 1 + active_bytes.len();
-    signatures
-        .par_chunks_mut(width)
-        .zip(row_hashes.par_iter_mut())
-        .enumerate()
-        .for_each(|(state, (row, row_hash))| {
-            row[0] = label_ids[state];
-            for (slot, &byte) in active_bytes.iter().enumerate() {
-                let target = tokenizer.get_transition(state as u32, byte);
-                row[slot + 1] = if target == u32::MAX {
-                    MISSING_BLOCK
-                } else {
-                    prev_blocks[target as usize]
-                };
-            }
-            *row_hash = row.iter().fold(
-                mix_u64((row.len() as u64) ^ 0x9E37_79B9_7F4A_7C15),
-                |hash, &value| mix_u64(hash ^ (value as u64).wrapping_add(0xA24B_AED4_963E_E407)),
-            );
-        });
-
-    order.par_sort_unstable_by(|&left, &right| {
-        let hash_cmp = row_hashes[left].cmp(&row_hashes[right]);
-        if hash_cmp != std::cmp::Ordering::Equal {
-            return hash_cmp;
-        }
-        let left_start = left * width;
-        let right_start = right * width;
-        signatures[left_start..left_start + width]
-            .cmp(&signatures[right_start..right_start + width])
-            .then_with(|| left.cmp(&right))
-    });
-
-    let mut next_blocks = vec![0u32; n];
-    let mut block_count = 0usize;
-    let mut previous_state: Option<usize> = None;
-
-    for &state in order.iter() {
-        let starts_new_block = previous_state.is_none_or(|prev| {
-            if row_hashes[state] != row_hashes[prev] {
-                return true;
-            }
-            let state_start = state * width;
-            let prev_start = prev * width;
-            signatures[state_start..state_start + width]
-                != signatures[prev_start..prev_start + width]
-        });
-        if starts_new_block {
-            block_count += 1;
-        }
-        next_blocks[state] = (block_count - 1) as u32;
-        previous_state = Some(state);
-    }
-
-    (next_blocks, block_count)
-}
-
-fn build_full_mapping_from_blocks(blocks: &[u32], num_states: usize) -> Vec<usize> {
-    let mut rep_for_block = vec![usize::MAX; blocks
-        .iter()
-        .copied()
-        .max()
-        .map_or(0, |value| value as usize + 1)];
-    let mut mapping = vec![0usize; num_states];
-
-    for (state, &block) in blocks.iter().enumerate() {
-        let block = block as usize;
-        if rep_for_block[block] == usize::MAX {
-            rep_for_block[block] = state;
-        }
-        mapping[state] = rep_for_block[block];
-    }
-
-    mapping
-}
-
-fn build_subset_mapping(states: &[usize], full_mapping: &[usize]) -> Vec<usize> {
-    states
-        .iter()
-        .map(|&state| full_mapping[state])
-        .collect()
-}
-
-fn compute_kbounded_partition(
-    tokenizer: &Tokenizer,
-    k: usize,
-    active_groups: Option<&[bool]>,
-    active_bytes: &[u8],
-) -> Vec<u32> {
-    let n = tokenizer.num_states() as usize;
-    let (label_ids, mut block_count) = build_initial_label_partition(tokenizer, active_groups);
-    let mut blocks = label_ids.clone();
-
-    if block_count == n || active_bytes.is_empty() {
-        return blocks;
-    }
-
-    let width = 1 + active_bytes.len();
-    let mut signatures = vec![0u32; n * width];
-    let mut row_hashes = vec![0u64; n];
-    let mut order: Vec<usize> = (0..n).collect();
-
-    for _ in 0..k {
-        let (next_blocks, next_count) = refine_once_sorted(
-            tokenizer,
-            active_bytes,
-            &label_ids,
-            &blocks,
-            &mut signatures,
-            &mut row_hashes,
-            &mut order,
-        );
-
-        let stable = same_partition(&blocks, block_count, &next_blocks, next_count);
-        blocks = next_blocks;
-        block_count = next_count;
-        if stable || block_count == n {
-            break;
-        }
-    }
-
-    blocks
-}
-
-fn stable_refinement_blocks(
+fn stable_representatives(
     tokenizer: &Tokenizer,
     active_groups: Option<&[bool]>,
     active_bytes: &[u8],
-) -> Vec<u32> {
-    let n = tokenizer.num_states() as usize;
-    let (label_ids, mut block_count) = build_initial_label_partition(tokenizer, active_groups);
-    let mut blocks = label_ids.clone();
-
-    if block_count == n || active_bytes.is_empty() {
-        return blocks;
-    }
-
-    let width = 1 + active_bytes.len();
-    let mut signatures = vec![0u32; n * width];
-    let mut row_hashes = vec![0u64; n];
-    let mut order: Vec<usize> = (0..n).collect();
-
-    loop {
-        let (next_blocks, next_count) = refine_once_sorted(
-            tokenizer,
-            active_bytes,
-            &label_ids,
-            &blocks,
-            &mut signatures,
-            &mut row_hashes,
-            &mut order,
-        );
-
-        let stable = same_partition(&blocks, block_count, &next_blocks, next_count);
-        blocks = next_blocks;
-        block_count = next_count;
-        if stable || block_count == n {
-            break;
-        }
-    }
-
-    blocks
+    states: &[usize],
+) -> Vec<usize> {
+    let (initial, count) = build_initial_label_partition(tokenizer, active_groups);
+    if count == initial.len() { return states.to_vec(); }
+    let (classes, representatives, _) = crate::terminal_dwa::congruence::refine_partition_rows(
+        initial,
+        |state| active_bytes.iter().filter_map(move |&byte| {
+            let target = tokenizer.get_transition(state as u32, byte);
+            (target != u32::MAX).then_some((byte, target))
+        }),
+        None,
+    );
+    states.iter().map(|&s| representatives[classes[s] as usize] as usize).collect()
 }
-
-
-/// Refine an already-formed total partition until it is a right congruence on
-/// `active_bytes`, while preserving that partition as a lower bound.
-pub fn stable_refinement_from_initial_blocks(
-    tokenizer: &Tokenizer,
-    active_bytes: &[u8],
-    initial_blocks: &[u32],
-    initial_block_count: usize,
-) -> Vec<u32> {
-    let n = tokenizer.num_states() as usize;
-    assert_eq!(initial_blocks.len(), n);
-    assert!(initial_blocks
-        .iter()
-        .all(|&block| (block as usize) < initial_block_count));
-    if initial_block_count == n || active_bytes.is_empty() {
-        return initial_blocks.to_vec();
-    }
-
-    let width = 1 + active_bytes.len();
-    let mut signatures = vec![0u32; n * width];
-    let mut row_hashes = vec![0u64; n];
-    let mut order: Vec<usize> = (0..n).collect();
-    let mut blocks = initial_blocks.to_vec();
-    let mut block_count = initial_block_count;
-    loop {
-        let (next_blocks, next_count) = refine_once_sorted(
-            tokenizer,
-            active_bytes,
-            initial_blocks,
-            &blocks,
-            &mut signatures,
-            &mut row_hashes,
-            &mut order,
-        );
-        let stable = same_partition(&blocks, block_count, &next_blocks, next_count);
-        blocks = next_blocks;
-        block_count = next_count;
-        if stable || block_count == n {
-            return blocks;
-        }
-    }
-}
-
 
 pub fn compute_statistic(vocab: &Vocab) -> MaxLengthStatistic {
     let mut relevant_bytes = [false; 256];
@@ -555,9 +305,7 @@ pub fn compute_state_map(
         active_byte_representatives(Some(&statistic.relevant_bytes), Some(byte_to_class));
     let representative_states = match mode {
         MaxLengthMode::StableByteRestricted => {
-            let blocks = stable_refinement_blocks(tokenizer, active_groups, &active_bytes);
-            let full_mapping = build_full_mapping_from_blocks(&blocks, num_states);
-            build_subset_mapping(&states, &full_mapping)
+            stable_representatives(tokenizer, active_groups, &active_bytes, &states)
         }
         MaxLengthMode::KBoundedByteRestricted => {
             let owned_tokenizer_view;

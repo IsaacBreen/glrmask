@@ -1,4 +1,4 @@
-//! Sparse exact deterministic partition refinement shared by L1 and TI.
+//! Sparse exact deterministic partition refinement for partial byte observations.
 
 use std::collections::VecDeque;
 
@@ -6,8 +6,19 @@ use std::collections::VecDeque;
 /// synthetic dead state exists, its implicit preimages are complements of
 /// all other preimages. Never split on its incomplete explicit edge list.
 pub(crate) fn refine_partition<'a>(
-    mut classes: Vec<u32>,
+    classes: Vec<u32>,
     edges_from: impl Fn(usize) -> &'a [(u8, u32)],
+    dead: Option<usize>,
+) -> (Vec<u32>, Vec<u32>, usize) {
+    refine_partition_rows(classes, |state| edges_from(state).iter().copied(), dead)
+}
+
+/// The same refinement over borrowed or generated rows. Each source has at
+/// most one edge per byte. Missing edges with no explicit dead state remain
+/// distinct from all materialized target classes.
+pub(crate) fn refine_partition_rows<I: Iterator<Item = (u8, u32)>>(
+    mut classes: Vec<u32>,
+    edges_from: impl Fn(usize) -> I,
     dead: Option<usize>,
 ) -> (Vec<u32>, Vec<u32>, usize) {
     let n = classes.len();
@@ -35,7 +46,7 @@ pub(crate) fn refine_partition<'a>(
 
     let mut reverse_offsets = vec![0usize; n + 1];
     for state in 0..n {
-        for &(_, target) in edges_from(state) {
+        for (_, target) in edges_from(state) {
             reverse_offsets[target as usize + 1] += 1;
         }
     }
@@ -43,7 +54,7 @@ pub(crate) fn refine_partition<'a>(
     let mut next_reverse = reverse_offsets[..n].to_vec();
     let mut reverse = vec![(0u8, 0u32); reverse_offsets[n]];
     for state in 0..n {
-        for &(byte, target) in edges_from(state) {
+        for (byte, target) in edges_from(state) {
             let slot = &mut next_reverse[target as usize];
             reverse[*slot] = (byte, state as u32);
             *slot += 1;
@@ -135,3 +146,48 @@ pub(crate) fn refine_partition<'a>(
     (classes, representatives, pops)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // Deliberately simple synchronous Moore refinement. This does not use
+    // the inverse graph, worklist, partition blocks, or smaller-half rule.
+    fn literal_partition(mut classes: Vec<u32>, rows: &[Vec<(u8, u32)>]) -> Vec<u32> {
+        loop {
+            let mut signatures = HashMap::new();
+            let next: Vec<u32> = rows.iter().enumerate().map(|(state, row)| {
+                let mut key = vec![classes[state]];
+                for byte in 0..=u8::MAX {
+                    key.push(row.iter().find(|&&(b, _)| b == byte)
+                        .map_or(u32::MAX, |&(_, dst)| classes[dst as usize]));
+                }
+                let id = signatures.len() as u32;
+                *signatures.entry(key).or_insert(id)
+            }).collect();
+            let stable = (0..classes.len()).all(|a| (0..a).all(|b|
+                (classes[a] == classes[b]) == (next[a] == next[b])));
+            if stable { return next; }
+            classes = next;
+        }
+    }
+
+    #[test]
+    fn partial_congruence_agrees_with_literal_observer() {
+        let rows = vec![
+            vec![(0, 1), (1, 4)],
+            vec![(0, 2)],
+            vec![(0, 1), (1, 4)],
+            vec![(0, 2)],
+            vec![],
+            vec![(0, 3), (1, 4)],
+            vec![(0, 3), (1, 6)],
+            vec![],
+        ];
+        let initial = vec![0, 0, 0, 0, 1, 0, 0, 0];
+        let literal = literal_partition(initial.clone(), &rows);
+        let (actual, _, _) = refine_partition(initial, |s| &rows[s], None);
+        assert_eq!(literal, actual);
+    }
+}

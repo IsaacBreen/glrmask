@@ -467,9 +467,9 @@ impl GenericPartitionAnalysis {
         let quotient_started_at = Instant::now();
         let global_classes = hopcroft_refine_sparse_edges(
             &initial_classes,
-            offsets,
-            edge_bytes,
-            edge_targets,
+            &offsets,
+            &edge_bytes,
+            &edge_targets,
         );
         let quotient_time = quotient_started_at.elapsed();
 
@@ -1146,9 +1146,9 @@ fn report_physical_definition_coordinate(
         rounds += 1;
         let Some(byte_classes) = hopcroft_refine_sparse_edges(
             &input_classes,
-            offsets.clone(),
-            bytes.clone(),
-            targets.clone(),
+            &offsets,
+            &bytes,
+            &targets,
         ) else {
             eprintln!(
                 "[glrmask/profile][definition_physical_coordinate] partition={} scope={} selected=false reason=invalid_source_graph raw_states={} source_states={} total_ms={:.3}",

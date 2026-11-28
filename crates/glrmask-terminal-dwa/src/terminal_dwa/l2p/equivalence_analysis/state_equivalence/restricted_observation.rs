@@ -11,7 +11,7 @@
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use rustc_hash::FxHashMap;
-use std::collections::VecDeque;
+use crate::terminal_dwa::congruence::refine_partition_rows;
 use std::time::Instant;
 
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
@@ -118,31 +118,6 @@ fn candidate_partition(
     }
 
     (members, representatives, raw_to_candidate)
-}
-
-fn same_candidate_partition(left: &[u32], right: &[u32]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut left_to_right = FxHashMap::<u32, u32>::default();
-    let mut right_to_left = FxHashMap::<u32, u32>::default();
-    for (&left_class, &right_class) in left.iter().zip(right) {
-        match left_to_right.get(&left_class) {
-            Some(&mapped) if mapped != right_class => return false,
-            Some(_) => {}
-            None => {
-                left_to_right.insert(left_class, right_class);
-            }
-        }
-        match right_to_left.get(&right_class) {
-            Some(&mapped) if mapped != left_class => return false,
-            Some(_) => {}
-            None => {
-                right_to_left.insert(right_class, left_class);
-            }
-        }
-    }
-    true
 }
 
 fn candidate_partition_by_source_observation(
@@ -255,80 +230,48 @@ pub fn compute_state_map(
         };
     let num_candidates = candidate_representatives.len();
 
-    // At depth zero every candidate has the same recursive characterization.
-    let (mut current_classes, mut current_class_count) = if include_source_observation {
-        let mut classes_by_source = FxHashMap::<(u32, bool), u32>::default();
-        let mut classes = vec![0u32; num_candidates];
-        for (candidate, &state) in candidate_representatives.iter().enumerate() {
-            let has_any_transition = dfa.transitions_for(state).iter().any(|&target| target != u32::MAX);
-            let next = classes_by_source.len() as u32;
-            classes[candidate] = *classes_by_source
-                .entry((target_labels[state], has_any_transition))
-                .or_insert(next);
+    // Destination observations are fixed independently of successor classes.
+    // Seed them once instead of re-hashing them in every refinement round.
+    // A missing edge has code zero; a present edge includes its raw target
+    // label even if the inherited candidate also contains other raw labels.
+    let mut seeds = FxHashMap::<Vec<u32>, u32>::default();
+    let mut signature = Vec::with_capacity(active_bytes.len() + 2);
+    let mut initial = Vec::with_capacity(num_candidates);
+    for &state in &candidate_representatives {
+        signature.clear();
+        if include_source_observation {
+            signature.push(target_labels[state]);
+            signature.push(u32::from(dfa.transitions_for(state).iter().any(|&t| t != u32::MAX)));
         }
-        (classes, classes_by_source.len())
-    } else {
-        (vec![0u32; num_candidates], usize::from(num_candidates != 0))
-    };
-    let sig_len = 1 + active_bytes.len();
-    let mut signature = vec![0u64; sig_len];
-
-    for _ in 0..num_candidates {
-        let mut next_classes = vec![0u32; num_candidates];
-        // Bucket candidates by a cheap signature hash and resolve collisions by
-        // comparing against the flat per-class signature store. This assigns
-        // classes in order of first appearance (identical to the previous
-        // `FxHashMap<Vec<u64>, u32>` map) while avoiding a `Vec<u64>` clone per
-        // candidate: only one signature is stored per distinct class.
-        let mut classes_by_hash = FxHashMap::<u64, Vec<u32>>::default();
-        let mut class_signatures: Vec<u64> = Vec::new();
-
-        for (candidate, &state) in candidate_representatives.iter().enumerate() {
-            signature[0] = current_classes[candidate] as u64;
-            for (slot, &byte) in active_bytes.iter().enumerate() {
-                let target = dfa.trans(state, byte as usize);
-                signature[slot + 1] = if target == u32::MAX {
-                    0
-                } else {
-                    let target_candidate = raw_to_candidate[target as usize];
-                    debug_assert_ne!(target_candidate, NO_CANDIDATE);
-                    let target_class = current_classes[target_candidate] as u64 + 1;
-                    let labels = target_labels[target as usize] as u64 + 1;
-                    (labels << 32) | target_class
-                };
-            }
-
-            let hash = hash_signature(&signature);
-            let bucket = classes_by_hash.entry(hash).or_default();
-            let existing = bucket.iter().copied().find(|&class| {
-                let base = class as usize * sig_len;
-                class_signatures[base..base + sig_len] == signature[..]
-            });
-            let class = existing.unwrap_or_else(|| {
-                let class = (class_signatures.len() / sig_len) as u32;
-                class_signatures.extend_from_slice(&signature);
-                bucket.push(class);
-                class
-            });
-            next_classes[candidate] = class;
+        for &byte in &active_bytes {
+            let target = dfa.trans(state, byte as usize);
+            signature.push(if target == u32::MAX { 0 } else { target_labels[target as usize] + 1 });
         }
-
-        let next_class_count = class_signatures.len() / sig_len;
-        if next_class_count == current_class_count
-            && same_candidate_partition(&current_classes, &next_classes)
-        {
-            return map_from_candidate_classes(
-                &candidate_members,
-                &candidate_representatives,
-                &next_classes,
-                num_states,
-            );
-        }
-        current_classes = next_classes;
-        current_class_count = next_class_count;
+        let class = if let Some(&class) = seeds.get(signature.as_slice()) {
+            class
+        } else {
+            let class = seeds.len() as u32;
+            seeds.insert(signature.clone(), class);
+            class
+        };
+        initial.push(class);
     }
-
-    unreachable!("restricted-observation partition refinement did not stabilize");
+    drop(seeds);
+    let (classes, _, _) = refine_partition_rows(
+        initial,
+        |candidate| {
+            let state = candidate_representatives[candidate];
+            let raw_to_candidate = &raw_to_candidate;
+            active_bytes.iter().filter_map(move |&byte| {
+                let target = dfa.trans(state, byte as usize);
+                (target != u32::MAX).then(|| (byte, raw_to_candidate[target as usize] as u32))
+            })
+        },
+        None,
+    );
+    map_from_candidate_classes(
+        &candidate_members, &candidate_representatives, &classes, num_states,
+    )
 }
 
 fn active_mask_words(active_groups: &[bool]) -> Vec<u64> {
@@ -346,15 +289,6 @@ fn mix_observation_hash(mut hash: u64, word: u64) -> u64 {
     hash ^= word.wrapping_add(0x9e37_79b9_7f4a_7c15).rotate_left(17);
     hash = hash.wrapping_mul(0xbf58_476d_1ce4_e5b9);
     hash ^ (hash >> 29)
-}
-
-#[inline]
-fn hash_signature(signature: &[u64]) -> u64 {
-    let mut hash = 0x2d35_83d7_4f1a_6e9bu64;
-    for &word in signature {
-        hash = mix_observation_hash(hash, word);
-    }
-    hash
 }
 
 /// Build an exact compact key for a masked finalizer/future observation.
@@ -495,269 +429,40 @@ fn raw_active_language_states(tokenizer: &Tokenizer, active_groups: &[bool]) -> 
         .collect()
 }
 
-enum ExactSignatureBucket {
-    Single { representative: usize, class: u32 },
-    Collisions(Vec<(usize, u32)>),
-}
-
-/// Canonical sparse rows for the active vocabulary-byte alphabet. Dead edges
-/// are omitted; their shared absence is implicit in every signature.
-struct RawRelevantEdges {
-    offsets: Vec<u32>,
-    bytes: Vec<u8>,
-    targets: Vec<u32>,
-}
-
-fn build_raw_relevant_edges(
-    transitions: &[u32],
-    num_states: usize,
-    active_bytes: &[u8],
-    active_language: &[bool],
-) -> RawRelevantEdges {
-    assert_eq!(active_language.len(), num_states);
-    let mut offsets = Vec::with_capacity(num_states + 1);
-    let mut bytes = Vec::new();
-    let mut targets = Vec::new();
-    offsets.push(0);
-    for state in 0..num_states {
-        if active_language[state] {
-            let base = state * 256;
-            for &byte in active_bytes {
-                let target = transitions[base + byte as usize];
-                if target != u32::MAX && active_language[target as usize] {
-                    bytes.push(byte);
-                    targets.push(target);
-                }
-            }
-        }
-        offsets.push(bytes.len() as u32);
-    }
-    RawRelevantEdges {
-        offsets,
-        bytes,
-        targets,
-    }
-}
-
-#[inline]
-fn sparse_signature_hash(
-    state: usize,
-    current_classes: &[u32],
-    edges: &RawRelevantEdges,
-) -> u64 {
-    let mut hash = mix_observation_hash(0x1319_8a2e_0370_7344, current_classes[state] as u64);
-    let start = edges.offsets[state] as usize;
-    let end = edges.offsets[state + 1] as usize;
-    for index in start..end {
-        let edge = ((edges.bytes[index] as u64) << 32)
-            | (current_classes[edges.targets[index] as usize] as u64 + 1);
-        hash = mix_observation_hash(hash, edge);
-    }
-    hash
-}
-
-fn same_sparse_signature(
-    left: usize,
-    right: usize,
-    current_classes: &[u32],
-    edges: &RawRelevantEdges,
-) -> bool {
-    if current_classes[left] != current_classes[right] {
-        return false;
-    }
-    let left_start = edges.offsets[left] as usize;
-    let left_end = edges.offsets[left + 1] as usize;
-    let right_start = edges.offsets[right] as usize;
-    let right_end = edges.offsets[right + 1] as usize;
-    if left_end - left_start != right_end - right_start {
-        return false;
-    }
-    (0..left_end - left_start).all(|offset| {
-        edges.bytes[left_start + offset] == edges.bytes[right_start + offset]
-            && current_classes[edges.targets[left_start + offset] as usize]
-                == current_classes[edges.targets[right_start + offset] as usize]
-    })
-}
-
-fn blocks_from_classes(classes: &[u32], class_count: usize) -> Vec<Vec<u32>> {
-    let mut blocks = vec![Vec::new(); class_count];
-    for (state, &class) in classes.iter().enumerate() {
-        blocks[class as usize].push(state as u32);
-    }
-    blocks
-}
-
-fn build_sparse_inverse_edges(edges: &RawRelevantEdges, num_states: usize) -> Vec<Vec<(u8, u32)>> {
-    let mut inverse = vec![Vec::new(); num_states];
-    for source in 0..num_states {
-        let start = edges.offsets[source] as usize;
-        let end = edges.offsets[source + 1] as usize;
-        for index in start..end {
-            inverse[edges.targets[index] as usize].push((edges.bytes[index], source as u32));
-        }
-    }
-    inverse
-}
-
-/// Exact Hopcroft refinement for the partial DFA induced by active vocabulary
-/// bytes. An absent edge is one common implicit missing target, so predecessors
-/// of every materialized block are sufficient to split all observable states.
-fn hopcroft_refine_sparse(initial_classes: &[u32], edges: &RawRelevantEdges) -> Vec<u32> {
-    let num_states = initial_classes.len();
-    let mut partition = initial_classes.to_vec();
-    let initial_count = partition
-        .iter()
-        .copied()
-        .max()
-        .map_or(0usize, |class| class as usize + 1);
-    let mut blocks = blocks_from_classes(&partition, initial_count);
-    let inverse = build_sparse_inverse_edges(edges, num_states);
-
-    let mut worklist: VecDeque<u32> = (0..blocks.len() as u32).collect();
-    let mut in_worklist = vec![true; blocks.len()];
-    let mut source_set = vec![false; num_states];
-    let mut sources_to_clear = Vec::<u32>::with_capacity(num_states.min(10_000));
-    let mut touched_blocks = Vec::<u32>::with_capacity(1024);
-    let mut block_touched = vec![false; blocks.len()];
-    let mut block_sources = vec![Vec::<u32>::new(); blocks.len()];
-    let mut input_sources = vec![Vec::<u32>::new(); 256];
-    let mut touched_inputs = Vec::<u8>::with_capacity(64);
-
-    while let Some(splitter_block) = worklist.pop_front() {
-        let splitter = splitter_block as usize;
-        if splitter >= blocks.len() || blocks[splitter].is_empty() {
-            continue;
-        }
-        in_worklist[splitter] = false;
-        touched_inputs.clear();
-        {
-            let splitter_states = &blocks[splitter];
-            for &target in splitter_states {
-                for &(byte, source) in &inverse[target as usize] {
-                    let sources = &mut input_sources[byte as usize];
-                    if sources.is_empty() {
-                        touched_inputs.push(byte);
-                    }
-                    sources.push(source);
-                }
-            }
-        }
-
-        for &byte in &touched_inputs {
-            sources_to_clear.clear();
-            let sources = &mut input_sources[byte as usize];
-            for &source in sources.iter() {
-                if !source_set[source as usize] {
-                    source_set[source as usize] = true;
-                    sources_to_clear.push(source);
-                    let block = partition[source as usize] as usize;
-                    if !block_touched[block] {
-                        block_touched[block] = true;
-                        touched_blocks.push(block as u32);
-                    }
-                    block_sources[block].push(source);
-                }
-            }
-            sources.clear();
-
-            for &block_id in &touched_blocks {
-                let block = block_id as usize;
-                let block_len = blocks[block].len();
-                let source_count = block_sources[block].len();
-                if block_len <= 1 || source_count == 0 || source_count == block_len {
-                    continue;
-                }
-                let new_block = blocks.len();
-                let move_sources = source_count <= block_len - source_count;
-                let old_members = std::mem::take(&mut blocks[block]);
-                let (remaining, moved) = if move_sources {
-                    let mut remaining = Vec::with_capacity(block_len - source_count);
-                    for state in old_members {
-                        if !source_set[state as usize] {
-                            remaining.push(state);
-                        }
-                    }
-                    (remaining, std::mem::take(&mut block_sources[block]))
-                } else {
-                    let mut moved = Vec::with_capacity(block_len - source_count);
-                    for state in old_members {
-                        if !source_set[state as usize] {
-                            moved.push(state);
-                        }
-                    }
-                    (std::mem::take(&mut block_sources[block]), moved)
-                };
-                for &state in &moved {
-                    partition[state as usize] = new_block as u32;
-                }
-                blocks[block] = remaining;
-                blocks.push(moved);
-                in_worklist.push(false);
-                block_touched.push(false);
-                block_sources.push(Vec::new());
-                if in_worklist[block] {
-                    in_worklist[new_block] = true;
-                    worklist.push_back(new_block as u32);
-                } else if blocks[block].len() <= blocks[new_block].len() {
-                    in_worklist[block] = true;
-                    worklist.push_back(block as u32);
-                } else {
-                    in_worklist[new_block] = true;
-                    worklist.push_back(new_block as u32);
-                }
-            }
-
-            for &source in &sources_to_clear {
-                source_set[source as usize] = false;
-            }
-            for &block_id in &touched_blocks {
-                let block = block_id as usize;
-                block_touched[block] = false;
-                block_sources[block].clear();
-            }
-            touched_blocks.clear();
-        }
-    }
-    partition
-}
-
-/// Exact Hopcroft refinement for a caller-supplied partial deterministic graph.
-///
-/// `offsets`, `bytes`, and `targets` use the same CSR layout as
-/// `RawRelevantEdges`. Missing byte edges are one implicit dead target. This
-/// narrow crate-internal entry point lets definition-level singleton analyses
-/// reuse the production refinement implementation without constructing a
-/// physical combined lexer.
+/// Exact refinement for a caller-supplied partial deterministic graph.
+/// The graph is borrowed so repeated epsilon/byte refinement need not copy it.
 pub fn hopcroft_refine_sparse_edges(
     initial_classes: &[u32],
-    offsets: Vec<u32>,
-    bytes: Vec<u8>,
-    targets: Vec<u32>,
+    offsets: &[u32],
+    bytes: &[u8],
+    targets: &[u32],
 ) -> Option<Vec<u32>> {
     if offsets.len() != initial_classes.len() + 1
         || bytes.len() != targets.len()
         || offsets.first().copied() != Some(0)
         || offsets.last().copied().map(|value| value as usize) != Some(bytes.len())
-        || targets
-            .iter()
-            .any(|&target| target as usize >= initial_classes.len())
+        || targets.iter().any(|&target| target as usize >= initial_classes.len())
     {
         return None;
     }
-    if offsets
-        .windows(2)
-        .any(|window| window[0] > window[1] || window[1] as usize > bytes.len())
-    {
-        return None;
+    for row in offsets.windows(2) {
+        let (start, end) = (row[0] as usize, row[1] as usize);
+        let labels = bytes.get(start..end)?;
+        let mut seen = [false; 256];
+        for &byte in labels {
+            if std::mem::replace(&mut seen[byte as usize], true) {
+                return None;
+            }
+        }
     }
-    Some(hopcroft_refine_sparse(
-        initial_classes,
-        &RawRelevantEdges {
-            offsets,
-            bytes,
-            targets,
+    Some(refine_partition_rows(
+        initial_classes.to_vec(),
+        |state| {
+            let range = offsets[state] as usize..offsets[state + 1] as usize;
+            bytes[range.clone()].iter().copied().zip(targets[range].iter().copied())
         },
-    ))
+        None,
+    ).0)
 }
 
 fn map_from_raw_classes(classes: &[u32]) -> ManyToOneIdMap {
@@ -853,122 +558,32 @@ pub fn compute_state_map_raw(
     let target_labels = &observations.ids;
     let label_ms = labels_started_at.elapsed().as_secs_f64() * 1000.0;
     let refine_started_at = Instant::now();
-    let mut current_classes = target_labels.clone();
-    let mut current_class_count = current_classes
-        .iter()
-        .copied()
-        .max()
-        .map_or(0usize, |id| id as usize + 1);
-    let edges = build_raw_relevant_edges(
-        transitions,
-        num_states,
-        &active_bytes,
-        &observations.active_language,
+    let active_language = &observations.active_language;
+    let (classes, _, _) = refine_partition_rows(
+        target_labels.clone(),
+        |source| {
+            active_bytes.iter().filter_map(move |&byte| {
+                if !active_language[source] { return None; }
+                let target = transitions[source * 256 + byte as usize];
+                (target != u32::MAX && active_language[target as usize]).then_some((byte, target))
+            })
+        },
+        None,
     );
-    // Hopcroft is the default for the large raw-coordinate case. The
-    // signature fixed point remains available as a diagnostic reference.
-    if std::env::var_os("GLRMASK_RAW_RESTRICTED_SIGNATURE_REFINE").is_none() {
-        let classes = hopcroft_refine_sparse(target_labels, &edges);
-        let refine_ms = refine_started_at.elapsed().as_secs_f64() * 1000.0;
-        let state_map = map_from_raw_classes(&classes);
-        debug_assert!(raw_map_is_relevant_byte_congruent(
-            &state_map,
-            target_labels,
-            transitions,
-            &active_bytes,
-            &observations.active_language,
-        ));
-        return Some(RawRestrictedObservationResult {
-            state_map,
-            raw_observation_ids: observations.ids,
-            observation_representatives: observations.representatives,
-            label_ms,
-            refine_ms,
-            certificate_ms: 0.0,
-            rounds: 0,
-        });
-    }
-    for round in 0..num_states {
-        let mut next_classes = vec![0u32; num_states];
-        let mut buckets = FxHashMap::<u64, ExactSignatureBucket>::default();
-        let mut next_class_count = 0u32;
-        for state in 0..num_states {
-            let hash = sparse_signature_hash(state, &current_classes, &edges);
-            let class = match buckets.get_mut(&hash) {
-                None => {
-                    let class = next_class_count;
-                    next_class_count += 1;
-                    buckets.insert(hash, ExactSignatureBucket::Single {
-                        representative: state,
-                        class,
-                    });
-                    class
-                }
-                Some(ExactSignatureBucket::Single {
-                    representative,
-                    class,
-                }) => {
-                    if same_sparse_signature(*representative, state, &current_classes, &edges) {
-                        *class
-                    } else {
-                        let previous = (*representative, *class);
-                        let class = next_class_count;
-                        next_class_count += 1;
-                        *buckets.get_mut(&hash).expect("bucket exists") =
-                            ExactSignatureBucket::Collisions(vec![previous, (state, class)]);
-                        class
-                    }
-                }
-                Some(ExactSignatureBucket::Collisions(entries)) => {
-                    if let Some((_, class)) = entries.iter().find(|&&(representative, _)| {
-                        same_sparse_signature(representative, state, &current_classes, &edges)
-                    }) {
-                        *class
-                    } else {
-                        let class = next_class_count;
-                        next_class_count += 1;
-                        entries.push((state, class));
-                        class
-                    }
-                }
-            };
-            next_classes[state] = class;
-        }
-        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
-            eprintln!(
-                "[glrmask/profile][raw_restricted_round] round={} classes={}",
-                round + 1,
-                next_class_count,
-            );
-        }
-        if next_class_count as usize == current_class_count
-            && same_candidate_partition(&current_classes, &next_classes)
-        {
-            let refine_ms = refine_started_at.elapsed().as_secs_f64() * 1000.0;
-            let state_map = map_from_raw_classes(&next_classes);
-            debug_assert!(raw_map_is_relevant_byte_congruent(
-                &state_map,
-                target_labels,
-                transitions,
-                &active_bytes,
-                &observations.active_language,
-            ));
-            return Some(RawRestrictedObservationResult {
-                state_map,
-                raw_observation_ids: observations.ids,
-                observation_representatives: observations.representatives,
-                label_ms,
-                refine_ms,
-                certificate_ms: 0.0,
-                rounds: round + 1,
-            });
-        }
-        current_classes = next_classes;
-        current_class_count = next_class_count as usize;
-    }
-    None
-
-
+    let refine_ms = refine_started_at.elapsed().as_secs_f64() * 1000.0;
+    let state_map = map_from_raw_classes(&classes);
+    debug_assert!(raw_map_is_relevant_byte_congruent(
+        &state_map, target_labels, transitions, &active_bytes, active_language,
+    ));
+    Some(RawRestrictedObservationResult {
+        state_map,
+        raw_observation_ids: observations.ids,
+        observation_representatives: observations.representatives,
+        label_ms,
+        refine_ms,
+        certificate_ms: 0.0,
+        rounds: 0,
+    })
 }
 
 #[cfg(test)]
