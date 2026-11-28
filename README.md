@@ -177,7 +177,9 @@ loop {
 
 In a typical serving setup, a grammar constraint is one main grammar with smaller grammars nested inside it, some of which, like tool schemas, change from request to request. GLRMask is built to make this kind of composition cheap. Like modules in a program, grammars can be written and compiled as separate parts and combined later.
 
-A server compiles its main grammar once as a `Module` with named externs. Each tool's schema is compiled on its own, in parallel or on another machine. For each request, GLRMask composes the main grammar with the compiled schemas by filling in the externs. Resolving the interactions between them requires some extra *boundary* work. However, this work is usually small compared with compiling the grammars themselves, so composition remains cheap even when the grammars are large.
+A server compiles its main grammar once as a `Module` with named externs. Each tool's schema is compiled on its own, in parallel or on another machine. For each request, GLRMask composes the main grammar with the compiled schemas by filling in the externs.
+
+Resolving the interactions between them requires some extra *boundary* work. However, this work is usually small compared with compiling the grammars themselves, so composition remains cheap even when the grammars are large.
 
 ```python
 # Token ID -> exact bytes from tokenizer
