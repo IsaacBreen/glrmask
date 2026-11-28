@@ -3640,7 +3640,7 @@ impl Constraint {
             }
         };
         if let Some(vocab) = external_vocab {
-            constraint.token_bytes = crate::runtime::TokenByteDomain::from_entries(vocab.entries_arc());
+            constraint.token_bytes = crate::runtime::TokenByteDomain::from_vocab(vocab);
         }
         if let Some(projection) = external_internal_token_buf_masks {
             projection.validate_rows(&constraint)

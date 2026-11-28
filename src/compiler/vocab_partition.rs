@@ -193,9 +193,9 @@ fn singleton_literal_vocab_partition(vocab: &Vocab, language: &[u8]) -> ManyToOn
     let mut internal_to_originals = Vec::<Vec<u32>>::new();
     let mut representative_original_ids = Vec::<u32>::new();
     let mut dead_class = None::<u32>;
-    for (&token_id, token_bytes) in vocab.entries_map() {
+    for (&token_id, token_bytes) in vocab.entries_map().iter() {
         let live_slot = (token_bytes.len() <= language.len())
-            .then(|| live_classes.get_mut(token_bytes.as_slice()))
+            .then(|| live_classes.get_mut(token_bytes))
             .flatten();
         let class = if let Some(slot) = live_slot {
             *slot.get_or_insert_with(|| {

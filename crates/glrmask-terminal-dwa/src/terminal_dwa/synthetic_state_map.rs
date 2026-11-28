@@ -1690,7 +1690,6 @@ pub fn certify_vocabulary_exact_state_candidates(
     let tokens = vocab
         .entries_map()
         .values()
-        .map(Vec::as_slice)
         .collect::<Vec<_>>();
     let disallowed_follows = (0..full.num_terminals() as usize)
         .map(|_| BitSet::new(full.num_terminals() as usize))

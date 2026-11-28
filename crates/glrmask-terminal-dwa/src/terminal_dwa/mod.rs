@@ -900,14 +900,9 @@ impl CharTypeSubVocabPartition {
     fn materialize(&self, parent: &Vocab) -> Vocab {
         self.vocab
             .get_or_init(|| {
-                let mut entries = Vec::with_capacity(self.token_ids.len());
-                for &token_id in self.token_ids.iter() {
-                    let bytes = parent
-                        .get(token_id)
-                        .expect("char-type partition token must exist in parent vocab");
-                    entries.push((token_id, bytes.to_vec()));
-                }
-                Vocab::from_entries_unchecked(entries)
+                let child = parent.subset(self.token_ids.iter().copied());
+                assert_eq!(child.len(), self.token_ids.len(), "char-type partition must reference its parent vocabulary");
+                child
             })
             .clone()
     }
@@ -1000,13 +995,7 @@ fn char_type_regular_key(
 fn vocab_from_token_partitions(vocab: &Vocab, token_partitions: Vec<Vec<u32>>) -> Arc<[Vocab]> {
     token_partitions
         .into_iter()
-        .map(|token_ids| {
-            let entries = token_ids
-                .into_iter()
-                .filter_map(|token_id| vocab.entries_map().get(&token_id).map(|bytes| (token_id, bytes.clone())))
-                .collect();
-            Vocab::from_entries_unchecked(entries)
-        })
+        .map(|token_ids| vocab.subset(token_ids))
         .collect::<Vec<_>>()
         .into()
 }
@@ -1082,10 +1071,10 @@ fn build_char_type_sub_vocabs(
         && !macro_parallelism_disabled()
     {
         use rayon::prelude::*;
-        vocab
-            .entries_map()
-            .par_iter()
-            .fold(new_partition_accumulator, |mut acc, (&token_id, bytes)| {
+        (0..vocab.len())
+            .into_par_iter()
+            .fold(new_partition_accumulator, |mut acc, ordinal| {
+                let (token_id, bytes) = vocab.entries_map().entry_at(ordinal);
                 let idx = partition_index(bytes);
                 for &byte in bytes {
                     acc.1[idx].insert(byte);
@@ -2199,7 +2188,7 @@ fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                     eprintln!(
                         "[glrmask/profile][partition_local_synthesis] partition={} horizon={} global_states={} local_states={} local_transitions={} build_ms={:.3} selected=true",
                         label,
-                        sub_vocab.entries_map().values().map(Vec::len).max().unwrap_or(0),
+                        sub_vocab.max_token_byte_len(),
                         tokenizer.num_states(),
                         local.tokenizer.num_states(),
                         local.tokenizer.transition_count(),
@@ -2218,7 +2207,7 @@ fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 eprintln!(
                     "[glrmask/profile][partition_local_synthesis] partition={} horizon={} global_states={} local_states={} build_ms={:.3} selected=false reason=build_or_lift_failed",
                     label,
-                    sub_vocab.entries_map().values().map(Vec::len).max().unwrap_or(0),
+                    sub_vocab.max_token_byte_len(),
                     tokenizer.num_states(),
                     local.tokenizer.num_states(),
                     local.build_ms,

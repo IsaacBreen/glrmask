@@ -8315,201 +8315,51 @@ impl Default for DynamicMaskVocab {
     }
 }
 
-/// Derived contiguous byte index for a Vocab's immutable entries. Native
-/// artifacts bind an external Vocab, so this is runtime data, not a wire
-/// format. Dense IDs index directly; sparse IDs use one sorted ID array.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct PackedTokenBytes {
-    offsets: Box<[u32]>,
-    sparse_ids: Option<Box<[u32]>>,
-    data: Box<[u8]>,
-}
-
-impl PackedTokenBytes {
-    pub(crate) fn from_runtime_entries(
-        entries: &BTreeMap<u32, Vec<u8>>,
-    ) -> Result<Self, String> {
-        let count = entries.len();
-        u32::try_from(count).map_err(|_| "token vocabulary exceeds u32".to_owned())?;
-        let dense = entries.last_key_value()
-            .is_none_or(|(&id, _)| u64::from(id) + 1 == count as u64);
-        let data_len = entries.values().try_fold(0u32, |total, bytes| {
-            total.checked_add(u32::try_from(bytes.len()).ok()?)
-        }).ok_or_else(|| "token byte data exceeds u32".to_owned())?;
-        let offset_count = count.checked_add(1)
-            .ok_or_else(|| "token byte offset count exceeds usize".to_owned())?;
-        let mut offsets = Vec::with_capacity(offset_count);
-        let mut sparse_ids = (!dense).then(|| Vec::with_capacity(count));
-        let mut data = Vec::with_capacity(data_len as usize);
-        offsets.push(0);
-        for (&id, bytes) in entries {
-            if let Some(ids) = &mut sparse_ids {
-                ids.push(id);
-            }
-            data.extend_from_slice(bytes);
-            offsets.push(data.len() as u32);
-        }
-        Ok(Self {
-            offsets: offsets.into_boxed_slice(),
-            sparse_ids: sparse_ids.map(Vec::into_boxed_slice),
-            data: data.into_boxed_slice(),
-        })
-    }
-
-    #[inline]
-    pub(crate) fn len(&self) -> usize {
-        self.offsets.len() - 1
-    }
-
-    #[inline]
-    pub(crate) fn get(&self, token_id: u32) -> Option<&[u8]> {
-        let index = match &self.sparse_ids {
-            Some(ids) => ids.binary_search(&token_id).ok()?,
-            None => usize::try_from(token_id).ok().filter(|&index| index < self.len())?,
-        };
-        Some(self.bytes_at(index))
-    }
-
-    #[inline]
-    fn bytes_at(&self, index: usize) -> &[u8] {
-        &self.data[self.offsets[index] as usize..self.offsets[index + 1] as usize]
-    }
-
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (u32, &[u8])> + '_ {
-        (0..self.len()).map(|index| {
-            let id = self.sparse_ids.as_ref().map_or(index as u32, |ids| ids[index]);
-            (id, self.bytes_at(index))
-        })
-    }
-
-    pub(crate) fn max_token_id(&self) -> Option<u32> {
-        match &self.sparse_ids {
-            Some(ids) => ids.last().copied(),
-            None => self.len().checked_sub(1).map(|id| id as u32),
-        }
-    }
-}
-
-/// One immutable model-token domain, with an optional derived lookup index.
-/// The index is constructed from these exact entries and remains valid when
-/// binding an equal vocabulary. Neither representation is persisted.
+/// Runtime ownership of the exact model vocabulary coordinate. The same
+/// byte slab and lookup table are used by compilation and all bound
+/// constraints; no secondary packed index or rebinding cache is needed.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct TokenByteDomain {
-    entries: Arc<BTreeMap<u32, Vec<u8>>>,
-    index: Option<Arc<PackedTokenBytes>>,
-}
+pub(crate) struct TokenByteDomain(Arc<crate::vocab::VocabEntries>);
 
 impl TokenByteDomain {
-    pub(crate) fn from_entries(entries: Arc<BTreeMap<u32, Vec<u8>>>) -> Self {
-        Self { entries, index: None }
+    pub(crate) fn from_vocab(vocab: &crate::Vocab) -> Self {
+        Self(vocab.entries_arc())
     }
 
-    pub(crate) fn from_indexed_vocab(vocab: &crate::Vocab) -> Self {
-        Self {
-            entries: vocab.entries_arc(),
-            index: Some(crate::compiler::compile::vocab_packed_token_bytes(vocab)),
-        }
-    }
+    pub(crate) fn entries(&self) -> &crate::vocab::VocabEntries { &self.0 }
 
-    pub(crate) fn entries(&self) -> &BTreeMap<u32, Vec<u8>> {
-        &self.entries
-    }
-
-    pub(crate) fn entries_arc(&self) -> Arc<BTreeMap<u32, Vec<u8>>> {
-        Arc::clone(&self.entries)
+    #[cfg(test)]
+    pub(crate) fn entries_arc(&self) -> Arc<crate::vocab::VocabEntries> {
+        Arc::clone(&self.0)
     }
 
     pub(crate) fn matches_vocab(&self, vocab: &crate::Vocab) -> bool {
         let entries = vocab.entries_arc();
-        if Arc::ptr_eq(&self.entries, &entries) {
-            return true;
-        }
-        if let Some(index) = &self.index {
-            if let Some(other) =
-                crate::compiler::compile::prepared_vocab_packed_token_bytes(vocab)
-            {
-                return index.as_ref() == other.as_ref();
-            }
-            return index.len() == entries.len()
-                && index.iter().eq(entries.iter().map(|(&id, bytes)| (id, bytes.as_slice())));
-        }
-        self.entries.as_ref() == entries.as_ref()
+        Arc::ptr_eq(&self.0, &entries) || self.0 == entries
     }
 
     pub(crate) fn bind_exact(&mut self, vocab: &crate::Vocab) -> bool {
-        if !self.matches_vocab(vocab) {
-            return false;
-        }
-        self.entries = vocab.entries_arc();
+        if !self.matches_vocab(vocab) { return false; }
+        self.0 = vocab.entries_arc();
         true
     }
 
     #[inline]
-    pub(crate) fn get(&self, id: u32) -> Option<&[u8]> {
-        match &self.index {
-            Some(index) => index.get(id),
-            None => self.entries.get(&id).map(Vec::as_slice),
-        }
-    }
+    pub(crate) fn get(&self, id: u32) -> Option<&[u8]> { self.0.get(&id) }
 
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
+    pub(crate) fn len(&self) -> usize { self.0.len() }
+    pub(crate) fn is_empty(&self) -> bool { self.0.is_empty() }
 
     pub(crate) fn max_token_id(&self) -> Option<u32> {
-        match &self.index {
-            Some(index) => index.max_token_id(),
-            None => self.entries.last_key_value().map(|(&id, _)| id),
-        }
+        self.0.keys().next_back().copied()
     }
 
     pub(crate) fn max_byte_len(&self) -> usize {
-        self.iter().map(|(_, bytes)| bytes.len()).max().unwrap_or(0)
+        self.0.values().map(<[u8]>::len).max().unwrap_or(0)
     }
 
-    pub(crate) fn iter(&self) -> Box<dyn Iterator<Item = (u32, &[u8])> + '_> {
-        match &self.index {
-            Some(index) => Box::new(index.iter()),
-            None => Box::new(self.entries.iter().map(|(&id, bytes)| (id, bytes.as_slice()))),
-        }
-    }
-}
-#[cfg(test)]
-mod packed_token_bytes_tests {
-    use super::*;
-
-    fn check_index(value: BTreeMap<u32, Vec<u8>>) {
-        let view = PackedTokenBytes::from_runtime_entries(&value).unwrap();
-        assert_eq!(view.len(), value.len());
-        assert_eq!(
-            view.iter()
-                .map(|(id, bytes)| (id, bytes.to_vec()))
-                .collect::<BTreeMap<_, _>>(),
-            value,
-        );
-        for (&id, bytes) in &value {
-            assert_eq!(view.get(id), Some(bytes.as_slice()));
-        }
-        assert_eq!(view.max_token_id(), value.keys().next_back().copied());
-    }
-
-    #[test]
-    fn indexed_token_bytes_dense_and_sparse() {
-        check_index(BTreeMap::new());
-        check_index(BTreeMap::from([
-            (0, b"a".to_vec()),
-            (1, b"bc".to_vec()),
-            (2, Vec::new()),
-        ]));
-        check_index(BTreeMap::from([
-            (2, b"a".to_vec()),
-            (9, b"bc".to_vec()),
-            (1000, b"xyz".to_vec()),
-        ]));
+    pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = (u32, &[u8])> + '_ {
+        self.0.iter().map(|(&id, bytes)| (id, bytes))
     }
 }
 
@@ -8952,20 +8802,20 @@ impl Constraint {
                 (ConstraintRuntimeBackend::Static, ParserDwaStorage::Owned(parser_dwa),
                     NonDwaWeightStorage::Materialized(non_dwa_weights), possible_matches_complete,
                     tokenizer_tsids, token_classes, composition_grammar_summary,
-                    TokenByteDomain::from_indexed_vocab(vocab), false)
+                    TokenByteDomain::from_vocab(vocab), false)
             }
             CompiledMask::Dynamic => {
                 assert!(matches!(&language.table, ParserExecutable::Native(_) | ParserExecutable::ExplicitLr(_)));
                 (ConstraintRuntimeBackend::Dynamic, ParserDwaStorage::Absent, Default::default(),
                     false, Default::default(), Default::default(), None,
-                    TokenByteDomain::from_entries(vocab.entries_arc()), false)
+                    TokenByteDomain::from_vocab(vocab), false)
             }
             CompiledMask::Linked => {
                 assert!(matches!(&language.table, ParserExecutable::LinkedLr(_)));
                 (ConstraintRuntimeBackend::Static, ParserDwaStorage::Absent, Default::default(),
                     true, super::TokenizerTsidMap::partition(vec![0], vec![vec![0]]),
                     super::TokenClasses::mapped(Vec::new(), Vec::new()), None,
-                    TokenByteDomain::from_entries(vocab.entries_arc()),
+                    TokenByteDomain::from_vocab(vocab),
                     language.tokenizer.has_epsilon_transitions())
             }
         };

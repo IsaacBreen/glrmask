@@ -8,13 +8,6 @@ pub(crate) use super::pipeline::{
     emit_compile_profile_summary,
 };
 
-#[derive(Debug)]
-struct VocabPackedTokenBytes {
-    packed: std::sync::Arc<crate::runtime::PackedTokenBytes>,
-}
-
-impl glrmask_vocab::__private::VocabDerivedArtifact for VocabPackedTokenBytes {}
-
 /// Sorted byte-backed zero-length spellings in one immutable model vocabulary.
 /// Exact-only control IDs are not byte entries and must not be added here.
 #[derive(Debug)]
@@ -154,36 +147,6 @@ fn compute_vocab_content_digest(vocab: &crate::Vocab, buffered: bool) -> [u8; 32
     *hasher.finalize().as_bytes()
 }
 
-fn prepare_vocab_packed_token_bytes(
-    vocab: &crate::Vocab,
-) -> std::sync::Arc<crate::runtime::PackedTokenBytes> {
-    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabPackedTokenBytes>() {
-        return std::sync::Arc::clone(&cached.packed);
-    }
-    let packed = std::sync::Arc::new(
-        crate::runtime::PackedTokenBytes::from_runtime_entries(vocab.entries_map())
-            .expect("vocabulary token bytes should form a valid indexed runtime vocabulary"),
-    );
-    vocab.vocab_derived_cache_set(std::sync::Arc::new(VocabPackedTokenBytes {
-        packed: std::sync::Arc::clone(&packed),
-    }));
-    packed
-}
-
-pub(crate) fn vocab_packed_token_bytes(
-    vocab: &crate::Vocab,
-) -> std::sync::Arc<crate::runtime::PackedTokenBytes> {
-    prepare_vocab_packed_token_bytes(vocab)
-}
-
-pub(crate) fn prepared_vocab_packed_token_bytes(
-    vocab: &crate::Vocab,
-) -> Option<std::sync::Arc<crate::runtime::PackedTokenBytes>> {
-    vocab
-        .vocab_derived_cache_get::<VocabPackedTokenBytes>()
-        .map(|cached| std::sync::Arc::clone(&cached.packed))
-}
-
 /// Populate only vocabulary artifacts used by DynamicConstraint compilation/runtime.
 ///
 /// O2 vocabulary partitioning reuses the terminal-DWA module's *pure vocabulary*
@@ -195,7 +158,6 @@ pub(crate) fn prepared_vocab_packed_token_bytes(
 /// This still deliberately excludes grammar-specific terminal-DWA construction
 /// and static possible-match preparation.
 pub(crate) fn prepare_vocab_for_dynamic_compile(vocab: &crate::Vocab) {
-    let _ = prepare_vocab_packed_token_bytes(vocab);
     let _ = vocab_content_digest(vocab);
     super::stages::id_map_and_terminal_dwa::prepare_vocab_for_terminal_dwa(vocab);
     super::constraint_possible_matches::prepare_vocab_for_dynamic_mask(vocab);
@@ -213,9 +175,6 @@ pub(crate) fn prepare_vocab_for_compile(vocab: &crate::Vocab) {
             );
         }
     };
-    run("packed_token_bytes", &mut || {
-        let _ = prepare_vocab_packed_token_bytes(vocab);
-    });
     run("terminal_dwa", &mut || {
         super::stages::id_map_and_terminal_dwa::prepare_vocab_for_terminal_dwa(vocab)
     });
@@ -225,29 +184,6 @@ pub(crate) fn prepare_vocab_for_compile(vocab: &crate::Vocab) {
     run("dynamic_mask", &mut || {
         super::constraint_possible_matches::prepare_vocab_for_dynamic_mask(vocab)
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::vocab_packed_token_bytes;
-    use crate::Vocab;
-    use std::sync::Arc;
-
-    #[test]
-    fn packed_token_bytes_are_shared_across_vocab_clones() {
-        let vocab = Vocab::from_entries_unchecked(vec![
-            (0, b"a".to_vec()),
-            (2, b"xyz".to_vec()),
-        ]);
-        let first = vocab_packed_token_bytes(&vocab);
-        let clone = vocab.clone();
-        let second = vocab_packed_token_bytes(&clone);
-
-        assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(first.len(), 2);
-        assert_eq!(first.get(0), Some(b"a".as_slice()));
-        assert_eq!(first.get(2), Some(b"xyz".as_slice()));
-    }
 }
 
 #[cfg(test)]

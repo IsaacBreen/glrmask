@@ -539,7 +539,7 @@ fn prepare_equivalence_inputs<'a>(
     let mut token_ids: Vec<u32> = Vec::with_capacity(vocab.len());
     for (&tid, bytes) in vocab.entries_map().iter() {
         token_ids.push(tid);
-        token_bytes.push(bytes.as_slice());
+        token_bytes.push(bytes);
     }
 
     let initial_states = match initial_state_map {
@@ -590,7 +590,7 @@ pub struct CombinedEquivalenceProfile {
 impl CombinedEquivalenceProfile {
     pub fn identity(vocab: &Vocab, map: &InternalIdMap) -> Self {
         let count = map.tokenizer_states.num_internal_ids() as usize;
-        let stats = token_length_stats(vocab.entries_map().values().map(Vec::as_slice));
+        let stats = token_length_stats(vocab.entries_map().values());
         Self {
             initial_states_considered: count,
             max_length_skipped: true,
@@ -985,7 +985,7 @@ fn try_analyze_equivalences_with_token_position_partition(
     let num_states = tokenizer.num_states() as usize;
     if seed.original_to_internal.len() != num_states
         || seed.representative_original_ids.is_empty()
-        || vocab.entries_map().values().any(Vec::is_empty)
+        || vocab.entries_map().values().any(<[u8]>::is_empty)
     {
         return None;
     }

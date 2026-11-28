@@ -89,10 +89,156 @@ impl TokenSet {
 
 use range_set_blaze::RangeSetBlaze;
 
+/// Immutable bytes and original-ID coordinate. A subset owns only its
+/// sorted ID/span table; all views share the original byte allocation.
+/// Dense IDs index directly, sparse IDs use the same sorted ID table.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct VocabEntries {
+    ids: Box<[u32]>,
+    spans: Box<[(usize, usize)]>,
+    data: Arc<Vec<u8>>,
+    dense: bool,
+}
+
+impl VocabEntries {
+    fn from_sorted<B: AsRef<[u8]>>(entries: impl IntoIterator<Item=(u32, B)>, count: usize, byte_count: usize) -> Self {
+        let mut ids = Vec::with_capacity(count);
+        let mut spans = Vec::with_capacity(count);
+        let mut data = Vec::with_capacity(byte_count);
+        for (id, bytes) in entries {
+            assert!(ids.last().is_none_or(|&previous| previous < id), "duplicate or unordered vocabulary ID {id}");
+            ids.push(id);
+            let start = data.len();
+            data.extend_from_slice(bytes.as_ref());
+            spans.push((start, data.len()));
+        }
+        Self::from_parts(ids, spans, Arc::new(data))
+    }
+
+    fn from_parts(ids: Vec<u32>, spans: Vec<(usize, usize)>, data: Arc<Vec<u8>>) -> Self {
+        let dense = ids.last().is_none_or(|&id| u64::from(id) + 1 == ids.len() as u64);
+        Self { ids: ids.into_boxed_slice(), spans: spans.into_boxed_slice(), data, dense }
+    }
+
+    pub fn len(&self) -> usize { self.ids.len() }
+    pub fn is_empty(&self) -> bool { self.ids.is_empty() }
+    pub fn keys(&self) -> std::slice::Iter<'_, u32> { self.ids.iter() }
+
+    #[inline]
+    pub fn ordinal(&self, id: u32) -> Option<usize> {
+        if self.dense {
+            ((id as usize) < self.len()).then_some(id as usize)
+        } else {
+            self.ids.binary_search(&id).ok()
+        }
+    }
+
+    #[inline]
+    pub fn bytes_at(&self, ordinal: usize) -> &[u8] {
+        let (start, end) = self.spans[ordinal];
+        &self.data[start..end]
+    }
+
+    #[inline]
+    pub fn get(&self, id: &u32) -> Option<&[u8]> {
+        self.ordinal(*id).map(|ordinal| self.bytes_at(ordinal))
+    }
+
+    pub fn entry_at(&self, ordinal: usize) -> (u32, &[u8]) {
+        (self.ids[ordinal], self.bytes_at(ordinal))
+    }
+
+    pub fn contains_key(&self, id: &u32) -> bool { self.ordinal(*id).is_some() }
+
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item=(&u32, &[u8])> + ExactSizeIterator {
+        self.ids.iter().enumerate().map(|(ordinal, id)| (id, self.bytes_at(ordinal)))
+    }
+
+    pub fn values(&self) -> impl DoubleEndedIterator<Item=&[u8]> + ExactSizeIterator {
+        (0..self.len()).map(|ordinal| self.bytes_at(ordinal))
+    }
+
+    pub fn last_key_value(&self) -> Option<(&u32, &[u8])> { self.iter().next_back() }
+
+    fn shared_word(&self, ordinal: usize) -> TokenBytes {
+        TokenBytes { data: Arc::clone(&self.data), span: self.spans[ordinal] }
+    }
+
+    fn subset(&self, ids: impl IntoIterator<Item=u32>) -> Self {
+        let mut ordinals = ids.into_iter().filter_map(|id| self.ordinal(id)).collect::<Vec<_>>();
+        ordinals.sort_unstable();
+        assert!(ordinals.windows(2).all(|pair| pair[0] < pair[1]), "duplicate vocabulary subset ID");
+        let ids = ordinals.iter().map(|&i| self.ids[i]).collect();
+        let spans = ordinals.iter().map(|&i| self.spans[i]).collect();
+        Self::from_parts(ids, spans, Arc::clone(&self.data))
+    }
+}
+
+impl PartialEq for VocabEntries {
+    fn eq(&self, other: &Self) -> bool {
+        self.ids == other.ids && (
+            (Arc::ptr_eq(&self.data, &other.data) && self.spans == other.spans)
+            || self.values().eq(other.values())
+        )
+    }
+}
+impl Eq for VocabEntries {}
+impl fmt::Debug for VocabEntries {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
+}
+
+/// A byte spelling backed by a shared immutable slab. Equality and order
+/// depend on the spelling, not the identity or location of its allocation.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct TokenBytes {
+    data: Arc<Vec<u8>>,
+    span: (usize, usize),
+}
+
+impl TokenBytes {
+    /// Pack independent spellings into one allocation, for a standalone
+    /// lexical tree not backed by a model vocabulary.
+    pub fn pack<B: AsRef<[u8]>>(words: impl IntoIterator<Item=B>) -> Vec<Self> {
+        let mut data = Vec::new();
+        let mut spans = Vec::new();
+        for word in words {
+            let start = data.len();
+            data.extend_from_slice(word.as_ref());
+            spans.push((start, data.len()));
+        }
+        let data = Arc::new(data);
+        spans.into_iter().map(|span| Self { data: Arc::clone(&data), span }).collect()
+    }
+}
+impl AsRef<[u8]> for TokenBytes {
+    fn as_ref(&self) -> &[u8] { &self.data[self.span.0..self.span.1] }
+}
+impl std::ops::Deref for TokenBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] { self.as_ref() }
+}
+impl PartialEq for TokenBytes {
+    fn eq(&self, other: &Self) -> bool { self.as_ref() == other.as_ref() }
+}
+impl Eq for TokenBytes {}
+impl PartialOrd for TokenBytes {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+}
+impl Ord for TokenBytes {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.as_ref().cmp(other.as_ref()) }
+}
+impl fmt::Debug for TokenBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Debug::fmt(self.as_ref(), f) }
+}
+
 /// Each token ID and its bytes.
 #[derive(Clone)]
 pub struct Vocab {
-    entries: Arc<BTreeMap<u32, Vec<u8>>>,
+    entries: Arc<VocabEntries>,
     compiler_cache: Arc<VocabCompilerCache>,
     event_token_ranges: Arc<[(u32, u32)]>,
     byte_token_ranges: Arc<[(u32, u32)]>,
@@ -130,7 +276,7 @@ impl VocabByteFacts {
 pub struct LexicalVocabulary {
     pub original_slot_count: usize,
     pub ordered_to_originals: Arc<Vec<Vec<u32>>>,
-    pub ordered_token_bytes: Arc<Vec<Arc<[u8]>>>,
+    pub ordered_token_bytes: Arc<Vec<TokenBytes>>,
     original_to_ordered: OnceLock<Arc<[u32]>>,
     original_order: OnceLock<Arc<[(u32, u32)]>>,
     trie: OnceLock<Arc<vocab_prefix_tree::VocabPrefixTree>>,
@@ -141,16 +287,17 @@ pub struct LexicalVocabulary {
 impl VocabDerivedArtifact for LexicalVocabulary {}
 
 impl LexicalVocabulary {
-    pub fn build(entries: &BTreeMap<u32, Vec<u8>>) -> Self {
-        let mut sorted: Vec<_> = entries.iter().map(|(&id, bytes)| (id, bytes.as_slice())).collect();
-        sorted.sort_unstable_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(&b.0)));
-        let mut words: Vec<Arc<[u8]>> = Vec::new();
+    pub fn build(entries: &VocabEntries) -> Self {
+        let mut sorted: Vec<_> = (0..entries.len()).collect();
+        sorted.sort_unstable_by(|&a, &b| entries.bytes_at(a).cmp(entries.bytes_at(b)).then(a.cmp(&b)));
+        let mut words: Vec<TokenBytes> = Vec::new();
         let mut aliases: Vec<Vec<u32>> = Vec::new();
-        for (id, bytes) in sorted {
-            if words.last().is_some_and(|last| last.as_ref() == bytes) {
+        for ordinal in sorted {
+            let id = entries.ids[ordinal];
+            if words.last().is_some_and(|last| last.as_ref() == entries.bytes_at(ordinal)) {
                 aliases.last_mut().expect("existing spelling").push(id);
             } else {
-                words.push(Arc::from(bytes));
+                words.push(entries.shared_word(ordinal));
                 aliases.push(vec![id]);
             }
         }
@@ -275,19 +422,25 @@ impl Vocab {
     }
 
     #[doc(hidden)]
-    pub fn from_entries_unchecked(entries: Vec<(u32, Vec<u8>)>) -> Self {
-        let mut ids = BTreeSet::new();
-        for (id, _) in &entries {
-            if !ids.insert(*id) {
-                panic!("duplicate vocabulary ID {id}");
-            }
-        }
-        let entries: Arc<BTreeMap<u32, Vec<u8>>> = Arc::new(entries.into_iter().collect());
-        let max_token_byte_len = entries.values().map(Vec::len).max().unwrap_or(0);
+    pub fn from_entries_unchecked(mut entries: Vec<(u32, Vec<u8>)>) -> Self {
+        entries.sort_unstable_by_key(|entry| entry.0);
+        let byte_count = entries.iter().map(|entry| entry.1.len()).sum();
+        let count = entries.len();
+        Self::from_storage(VocabEntries::from_sorted(entries, count, byte_count))
+    }
+
+    /// Restrict the original ID domain without duplicating token bytes.
+    #[doc(hidden)]
+    pub fn subset(&self, ids: impl IntoIterator<Item=u32>) -> Self {
+        Self::from_storage(self.entries.subset(ids))
+    }
+
+    fn from_storage(entries: VocabEntries) -> Self {
+        let max_token_byte_len = entries.values().map(<[u8]>::len).max().unwrap_or(0);
         let mut vocab = Self {
             event_token_ranges: Arc::from(Vec::new()),
             byte_token_ranges: Arc::from(Vec::new()),
-            entries,
+            entries: Arc::new(entries),
             compiler_cache: Arc::new(VocabCompilerCache::default()),
             max_token_byte_len,
         };
@@ -296,28 +449,41 @@ impl Vocab {
     }
 
     fn rebuild_event_ranges(&mut self) {
-        self.event_token_ranges = RangeSetBlaze::from_iter(self.entries.keys().copied())
-            .ranges()
-            .map(|range| (*range.start(), *range.end()))
-            .collect::<Vec<_>>()
-            .into();
-        self.byte_token_ranges = RangeSetBlaze::from_iter(
-            self.entries
-                .iter()
-                .filter_map(|(&id, bytes)| (!bytes.is_empty()).then_some(id)),
-        )
-        .ranges()
-        .map(|range| (*range.start(), *range.end()))
-        .collect::<Vec<_>>()
-        .into();
+        fn ranges(ids: impl IntoIterator<Item=u32>) -> Arc<[(u32, u32)]> {
+            let mut runs: Vec<(u32, u32)> = Vec::new();
+            for id in ids {
+                if let Some(last) = runs.last_mut()
+                    && last.1.checked_add(1) == Some(id)
+                {
+                    last.1 = id;
+                } else {
+                    runs.push((id, id));
+                }
+            }
+            runs.into()
+        }
+        self.event_token_ranges = ranges(self.entries.keys().copied());
+        self.byte_token_ranges = ranges(self.entries.iter()
+            .filter_map(|(&id, bytes)| (!bytes.is_empty()).then_some(id)));
+    }
+
+    /// A known original ID range containing the given ID, if any.
+    fn event_range_at(&self, id: u32) -> Option<(u32, u32)> {
+        let index = self.event_token_ranges.partition_point(|&(start, _)| start <= id);
+        let range = *self.event_token_ranges.get(index.checked_sub(1)?)?;
+        (range.1 >= id).then_some(range)
     }
 
     /// The first ID in `set` that this vocabulary does not define.
     #[doc(hidden)]
     pub fn first_unknown_token_id(&self, set: &TokenSet) -> Option<u32> {
-        set.range_pairs()
-            .iter()
-            .find_map(|&(start, end)| (start..=end).find(|&id| !self.contains_token_id(id)))
+        set.range_pairs().iter().find_map(|&(start, end)| {
+            match self.event_range_at(start) {
+                None => Some(start),
+                Some((_, covered_end)) if covered_end < end => covered_end.checked_add(1),
+                Some(_) => None,
+            }
+        })
     }
 
     /// All IDs that may be consumed as grammar events, including special IDs
@@ -343,8 +509,7 @@ impl Vocab {
         if start > end {
             return false;
         }
-        let index = self.event_token_ranges.partition_point(|&(lower, _)| lower <= start);
-        index > 0 && self.event_token_ranges[index - 1].1 >= end
+        self.event_range_at(start).is_some_and(|(_, upper)| upper >= end)
     }
 
     /// Maximum byte length of any token in this vocabulary.
@@ -432,12 +597,7 @@ impl Vocab {
     /// Find a free ID at or above `start` without scanning each occupied ID.
     #[doc(hidden)]
     pub fn next_available_token_id(&self, start: u32) -> Option<u32> {
-        let index = self.event_token_ranges.partition_point(|&(lower, _)| lower <= start);
-        if index > 0 && self.event_token_ranges[index - 1].1 >= start {
-            self.event_token_ranges[index - 1].1.checked_add(1)
-        } else {
-            Some(start)
-        }
+        self.event_range_at(start).map_or(Some(start), |(_, upper)| upper.checked_add(1))
     }
 
     /// Whether at least one model ID intersects an inclusive range.
@@ -494,23 +654,23 @@ impl Vocab {
 
     #[doc(hidden)]
     pub fn get(&self, token_id: u32) -> Option<&[u8]> {
-        self.entries.get(&token_id).map(Vec::as_slice)
+        self.entries.get(&token_id)
     }
 
     #[doc(hidden)]
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (u32, &[u8])> {
         self.entries
             .iter()
-            .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
+            .map(|(&token_id, bytes)| (token_id, bytes))
     }
 
     #[doc(hidden)]
-    pub fn entries_map(&self) -> &BTreeMap<u32, Vec<u8>> {
+    pub fn entries_map(&self) -> &VocabEntries {
         &self.entries
     }
 
     #[doc(hidden)]
-    pub fn entries_arc(&self) -> Arc<BTreeMap<u32, Vec<u8>>> {
+    pub fn entries_arc(&self) -> Arc<VocabEntries> {
         Arc::clone(&self.entries)
     }
 
@@ -547,7 +707,7 @@ mod suffix_index;
 pub mod __private {
     pub use super::derived_artifact::VocabDerivedArtifact;
     pub use super::error::internal::{error_message, new_error, with_source_span};
-    pub use super::{Vocab, LexicalVocabulary, VocabByteFacts};
+    pub use super::{Vocab, VocabEntries, TokenBytes, LexicalVocabulary, VocabByteFacts};
     pub use super::suffix_index::VocabularySuffixIndex;
 
     pub mod vocab_prefix_tree {
@@ -558,6 +718,39 @@ pub mod __private {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_store_and_subsets_match_literal_mappings() {
+        for entries in [
+            vec![],
+            vec![(0, b"a".to_vec()), (1, b"bc".to_vec()), (2, Vec::new())],
+            vec![(1000, b"bc".to_vec()), (2, b"a".to_vec()), (9, b"bc".to_vec()), (33, Vec::new())],
+        ] {
+            let expected = entries.iter().cloned().collect::<BTreeMap<_, _>>();
+            let vocab = Vocab::from_entries_unchecked(entries);
+            let clone = vocab.clone();
+            assert!(Arc::ptr_eq(&vocab.entries_arc(), &clone.entries_arc()));
+            assert_eq!(vocab.iter().map(|(id, bytes)| (id, bytes.to_vec()))
+                .collect::<BTreeMap<_, _>>(), expected);
+            assert_eq!(vocab.max_event_token_id(), expected.keys().next_back().copied());
+            for id in [0, 1, 2, 9, 33, 1000, 1001] {
+                assert_eq!(vocab.get(id), expected.get(&id).map(Vec::as_slice));
+            }
+            let subset = vocab.subset([1000, 2, 0, 9]);
+            let subset_expected = expected.iter().filter(|(id, _)| [1000, 2, 0, 9].contains(*id))
+                .map(|(&id, bytes)| (id, bytes.clone())).collect::<BTreeMap<_, _>>();
+            assert!(Arc::ptr_eq(&vocab.entries.data, &subset.entries.data));
+            let independent = Vocab::from_entries_unchecked(subset_expected.into_iter().collect());
+            assert!(subset.same_model_vocab(&independent));
+            let lexical = subset.lexical_vocabulary();
+            for (word, ids) in lexical.ordered_token_bytes.iter().zip(lexical.ordered_to_originals.iter()) {
+                assert!(Arc::ptr_eq(&word.data, &vocab.entries.data));
+                for &id in ids {
+                    assert_eq!(word.as_ref(), expected[&id].as_slice());
+                }
+            }
+        }
+    }
 
     #[test]
     fn clones_share_pure_derived_artifact_cache() {

@@ -186,15 +186,15 @@ impl L2pVocabBoundarySplit {
     }
 
     fn materialize_vocab(vocab: &Vocab, token_ids: &[u32]) -> Vocab {
-        let mut entries = Vec::with_capacity(token_ids.len());
+        let mut selected = Vec::with_capacity(token_ids.len());
         let mut parent_entry_indices = Vec::with_capacity(token_ids.len());
         let mut token_ids = token_ids.iter().copied().peekable();
-        for (parent_entry_index, (&token_id, bytes)) in vocab.entries_map().iter().enumerate() {
+        for (parent_entry_index, &token_id) in vocab.entries_map().keys().enumerate() {
             while token_ids.peek().is_some_and(|candidate| *candidate < token_id) {
                 token_ids.next();
             }
             if token_ids.peek().is_some_and(|candidate| *candidate == token_id) {
-                entries.push((token_id, bytes.clone()));
+                selected.push(token_id);
                 parent_entry_indices.push(parent_entry_index);
                 token_ids.next();
             }
@@ -202,7 +202,7 @@ impl L2pVocabBoundarySplit {
                 break;
             }
         }
-        let child = Vocab::from_entries_unchecked(entries);
+        let child = vocab.subset(selected);
         super::l2p::equivalence_analysis::vocab::common_atom::inherit_vocab_suffix_index(
             vocab,
             &child,
@@ -223,17 +223,7 @@ impl L2pVocabBoundarySplit {
         // `materialize_vocab`. For the usual sparse split, direct token-ID
         // lookups avoid walking the entire parent partition merely to extract
         // a few dozen entries.
-        Vocab::from_entries_unchecked(
-            self.single_token_ids
-                .iter()
-                .filter_map(|&token_id| {
-                    vocab
-                        .entries_map()
-                        .get(&token_id)
-                        .map(|bytes| (token_id, bytes.clone()))
-                })
-                .collect(),
-        )
+        vocab.subset(self.single_token_ids.iter().copied())
     }
 }
 
@@ -3339,7 +3329,7 @@ fn exact_terminal_path_two_plus_finite_literals(
                 if witnesses[terminal_1].is_none() || witnesses[terminal_2].is_none() {
                     let witness = TerminalBoundaryWitness {
                         token_id,
-                        token_bytes: bytes.clone(),
+                        token_bytes: bytes.to_vec(),
                         split_position,
                         terminal_1,
                         terminal_2,
@@ -5382,7 +5372,7 @@ fn exact_terminal_path_two_plus_bounded_view_from_starts(
     let token_entries = vocab
         .entries_map()
         .iter()
-        .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
+        .map(|(&token_id, bytes)| (token_id, bytes))
         .collect::<Vec<_>>();
     let tokens = token_entries
         .iter()
@@ -5672,7 +5662,7 @@ pub fn split_vocab_for_active_l2p_terminals(
             &route_setup.allowed_boundary_pair_words,
             &route_setup.active_reachable_by_byte,
         ) {
-            TokenL2pRouteHint::Adjacent => adjacent_entries.push((token_id, bytes.as_slice())),
+            TokenL2pRouteHint::Adjacent => adjacent_entries.push((token_id, bytes)),
             TokenL2pRouteHint::Single => single_token_ids.push(token_id),
             TokenL2pRouteHint::Irrelevant => irrelevant_tokens += 1,
         }
@@ -6384,7 +6374,7 @@ use crate::ds::vocab_prefix_tree::VocabPrefixTree;
         );
         let split_index = vocab_adjacent_pair_index(&vocab);
 
-        for (&id, bytes) in vocab.entries_map() {
+        for (&id, bytes) in vocab.entries_map().iter() {
             let entry_index = split_index.lexical.original_to_ordered()[id as usize] as usize;
             let split_base = split_index.lexical.split_offsets()[entry_index];
             for split_after in 0..bytes.len().saturating_sub(1) {

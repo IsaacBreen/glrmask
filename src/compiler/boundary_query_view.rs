@@ -27,7 +27,7 @@ pub(super) fn prepare(tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisS
     let n=tokenizer.num_states() as usize;
     if !(256..=200_000).contains(&n) || tokenizer.has_virtual_residual_runtime() || !scope.require_crossing(){return None;}
     let started=Instant::now();
-    let mut words=vocab.entries_map().values().map(Vec::as_slice).collect::<Vec<_>>();
+    let mut words=vocab.entries_map().values().collect::<Vec<_>>();
     if words.is_empty() || words.iter().any(|w|w.is_empty() || w.len()>1024)
         || words.iter().try_fold(0usize,|a,w|a.checked_add(w.len()))?>262_144{return None;}
     words.sort_unstable();words.dedup();

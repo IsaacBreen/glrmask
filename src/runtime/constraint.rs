@@ -1245,7 +1245,7 @@ impl Constraint {
                     vocab
                         .entries_map()
                         .iter()
-                        .map(|(&id, bytes)| (id as usize, bytes.clone()))
+                        .map(|(&id, bytes)| (id as usize, bytes.to_vec()))
                         .collect(),
                 )));
                 vocab.vocab_derived_cache_set(tree.clone());
@@ -1669,7 +1669,7 @@ impl Constraint {
         self.token_bytes.max_byte_len()
     }
 
-    pub(crate) fn token_bytes_iter(&self) -> Box<dyn Iterator<Item = (u32, &[u8])> + '_> {
+    pub(crate) fn token_bytes_iter(&self) -> impl ExactSizeIterator<Item = (u32, &[u8])> + '_ {
         self.token_bytes.iter()
     }
 
@@ -5150,7 +5150,6 @@ impl Constraint {
                         .token_bytes
                         .entries()
                         .values()
-                        .map(Vec::as_slice)
                         .collect::<BTreeSet<_>>();
                     let mut matched_tokens = 0usize;
                     let mut continuation_live = 0usize;
@@ -5469,7 +5468,7 @@ impl Constraint {
             for (&token, bytes) in self.token_bytes.entries().iter() {
                 if !special_tokens.contains(token) {
                     ordinary_token_by_bytes
-                        .entry(bytes.as_slice())
+                        .entry(bytes)
                         .or_insert(token);
                 }
             }
@@ -10785,7 +10784,7 @@ mod dense_internal_token_mask_tests {
     }
 
     #[test]
-    fn loaded_constraint_binds_prepared_equal_vocab_and_rejects_mismatch() {
+    fn loaded_constraint_binds_equal_vocab_and_rejects_mismatch() {
         let vocab_a = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let vocab_b = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
         let vocab_bad = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
@@ -10796,17 +10795,11 @@ mod dense_internal_token_mask_tests {
         .unwrap();
         let saved = constraint.save();
 
-        // Prepare exactly the pure Vocab artifact used by the packed-wire fast
-        // path, then bind a current-format loaded constraint. This exercises
-        // the path used by serving/CFA where vocabulary preparation is shared
-        // across many independently loaded constraints.
-        let _ = crate::compiler::compile::vocab_packed_token_bytes(&vocab_b);
         let mut loaded = Constraint::load(saved.clone(), &vocab_a).unwrap();
         assert_eq!(loaded.token_bytes.len(), vocab_a.len());
         loaded.bind_vocab_exact(&vocab_b).unwrap();
         assert!(Arc::ptr_eq(&loaded.token_bytes.entries_arc(), &vocab_b.entries_arc()));
 
-        let _ = crate::compiler::compile::vocab_packed_token_bytes(&vocab_bad);
         let mut mismatched = Constraint::load(saved, &vocab_a).unwrap();
         assert_eq!(mismatched.token_bytes.len(), vocab_a.len());
         assert!(mismatched.bind_vocab_exact(&vocab_bad).is_err());

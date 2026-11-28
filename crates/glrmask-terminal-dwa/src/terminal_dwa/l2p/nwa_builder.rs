@@ -1572,7 +1572,7 @@ pub fn internal_vocab_entries(vocab: &Vocab, id_map: &InternalIdMap) -> Vec<(u32
             vocab
                 .entries_map()
                 .get(&representative)
-                .map(|bytes| (internal_token_id as u32, bytes.clone()))
+                .map(|bytes| (internal_token_id as u32, bytes.to_vec()))
         })
         .collect()
 }

@@ -137,7 +137,7 @@ fn build_identity_common(
     let max_token = *vocab.entries_map().keys().max()?;
     if n == 0 || n > 200_000 || max_token >= 2_000_000 || vocab.len() > 4096
         || tokenizer.has_virtual_residual_runtime()
-        || vocab.entries_map().values().any(Vec::is_empty)
+        || vocab.entries_map().values().any(<[u8]>::is_empty)
         || scope.initial_states().keep_raw().len() != n as usize
         || grammar.num_terminals != tokenizer.num_terminals()
         || flat_trans.len() != (tokenizer.num_states()as usize).checked_mul(256)?
@@ -151,8 +151,8 @@ fn build_identity_common(
     let packed = crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_PACK_INITIAL_TSIDS");
     let states = singleton_state_map(scope.initial_states().keep_raw(), packed);
     let mut words = BTreeMap::<Vec<u8>, Vec<u32>>::new();
-    for (&id, word) in vocab.entries_map() {
-        words.entry(word.clone()).or_default().push(id);
+    for (&id, word) in vocab.entries_map().iter() {
+        words.entry(word.to_vec()).or_default().push(id);
     }
     let groups = words.into_values().collect::<Vec<_>>();
     let mut original_to_internal = vec![u32::MAX; max_token as usize + 1];

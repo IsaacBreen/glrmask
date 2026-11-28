@@ -9,7 +9,7 @@ pub(super) fn query_support(tok:&Tokenizer,vocab:&Vocab,seeds:&[bool])->Option<(
     if seeds.len()!=n||n>200_000||nt==0||tok.has_virtual_residual_runtime(){return None;}
     let roots=tok.deterministic_reset_states().into_vec();
     for &q in &roots{for source in tok.singleton_epsilon_closure(q){if tok.matched_terminals_iter(source).next().is_some(){return None;}}}
-    let mut words=vocab.entries_map().values().map(Vec::as_slice).collect::<Vec<_>>();
+    let mut words=vocab.entries_map().values().collect::<Vec<_>>();
     if words.iter().any(|w|w.is_empty())||words.iter().try_fold(0usize,|a,w|a.checked_add(w.len()))?>262_144{return None;}
     words.sort_unstable();words.dedup();
     let mut initial=seeds.iter().enumerate().filter_map(|(q,&keep)|keep.then_some(q as u32)).collect::<Vec<_>>();

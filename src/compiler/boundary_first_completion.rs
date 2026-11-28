@@ -14,7 +14,7 @@ pub(crate) fn prepare(tok:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,f
  const MAX_STEPS:usize=16_000_000;const MAX_CELLS:usize=4_000_000;
  let n=tok.num_states()as usize;
  if !scope.require_crossing()||n==0||n>200_000||tok.has_virtual_residual_runtime()
-  ||vocab.is_empty()||vocab.len()>4096||vocab.entries_map().values().any(Vec::is_empty)
+  ||vocab.is_empty()||vocab.len()>4096||vocab.entries_map().values().any(<[u8]>::is_empty)
   ||scope.initial_states().keep_raw().len()!=n||flat.len()!=n.checked_mul(256)? {return None;}
  let mut trie=vec![Node::default()];
  for word in vocab.entries_map().values(){let mut node=0;for &b in word{

@@ -268,7 +268,7 @@ pub fn crossing_prefix_seed_support(
             closures.push((q, closure));
         }
     }
-    let mut words = vocab.entries_map().values().map(Vec::as_slice).collect::<Vec<_>>();
+    let mut words = vocab.entries_map().values().collect::<Vec<_>>();
     words.sort_unstable(); words.dedup();
     let trie = build_token_bounded_analysis_trie_sorted(&words);
     trie.prefix_event_sources(flat_trans, &events, &closures, Some(&initial_events))

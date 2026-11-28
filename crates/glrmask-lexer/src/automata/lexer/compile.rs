@@ -432,7 +432,7 @@ fn max_repeat_translation_over_vocab_suffixes(
             .unwrap_or_else(|| {
                 let longest = std::sync::Arc::new(RepeatHorizonLongestTokens {
                     tokens: vocab.entries_map().values()
-                        .filter(|token| token.len() == max_token_len).cloned().collect(),
+                        .filter(|token| token.len() == max_token_len).map(<[u8]>::to_vec).collect(),
                 });
                 vocab.vocab_derived_cache_set(std::sync::Arc::clone(&longest));
                 longest

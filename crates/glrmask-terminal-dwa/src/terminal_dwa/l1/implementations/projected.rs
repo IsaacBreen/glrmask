@@ -6,6 +6,7 @@
 //! residuals are roots; minimization therefore never prunes by reachability from
 //! one distinguished start state.
 
+use crate::vocab::TokenBytes;
 use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -856,7 +857,7 @@ fn reference_residual_partition(
     }
 }
 
-fn unique_vocab(input: BuildInput<'_>) -> (Arc<Vec<Vec<u32>>>, Arc<Vec<Arc<[u8]>>>) {
+fn unique_vocab(input: BuildInput<'_>) -> (Arc<Vec<Vec<u32>>>, Arc<Vec<TokenBytes>>) {
     if let Some(parent) = input.subset_parent_order {
         let mut included = vec![false; parent.original_slot_count];
         for (id, _) in input.vocab.iter() { included[id as usize] = true; }
@@ -866,7 +867,7 @@ fn unique_vocab(input: BuildInput<'_>) -> (Arc<Vec<Vec<u32>>>, Arc<Vec<Arc<[u8]>
             let ids: Vec<_> = group.iter().copied().filter(|&id| included[id as usize]).collect();
             if !ids.is_empty() {
                 aliases.push(ids);
-                tokens.push(Arc::clone(bytes));
+                tokens.push(bytes.clone());
             }
         }
         (Arc::new(aliases), Arc::new(tokens))
@@ -922,7 +923,7 @@ fn quotient_input_bytes(input: BuildInput<'_>, bytes: &[u8]) -> (Vec<u8>, [u8; 2
 fn build_one_byte(
     input: BuildInput<'_>,
     aliases: &[Vec<u32>],
-    tokens: &[Arc<[u8]>],
+    tokens: &[TokenBytes],
     total: Instant,
 ) -> Option<LocalIdMapTerminalDwa> {
     let scan = Instant::now();
@@ -1572,7 +1573,7 @@ struct FiniteVocabProjection {
     /// Full partition vocabularies cache this once so projected L1 can build
     /// sorted reverse ID maps without per-grammar class sorting.
     original_order: Option<Arc<[(u32, u32)]>>,
-    tokens: Arc<Vec<Arc<[u8]>>>,
+    tokens: Arc<Vec<TokenBytes>>,
     /// Sorted byte alphabet appearing anywhere in `tokens`. This is a pure
     /// vocabulary property and is reused by the residual kernel on every
     /// grammar instead of rescanning all token bytes.
@@ -2984,7 +2985,7 @@ fn build_residual_projection(input: BuildInput<'_>, publication: ResidualPublica
         .then(|| build_finite_vocab_projection(input.vocab));
     let vocab_projection_ms = vocab_projection_started.elapsed().as_secs_f64() * 1000.0;
     let owned_vocab;
-    let (aliases, tokens): (&[Vec<u32>], &[Arc<[u8]>]) = if let Some(prepared) = prepared_vocab.as_ref() {
+    let (aliases, tokens): (&[Vec<u32>], &[TokenBytes]) = if let Some(prepared) = prepared_vocab.as_ref() {
         (prepared.aliases.as_slice(), prepared.tokens.as_slice())
     } else {
         owned_vocab = unique_vocab(input);

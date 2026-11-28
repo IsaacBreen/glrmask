@@ -3106,7 +3106,7 @@ table: &child_table,
                         .filter_map(|(&candidate, bytes)| {
                             (token_allowed(&actual_mask, candidate)
                                 != token_allowed(&expected_mask, candidate))
-                                .then_some((candidate, bytes.clone(), token_allowed(&actual_mask, candidate), token_allowed(&expected_mask, candidate)))
+                                .then_some((candidate, bytes.to_vec(), token_allowed(&actual_mask, candidate), token_allowed(&expected_mask, candidate)))
                         })
                         .collect::<Vec<_>>();
                     eprintln!("IGNORE_FUSION_DIFF {differing:?}");

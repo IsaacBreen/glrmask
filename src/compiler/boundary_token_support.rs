@@ -424,7 +424,7 @@ mod tests {
             let support=crossing_token_support(&tokenizer,&vocab,&mask,&ownership,ImmediateComponentId(0)).unwrap();
             for id in [1,99,101,102,999] { assert!(support.tokens.contains(&id),"missing {id}"); }
             for id in [103,104,105] { assert!(!support.tokens.contains(&id),"spurious simple token {id}"); }
-            assert!(support.byte_prefixes < vocab.entries_map().values().map(Vec::len).sum());
+            assert!(support.byte_prefixes < vocab.entries_map().values().map(<[u8]>::len).sum());
         }
     }
 

@@ -1,3 +1,4 @@
+use super::TokenBytes;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
@@ -151,7 +152,7 @@ impl fmt::Debug for VocabPrefixTreeNode<'_> {
 }
 
 pub struct VocabPrefixTree {
-    tokens: Arc<Vec<Arc<[u8]>>>,
+    tokens: Arc<Vec<TokenBytes>>,
     /// Omitted for the common lexical-ID coordinate. A general terminal
     /// quotient may have arbitrary IDs and hence noncontiguous reachable sets.
     ids: Option<Box<[usize]>>,
@@ -226,29 +227,29 @@ impl VocabPrefixTree {
             write += 1;
         }
         tokens.truncate(write);
-        let (ids, words): (Vec<_>, Vec<Arc<[u8]>>) = tokens.into_iter()
-            .map(|(id, bytes)| (id, Arc::from(bytes))).unzip();
+        let (ids, words): (Vec<_>, Vec<_>) = tokens.into_iter().unzip();
+        let words = TokenBytes::pack(words);
         Self::from_parts(Arc::new(words), Some(ids.into_boxed_slice()))
     }
 
     /// Build from lexically sorted, distinct spellings.
     pub fn build_presorted(tokens: &[(usize, &[u8])]) -> Self {
-        let (ids, words): (Vec<_>, Vec<Arc<[u8]>>) = tokens.iter()
-            .map(|&(id, bytes)| (id, Arc::from(bytes))).unzip();
+        let ids: Vec<_> = tokens.iter().map(|&(id, _)| id).collect();
+        let words = TokenBytes::pack(tokens.iter().map(|&(_, bytes)| bytes));
         Self::from_parts(Arc::new(words), Some(ids.into_boxed_slice()))
     }
 
     /// Reuse the vocabulary's immutable, distinct, byte-sorted spellings.
-    pub fn from_ordered_tokens(tokens: Arc<Vec<Arc<[u8]>>>) -> Self {
+    pub fn from_ordered_tokens(tokens: Arc<Vec<TokenBytes>>) -> Self {
         Self::from_parts(tokens, None)
     }
 
-    fn from_parts(tokens: Arc<Vec<Arc<[u8]>>>, ids: Option<Box<[usize]>>) -> Self {
+    fn from_parts(tokens: Arc<Vec<TokenBytes>>, ids: Option<Box<[usize]>>) -> Self {
         debug_assert!(tokens.windows(2).all(|pair| pair[0] < pair[1]));
         let ids = ids.filter(|ids| ids.iter().copied().ne(0..tokens.len()));
         let max_token_id = ids.as_ref().map_or(tokens.len().saturating_sub(1),
             |ids| ids.iter().copied().max().unwrap_or(0));
-        fn add_node(tokens: &[Arc<[u8]>], first: usize, end: usize, prefix_len: usize,
+        fn add_node(tokens: &[TokenBytes], first: usize, end: usize, prefix_len: usize,
             nodes: &mut Vec<RadixNode>, children: &mut Vec<u32>) -> u32
         {
             let index = u32::try_from(nodes.len()).expect("radix node index");
@@ -394,7 +395,7 @@ mod proper_prefix_byte_tests {
     fn lexical_radix_intervals_match_literal_prefixes() {
         let words = [b"".as_slice(), b"a", b"abc", b"abd", b"b", b"zz"];
         let tree = VocabPrefixTree::from_ordered_tokens(Arc::new(
-            words.iter().map(|word| Arc::<[u8]>::from(*word)).collect()
+            TokenBytes::pack(words)
         ));
         let mut pending = vec![tree.root()];
         while let Some(node) = pending.pop() {

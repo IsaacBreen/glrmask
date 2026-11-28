@@ -346,16 +346,16 @@ fn build_boundary_terminal_dwa_query_jobs(
         result.profile.setup_ms+=elapsed;Some(result)
     };
     let Some(size)=tile_size.filter(|_|inputs.scope.require_crossing()
-        && inputs.vocab.len()<=4096 && !inputs.vocab.entries_map().values().any(Vec::is_empty))
+        && inputs.vocab.len()<=4096 && !inputs.vocab.entries_map().values().any(<[u8]>::is_empty))
     else{return compile_one(inputs,shared);};
-    let mut routed=BTreeMap::<u8,Vec<(u32,Vec<u8>)>>::new();
-    for (&id,bytes) in inputs.vocab.entries_map(){
-        routed.entry(tdwa::classify::classify_vocab_char_type(bytes)).or_default().push((id,bytes.clone()));
+    let mut routed=BTreeMap::<u8,Vec<(u32,&[u8])>>::new();
+    for (&id,bytes) in inputs.vocab.entries_map().iter(){
+        routed.entry(tdwa::classify::classify_vocab_char_type(bytes)).or_default().push((id,bytes));
     }
     let mut groups=Vec::new();
     for mut entries in routed.into_values(){
         entries.sort_unstable_by(|a,b|a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-        for chunk in entries.chunks(size){groups.push(Vocab::from_entries_unchecked(chunk.to_vec()));}
+        for chunk in entries.chunks(size){groups.push(inputs.vocab.subset(chunk.iter().map(|&(id,_)|id)));}
     }
     if groups.len()<2 || groups.len()>256{return compile_one(inputs,shared);}
     let flat:Arc<[u32]>=inputs.flat_trans.cloned().unwrap_or_else(||Arc::from(tdwa::l1::build_flat_transition_table(inputs.merged_tokenizer)));
@@ -1098,20 +1098,10 @@ where
                 if ids.is_empty() {
                     return None;
                 }
-                let entries = ids
-                    .iter()
-                    .filter_map(|&id| {
-                        inputs
-                            .vocab
-                            .entries_map()
-                            .get(&id)
-                            .map(|bytes| (id, bytes.clone()))
-                    })
-                    .collect::<Vec<_>>();
-                if entries.len() != ids.len() {
+                candidate_storage = inputs.vocab.subset(ids.iter().copied());
+                if candidate_storage.len() != ids.len() {
                     panic!("boundary candidate summary contains token IDs outside vocabulary");
                 }
-                candidate_storage = Vocab::from_entries_unchecked(entries);
                 &candidate_storage
             }
             Some(None) | None => inputs.vocab,
@@ -1212,9 +1202,9 @@ where
                         started.elapsed().as_secs_f64() * 1000.0);
                 }
                 if !support.tokens.is_empty() && support.tokens.len() < candidate_vocab.len() {
-                    live_vocab = Some(Vocab::from_entries_unchecked(support.tokens.into_iter().map(|id| {
-                        (id, candidate_vocab.entries_map()[&id].clone())
-                    }).collect()));
+                    let selected = candidate_vocab.subset(support.tokens.iter().copied());
+                    assert_eq!(selected.len(), support.tokens.len(), "boundary support must reference candidate vocabulary");
+                    live_vocab = Some(selected);
                 }
                 // The empty case retains the existing exact builder until its
                 // empty-language result has been independently checked.
@@ -3972,7 +3962,7 @@ mod tests {
         let mut table = vocab
             .entries_map()
             .iter()
-            .map(|(id, token)| (*id, token.clone()))
+            .map(|(id, token)| (*id, token.to_vec()))
             .collect::<Vec<_>>();
         table.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
         table

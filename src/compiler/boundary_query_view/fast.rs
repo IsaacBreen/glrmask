@@ -76,7 +76,7 @@ pub(super) fn footprint(
         || scope.initial_states().keep_raw().len() != n
     { return None; }
     let began = Instant::now();
-    let mut words = vocab.entries_map().values().map(Vec::as_slice).collect::<Vec<_>>();
+    let mut words = vocab.entries_map().values().collect::<Vec<_>>();
     if words.is_empty() || words.iter().any(|w| w.is_empty() || w.len() > 1024)
         || words.iter().try_fold(0usize, |a, w| a.checked_add(w.len()))? > 262_144
     { return None; }

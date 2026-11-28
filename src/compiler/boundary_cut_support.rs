@@ -428,7 +428,7 @@ fn crossing_support_with_flat(
     };
     let solve = Instant::now();
     let mut tokens = Vec::new();
-    for (&id, word) in vocab.entries_map() {
+    for (&id, word) in vocab.entries_map().iter() {
         if word.is_empty() {
             tokens.push(id);
             continue;

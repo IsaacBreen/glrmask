@@ -1131,7 +1131,7 @@ pub fn build_token_bounded_analysis_trie_sorted(
     words.dedup();
     TokenBoundedAnalysisTrie::from_radix(Arc::new(
         VocabPrefixTree::from_ordered_tokens(Arc::new(
-            words.into_iter().map(Arc::<[u8]>::from).collect()
+            crate::vocab::TokenBytes::pack(words)
         ))
     ))
 }
