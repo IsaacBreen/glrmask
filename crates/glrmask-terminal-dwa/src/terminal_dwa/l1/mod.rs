@@ -3,10 +3,9 @@
 pub mod implementations;
 
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
 
 use super::types::{
-    LocalIdMapTerminalDwa, LocalTerminalBuild, TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled,
+    LocalIdMapTerminalDwa, LocalTerminalBuild, TerminalColoring, TerminalDwaPhaseProfile,
 };
 use crate::Vocab;
 use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
@@ -16,13 +15,8 @@ use crate::grammar::flat::TerminalID;
 
 const L1_GENERIC_NFA_TOKEN_BOUNDED_MAX_VOCAB: usize = 20_000;
 
-#[derive(Debug)]
-pub struct L1IdentityVocabOrder {
-    token_entries_sorted: Arc<[(u32, Arc<[u8]>)]>,
-    original_to_internal: Arc<[u32]>,
-}
+pub use crate::vocab::LexicalVocabulary as L1IdentityVocabOrder;
 
-impl crate::vocab::VocabDerivedArtifact for L1IdentityVocabOrder {}
 impl crate::vocab::VocabDerivedArtifact
     for super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie
 {
@@ -42,9 +36,9 @@ fn l1_token_bounded_analysis_trie(
     }
     let order = l1_identity_vocab_order(vocab);
     let tokens = order
-        .token_entries_sorted
+        .ordered_token_bytes
         .iter()
-        .map(|(_, bytes)| bytes.as_ref())
+        .map(|bytes| bytes.as_ref())
         .collect::<Vec<_>>();
     let trie = Arc::new(
         super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_trie_sorted(
@@ -82,56 +76,8 @@ pub(crate) fn cached_l1_token_bounded_analysis_trie(
 }
 
 fn l1_identity_vocab_order(vocab: &Vocab) -> Arc<L1IdentityVocabOrder> {
-    if let Some(cached) = vocab.vocab_derived_cache_get::<L1IdentityVocabOrder>() {
-        return cached;
-    }
-
-    let profiling = compile_profile_enabled();
-    let total_started_at = profiling.then(Instant::now);
-    let collect_started_at = profiling.then(Instant::now);
-    let mut token_entries_sorted: Vec<(u32, Arc<[u8]>)> = vocab
-        .entries_map()
-        .iter()
-        .map(|(&id, bytes)| (id, Arc::<[u8]>::from(bytes.clone().into_boxed_slice())))
-        .collect();
-    let collect_ms =
-        collect_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-
-    let sort_started_at = profiling.then(Instant::now);
-    token_entries_sorted.sort_unstable_by(|(left_id, left_bytes), (right_id, right_bytes)| {
-        left_bytes
-            .first()
-            .cmp(&right_bytes.first())
-            .then(left_bytes.cmp(right_bytes))
-            .then(left_id.cmp(right_id))
-    });
-    let sort_ms = sort_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-
-    let map_started_at = profiling.then(Instant::now);
-    let mut token_original_to_internal = vec![u32::MAX; vocab.max_token_id() as usize + 1];
-    for (internal_id, (original_id, _)) in token_entries_sorted.iter().enumerate() {
-        token_original_to_internal[*original_id as usize] = internal_id as u32;
-    }
-    let map_ms = map_started_at.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-
-    let order = Arc::new(L1IdentityVocabOrder {
-        token_entries_sorted: token_entries_sorted.into(),
-        original_to_internal: token_original_to_internal.into(),
-    });
-    vocab.vocab_derived_cache_set(Arc::clone(&order));
-    if let Some(total_started_at) = total_started_at {
-        eprintln!(
-            "[glrmask/profile][l1_identity_order] tokens={} collect_ms={:.3} sort_ms={:.3} map_ms={:.3} total_ms={:.3}",
-            vocab.len(),
-            collect_ms,
-            sort_ms,
-            map_ms,
-            total_started_at.elapsed().as_secs_f64() * 1000.0,
-        );
-    }
-    order
+    vocab.lexical_vocabulary()
 }
-
 pub fn prepare_l1_identity_vocab_order(vocab: &Vocab) {
     let _ = l1_identity_vocab_order(vocab);
 }
@@ -156,29 +102,11 @@ pub fn cached_l1_exact_token_groups(
     byte_strings: &[Vec<u8>],
 ) -> Option<Vec<Vec<u32>>> {
     let order = vocab.vocab_derived_cache_get::<L1IdentityVocabOrder>()?;
-    let entries = order.token_entries_sorted.as_ref();
-    Some(
-        byte_strings
-            .iter()
-            .map(|bytes| {
-                let cmp = |entry: &(u32, Arc<[u8]>)| {
-                    entry
-                        .1
-                        .first()
-                        .cmp(&bytes.first())
-                        .then_with(|| entry.1.as_ref().cmp(bytes.as_slice()))
-                };
-                let start = entries.partition_point(|entry| cmp(entry).is_lt());
-                let end = entries.partition_point(|entry| !cmp(entry).is_gt());
-                entries[start..end]
-                    .iter()
-                    .map(|(token_id, _)| *token_id)
-                    .collect::<Vec<_>>()
-            })
-            .collect(),
-    )
+    Some(byte_strings.iter().map(|bytes| {
+        order.ordered_token_bytes.binary_search_by(|word| word.as_ref().cmp(bytes.as_slice()))
+            .ok().map(|index| order.ordered_to_originals[index].clone()).unwrap_or_default()
+    }).collect())
 }
-
 /// Reuse the parent L1 byte order for an L2P boundary subset when it is already cached.
 pub(crate) fn inherit_l2p_lexical_entry_order(
     parent_vocab: &Vocab,
@@ -192,7 +120,7 @@ pub(crate) fn inherit_l2p_lexical_entry_order(
     let mut entry_indices = (0..child_token_ids_in_entry_order.len() as u32).collect::<Vec<_>>();
     entry_indices.sort_unstable_by_key(|&entry_index| {
         let token_id = child_token_ids_in_entry_order[entry_index as usize] as usize;
-        parent_order.original_to_internal[token_id]
+        (parent_order.original_to_ordered()[token_id], token_id)
     });
     child_vocab.vocab_derived_cache_set(Arc::new(
         super::l2p::equivalence_analysis::shared::VocabLexicalEntryOrder {

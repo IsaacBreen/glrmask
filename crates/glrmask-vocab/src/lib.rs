@@ -5,7 +5,7 @@ use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::{Bound, RangeBounds, RangeInclusive};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 mod error;
 pub use error::{Error, ErrorKind, SourceSpan};
@@ -112,6 +112,64 @@ struct VocabRelevantBytes {
 }
 
 impl VocabDerivedArtifact for VocabRelevantBytes {}
+
+/// The immutable exact-spelling coordinate shared by vocabulary consumers.
+/// IDs in each alias group are ordered by original ID; groups are ordered by
+/// byte spelling. Grammar-dependent equivalence classes never enter this cache.
+#[derive(Debug)]
+pub struct LexicalVocabulary {
+    pub original_slot_count: usize,
+    pub ordered_to_originals: Arc<Vec<Vec<u32>>>,
+    pub ordered_token_bytes: Arc<Vec<Arc<[u8]>>>,
+    original_to_ordered: OnceLock<Arc<[u32]>>,
+    original_order: OnceLock<Arc<[(u32, u32)]>>,
+}
+
+impl VocabDerivedArtifact for LexicalVocabulary {}
+
+impl LexicalVocabulary {
+    pub fn build(entries: &BTreeMap<u32, Vec<u8>>) -> Self {
+        let mut sorted: Vec<_> = entries.iter().map(|(&id, bytes)| (id, bytes.as_slice())).collect();
+        sorted.sort_unstable_by(|a, b| a.1.cmp(b.1).then(a.0.cmp(&b.0)));
+        let mut words: Vec<Arc<[u8]>> = Vec::new();
+        let mut aliases: Vec<Vec<u32>> = Vec::new();
+        for (id, bytes) in sorted {
+            if words.last().is_some_and(|last| last.as_ref() == bytes) {
+                aliases.last_mut().expect("existing spelling").push(id);
+            } else {
+                words.push(Arc::from(bytes));
+                aliases.push(vec![id]);
+            }
+        }
+        Self {
+            original_slot_count: entries.last_key_value().map_or(0, |(&id, _)| id as usize + 1),
+            ordered_to_originals: Arc::new(aliases),
+            ordered_token_bytes: Arc::new(words),
+            original_to_ordered: OnceLock::new(),
+            original_order: OnceLock::new(),
+        }
+    }
+
+    pub fn original_to_ordered(&self) -> &[u32] {
+        self.original_to_ordered.get_or_init(|| {
+            let mut map = vec![u32::MAX; self.original_slot_count];
+            for (ordered, ids) in self.ordered_to_originals.iter().enumerate() {
+                for &id in ids { map[id as usize] = ordered as u32; }
+            }
+            map.into()
+        })
+    }
+
+    pub fn original_order(&self) -> Arc<[(u32, u32)]> {
+        Arc::clone(self.original_order.get_or_init(|| {
+            let mut pairs: Vec<_> = self.ordered_to_originals.iter().enumerate().flat_map(|(ordered, ids)|
+                ids.iter().map(move |&id| (id, ordered as u32))
+            ).collect();
+            pairs.sort_unstable_by_key(|&(id, _)| id);
+            pairs.into()
+        }))
+    }
+}
 
 mod derived_artifact {
     use std::any::Any;
@@ -355,6 +413,16 @@ impl Vocab {
             .map_or(0, |(&token_id, _)| token_id)
     }
 
+    #[doc(hidden)]
+    pub fn lexical_vocabulary(&self) -> Arc<LexicalVocabulary> {
+        if let Some(cached) = self.vocab_derived_cache_get_internal::<LexicalVocabulary>() {
+            return cached;
+        }
+        let built = Arc::new(LexicalVocabulary::build(self.entries_map()));
+        self.vocab_derived_cache_set_internal(Arc::clone(&built));
+        self.vocab_derived_cache_get_internal::<LexicalVocabulary>().unwrap_or(built)
+    }
+
     fn vocab_derived_cache_get_internal<T: VocabDerivedArtifact>(&self) -> Option<Arc<T>> {
         self.compiler_cache
             .artifacts
@@ -426,7 +494,7 @@ pub(crate) mod vocab_prefix_tree;
 pub mod __private {
     pub use super::derived_artifact::VocabDerivedArtifact;
     pub use super::error::internal::{error_message, new_error, with_source_span};
-    pub use super::Vocab;
+    pub use super::{Vocab, LexicalVocabulary};
 
     pub mod vocab_prefix_tree {
         pub use super::super::vocab_prefix_tree::*;

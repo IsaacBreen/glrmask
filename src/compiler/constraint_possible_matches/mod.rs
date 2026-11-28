@@ -1,7 +1,5 @@
 use crate::automata::lexer::Lexer;
 use std::collections::BTreeMap;
-use std::hash::Hasher;
-use std::sync::Mutex;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -132,12 +130,7 @@ pub(crate) fn complete_single_use_terminal_possible_matches_from_l1(
     Some(deferred)
 }
 
-#[derive(Debug, Clone)]
-struct OrderedVocab {
-    original_slot_count: usize,
-    ordered_to_originals: Arc<Vec<Vec<u32>>>,
-    ordered_token_bytes: Vec<Vec<u8>>,
-}
+use crate::vocab::LexicalVocabulary as OrderedVocab;
 
 #[derive(Debug, Clone)]
 struct OrderedVocabTrieArtifacts {
@@ -173,21 +166,6 @@ impl OrderedVocabTrieArtifacts {
             llg_master_max_safe_chars: Arc::new(OnceLock::new()),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct OrderedVocabCacheFingerprint {
-    token_count: usize,
-    max_token_id: u32,
-    total_bytes: usize,
-    hash: u64,
-}
-
-#[derive(Debug, Clone)]
-struct OrderedVocabCacheEntry {
-    fingerprint: OrderedVocabCacheFingerprint,
-    source_original_to_ordered: Arc<[u32]>,
-    artifacts: OrderedVocabTrieArtifacts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,39 +217,8 @@ struct SweepBuildStats {
     total_events: usize,
 }
 
-fn build_ordered_vocab(token_bytes: &BTreeMap<u32, Vec<u8>>) -> OrderedVocab {
-    let original_slot_count = token_bytes.keys().next_back().map(|token_id| *token_id as usize + 1).unwrap_or(0);
-    let mut entries: Vec<(u32, &[u8])> = token_bytes
-        .iter()
-        .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
-        .collect();
-    entries.sort_unstable_by(|left, right| left.1.cmp(right.1).then_with(|| left.0.cmp(&right.0)));
-
-    let mut ordered_to_originals = Vec::new();
-    let mut ordered_token_bytes = Vec::new();
-    let mut index = 0usize;
-    while index < entries.len() {
-        let bytes = entries[index].1;
-        let mut originals = Vec::new();
-        while index < entries.len() && entries[index].1 == bytes {
-            originals.push(entries[index].0);
-            index += 1;
-        }
-        originals.sort_unstable();
-        originals.dedup();
-        ordered_token_bytes.push(bytes.to_vec());
-        ordered_to_originals.push(originals);
-    }
-
-    OrderedVocab {
-        original_slot_count,
-        ordered_to_originals: Arc::new(ordered_to_originals),
-        ordered_token_bytes,
-    }
-}
-
 fn build_ordered_vocab_prefix_tree(ordered_vocab: &OrderedVocab) -> VocabPrefixTree {
-    let entries: Vec<(usize, &[u8])> = ordered_vocab.ordered_token_bytes.iter().enumerate().map(|(ordered_id, bytes)| (ordered_id, bytes.as_slice())).collect();
+    let entries: Vec<(usize, &[u8])> = ordered_vocab.ordered_token_bytes.iter().enumerate().map(|(ordered_id, bytes)| (ordered_id, bytes.as_ref())).collect();
     VocabPrefixTree::build_presorted(&entries)
 }
 
@@ -297,94 +244,6 @@ fn ordered_vocab_cache_capacity() -> usize {
     })
 }
 
-fn ordered_vocab_cache() -> &'static Mutex<Vec<OrderedVocabCacheEntry>> {
-    static CACHE: OnceLock<Mutex<Vec<OrderedVocabCacheEntry>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-fn ordered_vocab_cache_fingerprint(
-    token_bytes: &BTreeMap<u32, Vec<u8>>,
-) -> OrderedVocabCacheFingerprint {
-    let mut hasher = rustc_hash::FxHasher::default();
-    let mut token_count = 0usize;
-    let mut max_token_id = 0u32;
-    let mut total_bytes = 0usize;
-    for (&token_id, bytes) in token_bytes {
-        hasher.write_u32(token_id);
-        hasher.write_usize(bytes.len());
-        hasher.write(bytes);
-        token_count += 1;
-        max_token_id = token_id;
-        total_bytes += bytes.len();
-    }
-    OrderedVocabCacheFingerprint {
-        token_count,
-        max_token_id,
-        total_bytes,
-        hash: hasher.finish(),
-    }
-}
-
-fn ordered_vocab_cache_source_matches(
-    token_bytes: &BTreeMap<u32, Vec<u8>>,
-    source_original_to_ordered: &[u32],
-    ordered_vocab: &OrderedVocab,
-) -> bool {
-    if ordered_vocab.ordered_token_bytes.len() != ordered_vocab.ordered_to_originals.len() {
-        return false;
-    }
-
-    let cached_token_count: usize = ordered_vocab
-        .ordered_to_originals
-        .iter()
-        .map(|originals| originals.len())
-        .sum();
-    if token_bytes.len() != cached_token_count {
-        return false;
-    }
-
-    let actual_slot_count = token_bytes
-        .keys()
-        .next_back()
-        .map(|token_id| *token_id as usize + 1)
-        .unwrap_or(0);
-    if actual_slot_count != ordered_vocab.original_slot_count {
-        return false;
-    }
-
-    if source_original_to_ordered.len() != ordered_vocab.original_slot_count {
-        return false;
-    }
-
-    for (&original_id, actual_bytes) in token_bytes {
-        let Some(&ordered_id) = source_original_to_ordered.get(original_id as usize) else {
-            return false;
-        };
-        let Some(cached_bytes) = ordered_vocab.ordered_token_bytes.get(ordered_id as usize) else {
-            return false;
-        };
-        if actual_bytes != cached_bytes {
-            return false;
-        }
-    }
-
-    true
-}
-
-fn ordered_vocab_cache_source_original_to_ordered(
-    ordered_vocab: &OrderedVocab,
-) -> Arc<[u32]> {
-    let mut original_to_ordered = vec![u32::MAX; ordered_vocab.original_slot_count];
-    for (ordered_id, originals) in ordered_vocab.ordered_to_originals.iter().enumerate() {
-        for &original_id in originals {
-            let slot = &mut original_to_ordered[original_id as usize];
-            debug_assert_eq!(*slot, u32::MAX);
-            *slot = ordered_id as u32;
-        }
-    }
-    original_to_ordered.into()
-}
-
 fn compile_profile_requested() -> bool {
     crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
@@ -406,124 +265,14 @@ fn emit_ordered_vocab_cache_profile(profile: OrderedVocabCacheProfile) {
     );
 }
 
-fn get_ordered_vocab_trie_artifacts(
-    token_bytes: &BTreeMap<u32, Vec<u8>>,
-) -> (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile) {
-    let capacity = ordered_vocab_cache_capacity();
-    if !ordered_vocab_cache_enabled() || capacity == 0 {
-        let ordered_vocab_started_at = Instant::now();
-        let ordered_vocab = Arc::new(build_ordered_vocab(token_bytes));
-        let ordered_vocab_build_ns = ordered_vocab_started_at.elapsed().as_nanos();
-        let trie_started_at = Instant::now();
-        let trie = Arc::new(build_ordered_vocab_prefix_tree(ordered_vocab.as_ref()));
-        let trie_build_ns = trie_started_at.elapsed().as_nanos();
-        return (
-            OrderedVocabTrieArtifacts::new(ordered_vocab, trie),
-            OrderedVocabCacheProfile {
-                status: OrderedVocabCacheStatus::Disabled,
-                probe_ns: 0,
-                verify_ns: 0,
-                ordered_vocab_build_ns,
-                trie_build_ns,
-                cache_entries: 0,
-                capacity,
-            },
-        );
-    }
-
-    let probe_started_at = Instant::now();
-    let fingerprint = ordered_vocab_cache_fingerprint(token_bytes);
-    let mut verify_ns = 0u128;
-
-    {
-        let mut cache = ordered_vocab_cache().lock().unwrap();
-        let mut hit_index = None;
-        for (index, entry) in cache.iter().enumerate() {
-            if entry.fingerprint != fingerprint {
-                continue;
-            }
-            let verify_started_at = Instant::now();
-            let is_match = ordered_vocab_cache_source_matches(
-                token_bytes,
-                entry.source_original_to_ordered.as_ref(),
-                entry.artifacts.ordered_vocab.as_ref(),
-            );
-            verify_ns += verify_started_at.elapsed().as_nanos();
-            if is_match {
-                hit_index = Some(index);
-                break;
-            }
-        }
-
-        if let Some(index) = hit_index {
-            let entry = cache.remove(index);
-            let artifacts = entry.artifacts.clone();
-            cache.push(entry);
-            let cache_entries = cache.len();
-            return (
-                artifacts,
-                OrderedVocabCacheProfile {
-                    status: OrderedVocabCacheStatus::Hit,
-                    probe_ns: probe_started_at.elapsed().as_nanos(),
-                    verify_ns,
-                    ordered_vocab_build_ns: 0,
-                    trie_build_ns: 0,
-                    cache_entries,
-                    capacity,
-                },
-            );
-        }
-    }
-
-    let ordered_vocab_started_at = Instant::now();
-    let ordered_vocab = Arc::new(build_ordered_vocab(token_bytes));
-    let ordered_vocab_build_ns = ordered_vocab_started_at.elapsed().as_nanos();
-    let trie_started_at = Instant::now();
-    let trie = Arc::new(build_ordered_vocab_prefix_tree(ordered_vocab.as_ref()));
-    let trie_build_ns = trie_started_at.elapsed().as_nanos();
-    let source_original_to_ordered = ordered_vocab_cache_source_original_to_ordered(ordered_vocab.as_ref());
-    let entry = OrderedVocabCacheEntry {
-        fingerprint,
-        source_original_to_ordered,
-        artifacts: OrderedVocabTrieArtifacts::new(
-            Arc::clone(&ordered_vocab),
-            Arc::clone(&trie),
-        ),
-    };
-
-    let cache_entries = {
-        let mut cache = ordered_vocab_cache().lock().unwrap();
-        if cache.len() >= capacity {
-            cache.remove(0);
-        }
-        cache.push(entry);
-        cache.len()
-    };
-
-    (
-        OrderedVocabTrieArtifacts::new(ordered_vocab, trie),
-        OrderedVocabCacheProfile {
-            status: OrderedVocabCacheStatus::Miss,
-            probe_ns: probe_started_at.elapsed().as_nanos(),
-            verify_ns,
-            ordered_vocab_build_ns,
-            trie_build_ns,
-            cache_entries,
-            capacity,
-        },
-    )
-}
-
 fn get_ordered_vocab_trie_artifacts_for_vocab(
     vocab: &Vocab,
 ) -> (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile) {
     let capacity = ordered_vocab_cache_capacity();
-    if !ordered_vocab_cache_enabled() || capacity == 0 {
-        return get_ordered_vocab_trie_artifacts(vocab.entries_map());
-    }
+    let enabled = ordered_vocab_cache_enabled() && capacity != 0;
 
     let probe_started_at = Instant::now();
-    if let Some(artifacts) = vocab.vocab_derived_cache_get::<OrderedVocabTrieArtifacts>() {
+    if let Some(artifacts) = enabled.then(|| vocab.vocab_derived_cache_get::<OrderedVocabTrieArtifacts>()).flatten() {
         return (
             artifacts.as_ref().clone(),
             OrderedVocabCacheProfile {
@@ -539,23 +288,23 @@ fn get_ordered_vocab_trie_artifacts_for_vocab(
     }
 
     let ordered_vocab_started_at = Instant::now();
-    let ordered_vocab = Arc::new(build_ordered_vocab(vocab.entries_map()));
+    let ordered_vocab = if enabled { vocab.lexical_vocabulary() } else { Arc::new(OrderedVocab::build(vocab.entries_map())) };
     let ordered_vocab_build_ns = ordered_vocab_started_at.elapsed().as_nanos();
     let trie_started_at = Instant::now();
     let trie = Arc::new(build_ordered_vocab_prefix_tree(ordered_vocab.as_ref()));
     let trie_build_ns = trie_started_at.elapsed().as_nanos();
     let artifacts = OrderedVocabTrieArtifacts::new(ordered_vocab, trie);
-    vocab.vocab_derived_cache_set(Arc::new(artifacts.clone()));
+    if enabled { vocab.vocab_derived_cache_set(Arc::new(artifacts.clone())); }
 
     (
         artifacts,
         OrderedVocabCacheProfile {
-            status: OrderedVocabCacheStatus::Miss,
+            status: if enabled { OrderedVocabCacheStatus::Miss } else { OrderedVocabCacheStatus::Disabled },
             probe_ns: probe_started_at.elapsed().as_nanos(),
             verify_ns: 0,
             ordered_vocab_build_ns,
             trie_build_ns,
-            cache_entries: 1,
+            cache_entries: usize::from(enabled),
             capacity,
         },
     )
@@ -2398,7 +2147,7 @@ fn prepare_llg_slice_leftovers_for_ordered_vocab(
     let max_token_byte_len = ordered_vocab
         .ordered_token_bytes
         .iter()
-        .map(Vec::len)
+        .map(|word| word.len())
         .max()
         .unwrap_or(0);
     // Default to the validated finite word language. This is vocabulary-only
@@ -2439,7 +2188,7 @@ fn prepare_llg_slice_leftovers_for_ordered_vocab(
     let mut entries = Vec::<(u16, usize, &[u8])>::with_capacity(ordered_vocab.ordered_token_bytes.len());
     
     for (canonical, bytes) in ordered_vocab.ordered_token_bytes.iter().enumerate() {
-        let bytes = bytes.as_slice();
+        let bytes = bytes.as_ref();
         let is_safe = safe_plus.is_match(bytes);
         let safe_chars = if is_safe {
             let chars = std::str::from_utf8(bytes)
@@ -2469,13 +2218,13 @@ fn prepare_llg_slice_leftovers_for_ordered_vocab(
         }
         if is_whitespace {
             whitespace_max_token_byte_len = whitespace_max_token_byte_len.max(bytes.len() as u32);
-            for &byte in bytes {
+            for &byte in bytes.iter() {
                 whitespace_token_bytes.insert(byte);
             }
         }
         if is_ascii_word {
             ascii_word_max_token_byte_len = ascii_word_max_token_byte_len.max(bytes.len() as u32);
-            for &byte in bytes {
+            for &byte in bytes.iter() {
                 ascii_word_token_bytes.insert(byte);
             }
         } else if ascii_word.is_some() {
@@ -2565,9 +2314,9 @@ fn llg_safe_slice_token_bytes_for_ordered_vocab(ordered_vocab: &OrderedVocab) ->
     )
     .expect("safe-string slice regex must compile");
     let mut bytes = U8Set::empty();
-    for token in &ordered_vocab.ordered_token_bytes {
+    for token in ordered_vocab.ordered_token_bytes.iter() {
         if safe_plus.is_match(token) {
-            for &byte in token {
+            for &byte in token.iter() {
                 bytes.insert(byte);
             }
         }
@@ -2676,11 +2425,6 @@ pub(crate) fn runtime_dynamic_vocab_for_partition(
     let profile = crate::compiler::compile::compile_profile_enabled();
     let total_started = profile.then(Instant::now);
     let destructure_started = profile.then(Instant::now);
-    let token_slots = if vocab.is_empty() {
-        0
-    } else {
-        vocab.max_token_id() as usize + 1
-    };
     let ManyToOneIdMap {
         original_to_internal: _,
         internal_to_originals,
@@ -2746,14 +2490,10 @@ pub(crate) fn runtime_dynamic_vocab_for_partition(
     }
     let groups_ms = groups_started.map_or(0.0, elapsed_ms);
 
-    let ordered = OrderedVocab {
-        original_slot_count: token_slots,
-        ordered_to_originals: Arc::new(expanded_groups),
-        ordered_token_bytes,
-    };
+    let ordered_to_originals = Arc::new(expanded_groups);
 
     let prefix_started = profile.then(Instant::now);
-    let refs: Vec<_> = ordered.ordered_token_bytes.iter().enumerate()
+    let refs: Vec<_> = ordered_token_bytes.iter().enumerate()
         .map(|(id, bytes)| (0u16, id, bytes.as_slice())).collect();
     let prefix_ms = prefix_started.map_or(0.0, elapsed_ms);
     let trie_started = profile.then(Instant::now);
@@ -2769,13 +2509,13 @@ pub(crate) fn runtime_dynamic_vocab_for_partition(
     let mut runtime = if materialize_runtime_indexes {
         DynamicMaskVocab::from_materialized_ordered_with_all_original_token_words(
             runtime_trie,
-            ordered.ordered_to_originals,
+            ordered_to_originals,
             Some(prepared_all_original_token_words),
         )
     } else {
         DynamicMaskVocab::from_materialized_ordered_for_transfer(
             runtime_trie,
-            ordered.ordered_to_originals,
+            ordered_to_originals,
         )
     };
     let runtime_ms = runtime_started.map_or(0.0, elapsed_ms);
@@ -2980,8 +2720,8 @@ fn compute_constraint_possible_matches_with_artifacts(
         result
     } else if use_nfa_powerset_collect {
         let mut relevant_bytes = [false; 256];
-        for bytes in &ordered_vocab.ordered_token_bytes {
-            for &byte in bytes {
+        for bytes in ordered_vocab.ordered_token_bytes.iter() {
+            for &byte in bytes.iter() {
                 relevant_bytes[byte as usize] = true;
             }
         }
@@ -3116,7 +2856,7 @@ fn compute_constraint_possible_matches_with_artifacts(
                             let bytes = ordered_vocab
                                 .ordered_token_bytes
                                 .get(token as usize)
-                                .map(Vec::as_slice)
+                                .map(|word| word.as_ref())
                                 .unwrap_or(&[]);
                             eprintln!(
                                 "[glrmask/profile][pm_powerset_batched_mismatch] state={} terminal={} token={} actual={} expected={} bytes={:?} actual_ranges={} expected_ranges={}",
@@ -3347,7 +3087,7 @@ mod tests {
         let before=vocab.compiler_cache_entry_count();
         assert!(prepared_proper_prefix_byte_candidates(&vocab,&query).is_none());
         assert_eq!(vocab.compiler_cache_entry_count(),before,"query must not shift cold work into preparation");
-        let ordered=Arc::new(build_ordered_vocab(vocab.entries_map()));
+        let ordered=Arc::new(OrderedVocab::build(vocab.entries_map()));
         let trie=Arc::new(build_ordered_vocab_prefix_tree(&ordered));
         vocab.vocab_derived_cache_set(Arc::new(OrderedVocabTrieArtifacts::new(ordered,trie)));
         assert_eq!(prepared_proper_prefix_byte_candidates(&vocab,&query),Some(vec![1_003,9_000_001]));
@@ -3363,7 +3103,7 @@ mod tests {
     fn prepared_prefix_byte_query_declines_dense_original_alias_expansion() {
         let entries=(0..130u32).map(|i|(i*97+3,b"ab".to_vec())).collect::<Vec<_>>();
         let vocab=Vocab::from_entries_unchecked(entries);
-        let ordered=Arc::new(build_ordered_vocab(vocab.entries_map()));
+        let ordered=Arc::new(OrderedVocab::build(vocab.entries_map()));
         let trie=Arc::new(build_ordered_vocab_prefix_tree(&ordered));
         vocab.vocab_derived_cache_set(Arc::new(OrderedVocabTrieArtifacts::new(ordered,trie)));
         let mut query=[0u64;4];query[b'a' as usize>>6]|=1u64<<(b'a'&63);
@@ -3392,7 +3132,7 @@ mod tests {
                 terminals.extend(tokenizer.matched_terminals_iter(state));
             }
         }
-        for &byte in bytes {
+        for &byte in bytes.iter() {
             states = tokenizer.step_all(&states, byte);
             for &state in &states {
                 terminals.extend(tokenizer.matched_terminals_iter(state));
@@ -3661,8 +3401,8 @@ mod tests {
         );
 
         let mut relevant_bytes = [false; 256];
-        for bytes in &artifacts.ordered_vocab.ordered_token_bytes {
-            for &byte in bytes {
+        for bytes in artifacts.ordered_vocab.ordered_token_bytes.iter() {
+            for &byte in bytes.iter() {
                 relevant_bytes[byte as usize] = true;
             }
         }

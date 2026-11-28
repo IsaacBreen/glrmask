@@ -854,51 +854,25 @@ fn reference_residual_partition(
     }
 }
 
-fn unique_vocab(input: BuildInput<'_>) -> (Vec<Vec<u32>>, Vec<Arc<[u8]>>) {
-    let mut tokens = Vec::<Arc<[u8]>>::with_capacity(input.vocab.len());
-    let mut aliases = Vec::<Vec<u32>>::with_capacity(input.vocab.len());
-
-    let mut push = |id: u32, bytes: &Arc<[u8]>| {
-        if tokens
-            .last()
-            .is_some_and(|token| token.as_ref() == bytes.as_ref())
-        {
-            aliases
-                .last_mut()
-                .expect("duplicate token has predecessor")
-                .push(id);
-        } else {
-            tokens.push(Arc::clone(bytes));
-            aliases.push(vec![id]);
-        }
-    };
-
+fn unique_vocab(input: BuildInput<'_>) -> (Arc<Vec<Vec<u32>>>, Arc<Vec<Arc<[u8]>>>) {
     if let Some(parent) = input.subset_parent_order {
-        // Split-L1 is a subset of an already sorted parent vocabulary. Filtering
-        // that order is sufficient; do not construct another L1IdentityVocabOrder
-        // (and especially do not build its packed-bucket metadata).
-        let mut included = vec![false; parent.original_to_internal.len()];
-        for (id, _) in input.vocab.iter() {
-            included[id as usize] = true;
-        }
-        for (id, bytes) in parent.token_entries_sorted.iter() {
-            if included[*id as usize] {
-                push(*id, bytes);
+        let mut included = vec![false; parent.original_slot_count];
+        for (id, _) in input.vocab.iter() { included[id as usize] = true; }
+        let mut aliases = Vec::new();
+        let mut tokens = Vec::new();
+        for (group, bytes) in parent.ordered_to_originals.iter().zip(parent.ordered_token_bytes.iter()) {
+            let ids: Vec<_> = group.iter().copied().filter(|&id| included[id as usize]).collect();
+            if !ids.is_empty() {
+                aliases.push(ids);
+                tokens.push(Arc::clone(bytes));
             }
         }
+        (Arc::new(aliases), Arc::new(tokens))
     } else {
-        let order = super::super::prepared_l1_identity_vocab_order(input.vocab);
-        for (id, bytes) in order.token_entries_sorted.iter() {
-            push(*id, bytes);
-        }
+        let order = input.vocab.lexical_vocabulary();
+        (Arc::clone(&order.ordered_to_originals), Arc::clone(&order.ordered_token_bytes))
     }
-    debug_assert_eq!(
-        aliases.iter().map(Vec::len).sum::<usize>(),
-        input.vocab.len()
-    );
-    (aliases, tokens)
 }
-
 /// Quotient vocabulary bytes by their exact raw tokenizer transition column.
 /// Equality here is stronger than needed but cheap to prove: identical direct
 /// transitions from every raw state imply identical `step_all` results from
@@ -1607,37 +1581,21 @@ struct ReverseVocabTrie {
 }
 
 struct FiniteVocabProjection {
-    aliases: Vec<Vec<u32>>,
+    aliases: Arc<Vec<Vec<u32>>>,
     /// `(original_token_id, unique_token_index)` sorted by original token ID.
     /// Full partition vocabularies cache this once so projected L1 can build
     /// sorted reverse ID maps without per-grammar class sorting.
-    original_order: Option<Box<[(u32, u32)]>>,
-    tokens: Vec<Arc<[u8]>>,
+    original_order: Option<Arc<[(u32, u32)]>>,
+    tokens: Arc<Vec<Arc<[u8]>>>,
     /// Sorted byte alphabet appearing anywhere in `tokens`. This is a pure
     /// vocabulary property and is reused by the residual kernel on every
     /// grammar instead of rescanning all token bytes.
-    vocab_bytes: Box<[u8]>,
+    vocab_bytes: Arc<[u8]>,
     trie: FiniteTrie,
     reverse_trie: Option<ReverseVocabTrie>,
 }
 
 impl crate::vocab::VocabDerivedArtifact for FiniteVocabProjection {}
-
-fn collect_vocab_bytes(tokens: &[Arc<[u8]>]) -> Box<[u8]> {
-    let mut relevant = [false; 256];
-    for token in tokens {
-        for &byte in token.iter() {
-            relevant[byte as usize] = true;
-        }
-    }
-    relevant
-        .iter()
-        .enumerate()
-        .filter_map(|(byte, &used)| used.then_some(byte as u8))
-        .collect::<Vec<_>>()
-        .into_boxed_slice()
-}
-
 
 fn small_prepared_vocab_enabled(input: BuildInput<'_>) -> bool {
     let max_tokenizer_states = std::env::var(
@@ -1777,42 +1735,17 @@ fn build_finite_vocab_projection(vocab: &Vocab) -> Arc<FiniteVocabProjection> {
     if let Some(cached) = vocab.vocab_derived_cache_get::<FiniteVocabProjection>() {
         return cached;
     }
-    let order = super::super::prepared_l1_identity_vocab_order(vocab);
-    let mut tokens = Vec::<Arc<[u8]>>::with_capacity(vocab.len());
-    let mut aliases = Vec::<Vec<u32>>::with_capacity(vocab.len());
-    for (id, bytes) in order.token_entries_sorted.iter() {
-        if tokens
-            .last()
-            .is_some_and(|token| token.as_ref() == bytes.as_ref())
-        {
-            aliases
-                .last_mut()
-                .expect("duplicate token has predecessor")
-                .push(*id);
-        } else {
-            tokens.push(Arc::clone(bytes));
-            aliases.push(vec![*id]);
-        }
-    }
-    debug_assert_eq!(aliases.iter().map(Vec::len).sum::<usize>(), vocab.len());
-    let mut original_order = aliases
-        .iter()
-        .enumerate()
-        .flat_map(|(unique, originals)| {
-            originals
-                .iter()
-                .copied()
-                .map(move |original| (original, unique as u32))
-        })
-        .collect::<Vec<_>>();
-    original_order.sort_unstable_by_key(|&(original, _)| original);
-    let vocab_bytes = collect_vocab_bytes(&tokens);
+    let order = vocab.lexical_vocabulary();
+    let tokens = Arc::clone(&order.ordered_token_bytes);
+    let aliases = Arc::clone(&order.ordered_to_originals);
+    let original_order = order.original_order();
+    let vocab_bytes = vocab.relevant_bytes();
     let trie = FiniteTrie::build(&tokens);
     let reverse_trie =
         (tokens.len() >= reverse_vocab_trie_min_tokens()).then(|| build_reverse_vocab_trie(&tokens));
     let projection = Arc::new(FiniteVocabProjection {
         aliases,
-        original_order: Some(original_order.into_boxed_slice()),
+        original_order: Some(original_order),
         tokens,
         vocab_bytes,
         trie,
@@ -1852,7 +1785,7 @@ fn finite_vocab_projection(input: BuildInput<'_>) -> (Arc<FiniteVocabProjection>
         );
     }
     let (aliases, tokens) = unique_vocab(input);
-    let vocab_bytes = collect_vocab_bytes(&tokens);
+    let vocab_bytes = input.vocab.relevant_bytes();
     let trie = FiniteTrie::build(&tokens);
     let reverse_trie =
         (tokens.len() >= reverse_vocab_trie_min_tokens()).then(|| build_reverse_vocab_trie(&tokens));
