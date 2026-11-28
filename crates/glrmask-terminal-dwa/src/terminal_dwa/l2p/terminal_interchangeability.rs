@@ -2703,6 +2703,33 @@ struct TailDefault {
     rows_for_tail: Vec<Vec<u32>>,
 }
 
+/// Final-TSID pullback = shared family default over the ordinary coordinate
+/// plus sparse member replacements. Replacements may restore the ordinary
+/// coordinate; they are not merely another list of deviations from ordinary.
+#[derive(Default)]
+struct ModePullback {
+    default_changes: Arc<[(u32, u32)]>,
+    replacements: Vec<(u32, u32)>,
+}
+
+impl ModePullback {
+    fn default_coordinate(&self, tsid: u32, ordinary: u32) -> u32 {
+        self.default_changes.binary_search_by_key(&tsid, |&(state, _)| state)
+            .map(|index| self.default_changes[index].1).unwrap_or(ordinary)
+    }
+
+    fn default_key(&self) -> usize {
+        self.default_changes.as_ptr() as usize
+    }
+
+    #[cfg(test)]
+    fn coordinate(&self, tsid: u32, ordinary: u32) -> u32 {
+        self.replacements.binary_search_by_key(&tsid, |&(state, _)| state)
+            .map(|index| self.replacements[index].1)
+            .unwrap_or_else(|_| self.default_coordinate(tsid, ordinary))
+    }
+}
+
 struct TransportFamily<'a> {
     source: TransportAtom<'a>,
     tail: Vec<&'a TransportScannerStateMap>,
@@ -2711,7 +2738,7 @@ struct TransportFamily<'a> {
 }
 
 impl TransportFamily<'_> {
-    fn component_for_row(&self) -> Option<Vec<u32>> {
+    fn component_for_row(&self) -> Option<(Vec<u32>, usize)> {
         let mut changes = Vec::<(u32, u32, u64)>::new();
         for (member, (_, deviations)) in self.members.iter().enumerate() {
             for &(source, target) in *deviations {
@@ -2737,55 +2764,34 @@ impl TransportFamily<'_> {
             let next = intern.len() as u32;
             components.push(*intern.entry(signature).or_insert(next));
         }
-        (intern.len() > 1).then_some(components)
+        (intern.len() > 1).then_some((components, intern.len()))
     }
 
     fn populate_pullbacks(
-        &self, final_sources: &[u32], ordinary: &[u32], active: &[bool],
-        output: &mut [Vec<(u32, u32)>],
+        &self, final_rows: &[usize], final_tsids_for_row: &[Vec<u32>],
+        ordinary: &[u32], active: &[bool], output: &mut [ModePullback],
     ) {
-        if !self.members.iter().any(|(mode, _)| active[*mode]) {
-            return;
-        }
-        let mut final_tsids_for_row = vec![Vec::<u32>::new(); self.source.representatives.len()];
-        let mut default_changes = Vec::<(u32, u32)>::new();
-        for (tsid, &raw) in final_sources.iter().enumerate() {
-            let row = self.source.row_for_raw(raw);
-            final_tsids_for_row[row].push(tsid as u32);
-            let coordinate = weight_coordinate(self.default.get(row));
-            if coordinate != ordinary[tsid] {
-                default_changes.push((tsid as u32, coordinate));
-            }
-        }
+        let default_changes: Arc<[(u32, u32)]> = final_rows.iter().enumerate()
+            .filter_map(|(tsid, &row)| {
+                let coordinate = weight_coordinate(self.default.get(row));
+                (coordinate != ordinary[tsid]).then_some((tsid as u32, coordinate))
+            }).collect::<Vec<_>>().into();
         for &(mode, changes) in &self.members {
             if !active[mode] { continue; }
-            let mut overrides = Vec::<(u32, u32)>::new();
+            let mut replacements = Vec::<(u32, u32)>::new();
             for &(source, target) in changes {
                 let coordinate = weight_coordinate(self.default.get(target as usize));
                 if coordinate == weight_coordinate(self.default.get(source as usize)) {
                     continue;
                 }
-                overrides.extend(final_tsids_for_row[source as usize].iter()
+                replacements.extend(final_tsids_for_row[source as usize].iter()
                     .map(|&tsid| (tsid, coordinate)));
             }
-            overrides.sort_unstable_by_key(|&(tsid, _)| tsid);
-            // Merge the shared default deviations with actual member
-            // replacements. A replacement may restore the ordinary row.
-            let mut defaults = default_changes.iter().copied().peekable();
-            let mut result = Vec::with_capacity(default_changes.len() + overrides.len());
-            for (tsid, coordinate) in overrides {
-                while defaults.peek().is_some_and(|&(source, _)| source < tsid) {
-                    result.push(defaults.next().unwrap());
-                }
-                if defaults.peek().is_some_and(|&(source, _)| source == tsid) {
-                    defaults.next();
-                }
-                if coordinate != ordinary[tsid as usize] {
-                    result.push((tsid, coordinate));
-                }
-            }
-            result.extend(defaults);
-            output[mode] = result;
+            replacements.sort_unstable_by_key(|&(tsid, _)| tsid);
+            output[mode] = ModePullback {
+                default_changes: Arc::clone(&default_changes),
+                replacements,
+            };
         }
     }
 }
@@ -2908,39 +2914,39 @@ impl<'a> TransportCoordinatePlan<'a> {
         }
         drop(tail_rows);
 
-        // Meet all family partitions in their shared source coordinate
-        // before returning to the raw scanner domain.
-        let mut columns_by_domain = FxHashMap::<usize, Vec<(&'a [u32], Vec<u32>)>>::default();
+        // Meet family partitions incrementally in their common source
+        // coordinate. Retain at most one column per source domain, not one
+        // per transport family. Once the domain is discrete it cannot split.
+        let mut domain_columns = FxHashMap::<usize, (&'a [u32], Vec<u32>, usize)>::default();
         for family in &families {
-            if let Some(components) = family.component_for_row() {
-                columns_by_domain.entry(family.source.source_classes.as_ptr() as usize)
-                    .or_default().push((family.source.source_classes, components));
-            }
-        }
-        let mut domain_columns = Vec::<(&[u32], Vec<u32>)>::new();
-        for columns in columns_by_domain.into_values() {
-            if columns.len() == 1 {
-                domain_columns.push(columns.into_iter().next().unwrap());
+            let source = family.source.source_classes;
+            let key = source.as_ptr() as usize;
+            if domain_columns.get(&key).is_some_and(|(_, labels, count)| *count == labels.len()) {
                 continue;
             }
-            let source = columns[0].0;
-            let class_count = columns[0].1.len();
-            let mut intern = FxHashMap::<SmallVec<[u32; 4]>, u32>::default();
-            let components = (0..class_count).map(|class| {
-                let signature = columns.iter().map(|(_, values)| values[class]).collect();
-                let next = intern.len() as u32;
-                *intern.entry(signature).or_insert(next)
-            }).collect::<Vec<_>>();
-            if intern.len() > 1 {
-                domain_columns.push((source, components));
+            let Some((components, count)) = family.component_for_row() else { continue; };
+            match domain_columns.entry(key) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert((source, components, count));
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    let (_, labels, count) = entry.get_mut();
+                    let mut meet = FxHashMap::<(u32, u32), u32>::default();
+                    for (old, new) in labels.iter_mut().zip(components) {
+                        let next = meet.len() as u32;
+                        *old = *meet.entry((*old, new)).or_insert(next);
+                    }
+                    *count = meet.len();
+                }
             }
         }
+        let domain_columns: Vec<_> = domain_columns.into_values().collect();
 
         let mut intern = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
         let classes = (0..state_count).map(|raw| {
             let mut signature = SmallVec::new();
             signature.push(key_for(raw as u32));
-            for (source_classes, components) in &domain_columns {
+            for (source_classes, components, _) in &domain_columns {
                 signature.push(u64::from(components[source_classes[raw] as usize]));
             }
             let next = intern.len() as u32;
@@ -2965,7 +2971,7 @@ impl<'a> TransportCoordinatePlan<'a> {
         self.state_map
     }
 
-    fn pullbacks(&self, active_modes: &[usize]) -> (Vec<u32>, Vec<Vec<(u32, u32)>>) {
+    fn pullbacks(&self, active_modes: &[usize]) -> (Vec<u32>, Vec<ModePullback>) {
         let final_sources = &self.state_map.representative_original_ids;
         let ordinary = final_sources.iter().map(|&raw| {
             weight_coordinate(transport_coordinate_key(self.ordinary, raw))
@@ -2974,9 +2980,24 @@ impl<'a> TransportCoordinatePlan<'a> {
         for &mode in active_modes {
             active[mode] = true;
         }
-        let mut output = vec![Vec::new(); self.modes.len()];
+        let mut output = (0..self.modes.len()).map(|_| ModePullback::default()).collect::<Vec<_>>();
+        let mut families_by_domain = FxHashMap::<usize, Vec<&TransportFamily<'_>>>::default();
         for family in &self.families {
-            family.populate_pullbacks(final_sources, &ordinary, &active, &mut output);
+            if family.members.iter().any(|(mode, _)| active[*mode]) {
+                families_by_domain.entry(family.source.source_classes.as_ptr() as usize)
+                    .or_default().push(family);
+            }
+        }
+        for families in families_by_domain.into_values() {
+            let source = families[0].source;
+            let final_rows: Vec<_> = final_sources.iter().map(|&raw| source.row_for_raw(raw)).collect();
+            let mut inverse = vec![Vec::<u32>::new(); source.representatives.len()];
+            for (tsid, &row) in final_rows.iter().enumerate() {
+                inverse[row].push(tsid as u32);
+            }
+            for family in families {
+                family.populate_pullbacks(&final_rows, &inverse, &ordinary, &active, &mut output);
+            }
         }
         (ordinary, output)
     }
@@ -2995,7 +3016,8 @@ struct PostDwaWeightLifter {
     // TSIDs sharing one non-MAX core coordinate. Precomputed once so `base_lift`
     // can emit one range per run instead of iterating every final TSID.
     coordinate_runs: Vec<(u32, u32, u32)>,
-    mode_deviations: Vec<Vec<(u32, u32)>>,
+    mode_pullbacks: Vec<ModePullback>,
+    default_lifts: FxHashMap<(usize, usize), Weight>,
     base_lifts: FxHashMap<usize, Weight>,
     mode_lifts: FxHashMap<(usize, usize), Weight>,
     // (core-weight body, exact mode-set id, entry-domain body).
@@ -3046,7 +3068,7 @@ fn finite_weight_token_cardinality(weight: &Weight) -> Option<u128> {
 
 impl PostDwaWeightLifter {
     fn new(plan: &TransportCoordinatePlan<'_>, active_mode_indices: &[usize]) -> Self {
-        let (ordinary_coordinates, mode_deviations) = plan.pullbacks(active_mode_indices);
+        let (ordinary_coordinates, mode_pullbacks) = plan.pullbacks(active_mode_indices);
         let final_sources = &plan.state_map.representative_original_ids;
         let modes = plan.modes;
         // Precompute maximal contiguous runs of equal, non-MAX coordinates so
@@ -3085,7 +3107,17 @@ impl PostDwaWeightLifter {
                 if mode_index == 0 {
                     continue;
                 }
-                let count = mode_deviations[mode_index].len();
+                let pullback = &mode_pullbacks[mode_index];
+                let mut count = pullback.default_changes.len();
+                for &(tsid, target) in &pullback.replacements {
+                    let ordinary = ordinary_coordinates[tsid as usize];
+                    let default = pullback.default_coordinate(tsid, ordinary);
+                    if default == ordinary && target != ordinary {
+                        count += 1;
+                    } else if default != ordinary && target == ordinary {
+                        count -= 1;
+                    }
+                }
                 nonempty_modes += usize::from(count != 0);
                 total_deviations += count;
                 max_deviations = max_deviations.max(count);
@@ -3104,7 +3136,8 @@ impl PostDwaWeightLifter {
         Self {
             ordinary_coordinates,
             coordinate_runs,
-            mode_deviations,
+            mode_pullbacks,
+            default_lifts: FxHashMap::default(),
             base_lifts: FxHashMap::default(),
             mode_lifts: FxHashMap::default(),
             group_lifts: FxHashMap::default(),
@@ -3157,14 +3190,23 @@ impl PostDwaWeightLifter {
             return existing.clone();
         }
 
-        let base = self.base_lift(weight);
-        let overrides: Vec<(u32, SharedTokenSet)> = self.mode_deviations[mode_index]
-            .iter()
-            .map(|&(final_tsid, coordinate)| {
-                (final_tsid, Self::tokens_for_coordinate(weight, coordinate))
-            })
+        let ordinary_lift = self.base_lift(weight);
+        let pullback = &self.mode_pullbacks[mode_index];
+        let default_lift = if pullback.default_changes.is_empty() {
+            ordinary_lift
+        } else {
+            let default_key = (weight.ptr_key(), pullback.default_key());
+            self.default_lifts.entry(default_key).or_insert_with(|| {
+                let overrides: Vec<_> = pullback.default_changes.iter()
+                    .map(|&(tsid, coordinate)| (tsid, Self::tokens_for_coordinate(weight, coordinate)))
+                    .collect();
+                ordinary_lift.with_sparse_tsid_overrides(&overrides)
+            }).clone()
+        };
+        let overrides: Vec<_> = pullback.replacements.iter()
+            .map(|&(tsid, coordinate)| (tsid, Self::tokens_for_coordinate(weight, coordinate)))
             .collect();
-        let lifted = base.with_sparse_tsid_overrides(&overrides);
+        let lifted = default_lift.with_sparse_tsid_overrides(&overrides);
         self.mode_lifts.insert(key, lifted.clone());
         lifted
     }
@@ -3173,22 +3215,46 @@ impl PostDwaWeightLifter {
         if self.group_coordinate_plans.contains_key(&mode_set_id) {
             return;
         }
-        // Only changed coordinates can need an override. Unlike the old
-        // dense per-TSID temporary, this scales with the actual deviations.
-        let mut changed = Vec::<(u32, u32, SharedTokenSet)>::new();
+        // All member gates sharing a family default are unioned once.
+        // Each replacement moves only that member's gate from the default
+        // coordinate to its own target. A gate at ordinary needs no entry
+        // in the sparse alternative relation.
+        let mut families = FxHashMap::<usize, Vec<usize>>::default();
+        let mut changed = Vec::<(u32, u32, bool, SharedTokenSet)>::new();
         for &mode in mode_indices {
+            let pullback = &self.mode_pullbacks[mode];
             let gate = &self.member_entry_weights[mode];
-            // A full member gate cannot coexist with another nonempty gate
-            // in a proven-disjoint group.
             debug_assert!(!gate.is_full());
-            for &(tsid, coordinate) in &self.mode_deviations[mode] {
+            if !pullback.default_changes.is_empty() {
+                families.entry(pullback.default_key()).or_default().push(mode);
+            }
+            for &(tsid, target) in &pullback.replacements {
+                let ordinary = self.ordinary_coordinates[tsid as usize];
+                let default = pullback.default_coordinate(tsid, ordinary);
                 let tokens = gate.shared_tokens_for_tsid(tsid);
-                if !tokens.is_empty() {
-                    changed.push((tsid, coordinate, tokens));
+                if tokens.is_empty() { continue; }
+                if default != ordinary {
+                    changed.push((tsid, default, false, Arc::clone(&tokens)));
+                }
+                if target != ordinary {
+                    changed.push((tsid, target, true, tokens));
                 }
             }
         }
-        changed.sort_unstable_by_key(|(tsid, coordinate, _)| (*tsid, *coordinate));
+        for modes in families.into_values() {
+            let gate = if modes.len() == 1 {
+                self.member_entry_weights[modes[0]].clone()
+            } else {
+                Weight::union_all(modes.iter().map(|&mode| &self.member_entry_weights[mode]))
+            };
+            for &(tsid, coordinate) in self.mode_pullbacks[modes[0]].default_changes.iter() {
+                let tokens = gate.shared_tokens_for_tsid(tsid);
+                if !tokens.is_empty() {
+                    changed.push((tsid, coordinate, true, tokens));
+                }
+            }
+        }
+        changed.sort_unstable_by_key(|(tsid, coordinate, _, _)| (*tsid, *coordinate));
 
         let mut signature_ids = FxHashMap::<(u32, Vec<(u32, usize)>), usize>::default();
         let mut signatures = Vec::<GatedCoordinateSignature>::new();
@@ -3200,17 +3266,29 @@ impl PostDwaWeightLifter {
             let mut alternatives = Vec::<(u32, SharedTokenSet)>::new();
             while cursor < changed.len() && changed[cursor].0 == tsid {
                 let coordinate = changed[cursor].1;
-                let mut tokens = changed[cursor].2.as_ref().clone();
-                cursor += 1;
+                let mut added = range_set_blaze::RangeSetBlaze::new();
+                let mut removed = range_set_blaze::RangeSetBlaze::new();
                 while cursor < changed.len()
                     && changed[cursor].0 == tsid
                     && changed[cursor].1 == coordinate
                 {
-                    tokens = &tokens | changed[cursor].2.as_ref();
+                    let (_, _, add, tokens) = &changed[cursor];
+                    if *add {
+                        added = &added | tokens.as_ref();
+                    } else {
+                        removed = &removed | tokens.as_ref();
+                    }
                     cursor += 1;
                 }
-                alternatives.push((coordinate, shared_rangeset(tokens)));
+                // The removal came from a member of the unioned default
+                // gate. Disjoint entry domains ensure no other member's
+                // token is removed from this alternative.
+                let tokens = &added - &removed;
+                if !tokens.is_empty() {
+                    alternatives.push((coordinate, shared_rangeset(tokens)));
+                }
             }
+            if alternatives.is_empty() { continue; }
             let key = (
                 ordinary,
                 alternatives.iter().map(|(coordinate, tokens)| {
@@ -4495,8 +4573,7 @@ mod tests {
         let (ordinary, changes) = plan.pullbacks(&active);
         for (tsid, raw) in plan.state_map.iter_representative_ids().enumerate() {
             for &mode in &active {
-                let actual = changes[mode].binary_search_by_key(&(tsid as u32), |&(state, _)| state)
-                    .map(|index| changes[mode][index].1).unwrap_or(ordinary[tsid]);
+                let actual = changes[mode].coordinate(tsid as u32, ordinary[tsid]);
                 let expected = plan.ordinary.original_to_internal[
                     plan.modes[mode].scanner_state(raw) as usize
                 ];
@@ -4713,7 +4790,7 @@ mod tests {
             3,
             vec![0, 1, 2],
         );
-        let modes = vec![
+        let explicit_modes = vec![
             TerminalNwaTransportMode::ordinary(3),
             TerminalNwaTransportMode::member(
                 TransportScannerStateMap::from_explicit(vec![1, 0, 2]), 0, 1,
@@ -4722,38 +4799,66 @@ mod tests {
                 TransportScannerStateMap::from_explicit(vec![2, 1, 0]), 0, 2,
             ),
         ];
-        let plan = TransportCoordinatePlan::new(&state_map, &modes);
-        let mut lifter = PostDwaWeightLifter::new(&plan, &[0, 1, 2]);
-        let row = |tokens: &[u32]| -> Weight {
-            Weight::from_uniform(
-                0..=2, tokens.iter().copied().collect::<range_set_blaze::RangeSetBlaze<_>>(),
-            )
+        let classes: Arc<[u32]> = vec![0, 1, 2].into();
+        let representatives: Arc<[u32]> = vec![1, 0, 2].into();
+        let shared = |changes: &[(u32, u32)]| TransportScannerStateMap::Quotient {
+            class_for_original: Arc::clone(&classes),
+            representative_for_class: Arc::clone(&representatives),
+            source_class_for_target_deviations: changes.into(),
         };
-        let ordinary_gate = row(&[30]);
-        let member_one_gate = row(&[10]);
-        let member_two_gate = row(&[20]);
-        lifter.member_entry_weights[1] = member_one_gate.clone();
-        lifter.member_entry_weights[2] = member_two_gate.clone();
-        let weight = Weight::from_per_tsid_token_sets([
-            (0, [10, 20, 30].into_iter().collect()),
-            (1, [20, 30].into_iter().collect()),
-            (2, [10, 30].into_iter().collect()),
-        ]);
+        // The two member modes share a nonordinary default. The second
+        // restores ordinary at both changed rows. This tests removal from
+        // the shared default gate as well as addition to a new alternative.
+        let factored_modes = vec![
+            TerminalNwaTransportMode::ordinary(3),
+            TerminalNwaTransportMode::member(shared(&[]), 0, 1),
+            TerminalNwaTransportMode::member(shared(&[(0, 1), (1, 0)]), 0, 2),
+        ];
+        for modes in [explicit_modes, factored_modes] {
+            let plan = TransportCoordinatePlan::new(&state_map, &modes);
+            assert_literal_pullbacks(&plan);
+            let mut lifter = PostDwaWeightLifter::new(&plan, &[0, 1, 2]);
+            let row = |tokens: &[u32]| -> Weight {
+                Weight::from_uniform(
+                    0..=2, tokens.iter().copied().collect::<range_set_blaze::RangeSetBlaze<_>>(),
+                )
+            };
+            let ordinary_gate = row(&[30]);
+            let member_one_gate = row(&[10]);
+            let member_two_gate = row(&[20]);
+            lifter.member_entry_weights[1] = member_one_gate.clone();
+            lifter.member_entry_weights[2] = member_two_gate.clone();
+            let weight = Weight::from_per_tsid_token_sets([
+                (0, [10, 20, 30].into_iter().collect()),
+                (1, [20, 30].into_iter().collect()),
+                (2, [10, 30].into_iter().collect()),
+            ]);
 
-        for (mode_set_id, indices) in [[0, 1, 2].as_slice(), [1, 2].as_slice()].into_iter().enumerate() {
-            let gates = [&ordinary_gate, &member_one_gate, &member_two_gate];
-            let domain = Weight::union_all(indices.iter().map(|&index| gates[index]));
-            let actual = lifter.lift_over_disjoint_group(&weight, mode_set_id, indices, &domain);
-            // Literal pointwise pullback and gate membership, independent of
-            // the sparse plan, base lift, and range override implementation.
-            for tsid in 0..3 {
-                for token in [10, 20, 30] {
-                    let expected = indices.iter().any(|&mode| {
-                        let target = modes[mode].scanner_state(tsid);
-                        gates[mode].tokens_for_tsid(tsid).contains(token)
-                            && weight.tokens_for_tsid(target).contains(token)
-                    });
-                    assert_eq!(actual.tokens_for_tsid(tsid).contains(token), expected);
+            for mode in 0..modes.len() {
+                let lifted = lifter.lift_for_mode(&weight, mode);
+                for tsid in 0..3 {
+                    assert_eq!(
+                        lifted.tokens_for_tsid(tsid),
+                        weight.tokens_for_tsid(modes[mode].scanner_state(tsid)),
+                    );
+                }
+            }
+
+            for (mode_set_id, indices) in [[0, 1, 2].as_slice(), [1, 2].as_slice()].into_iter().enumerate() {
+                let gates = [&ordinary_gate, &member_one_gate, &member_two_gate];
+                let domain = Weight::union_all(indices.iter().map(|&index| gates[index]));
+                let actual = lifter.lift_over_disjoint_group(&weight, mode_set_id, indices, &domain);
+                // Literal pointwise pullback and gate membership, independent of
+                // the sparse plan, base lift, and range override implementation.
+                for tsid in 0..3 {
+                    for token in [10, 20, 30] {
+                        let expected = indices.iter().any(|&mode| {
+                            let target = modes[mode].scanner_state(tsid);
+                            gates[mode].tokens_for_tsid(tsid).contains(token)
+                                && weight.tokens_for_tsid(target).contains(token)
+                        });
+                        assert_eq!(actual.tokens_for_tsid(tsid).contains(token), expected);
+                    }
                 }
             }
         }
