@@ -254,9 +254,9 @@ fn prepare_cut_component(constraint:&mut Constraint,vocab:&Vocab)->Result<bool,S
     let began=Instant::now();let source=Arc::clone(&constraint.tokenizer);
     if !old.matches(source.as_ref()){return Ok(false)}
     let model=vocab.iter().map(|(_,b)|b.to_vec()).collect::<Vec<_>>();
-    let Some(reset)=reset_index::ResetIndex::prepare(Arc::clone(&source),&model)else{return Ok(false)};
-    let Some(bytes)=reset.to_bytes()else{return Ok(false)};
-    if !reset.verify(){return Err("fresh reset certificate failed".into())}
+    let Some(certificate)=reset_index::ResetCertificate::prepare(Arc::clone(&source),&model)else{return Ok(false)};
+    let Some(bytes)=certificate.to_bytes()else{return Ok(false)};
+    let reset=certificate.certify().ok_or("fresh reset certificate failed")?;
     let first=match completion_index::FirstUnionIndex::prepare(Arc::clone(&old.context)){
         Ok(x)=>x,Err(completion_index::Error::ResourceLimit)=>return Ok(false),Err(e)=>return Err(format!("prepared first union: {e:?}")),
     };

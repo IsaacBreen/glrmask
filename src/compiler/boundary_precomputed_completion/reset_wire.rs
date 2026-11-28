@@ -2,7 +2,7 @@
 // Query metadata, owner IDs and composition peers are deliberately absent.
 const MAGIC:&[u8;8]=b"GLRRFX01";
 const MAX_WIRE:usize=64*1024*1024;
-impl ResetIndex{
+impl ResetCertificate{
     pub fn to_bytes(&self)->Option<Vec<u8>>{
         fn put(out:&mut Vec<u8>,n:usize)->Option<()>{out.extend_from_slice(&u32::try_from(n).ok()?.to_le_bytes());Some(())}
         fn row(out:&mut Vec<u8>,ids:&[u32])->Option<()>{put(out,ids.len())?;for &id in ids{put(out,id as usize)?;}Some(())}
@@ -15,6 +15,9 @@ impl ResetIndex{
         }
         debug_assert_eq!(out.len(),bytes);Some(out)
     }
+}
+
+impl ResetIndex {
     pub fn from_bytes(source:Arc<Tokenizer>,bytes:&[u8])->Option<Self>{
         if bytes.len()>MAX_WIRE||!bytes.starts_with(MAGIC)||source.num_states()==0||source.num_states()>500_000||source.has_virtual_residual_runtime(){return None}
         struct Reader<'a>{bytes:&'a[u8],at:usize}
@@ -31,7 +34,7 @@ impl ResetIndex{
         let mut r=Reader{bytes,at:8};let raw=r.word()?;let terms=r.word()?;let count=r.word()?;
         if raw!=source.num_states()as usize||terms!=source.num_terminals()as usize||count==0||count>100_000||count.checked_mul(16)?>bytes.len().saturating_sub(r.at){return None}
         let(mut frontier_left,mut labels_left,mut edge_left)=(2_000_000usize,8_000_000usize,1_000_000usize);
-        let mut nodes=Vec::with_capacity(count);let mut stats=Stats::default();
+        let mut nodes=Vec::with_capacity(count);
         for _ in 0..count{
             let frontier=r.ids(&mut frontier_left,raw as u32)?;if frontier.is_empty(){return None}
             let matched=r.ids(&mut labels_left,terms as u32)?;let future=r.ids(&mut labels_left,terms as u32)?;
@@ -41,10 +44,9 @@ impl ResetIndex{
             for _ in 0..edges_count{let b=r.word()?;let target=r.word()?;
                 if b>255||prev.is_some_and(|p|p>=b)||(target!=DEAD as usize&&target>=count){return None}prev=Some(b);edges.insert(b as u8,target as u32);
             }
-            stats.frontier_cells+=frontier.len();stats.labels+=matched.len()+future.len();stats.edges+=edges_count;
             nodes.push(Node{frontier,matched,future,edges});
         }
-        if r.at!=bytes.len(){return None}stats.nodes=count;let index=Self{source,nodes,stats};
-        index.verify().then_some(index)
+        if r.at!=bytes.len(){return None}let certificate=ResetCertificate{source,nodes};
+        certificate.certify()
     }
 }

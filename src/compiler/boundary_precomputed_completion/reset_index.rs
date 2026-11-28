@@ -8,13 +8,33 @@ const DEAD:u32=u32::MAX;
 #[derive(Debug)]
 struct Node{frontier:Vec<u32>,matched:Vec<u32>,future:Vec<u32>,edges:BTreeMap<u8,u32>}
 #[derive(Debug,Default)]
-pub struct Stats{pub nodes:usize,pub edges:usize,pub frontier_cells:usize,pub labels:usize,pub scanned_states:usize,pub factor_byte_visits:usize}
-pub(crate) struct ResetIndex{source:Arc<Tokenizer>,nodes:Vec<Node>,pub stats:Stats}
+pub struct Stats{pub edges:usize,pub frontier_cells:usize,pub labels:usize,pub scanned_states:usize,pub factor_byte_visits:usize}
+/// A proof under construction or decoded from the legacy wire. Its raw
+/// subsets are witnesses, not part of the executable reset relation.
+pub(crate) struct ResetCertificate {
+    source: Arc<Tokenizer>,
+    nodes: Vec<Node>,
+}
+
+/// The certified observations are a compact partial byte automaton. A
+/// missing edge declines the acceleration; a DEAD edge proves emptiness.
+pub(crate) struct ResetIndex {
+    source: Arc<Tokenizer>,
+    rows: Box<[ResetRow]>,
+    labels: Box<[u32]>,
+    edges: Box<[(u8, u32)]>,
+}
+
+struct ResetRow {
+    matched: u32,
+    future: u32,
+    edges: u32,
+}
 fn outputs(source:&Tokenizer,frontier:&[u32])->(Vec<u32>,Vec<u32>){
     let mut matched=frontier.iter().flat_map(|&q|source.matched_terminals_iter(q)).collect::<Vec<_>>();matched.sort_unstable();matched.dedup();
     let mut future=frontier.iter().flat_map(|&q|source.possible_future_terminals_iter(q)).collect::<Vec<_>>();future.sort_unstable();future.dedup();(matched,future)
 }
-impl ResetIndex{
++
     pub fn prepare(source:Arc<Tokenizer>,vocabulary:&[Vec<u8>])->Option<Self>{
         if source.num_states()==0||source.num_states()>500_000||source.has_virtual_residual_runtime()||vocabulary.iter().any(|w|w.len()>4096){return None}
         if vocabulary.iter().try_fold(0usize,|n,w|n.checked_add(w.len()))?>4_000_000{return None}
@@ -37,24 +57,11 @@ impl ResetIndex{
             };
             if target==DEAD{break}q=target as usize;
         }}}
-        stats.nodes=nodes.len();Some(Self{source,nodes,stats})
-    }
-    pub fn nullable(&self)->bool{!self.nodes[0].matched.is_empty()}
-    pub fn observe(&self,word:&[u8])->Option<(&[u32],&[u32])>{
-        let mut q=0;for &b in word{let target=*self.nodes[q].edges.get(&b)?;if target==DEAD{return Some((&[],&[]))}q=target as usize}
-        Some((&self.nodes[q].matched,&self.nodes[q].future))
-    }
-    pub fn segments(&self,word:&[u8])->Option<Vec<(usize,u32)>>{
-        let mut q=0;let mut out=Vec::new();
-        for(i,&b)in word.iter().enumerate(){let target=*self.nodes[q].edges.get(&b)?;if target==DEAD{break}q=target as usize;
-            out.extend(self.nodes[q].matched.iter().map(|&t|(i+1,t)));
-            if i+1==word.len(){out.extend(self.nodes[q].future.iter().map(|&t|(i+1,t)));}
-        }
-        out.sort_unstable();out.dedup();Some(out)
+        Some(Self { source, nodes })
     }
     /// Exhaustive independent certificate check: every observation and every
     /// recorded transition is checked against the immutable physical source.
-    pub fn verify(&self)->bool{
+    fn verify(&self)->bool{
         let mut root=self.source.deterministic_reset_states().iter().flat_map(|&q|self.source.singleton_epsilon_closure(q).into_vec()).collect::<Vec<_>>();root.sort_unstable();root.dedup();
         if self.nodes[0].frontier!=root{return false}
         for node in &self.nodes{
@@ -65,18 +72,57 @@ impl ResetIndex{
             }
         }true
     }
+    pub(crate) fn certify(self) -> Option<ResetIndex> {
+        if !self.verify() { return None; }
+        let mut rows = Vec::with_capacity(self.nodes.len() + 1);
+        let mut labels = Vec::new();
+        let mut edges = Vec::new();
+        for node in self.nodes {
+            let matched = u32::try_from(labels.len()).ok()?;
+            labels.extend(node.matched);
+            let future = u32::try_from(labels.len()).ok()?;
+            labels.extend(node.future);
+            let edge = u32::try_from(edges.len()).ok()?;
+            edges.extend(node.edges);
+            rows.push(ResetRow { matched, future, edges: edge });
+        }
+        let end = u32::try_from(labels.len()).ok()?;
+        rows.push(ResetRow {
+            matched: end, future: end, edges: u32::try_from(edges.len()).ok()?,
+        });
+        Some(ResetIndex {
+            source: self.source,
+            rows: rows.into_boxed_slice(),
+            labels: labels.into_boxed_slice(),
+            edges: edges.into_boxed_slice(),
+        })
+    }
 }
 
 include!("reset_wire.rs");
 
-impl ResetIndex{
- pub(crate) fn source(&self)->&Tokenizer{self.source.as_ref()}
- pub(crate) fn step_id(&self,id:u32,byte:u8)->Option<u32>{
-  if id==DEAD{return Some(DEAD)}
-  self.nodes.get(id as usize)?.edges.get(&byte).copied()
- }
- pub(crate) fn observation(&self,id:u32)->Option<(&[u32],&[u32])>{
-  if id==DEAD{return Some((&[],&[]))}
-  let n=self.nodes.get(id as usize)?;Some((&n.matched,&n.future))
- }
+impl ResetIndex {
+    pub(crate) fn source(&self) -> &Tokenizer { &self.source }
+
+    fn row(&self, id: u32) -> Option<(&ResetRow, &ResetRow)> {
+        let id = id as usize;
+        Some((self.rows.get(id)?, self.rows.get(id.checked_add(1)?)?))
+    }
+
+    pub(crate) fn step_id(&self, id: u32, byte: u8) -> Option<u32> {
+        if id == DEAD { return Some(DEAD); }
+        let (row, next) = self.row(id)?;
+        let edges = &self.edges[row.edges as usize..next.edges as usize];
+        let index = edges.binary_search_by_key(&byte, |&(b, _)| b).ok()?;
+        Some(edges[index].1)
+    }
+
+    pub(crate) fn observation(&self, id: u32) -> Option<(&[u32], &[u32])> {
+        if id == DEAD { return Some((&[], &[])); }
+        let (row, next) = self.row(id)?;
+        Some((
+            &self.labels[row.matched as usize..row.future as usize],
+            &self.labels[row.future as usize..next.matched as usize],
+        ))
+    }
 }
