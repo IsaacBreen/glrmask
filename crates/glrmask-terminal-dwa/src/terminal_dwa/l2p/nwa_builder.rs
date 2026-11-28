@@ -2122,8 +2122,8 @@ mod tests {
         nwa.set_final_weight(leaf, Weight::all());
         let start = nwa.add_state();
         nwa.start_states_mut().push(start);
-        let identity = TransportScannerStateMap::Explicit(
-            (0..tokenizer.num_states()).collect::<Vec<_>>().into(),
+        let identity = TransportScannerStateMap::from_explicit(
+            (0..tokenizer.num_states()).collect::<Vec<_>>(),
         );
         let modes = [
             TerminalNwaTransportMode::ordinary(tokenizer.num_states() as usize),
@@ -2775,24 +2775,10 @@ mod tests {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransportScannerStateMap {
-    Explicit(Arc<[TokenizerState]>),
     Quotient {
-        state_count: usize,
         class_for_original: Arc<[u32]>,
         representative_for_class: Arc<[TokenizerState]>,
         source_class_for_target_deviations: Box<[(u32, u32)]>,
-    },
-    /// A quotient whose target coordinate is first coarsened by a shared
-    /// macro-state quotient. This represents a large family of C-state
-    /// transports with only the few moved macro classes, rather than one
-    /// explicit deviation per C member.
-    MacroQuotient {
-        state_count: usize,
-        class_for_original: Arc<[u32]>,
-        representative_for_source_class: Arc<[TokenizerState]>,
-        macro_class_for_source_class: Arc<[u32]>,
-        representative_for_macro_class: Arc<[TokenizerState]>,
-        source_macro_for_target_deviations: Box<[(u32, u32)]>,
     },
     /// Temporary composition of round-local TI scanner coordinates. Keeping
     /// this lazy lets iterative TI replay share every accepted round map until
@@ -2803,37 +2789,11 @@ pub enum TransportScannerStateMap {
     },
 }
 
-pub struct DirectMacroQuotientParts<'a> {
-    pub macro_class_for_source_class: &'a [u32],
-    pub representative_for_macro_class: &'a [TokenizerState],
-    pub source_macro_for_target_deviations: &'a [(u32, u32)],
-}
-
 impl TransportScannerStateMap {
-    #[inline]
-    pub fn direct_macro_quotient_parts(&self) -> Option<DirectMacroQuotientParts<'_>> {
-        match self {
-            Self::MacroQuotient {
-                macro_class_for_source_class,
-                representative_for_macro_class,
-                source_macro_for_target_deviations,
-                ..
-            } => Some(DirectMacroQuotientParts {
-                macro_class_for_source_class,
-                representative_for_macro_class,
-                source_macro_for_target_deviations,
-            }),
-            Self::Explicit(_) | Self::Quotient { .. } | Self::Composed { .. } => None,
-        }
-    }
-
     #[inline]
     pub fn len(&self) -> usize {
         match self {
-            Self::Explicit(states) => states.len(),
-            Self::Quotient { state_count, .. } | Self::MacroQuotient { state_count, .. } => {
-                *state_count
-            }
+            Self::Quotient { class_for_original, .. } => class_for_original.len(),
             Self::Composed { outer, inner } => {
                 debug_assert_eq!(outer.len(), inner.len());
                 outer.len()
@@ -2844,7 +2804,6 @@ impl TransportScannerStateMap {
     #[inline]
     pub fn scanner_state(&self, original_state: TokenizerState) -> TokenizerState {
         match self {
-            Self::Explicit(states) => states[original_state as usize],
             Self::Quotient {
                 class_for_original,
                 representative_for_class,
@@ -2857,21 +2816,6 @@ impl TransportScannerStateMap {
                     .map(|index| source_class_for_target_deviations[index].1)
                     .unwrap_or(target_class);
                 representative_for_class[source_class as usize]
-            }
-            Self::MacroQuotient {
-                class_for_original,
-                macro_class_for_source_class,
-                representative_for_macro_class,
-                source_macro_for_target_deviations,
-                ..
-            } => {
-                let source_class = class_for_original[original_state as usize] as usize;
-                let source_macro = macro_class_for_source_class[source_class];
-                let target_macro = source_macro_for_target_deviations
-                    .binary_search_by_key(&source_macro, |&(source, _)| source)
-                    .map(|index| source_macro_for_target_deviations[index].1)
-                    .unwrap_or(source_macro);
-                representative_for_macro_class[target_macro as usize]
             }
             Self::Composed { outer, inner } => {
                 outer.scanner_state(inner.scanner_state(original_state))
@@ -2893,121 +2837,21 @@ impl TransportScannerStateMap {
         Arc::new(Self::Composed { outer, inner })
     }
 
+    /// Literal test oracle input. A discrete source partition represents an
+    /// arbitrary raw function without introducing a different execution path.
+    #[cfg(test)]
+    pub fn from_explicit(states: Vec<TokenizerState>) -> Self {
+        Self::Quotient {
+            class_for_original: (0..states.len() as u32).collect::<Vec<_>>().into(),
+            representative_for_class: states.into(),
+            source_class_for_target_deviations: Box::from([]),
+        }
+    }
+
+    #[cfg(test)]
     pub fn materialized(&self) -> Arc<[TokenizerState]> {
-        match self {
-            Self::Explicit(states) => Arc::clone(states),
-            Self::Quotient { state_count, .. } | Self::MacroQuotient { state_count, .. } => {
-                (0..*state_count)
-                    .map(|state| self.scanner_state(state as TokenizerState))
-                    .collect::<Vec<_>>()
-                    .into()
-            }
-            Self::Composed { .. } => (0..self.len())
-                .map(|state| self.scanner_state(state as TokenizerState))
-                .collect::<Vec<_>>()
-                .into(),
-        }
-    }
-
-    /// A composed TI transform is constant on the source classes of its
-    /// innermost map: that map first selects one representative raw coordinate,
-    /// and every outer transform is then deterministic.  Transport-coordinate
-    /// refinement uses this fact to evaluate a whole mode group once per source
-    /// quotient class instead of once per raw scanner state.
-    #[inline]
-    fn innermost_source_map(&self) -> &Self {
-        match self {
-            Self::Composed { inner, .. } => inner.innermost_source_map(),
-            Self::Explicit(_) | Self::Quotient { .. } | Self::MacroQuotient { .. } => self,
-        }
-    }
-
-    /// A stable identity for the innermost source partition.  Equal keys mean
-    /// the maps share the same raw-state-to-source-class function.  Distinct
-    /// but extensionally equal partitions are merely kept in separate groups,
-    /// which is conservative and remains exact.
-    #[inline]
-    pub fn innermost_source_domain_key(&self) -> usize {
-        match self.innermost_source_map() {
-            Self::Explicit(_) => 0,
-            Self::Quotient {
-                class_for_original,
-                ..
-            }
-            | Self::MacroQuotient {
-                class_for_original,
-                ..
-            } => class_for_original.as_ptr() as usize,
-            Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
-        }
-    }
-
-    #[inline]
-    pub fn innermost_source_class_count(&self) -> usize {
-        match self.innermost_source_map() {
-            Self::Explicit(states) => states.len(),
-            Self::Quotient {
-                representative_for_class,
-                ..
-            } => representative_for_class.len(),
-            Self::MacroQuotient {
-                representative_for_source_class,
-                ..
-            } => representative_for_source_class.len(),
-            Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
-        }
-    }
-
-    #[inline]
-    pub fn innermost_source_class(&self, original_state: TokenizerState) -> usize {
-        match self.innermost_source_map() {
-            Self::Explicit(_) => original_state as usize,
-            Self::Quotient {
-                class_for_original,
-                ..
-            }
-            | Self::MacroQuotient {
-                class_for_original,
-                ..
-            } => class_for_original[original_state as usize] as usize,
-            Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
-        }
-    }
-
-    /// The innermost `class_for_original` slice (state -> source class), or
-    /// `None` when the innermost map is `Explicit`, where the class equals the
-    /// original state. Resolving the innermost map once and indexing this slice
-    /// avoids re-walking any `Composed` chain per state.
-    #[inline]
-    pub fn innermost_class_for_original(&self) -> Option<&[u32]> {
-        match self.innermost_source_map() {
-            Self::Explicit(_) => None,
-            Self::Quotient {
-                class_for_original,
-                ..
-            }
-            | Self::MacroQuotient {
-                class_for_original,
-                ..
-            } => Some(class_for_original),
-            Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
-        }
-    }
-
-    #[inline]
-    pub fn innermost_source_representative(&self, class: usize) -> TokenizerState {
-        match self.innermost_source_map() {
-            Self::Explicit(_) => class as TokenizerState,
-            Self::Quotient {
-                representative_for_class,
-                ..
-            } => representative_for_class[class],
-            Self::MacroQuotient {
-                representative_for_source_class,
-                ..
-            } => representative_for_source_class[class],
-            Self::Composed { .. } => unreachable!("innermost transport map cannot be composed"),
-        }
+        (0..self.len()).map(|state| self.scanner_state(state as TokenizerState))
+            .collect::<Vec<_>>().into()
     }
 
     /// Append this temporary transport program in application order.  A
@@ -3021,52 +2865,12 @@ impl TransportScannerStateMap {
                 inner.append_atomic_transforms(output);
                 outer.append_atomic_transforms(output);
             }
-            Self::Explicit(_) | Self::Quotient { .. } | Self::MacroQuotient { .. } => {
+            Self::Quotient { .. } => {
                 output.push(self)
             }
         }
     }
 
-    /// Sparse inverse class permutation of a direct certified TI quotient.
-    /// Each pair maps an input stable class to the representative class used
-    /// by the transport; omitted classes map to themselves.
-    #[inline]
-    pub fn quotient_deviations(&self) -> Option<&[(u32, u32)]> {
-        match self {
-            Self::Quotient {
-                source_class_for_target_deviations,
-                ..
-            } => Some(source_class_for_target_deviations),
-            Self::Explicit(_) | Self::MacroQuotient { .. } | Self::Composed { .. } => None,
-        }
-    }
-
-    #[inline]
-    pub fn direct_quotient_default_key(&self) -> Option<(usize, usize)> {
-        match self {
-            Self::Quotient {
-                class_for_original,
-                representative_for_class,
-                ..
-            } => Some((
-                class_for_original.as_ptr() as usize,
-                representative_for_class.as_ptr() as usize,
-            )),
-            Self::Explicit(_) | Self::MacroQuotient { .. } | Self::Composed { .. } => None,
-        }
-    }
-
-    pub fn make_explicit_mut(&mut self) -> &mut [TokenizerState] {
-        if !matches!(self, Self::Explicit(_)) {
-            *self = Self::Explicit(self.materialized());
-        }
-        match self {
-            Self::Explicit(states) => Arc::make_mut(states),
-            Self::Quotient { .. } | Self::MacroQuotient { .. } | Self::Composed { .. } => {
-                unreachable!("transport map was just materialized")
-            }
-        }
-    }
 }
 
 /// One temporary binary-witness scanner mode for strict terminal
@@ -3075,35 +2879,53 @@ impl TransportScannerStateMap {
 /// exactly one label: its member whenever the transported scan emits that
 /// member's representative. It never relabels or emits unrelated terminals.
 #[derive(Clone, Debug)]
-pub struct TerminalNwaTransportMode {
-    pub scanner_state_for_original: TransportScannerStateMap,
-    member_reconstruction: Option<(TerminalID, TerminalID)>,
+pub enum TerminalNwaTransportMode {
+    Ordinary { state_count: usize },
+    Member {
+        scanner: TransportScannerStateMap,
+        representative: TerminalID,
+        member: TerminalID,
+    },
 }
 
 impl TerminalNwaTransportMode {
     pub fn ordinary(state_count: usize) -> Self {
-        Self {
-            scanner_state_for_original: TransportScannerStateMap::Explicit(
-                (0..state_count as u32).collect::<Vec<_>>().into(),
-            ),
-            member_reconstruction: None,
+        Self::Ordinary { state_count }
+    }
+
+    pub fn member(scanner: TransportScannerStateMap, representative: TerminalID, member: TerminalID) -> Self {
+        Self::Member { scanner, representative, member }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Ordinary { state_count } => *state_count,
+            Self::Member { scanner, .. } => scanner.len(),
         }
     }
 
-    pub fn member(
-        scanner_state_for_original: TransportScannerStateMap,
-        representative: TerminalID,
-        member: TerminalID,
-    ) -> Self {
-        Self {
-            scanner_state_for_original,
-            member_reconstruction: Some((representative, member)),
+    pub fn scanner_state(&self, raw: TokenizerState) -> TokenizerState {
+        match self {
+            Self::Ordinary { state_count } => {
+                assert!((raw as usize) < *state_count);
+                raw
+            }
+            Self::Member { scanner, .. } => scanner.scanner_state(raw),
         }
     }
 
-    #[inline]
+    pub fn scanner_map(&self) -> Option<&TransportScannerStateMap> {
+        match self {
+            Self::Ordinary { .. } => None,
+            Self::Member { scanner, .. } => Some(scanner),
+        }
+    }
+
     pub fn member_reconstruction(&self) -> Option<(TerminalID, TerminalID)> {
-        self.member_reconstruction
+        match self {
+            Self::Ordinary { .. } => None,
+            Self::Member { representative, member, .. } => Some((*representative, *member)),
+        }
     }
 
     #[inline]
@@ -3112,7 +2934,7 @@ impl TerminalNwaTransportMode {
         raw_terminal: TerminalID,
         visible_representatives: &[bool],
     ) -> Option<TerminalID> {
-        match self.member_reconstruction {
+        match self.member_reconstruction() {
             None => visible_representatives
                 .get(raw_terminal as usize)
                 .copied()
@@ -3318,9 +3140,7 @@ impl<'m> TransportModePlanner<'m> {
     ) -> SmallVec<[TransportContext; 4]> {
         let mut modes_by_scanner_state = BTreeMap::<TokenizerState, Vec<usize>>::new();
         for (mode, transport) in self.modes.iter().enumerate() {
-            let scanner_state = transport
-                .scanner_state_for_original
-                .scanner_state(original_state);
+            let scanner_state = transport.scanner_state(original_state);
             modes_by_scanner_state
                 .entry(scanner_state)
                 .or_default()
@@ -3361,9 +3181,7 @@ impl<'m> TransportModePlanner<'m> {
         let mut counts = vec![ScannerCounts::new(); state_count];
         for transport in self.modes {
             for (state_index, &original_state) in original_states.iter().enumerate() {
-                let scanner_state = transport
-                    .scanner_state_for_original
-                    .scanner_state(original_state);
+                let scanner_state = transport.scanner_state(original_state);
                 if let Some((_, count)) = counts[state_index]
                     .iter_mut()
                     .find(|(state, _)| *state == scanner_state)
@@ -3392,9 +3210,7 @@ impl<'m> TransportModePlanner<'m> {
         let mut explicit_groups = vec![ExplicitGroups::new(); state_count];
         for (mode, transport) in self.modes.iter().enumerate() {
             for (state_index, &original_state) in original_states.iter().enumerate() {
-                let scanner_state = transport
-                    .scanner_state_for_original
-                    .scanner_state(original_state);
+                let scanner_state = transport.scanner_state(original_state);
                 if scanner_state == modal_scanner_states[state_index] {
                     continue;
                 }

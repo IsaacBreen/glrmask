@@ -70,13 +70,13 @@ use nwa_builder::{
 };
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes_from_witnesses,
-    canonicalize_transport_mode_states, coalesced_disallowed_follows,
+    coalesced_disallowed_follows, TransportCoordinatePlan,
     discover_one_round_with_transport_witnesses_in_context,
     discover_one_round_with_transport_witnesses_in_context_permitted,
     fold_one_round_partition,
     expand_representative_dwa_after_minimization, partition_has_merges,
     restrict_weights_to_forward_domains_in_place,
-    singleton_partition, transport_coordinate_quotient, visible_output_raw_labels,
+    singleton_partition, visible_output_raw_labels,
     restore_raw_follow_constraints_after_expansion_with_transparent,
     TiDiscoveryContext,
 };
@@ -1412,7 +1412,6 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     // until after the representative-only DWA is minimized and compacted.
     // Keeping this ordinary quotient here is what makes the core small.
     let mut ti_transport_modes_ms = 0.0;
-    let mut ti_canonicalize_transport_modes_ms = 0.0;
     let mut ti_transport_coordinate_quotient_ms = 0.0;
 
     // The identity entry point accounts for its own map construction.
@@ -1921,42 +1920,15 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
 
-        let transport_coordinate_map = {
-            let ordinary_state_map = &core_id_map.tokenizer_states;
-            let canonicalize_started_at = ti_profile_timing.then(Instant::now);
-            canonicalize_transport_mode_states(&modes, ordinary_state_map);
-            ti_canonicalize_transport_modes_ms = canonicalize_started_at
-                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-                .unwrap_or(0.0);
-
-            let quotient_started_at = ti_profile_timing.then(Instant::now);
-            let mut quotient = transport_coordinate_quotient(ordinary_state_map, &modes);
-            // Cluster the final tsids by their core coordinate. Many final tsids
-            // collapse onto a few core coordinates during expansion; ordering
-            // them so equal-coordinate tsids are contiguous lets each lifted
-            // weight collapse to one range per coordinate instead of scattering
-            // into many. Pure relabel (masks are token-indexed, tsid names are
-            // internal), so the global digest is unchanged.
-            quotient.reorder_internal_by_representative_key(|representative| {
-                ordinary_state_map
-                    .original_to_internal
-                    .get(representative as usize)
-                    .copied()
-                    .unwrap_or(u32::MAX)
-            });
-            ti_transport_coordinate_quotient_ms = quotient_started_at
-                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-                .unwrap_or(0.0);
-            quotient
-        };
+        let quotient_started_at = ti_profile_timing.then(Instant::now);
+        let transport = TransportCoordinatePlan::new(&core_id_map.tokenizer_states, &modes);
+        ti_transport_coordinate_quotient_ms = quotient_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
 
         let expansion_started_at = ti_profile_timing.then(Instant::now);
-        let expanded_dwa = expand_representative_dwa_after_minimization(
-            &core_dwa,
-            &core_id_map.tokenizer_states,
-            &transport_coordinate_map,
-            &modes,
-        );
+        let expanded_dwa = expand_representative_dwa_after_minimization(&core_dwa, &transport);
+        let transport_coordinate_map = transport.into_state_map();
         ti_post_dwa_expansion_ms = expansion_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -2092,11 +2064,10 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             ti_representative_core_total_ms,
         );
         eprintln!(
-            "[glrmask/profile][ti_post_dwa_expansion] partition={} ti_active={} replay_maps_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3} expansion_ms={:.3} raw_follow_restore_ms={:.3} forward_domain_normalize_ms={:.3} post_dwa_minimize_ms={:.3} post_dwa_compact_ms={:.3} final_tsids={} expansion_total_ms={:.3}",
+            "[glrmask/profile][ti_post_dwa_expansion] partition={} ti_active={} replay_maps_ms={:.3} transport_coordinate_quotient_ms={:.3} expansion_ms={:.3} raw_follow_restore_ms={:.3} forward_domain_normalize_ms={:.3} post_dwa_minimize_ms={:.3} post_dwa_compact_ms={:.3} final_tsids={} expansion_total_ms={:.3}",
             partition_label,
             reference_terminal_expansion,
             ti_transport_modes_ms,
-            ti_canonicalize_transport_modes_ms,
             ti_transport_coordinate_quotient_ms,
             ti_post_dwa_expansion_ms,
             ti_raw_follow_restore_ms,
@@ -2107,7 +2078,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             ti_post_dwa_total_ms,
         );
         eprintln!(
-            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} strict_reference={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} restricted_observation_seed_ms={:.3} transport_modes_ms={:.3} coalesced_disallowed_follows_ms={:.3} canonicalize_transport_modes_ms={:.3} transport_coordinate_quotient_ms={:.3}",
+            "[glrmask/profile][terminal_interchangeability_plan] partition={} ti_active={} strict_reference={} rounds={} classes={} additional_merged_members={} discovery_ms={:.3} restricted_observation_seed_ms={:.3} transport_modes_ms={:.3} coalesced_disallowed_follows_ms={:.3} transport_coordinate_quotient_ms={:.3}",
             partition_label,
             reference_terminal_expansion,
             strict_reference,
@@ -2118,7 +2089,6 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             ti_restricted_observation_seed_ms,
             ti_transport_modes_ms,
             ti_coalesced_disallowed_follows_ms,
-            ti_canonicalize_transport_modes_ms,
             ti_transport_coordinate_quotient_ms,
         );
     }

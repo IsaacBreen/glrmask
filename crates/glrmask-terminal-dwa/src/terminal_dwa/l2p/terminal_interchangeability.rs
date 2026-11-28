@@ -527,15 +527,14 @@ impl RestrictedTopology {
             })
     }
 
+    #[cfg(test)]
     fn scanner_map_from_state_targets(
         &self,
         state_targets: &[u32],
     ) -> Option<TransportScannerStateMap> {
         assert_eq!(state_targets.len(), self.real_state_count);
         if self.state_for_raw.is_none() {
-            return Some(TransportScannerStateMap::Explicit(Arc::from(
-                state_targets.to_vec(),
-            )));
+            return Some(TransportScannerStateMap::from_explicit(state_targets.to_vec()));
         }
         let state_for_raw = self
             .state_for_raw
@@ -555,7 +554,7 @@ impl RestrictedTopology {
                     .filter(|&representative| representative != u32::MAX)
             })
             .collect::<Option<Vec<_>>>()?;
-        Some(TransportScannerStateMap::Explicit(raw_targets.into()))
+        Some(TransportScannerStateMap::from_explicit(raw_targets))
     }
 
     /// Deviation-independent part of `scanner_map_from_internal_quotient`:
@@ -567,12 +566,12 @@ impl RestrictedTopology {
         &self,
         class_for_state: Arc<[u32]>,
         representative_for_class: Arc<[u32]>,
-    ) -> (usize, Arc<[u32]>, Arc<[u32]>) {
+    ) -> (Arc<[u32]>, Arc<[u32]>) {
         if self.state_for_raw.is_none() {
             let representatives = representative_for_class.iter().map(|&state| {
                 if state as usize >= self.real_state_count { 0 } else { state }
             }).collect::<Vec<_>>();
-            return (self.real_state_count, Arc::from(&class_for_state[..self.real_state_count]), representatives.into());
+            return (Arc::from(&class_for_state[..self.real_state_count]), representatives.into());
         }
         let state_for_raw = self
             .state_for_raw
@@ -605,11 +604,7 @@ impl RestrictedTopology {
             })
             .collect::<Vec<_>>()
             .into();
-        (
-            self.raw_state_count,
-            class_for_original,
-            raw_representative_for_class,
-        )
+        (class_for_original, raw_representative_for_class)
     }
 
 
@@ -1721,8 +1716,6 @@ struct TiQuotient {
     dead: u32,
     real: Vec<bool>,
     raw: Vec<bool>,
-    scanner_state_count: usize,
-    explicit_raw_transport: bool,
     scanner_class_for_original: Arc<[u32]>,
     scanner_representative_for_class: Arc<[u32]>,
 }
@@ -1813,10 +1806,9 @@ impl TiQuotient {
         }
         let root = classes[topology.initial_state];
         let class_for_state: Arc<[u32]> = classes.into();
-        let (scanner_state_count, scanner_class_for_original, mut scanner_representative_for_class) =
+        let (scanner_class_for_original, mut scanner_representative_for_class) =
             topology.scanner_projection_from_internal_quotient(Arc::clone(&class_for_state), representatives.into());
-        let explicit_raw_transport = topology.nfa_outputs.is_some();
-        if explicit_raw_transport {
+        if topology.nfa_outputs.is_some() {
             // Powerset discovery IDs are not ordered by raw scanner ID.
             // Preserve the historical first-raw representative convention.
             let mut first_raw = vec![u32::MAX; n];
@@ -1824,32 +1816,30 @@ impl TiQuotient {
                 let rep = &mut first_raw[class as usize];
                 if *rep == u32::MAX { *rep = raw as u32; }
             }
+            // Unrepresented classes are never selected by a certified raw
+            // transport. Give their unused default row an in-domain value so
+            // composition may precompute it without a special sentinel.
+            for (class, representative) in first_raw.iter_mut().enumerate() {
+                if *representative == u32::MAX {
+                    assert!(!raw[class], "certified raw class lacks a representative");
+                    *representative = 0;
+                }
+            }
             scanner_representative_for_class = first_raw.into();
         }
         Self { class_for_state, rows, predecessors, output_sources, root, dead, real, raw,
-            scanner_state_count, explicit_raw_transport, scanner_class_for_original, scanner_representative_for_class }
+            scanner_class_for_original, scanner_representative_for_class }
     }
 
     fn transport(&self, deviations: Vec<(u32, u32)>) -> InterchangeMap {
-        let scanner_state_map = if self.explicit_raw_transport {
-            // Keep NFA witnesses explicit: downstream coordinate shortcuts
-            // that rely on a direct deterministic scanner quotient must not
-            // infer that property merely from a powerset observation class.
-            let states = self.scanner_class_for_original.iter().map(|&target| {
-                let source = deviations.binary_search_by_key(&target, |&(target, _)| target)
-                    .map(|i| deviations[i].1).unwrap_or(target);
-                let raw = self.scanner_representative_for_class[source as usize];
-                assert_ne!(raw, u32::MAX, "certified TI raw source is absent");
-                raw
-            }).collect::<Vec<_>>();
-            TransportScannerStateMap::Explicit(states.into())
-        } else {
-            TransportScannerStateMap::Quotient {
-                state_count: self.scanner_state_count,
-                class_for_original: Arc::clone(&self.scanner_class_for_original),
-                representative_for_class: Arc::clone(&self.scanner_representative_for_class),
-                source_class_for_target_deviations: deviations.into_boxed_slice(),
-            }
+        // The compressed map is a representation of the certified function,
+        // for either a DFA or an NFA observation quotient. Its consumers no
+        // longer assume an unchanged raw representative preserves the
+        // ordinary coordinate: they evaluate the actual default relation.
+        let scanner_state_map = TransportScannerStateMap::Quotient {
+            class_for_original: Arc::clone(&self.scanner_class_for_original),
+            representative_for_class: Arc::clone(&self.scanner_representative_for_class),
+            source_class_for_target_deviations: deviations.into_boxed_slice(),
         };
         InterchangeMap { scanner_state_map }
     }
@@ -2131,7 +2121,7 @@ impl InterchangeabilityDfa {
             }
             let states = raw_to_state.iter().map(|&state| first_raw.get(&classes[state as usize]).copied())
                 .collect::<Option<Vec<_>>>()?;
-            return Some(InterchangeMap { scanner_state_map: TransportScannerStateMap::Explicit(states.into()) });
+            return Some(InterchangeMap { scanner_state_map: TransportScannerStateMap::from_explicit(states) });
         }
         let targets = (0..self.topology.real_state_count)
             .map(|state| targets[&classes[state]]).collect::<Vec<_>>();
@@ -2641,531 +2631,355 @@ pub fn binary_transport_modes_from_witnesses(
     modes
 }
 
-/// Validate the common raw scanner domain of temporary transport modes.
-///
-/// Older code eagerly rewrote every mode into an explicit raw-state vector of
-/// ordinary quotient representatives here.  That does not change either later
-/// consumer: both need exactly `Q(mode(source))`, and applying `Q` directly is
-/// equivalent to first replacing the raw target by its `Q` representative.
-/// Keeping the maps lazy avoids `raw lexer states × TI members` work.
-pub fn canonicalize_transport_mode_states(
-    modes: &[TerminalNwaTransportMode],
-    ordinary_state_map: &ManyToOneIdMap,
-) {
-    let state_count = ordinary_state_map.original_to_internal.len();
-    for mode in modes {
-        assert_eq!(
-            mode.scanner_state_for_original.len(),
-            state_count,
-            "transport mode state domain must match ordinary state quotient",
-        );
+/// Preserve raw identity for scanner states outside the ordinary proof
+/// domain. The coefficient pullback treats those coordinates as absent, but
+/// the coordinate quotient must not merge them without a proof.
+fn transport_coordinate_key(ordinary: &ManyToOneIdMap, raw: u32) -> u64 {
+    match ordinary.original_to_internal.get(raw as usize).copied() {
+        Some(coordinate) if coordinate != u32::MAX => u64::from(coordinate),
+        _ => (1u64 << 32) | u64::from(raw),
     }
 }
 
-/// Refine an ordinary terminal-DWA quotient by the scanner destinations of
-/// every temporary transport mode. A source raw state `s` is assigned a compact
-/// transport TSID from the exact signature
-/// `(Q(m_0(s)), Q(m_1(s)), …)`, where `m_0` is the ordinary mode and each later
-/// mode is one target-only member reconstruction coordinate.
-///
-/// The full states-by-modes signature matrix is deliberately never
-/// materialized.  A composed transport is constant on the source quotient of
-/// its innermost round-local map.  Therefore every mode sharing that source
-/// quotient is evaluated once per source class, then each raw state is refined
-/// only by the small tuple of its per-round group ids.  This is the same exact
-/// signature vector while avoiding the normal `raw states × TI members` path.
-pub fn transport_coordinate_quotient(
-    ordinary_state_map: &ManyToOneIdMap,
-    modes: &[TerminalNwaTransportMode],
-) -> ManyToOneIdMap {
-    let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
-    let total_started_at = profile_timing.then(Instant::now);
-    assert!(
-        !modes.is_empty(),
-        "transport coordinate quotient needs the ordinary mode",
-    );
-    let state_count = ordinary_state_map.original_to_internal.len();
-    let ordinary_coordinate_key = |target_state: usize| {
-        let mapped = ordinary_state_map
-            .original_to_internal
-            .get(target_state)
-            .copied()
-            .unwrap_or(u32::MAX);
-        // A target outside the ordinary proof domain must retain its raw
-        // identity; merging all unmapped targets would be unsound.
-        if mapped == u32::MAX {
-            (1u64 << 32) | target_state as u64
+fn weight_coordinate(key: u64) -> u32 {
+    if key >> 32 == 0 { key as u32 } else { u32::MAX }
+}
+
+/// A quotient transform is a source partition, its default representatives,
+/// and a sparse permutation of the representative rows.
+#[derive(Clone, Copy)]
+struct TransportAtom<'a> {
+    source_classes: &'a [u32],
+    representatives: &'a [u32],
+    changes: &'a [(u32, u32)],
+}
+
+impl<'a> TransportAtom<'a> {
+    fn from_map(map: &'a TransportScannerStateMap) -> Self {
+        match map {
+            TransportScannerStateMap::Quotient {
+                class_for_original, representative_for_class,
+                source_class_for_target_deviations, ..
+            } => Self {
+                source_classes: class_for_original,
+                representatives: representative_for_class,
+                changes: source_class_for_target_deviations,
+            },
+            TransportScannerStateMap::Composed { .. } => unreachable!("atomic transform required"),
+        }
+    }
+
+    fn default_key(self) -> [usize; 2] {
+        [
+            self.source_classes.as_ptr() as usize,
+            self.representatives.as_ptr() as usize,
+        ]
+    }
+
+    fn row_for_raw(self, raw: u32) -> usize {
+        self.source_classes[raw as usize] as usize
+    }
+}
+
+struct TransportDefaultRow {
+    coordinates: Arc<[u64]>,
+    changes: Vec<(u32, u64)>,
+}
+
+impl TransportDefaultRow {
+    fn get(&self, row: usize) -> u64 {
+        self.changes.binary_search_by_key(&(row as u32), |&(source, _)| source)
+            .map(|index| self.changes[index].1)
+            .unwrap_or(self.coordinates[row])
+    }
+}
+
+/// Share the expensive default projection of a one-atom composed tail.
+/// Its sparse permutations need only touch rows which map to changed tail
+/// classes. Unlike an assumed identity tail, this also accounts for the
+/// tail's actual default representatives in the ordinary proof coordinate.
+struct TailDefault {
+    coordinates: Arc<[u64]>,
+    rows_for_tail: Vec<Vec<u32>>,
+}
+
+struct TransportFamily<'a> {
+    source: TransportAtom<'a>,
+    tail: Vec<&'a TransportScannerStateMap>,
+    members: Vec<(usize, &'a [(u32, u32)])>,
+    default: TransportDefaultRow,
+}
+
+impl TransportFamily<'_> {
+    fn component_for_row(&self) -> Option<Vec<u32>> {
+        let mut changes = Vec::<(u32, u32, u64)>::new();
+        for (member, (_, deviations)) in self.members.iter().enumerate() {
+            for &(source, target) in *deviations {
+                let coordinate = self.default.get(target as usize);
+                if coordinate != self.default.get(source as usize) {
+                    changes.push((source, member as u32, coordinate));
+                }
+            }
+        }
+        changes.sort_unstable();
+        let mut cursor = 0;
+        let mut intern = FxHashMap::<(u64, SmallVec<[(u32, u64); 4]>), u32>::default();
+        let mut components = Vec::with_capacity(self.source.representatives.len());
+        for row in 0..self.source.representatives.len() {
+            let first = cursor;
+            while cursor < changes.len() && changes[cursor].0 as usize == row {
+                cursor += 1;
+            }
+            let default = self.default.get(row);
+            let deviations = changes[first..cursor].iter()
+                .map(|&(_, mode, coordinate)| (mode, coordinate)).collect::<SmallVec<[_; 4]>>();
+            let signature = canonical_transport_signature(default, self.members.len(), deviations);
+            let next = intern.len() as u32;
+            components.push(*intern.entry(signature).or_insert(next));
+        }
+        (intern.len() > 1).then_some(components)
+    }
+
+    fn populate_pullbacks(
+        &self, final_sources: &[u32], ordinary: &[u32], active: &[bool],
+        output: &mut [Vec<(u32, u32)>],
+    ) {
+        if !self.members.iter().any(|(mode, _)| active[*mode]) {
+            return;
+        }
+        let mut final_tsids_for_row = vec![Vec::<u32>::new(); self.source.representatives.len()];
+        let mut default_changes = Vec::<(u32, u32)>::new();
+        for (tsid, &raw) in final_sources.iter().enumerate() {
+            let row = self.source.row_for_raw(raw);
+            final_tsids_for_row[row].push(tsid as u32);
+            let coordinate = weight_coordinate(self.default.get(row));
+            if coordinate != ordinary[tsid] {
+                default_changes.push((tsid as u32, coordinate));
+            }
+        }
+        for &(mode, changes) in &self.members {
+            if !active[mode] { continue; }
+            let mut overrides = Vec::<(u32, u32)>::new();
+            for &(source, target) in changes {
+                let coordinate = weight_coordinate(self.default.get(target as usize));
+                if coordinate == weight_coordinate(self.default.get(source as usize)) {
+                    continue;
+                }
+                overrides.extend(final_tsids_for_row[source as usize].iter()
+                    .map(|&tsid| (tsid, coordinate)));
+            }
+            overrides.sort_unstable_by_key(|&(tsid, _)| tsid);
+            // Merge the shared default deviations with actual member
+            // replacements. A replacement may restore the ordinary row.
+            let mut defaults = default_changes.iter().copied().peekable();
+            let mut result = Vec::with_capacity(default_changes.len() + overrides.len());
+            for (tsid, coordinate) in overrides {
+                while defaults.peek().is_some_and(|&(source, _)| source < tsid) {
+                    result.push(defaults.next().unwrap());
+                }
+                if defaults.peek().is_some_and(|&(source, _)| source == tsid) {
+                    defaults.next();
+                }
+                if coordinate != ordinary[tsid as usize] {
+                    result.push((tsid, coordinate));
+                }
+            }
+            result.extend(defaults);
+            output[mode] = result;
+        }
+    }
+}
+
+/// Canonical sparse spelling of the actual mode-coordinate vector. Choose
+/// its most frequent coordinate (ties by numeric key), then encode only
+/// deviations. A default need not be observed by any member; including it
+/// unconditionally could split equal transport vectors. Rebasing scans every
+/// mode only when deviations already occupy at least half the row.
+fn canonical_transport_signature(
+    default: u64, count: usize, deviations: SmallVec<[(u32, u64); 4]>,
+) -> (u64, SmallVec<[(u32, u64); 4]>) {
+    if deviations.len() < count - deviations.len() {
+        return (default, deviations);
+    }
+    let mut frequencies = FxHashMap::<u64, usize>::default();
+    frequencies.insert(default, count - deviations.len());
+    for &(_, coordinate) in &deviations {
+        *frequencies.entry(coordinate).or_default() += 1;
+    }
+    let (canonical, _) = frequencies.into_iter().max_by(|(left, lc), (right, rc)| {
+        lc.cmp(rc).then_with(|| right.cmp(left))
+    }).expect("transport family must have a member");
+    if canonical == default {
+        return (default, deviations);
+    }
+    let mut changes = deviations.into_iter().peekable();
+    let rebased = (0..count as u32).filter_map(|mode| {
+        let coordinate = if changes.peek().is_some_and(|&(index, _)| index == mode) {
+            changes.next().unwrap().1
         } else {
-            mapped as u64
-        }
-    };
-
-    struct ModeGroup {
-        domain_key: usize,
-        domain_mode: usize,
-        modes: Vec<usize>,
-        component_for_source_class: Vec<u32>,
-    }
-
-    #[derive(Eq, Hash, PartialEq)]
-    struct SparseModeSignature {
-        /// Sparse feature overrides from the ordinary coordinate. Real mode
-        /// ids occupy `[0, modes.len())`; tail-default features use ids above
-        /// that range. Absence means the ordinary coordinate already present
-        /// in the final state signature.
-        deviations: SmallVec<[(u32, u64); 8]>,
-    }
-
-    struct TailGroup<'a> {
-        tail: Vec<&'a TransportScannerStateMap>,
-        modes: Vec<(usize, &'a TransportScannerStateMap)>,
-        /// Sorted sparse overrides from the ordinary coordinate, keyed by the
-        /// current group's source class.
-        default_deviations: Vec<(u32, u64)>,
-    }
-
-    // The ordinary mode is represented directly by the first coordinate below.
-    // Group every target-only reconstruction by the partition on which its
-    // complete composed transform is constant.
-    let mut group_index_by_domain = FxHashMap::<usize, usize>::default();
-    let mut groups = Vec::<ModeGroup>::new();
-    for (mode_index, mode) in modes.iter().enumerate().skip(1) {
-        assert_eq!(
-            mode.scanner_state_for_original.len(),
-            state_count,
-            "transport mode state domain must match ordinary state quotient",
-        );
-        let domain_key = mode.scanner_state_for_original.innermost_source_domain_key();
-        let group_index = match group_index_by_domain.entry(domain_key) {
-            Entry::Occupied(entry) => *entry.get(),
-            Entry::Vacant(entry) => {
-                let index = groups.len();
-                groups.push(ModeGroup {
-                    domain_key,
-                    domain_mode: mode_index,
-                    modes: Vec::new(),
-                    component_for_source_class: Vec::new(),
-                });
-                entry.insert(index);
-                index
-            }
+            default
         };
-        groups[group_index].modes.push(mode_index);
-    }
+        (coordinate != canonical).then_some((mode, coordinate))
+    }).collect();
+    (canonical, rebased)
+}
 
-    let components_started_at = profile_timing.then(Instant::now);
-    let mut source_class_mode_evaluations = 0usize;
-    let mut macro_transport_groups = 0usize;
-    let mut sparse_tail_groups = 0usize;
-    let mut sparse_tail_atoms = 0usize;
-    let mut sparse_tail_default_cells = 0usize;
-    let mut sparse_tail_default_changes = 0usize;
-    // A transport mode with no quotient deviations is a pure structural
-    // relabeling that preserves the ordinary coordinate, so its component is a
-    // function of the ordinary coordinate and cannot refine the ordinary
-    // partition. Such groups are redundant: we skip building their component
-    // table and omit them from the final per-state signature. Because the
-    // absolute final-class numbering never reaches the digest (proven: the
-    // digest is invariant under class renumbering), dropping redundant groups
-    // is exact.
-    let mut group_is_redundant = vec![false; groups.len()];
-    for (group_index, group) in groups.iter_mut().enumerate() {
-        let domain = &modes[group.domain_mode].scanner_state_for_original;
-        let source_class_count = domain.innermost_source_class_count();
+/// One source-pinned transport relation drives both the equality partition
+/// of raw scanner states and every subsequent coefficient pullback. The
+/// full raw-state by member matrix is never allocated.
+pub(super) struct TransportCoordinatePlan<'a> {
+    ordinary: &'a ManyToOneIdMap,
+    modes: &'a [TerminalNwaTransportMode],
+    families: Vec<TransportFamily<'a>>,
+    state_map: ManyToOneIdMap,
+}
 
-        let mut all_modes_are_direct_quotients = true;
-        let group_quotient_deviations: usize = group
-            .modes
-            .iter()
-            .map(|&mode_index| {
-                let deviations = modes[mode_index]
-                    .scanner_state_for_original
-                    .quotient_deviations();
-                all_modes_are_direct_quotients &= deviations.is_some();
-                deviations.map_or(0, |deviations| deviations.len())
-            })
-            .sum();
-        // Only a direct quotient with no deviations is known structurally to
-        // preserve the ordinary coordinate. `None` does not mean identity: it
-        // also covers composed, macro-quotient, and explicit transport maps.
-        // Treating those shapes as zero-deviation groups can erase a genuine
-        // transport signature component and merge raw states whose member-mode
-        // destinations land in different core coordinates.
-        if all_modes_are_direct_quotients && group_quotient_deviations == 0 {
-            group_is_redundant[group_index] = true;
-            continue;
+impl<'a> TransportCoordinatePlan<'a> {
+    pub(super) fn new(
+        ordinary: &'a ManyToOneIdMap,
+        modes: &'a [TerminalNwaTransportMode],
+    ) -> Self {
+        assert!(!modes.is_empty() && modes[0].member_reconstruction().is_none());
+        let started = Instant::now();
+        let state_count = ordinary.original_to_internal.len();
+        let key_for = |raw| transport_coordinate_key(ordinary, raw);
+        let mut family_ids = FxHashMap::<Vec<usize>, usize>::default();
+        let mut families = Vec::<TransportFamily<'a>>::new();
+        for (mode, transport) in modes.iter().enumerate() {
+            assert_eq!(transport.len(), state_count, "transport state domain mismatch");
+            let Some(map) = transport.scanner_map() else {
+                assert_eq!(mode, 0, "only the first mode is ordinary");
+                continue;
+            };
+            let mut atoms = Vec::new();
+            map.append_atomic_transforms(&mut atoms);
+            let source = TransportAtom::from_map(atoms[0]);
+            let tail = &atoms[1..];
+            let mut key = source.default_key().to_vec();
+            key.extend(tail.iter().map(|atom| std::ptr::from_ref(*atom) as usize));
+            let family = *family_ids.entry(key).or_insert_with(|| {
+                let id = families.len();
+                families.push(TransportFamily {
+                    source, tail: tail.to_vec(), members: Vec::new(),
+                    default: TransportDefaultRow { coordinates: Arc::from([]), changes: Vec::new() },
+                });
+                id
+            });
+            families[family].members.push((mode, source.changes));
         }
+        let mut base_rows = FxHashMap::<usize, Arc<[u64]>>::default();
+        let mut tail_rows = FxHashMap::<(usize, [usize; 2]), TailDefault>::default();
+        for family in &mut families {
+            let reps = family.source.representatives;
+            let reps_key = reps.as_ptr() as usize;
+            family.default = if family.tail.is_empty() {
+                let coordinates = base_rows.entry(reps_key).or_insert_with(|| {
+                    reps.iter().map(|&raw| key_for(raw)).collect::<Vec<_>>().into()
+                });
+                TransportDefaultRow { coordinates: Arc::clone(coordinates), changes: Vec::new() }
+            } else if let [tail] = family.tail.as_slice() {
+                let atom = TransportAtom::from_map(tail);
+                let base = tail_rows.entry((reps_key, atom.default_key())).or_insert_with(|| {
+                    let mut rows_for_tail = vec![Vec::new(); atom.representatives.len()];
+                    let coordinates = reps.iter().enumerate().map(|(row, &raw)| {
+                        let tail_row = atom.row_for_raw(raw);
+                        rows_for_tail[tail_row].push(row as u32);
+                        key_for(atom.representatives[tail_row])
+                    }).collect::<Vec<_>>().into();
+                    TailDefault { coordinates, rows_for_tail }
+                });
+                let mut changes = Vec::new();
+                for &(source, target) in atom.changes {
+                    let coordinate = key_for(atom.representatives[target as usize]);
+                    for &row in &base.rows_for_tail[source as usize] {
+                        if coordinate != base.coordinates[row as usize] {
+                            changes.push((row, coordinate));
+                        }
+                    }
+                }
+                changes.sort_unstable_by_key(|&(row, _)| row);
+                TransportDefaultRow { coordinates: Arc::clone(&base.coordinates), changes }
+            } else {
+                let coordinates = reps.iter().map(|&raw| {
+                    key_for(family.tail.iter().fold(raw, |state, atom| atom.scanner_state(state)))
+                }).collect::<Vec<_>>().into();
+                TransportDefaultRow { coordinates, changes: Vec::new() }
+            };
+        }
+        drop(tail_rows);
 
-        // A direct macro quotient is constant on the shared macro class of a
-        // source C class. Classify those macro classes once, then project the
-        // component id back to C instead of scanning every C class per mode.
-        if let Some(first_parts) = domain.direct_macro_quotient_parts() {
-            let shared_macro_classes = first_parts.macro_class_for_source_class;
-            let shared_macro_representatives = first_parts.representative_for_macro_class;
-            let mut mode_deviations = Vec::with_capacity(group.modes.len());
-            let mut all_direct_macro = true;
-            for &mode_index in &group.modes {
-                let Some(parts) = modes[mode_index]
-                    .scanner_state_for_original
-                    .direct_macro_quotient_parts()
-                else {
-                    all_direct_macro = false;
-                    break;
-                };
-                if parts.macro_class_for_source_class.as_ptr() != shared_macro_classes.as_ptr()
-                    || parts.representative_for_macro_class.as_ptr()
-                        != shared_macro_representatives.as_ptr()
-                {
-                    all_direct_macro = false;
-                    break;
-                }
-                mode_deviations.push(parts.source_macro_for_target_deviations);
+        // Meet all family partitions in their shared source coordinate
+        // before returning to the raw scanner domain.
+        let mut columns_by_domain = FxHashMap::<usize, Vec<(&'a [u32], Vec<u32>)>>::default();
+        for family in &families {
+            if let Some(components) = family.component_for_row() {
+                columns_by_domain.entry(family.source.source_classes.as_ptr() as usize)
+                    .or_default().push((family.source.source_classes, components));
             }
-            if all_direct_macro {
-                assert_eq!(shared_macro_classes.len(), source_class_count);
-                let macro_coordinates = shared_macro_representatives
-                    .iter()
-                    .map(|&state| ordinary_coordinate_key(state as usize))
-                    .collect::<Vec<_>>();
-                let mut component_by_signature = FxHashMap::<Vec<u64>, u32>::default();
-                let mut component_for_macro = Vec::with_capacity(macro_coordinates.len());
-                for source_macro in 0..macro_coordinates.len() {
-                    let signature = mode_deviations
-                        .iter()
-                        .map(|deviations| {
-                            let target_macro = deviations
-                                .binary_search_by_key(&(source_macro as u32), |&(source, _)| source)
-                                .map(|index| deviations[index].1 as usize)
-                                .unwrap_or(source_macro);
-                            macro_coordinates[target_macro]
-                        })
-                        .collect::<Vec<_>>();
-                    let next_component = component_by_signature.len() as u32;
-                    let component = *component_by_signature
-                        .entry(signature)
-                        .or_insert(next_component);
-                    component_for_macro.push(component);
-                }
-                source_class_mode_evaluations += macro_coordinates.len() * group.modes.len();
-                group.component_for_source_class = shared_macro_classes
-                    .iter()
-                    .map(|&source_macro| component_for_macro[source_macro as usize])
-                    .collect();
-                macro_transport_groups += 1;
+        }
+        let mut domain_columns = Vec::<(&[u32], Vec<u32>)>::new();
+        for columns in columns_by_domain.into_values() {
+            if columns.len() == 1 {
+                domain_columns.push(columns.into_iter().next().unwrap());
                 continue;
             }
-        }
-
-        let mut programs = Vec::<(usize, Vec<&TransportScannerStateMap>)>::new();
-        let mut supports_sparse_program = true;
-        for &mode_index in &group.modes {
-            let mut parts = Vec::new();
-            modes[mode_index]
-                .scanner_state_for_original
-                .append_atomic_transforms(&mut parts);
-            if parts
-                .first()
-                .and_then(|inner| inner.quotient_deviations())
-                .is_none()
-            {
-                supports_sparse_program = false;
-                break;
-            }
-            programs.push((mode_index, parts));
-        }
-
-        if !supports_sparse_program {
-            let mut component_by_signature = FxHashMap::<Vec<u64>, u32>::default();
-            group.component_for_source_class = Vec::with_capacity(source_class_count);
-            for source_class in 0..source_class_count {
-                let source_state = domain.innermost_source_representative(source_class);
-                let mut signature = Vec::with_capacity(group.modes.len());
-                for &mode_index in &group.modes {
-                    let mode = &modes[mode_index].scanner_state_for_original;
-                    let target_state = mode.scanner_state(source_state) as usize;
-                    signature.push(ordinary_coordinate_key(target_state));
-                }
-                source_class_mode_evaluations += group.modes.len();
-                let next_component = component_by_signature.len() as u32;
-                let component = *component_by_signature
-                    .entry(signature)
-                    .or_insert(next_component);
-                group.component_for_source_class.push(component);
-            }
-            continue;
-        }
-
-        let mut tail_group_index_by_key = FxHashMap::<Vec<usize>, usize>::default();
-        let mut tail_groups = Vec::<TailGroup>::new();
-        for (mode_index, parts) in programs {
-            let inner = parts[0];
-            debug_assert_eq!(
-                inner.innermost_source_domain_key(),
-                group.domain_key,
-                "the first transport program atom must own this source domain",
-            );
-            let tail = parts[1..].to_vec();
-            let tail_key = tail
-                .iter()
-                .map(|part| std::ptr::from_ref(*part) as usize)
-                .collect::<Vec<_>>();
-            let tail_group_index = match tail_group_index_by_key.entry(tail_key) {
-                Entry::Occupied(entry) => *entry.get(),
-                Entry::Vacant(entry) => {
-                    let index = tail_groups.len();
-                    tail_groups.push(TailGroup {
-                        tail,
-                        modes: Vec::new(),
-                        default_deviations: Vec::new(),
-                    });
-                    entry.insert(index);
-                    index
-                }
-            };
-            tail_groups[tail_group_index].modes.push((mode_index, inner));
-        }
-
-        sparse_tail_groups += tail_groups.len();
-        sparse_tail_atoms += tail_groups.iter().map(|group| group.tail.len()).sum::<usize>();
-        let ordinary_for_source_class = (0..source_class_count)
-            .map(|source_class| {
-                ordinary_coordinate_key(
-                    domain.innermost_source_representative(source_class) as usize,
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut deviations_by_source_class =
-            vec![SmallVec::<[(u32, u64); 8]>::new(); source_class_count];
-        let mut current_classes_by_tail_domain =
-            FxHashMap::<usize, Vec<Vec<u32>>>::default();
-
-        for (tail_group_index, tail_group) in tail_groups.iter_mut().enumerate() {
-            let tail_feature = modes.len() as u32 + tail_group_index as u32;
-            if tail_group.tail.is_empty() {
-                // Identity tail: every default is already represented by the
-                // ordinary coordinate in the final quotient signature.
-            } else if tail_group.tail.len() == 1
-                && tail_group.tail[0].quotient_deviations().is_some()
-            {
-                let transform = tail_group.tail[0];
-                let tail_domain_key = transform.innermost_source_domain_key();
-                let classes_by_tail_class = current_classes_by_tail_domain
-                    .entry(tail_domain_key)
-                    .or_insert_with(|| {
-                        let mut inverse =
-                            vec![Vec::<u32>::new(); transform.innermost_source_class_count()];
-                        for source_class in 0..source_class_count {
-                            let raw_state =
-                                domain.innermost_source_representative(source_class);
-                            let tail_class =
-                                transform.innermost_source_class(raw_state);
-                            inverse[tail_class].push(source_class as u32);
-                        }
-                        inverse
-                    });
-                for &(input_class, output_class) in transform
-                    .quotient_deviations()
-                    .expect("one-atom quotient tail was checked above")
-                {
-                    let coordinate = ordinary_coordinate_key(
-                        transform.innermost_source_representative(output_class as usize)
-                            as usize,
-                    );
-                    for &source_class in &classes_by_tail_class[input_class as usize] {
-                        let source_class = source_class as usize;
-                        sparse_tail_default_cells += 1;
-                        source_class_mode_evaluations += 1;
-                        if coordinate != ordinary_for_source_class[source_class] {
-                            sparse_tail_default_changes += 1;
-                            tail_group
-                                .default_deviations
-                                .push((source_class as u32, coordinate));
-                            deviations_by_source_class[source_class]
-                                .push((tail_feature, coordinate));
-                        }
-                    }
-                }
-                tail_group.default_deviations.sort_unstable_by_key(|&(class, _)| class);
-            } else {
-                // General exact fallback. This is absent in the current p0/p1
-                // workload, but retains arbitrary composed-tail semantics.
-                for source_class in 0..source_class_count {
-                    let mut target_state =
-                        domain.innermost_source_representative(source_class);
-                    for transform in &tail_group.tail {
-                        target_state = transform.scanner_state(target_state);
-                    }
-                    let coordinate = ordinary_coordinate_key(target_state as usize);
-                    sparse_tail_default_cells += 1;
-                    source_class_mode_evaluations += 1 + tail_group.tail.len();
-                    if coordinate != ordinary_for_source_class[source_class] {
-                        sparse_tail_default_changes += 1;
-                        tail_group
-                            .default_deviations
-                            .push((source_class as u32, coordinate));
-                        deviations_by_source_class[source_class]
-                            .push((tail_feature, coordinate));
-                    }
-                }
-            }
-
-            let default_for = |source_class: usize| {
-                tail_group
-                    .default_deviations
-                    .binary_search_by_key(&(source_class as u32), |&(class, _)| class)
-                    .map(|index| tail_group.default_deviations[index].1)
-                    .unwrap_or(ordinary_for_source_class[source_class])
-            };
-            for &(mode_index, inner) in &tail_group.modes {
-                let inner_deviations = inner
-                    .quotient_deviations()
-                    .expect("sparse transport program was checked above");
-                for &(input_class, output_class) in inner_deviations {
-                    let input_class = input_class as usize;
-                    let output_class = output_class as usize;
-                    assert!(
-                        input_class < source_class_count && output_class < source_class_count,
-                        "TI transport deviation must stay within its source quotient",
-                    );
-                    let coordinate = default_for(output_class);
-                    if coordinate != default_for(input_class) {
-                        deviations_by_source_class[input_class]
-                            .push((mode_index as u32, coordinate));
-                    }
-                }
+            let source = columns[0].0;
+            let class_count = columns[0].1.len();
+            let mut intern = FxHashMap::<SmallVec<[u32; 4]>, u32>::default();
+            let components = (0..class_count).map(|class| {
+                let signature = columns.iter().map(|(_, values)| values[class]).collect();
+                let next = intern.len() as u32;
+                *intern.entry(signature).or_insert(next)
+            }).collect::<Vec<_>>();
+            if intern.len() > 1 {
+                domain_columns.push((source, components));
             }
         }
 
-        let mut component_by_signature = FxHashMap::<SparseModeSignature, u32>::default();
-        group.component_for_source_class = Vec::with_capacity(source_class_count);
-        for source_class in 0..source_class_count {
-            let mut deviations = std::mem::take(&mut deviations_by_source_class[source_class]);
-            deviations.sort_unstable_by_key(|&(feature, _)| feature);
-            let signature = SparseModeSignature { deviations };
-            let next_component = component_by_signature.len() as u32;
-            let component = *component_by_signature
-                .entry(signature)
-                .or_insert(next_component);
-            group.component_for_source_class.push(component);
-        }
-    }
-    let component_build_ms = components_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-
-    let final_refinement_started_at = profile_timing.then(Instant::now);
-    let refining_groups: Vec<&ModeGroup> = groups
-        .iter()
-        .enumerate()
-        .filter(|&(group_index, _)| !group_is_redundant[group_index])
-        // A group whose `component_for_source_class` is constant induces a
-        // constant column (every state maps to the same component), which
-        // refines nothing. The state-order loop below already drops constant
-        // columns via `next_canon <= 1`, but only after materializing all
-        // `state_count` entries. Checking the far smaller source-class vector
-        // here skips that materialization entirely — decisive when there are
-        // many single-mode groups over a large state space (each such group
-        // otherwise costs a full `state_count` scan plus a full-column hash).
-        .filter(|&(_, group)| {
-            let components = &group.component_for_source_class;
-            match components.first() {
-                Some(&first) => components.iter().any(|&c| c != first),
-                None => false,
+        let mut intern = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
+        let classes = (0..state_count).map(|raw| {
+            let mut signature = SmallVec::new();
+            signature.push(key_for(raw as u32));
+            for (source_classes, components) in &domain_columns {
+                signature.push(u64::from(components[source_classes[raw] as usize]));
             }
-        })
-        .map(|(_, group)| group)
-        .collect();
-    // Resolve each refining group's innermost class slice once. `None` means an
-    // `Explicit` innermost map where the source class equals the raw state, so
-    // the per-state signature assembly below is a plain array index instead of
-    // re-walking any `Composed` transport chain.
-    let refining_slices: Vec<(Option<&[u32]>, &[u32])> = refining_groups
-        .iter()
-        .map(|group| {
-            let domain = &modes[group.domain_mode].scanner_state_for_original;
-            (
-                domain.innermost_class_for_original(),
-                group.component_for_source_class.as_slice(),
-            )
-        })
-        .collect();
-    // Component ids are exact equality labels within each group. Their numeric
-    // names do not matter: including the raw labels directly in the joint
-    // signature yields the same partition intersection. This avoids building,
-    // relabelling, hashing, and then rereading one full raw-state column per
-    // group.
-    let mut class_for_signature = FxHashMap::<SmallVec<[u64; 8]>, u32>::default();
-    let mut class_for_state = Vec::with_capacity(state_count);
-    for source_state in 0..state_count {
-        let mut signature = SmallVec::<[u64; 8]>::with_capacity(refining_slices.len() + 1);
-        signature.push(ordinary_coordinate_key(source_state));
-        for &(class_slice, components) in &refining_slices {
-            let source_class = match class_slice {
-                Some(slice) => slice[source_state] as usize,
-                None => source_state,
-            };
-            signature.push(components[source_class] as u64);
-        }
-        let next_class = class_for_signature.len() as u32;
-        let class = *class_for_signature.entry(signature).or_insert(next_class);
-        class_for_state.push(class);
-    }
-    let final_refinement_ms = final_refinement_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-
-    let class_count = class_for_state
-        .iter()
-        .copied()
-        .max()
-        .map_or(0usize, |class| class as usize + 1);
-    let mut representatives = vec![u32::MAX; class_count];
-    for (state, &class) in class_for_state.iter().enumerate() {
-        let representative = &mut representatives[class as usize];
-        if *representative == u32::MAX {
-            *representative = state as u32;
-        }
-    }
-
-    let quotient = ManyToOneIdMap::from_original_to_internal_with_representatives(
-        class_for_state,
-        class_count as u32,
-        representatives,
-    );
-    if profile_timing {
-        let group_source_class_counts = groups
-            .iter()
-            .map(|group| {
-                modes[group.domain_mode]
-                    .scanner_state_for_original
-                    .innermost_source_class_count()
-            })
-            .collect::<Vec<_>>();
-        let group_mode_counts = groups
-            .iter()
-            .map(|group| group.modes.len())
-            .collect::<Vec<_>>();
-        eprintln!(
-            "[glrmask/profile][transport_coordinate_quotient] modes={} groups={} macro_transport_groups={} sparse_tail_groups={} sparse_tail_atoms={} sparse_tail_default_cells={} sparse_tail_default_changes={} group_source_class_counts={:?} group_mode_counts={:?} source_class_mode_evaluations={} raw_state_group_lookups={} component_build_ms={:.3} final_refinement_ms={:.3} total_ms={:.3}",
-            modes.len(),
-            groups.len(),
-            macro_transport_groups,
-            sparse_tail_groups,
-            sparse_tail_atoms,
-            sparse_tail_default_cells,
-            sparse_tail_default_changes,
-            group_source_class_counts,
-            group_mode_counts,
-            source_class_mode_evaluations,
-            state_count * groups.len(),
-            component_build_ms,
-            final_refinement_ms,
-            total_started_at
-                .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-                .unwrap_or(0.0),
+            let next = intern.len() as u32;
+            *intern.entry(signature).or_insert(next)
+        }).collect::<Vec<_>>();
+        let mut state_map = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+            classes, intern.len() as u32,
         );
+        // Cluster the final TSIDs by ordinary coordinate for linear range lifts.
+        state_map.reorder_internal_by_representative_key(|raw| weight_coordinate(key_for(raw)));
+        if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
+            eprintln!(
+                "[glrmask/profile][transport_coordinate_quotient] modes={} families={} source_domains={} final_tsids={} total_ms={:.3}",
+                modes.len(), families.len(), domain_columns.len(),
+                state_map.num_internal_ids(), started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        Self { ordinary, modes, families, state_map }
     }
-    quotient
+
+    pub(super) fn into_state_map(self) -> ManyToOneIdMap {
+        self.state_map
+    }
+
+    fn pullbacks(&self, active_modes: &[usize]) -> (Vec<u32>, Vec<Vec<(u32, u32)>>) {
+        let final_sources = &self.state_map.representative_original_ids;
+        let ordinary = final_sources.iter().map(|&raw| {
+            weight_coordinate(transport_coordinate_key(self.ordinary, raw))
+        }).collect::<Vec<_>>();
+        let mut active = vec![false; self.modes.len()];
+        for &mode in active_modes {
+            active[mode] = true;
+        }
+        let mut output = vec![Vec::new(); self.modes.len()];
+        for family in &self.families {
+            family.populate_pullbacks(final_sources, &ordinary, &active, &mut output);
+        }
+        (ordinary, output)
+    }
 }
 
 /// Sparse final-coordinate lifting for post-DWA TI expansion.
@@ -3231,17 +3045,10 @@ fn finite_weight_token_cardinality(weight: &Weight) -> Option<u128> {
 }
 
 impl PostDwaWeightLifter {
-    fn new(
-        core_state_map: &ManyToOneIdMap,
-        final_state_map: &ManyToOneIdMap,
-        modes: &[TerminalNwaTransportMode],
-        active_mode_indices: &[usize],
-    ) -> Self {
-        let final_sources: Vec<u32> = final_state_map.iter_representative_ids().collect();
-        let ordinary_coordinates: Vec<u32> = final_sources
-            .iter()
-            .map(|&source| Self::core_coordinate(core_state_map, source))
-            .collect();
+    fn new(plan: &TransportCoordinatePlan<'_>, active_mode_indices: &[usize]) -> Self {
+        let (ordinary_coordinates, mode_deviations) = plan.pullbacks(active_mode_indices);
+        let final_sources = &plan.state_map.representative_original_ids;
+        let modes = plan.modes;
         // Precompute maximal contiguous runs of equal, non-MAX coordinates so
         // `base_lift` emits one range per run instead of iterating every final
         // TSID. MAX coordinates break runs (they are skipped when lifting).
@@ -3270,95 +3077,6 @@ impl PostDwaWeightLifter {
                 coordinate_runs.len()
             );
         }
-        let mut mode_deviations = vec![Vec::new(); modes.len()];
-        let mut sparse_mode_ready = vec![false; modes.len()];
-        let mut direct_modes_by_default = FxHashMap::<(usize, usize), Vec<usize>>::default();
-        for &mode_index in active_mode_indices {
-            if mode_index == 0 {
-                continue;
-            }
-            if let Some(default_key) = modes[mode_index]
-                .scanner_state_for_original
-                .direct_quotient_default_key()
-            {
-                direct_modes_by_default
-                    .entry(default_key)
-                    .or_default()
-                    .push(mode_index);
-            }
-        }
-
-        // A direct quotient has one shared default representative per source
-        // class and only sparse member-specific class deviations. Verify that
-        // the shared default preserves every final coordinate before using the
-        // deviation-only path; all other transport shapes retain the full scan.
-        for mode_indices in direct_modes_by_default.into_values() {
-            let domain = &modes[mode_indices[0]].scanner_state_for_original;
-            let default_preserves_ordinary = final_sources
-                .iter()
-                .enumerate()
-                .all(|(final_tsid, &source)| {
-                    let source_class = domain.innermost_source_class(source);
-                    Self::core_coordinate(
-                        core_state_map,
-                        domain.innermost_source_representative(source_class),
-                    ) == ordinary_coordinates[final_tsid]
-                });
-            if !default_preserves_ordinary {
-                continue;
-            }
-
-            let mut final_entries_by_source_class =
-                vec![Vec::<(u32, u32)>::new(); domain.innermost_source_class_count()];
-            for (final_tsid, &source) in final_sources.iter().enumerate() {
-                final_entries_by_source_class[domain.innermost_source_class(source)].push((
-                    final_tsid as u32,
-                    ordinary_coordinates[final_tsid],
-                ));
-            }
-            for mode_index in mode_indices {
-                let deviations = &mut mode_deviations[mode_index];
-                for &(input_class, output_class) in modes[mode_index]
-                    .scanner_state_for_original
-                    .quotient_deviations()
-                    .expect("direct quotient transport must expose deviations")
-                {
-                    let Some(entries) = final_entries_by_source_class.get(input_class as usize) else {
-                        continue;
-                    };
-                    let coordinate = Self::core_coordinate(
-                        core_state_map,
-                        domain.innermost_source_representative(output_class as usize),
-                    );
-                    deviations.extend(entries.iter().filter_map(
-                        |&(final_tsid, ordinary_coordinate)| {
-                            (coordinate != ordinary_coordinate)
-                                .then_some((final_tsid, coordinate))
-                        },
-                    ));
-                }
-                deviations.sort_unstable_by_key(|&(final_tsid, _)| final_tsid);
-                sparse_mode_ready[mode_index] = true;
-            }
-        }
-
-        for &mode_index in active_mode_indices {
-            if mode_index == 0 || sparse_mode_ready[mode_index] {
-                continue;
-            }
-            let mode = &modes[mode_index];
-            let deviations = &mut mode_deviations[mode_index];
-            for (final_tsid, &source) in final_sources.iter().enumerate() {
-                let coordinate = Self::core_coordinate(
-                    core_state_map,
-                    mode.scanner_state_for_original.scanner_state(source),
-                );
-                if coordinate != ordinary_coordinates[final_tsid] {
-                    deviations.push((final_tsid as u32, coordinate));
-                }
-            }
-        }
-
         if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
             let mut nonempty_modes = 0usize;
             let mut total_deviations = 0usize;
@@ -3398,15 +3116,6 @@ impl PostDwaWeightLifter {
             profile_override_ms: 0.0,
             profile_apply_ms: 0.0,
         }
-    }
-
-    #[inline]
-    fn core_coordinate(core_state_map: &ManyToOneIdMap, raw_state: u32) -> u32 {
-        core_state_map
-            .original_to_internal
-            .get(raw_state as usize)
-            .copied()
-            .unwrap_or(u32::MAX)
     }
 
     #[inline]
@@ -3641,12 +3350,12 @@ impl PostDwaWeightLifter {
 /// the start. It restores raw member labels at the dispatcher, then lifts each
 /// shared suffix weight to the exact union of its reachable transported
 /// final-coordinate behaviors.
-pub fn expand_representative_dwa_after_minimization(
+pub(super) fn expand_representative_dwa_after_minimization(
     core_dwa: &DWA,
-    core_state_map: &ManyToOneIdMap,
-    final_state_map: &ManyToOneIdMap,
-    modes: &[TerminalNwaTransportMode],
+    plan: &TransportCoordinatePlan<'_>,
 ) -> DWA {
+    let modes = plan.modes;
+    let final_state_map = &plan.state_map;
     let profile_timing = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
     let coordinate_setup_started_at = profile_timing.then(Instant::now);
     assert!(
@@ -3687,12 +3396,7 @@ pub fn expand_representative_dwa_after_minimization(
     // Drop modes whose first raw-member edge has no viable token flow. These
     // clones were unreachable in the old graph-copy construction and therefore
     // must not participate in a shared suffix-weight union.
-    let mut lifter = PostDwaWeightLifter::new(
-        core_state_map,
-        final_state_map,
-        modes,
-        &candidate_mode_indices,
-    );
+    let mut lifter = PostDwaWeightLifter::new(plan, &candidate_mode_indices);
     let coordinate_setup_ms = coordinate_setup_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
@@ -4786,6 +4490,21 @@ mod tests {
         assert_partition_invariants(&final_classes, &active);
     }
 
+    fn assert_literal_pullbacks(plan: &TransportCoordinatePlan<'_>) {
+        let active = (0..plan.modes.len()).collect::<Vec<_>>();
+        let (ordinary, changes) = plan.pullbacks(&active);
+        for (tsid, raw) in plan.state_map.iter_representative_ids().enumerate() {
+            for &mode in &active {
+                let actual = changes[mode].binary_search_by_key(&(tsid as u32), |&(state, _)| state)
+                    .map(|index| changes[mode][index].1).unwrap_or(ordinary[tsid]);
+                let expected = plan.ordinary.original_to_internal[
+                    plan.modes[mode].scanner_state(raw) as usize
+                ];
+                assert_eq!(actual, expected, "pullback disagreed at TSID {tsid} mode {mode}");
+            }
+        }
+    }
+
     #[test]
     fn transport_coordinate_quotient_matches_target_only_mode_signature() {
         let ordinary = ManyToOneIdMap::from_original_to_internal_with_representatives(
@@ -4796,12 +4515,12 @@ mod tests {
         let modes = vec![
             TerminalNwaTransportMode::ordinary(7),
             TerminalNwaTransportMode::member(
-                TransportScannerStateMap::Explicit(vec![1, 0, 3, 2, 5, 4, 6].into()),
+                TransportScannerStateMap::from_explicit(vec![1, 0, 3, 2, 5, 4, 6]),
                 0,
                 1,
             ),
             TerminalNwaTransportMode::member(
-                TransportScannerStateMap::Explicit(vec![2, 3, 0, 1, 6, 6, 4].into()),
+                TransportScannerStateMap::from_explicit(vec![2, 3, 0, 1, 6, 6, 4]),
                 2,
                 3,
             ),
@@ -4813,12 +4532,13 @@ mod tests {
                     .iter()
                     .map(|mode| {
                         ordinary.original_to_internal
-                            [mode.scanner_state_for_original.scanner_state(source as u32) as usize]
+                            [mode.scanner_state(source as u32) as usize]
                     })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        let quotient = transport_coordinate_quotient(&ordinary, &modes);
+        let plan = TransportCoordinatePlan::new(&ordinary, &modes);
+        let quotient = &plan.state_map;
         for left in 0..expected_signatures.len() {
             for right in 0..expected_signatures.len() {
                 assert_eq!(
@@ -4829,18 +4549,7 @@ mod tests {
             }
         }
 
-        canonicalize_transport_mode_states(&modes, &ordinary);
-        let canonical_quotient = transport_coordinate_quotient(&ordinary, &modes);
-        for left in 0..expected_signatures.len() {
-            for right in 0..expected_signatures.len() {
-                assert_eq!(
-                    canonical_quotient.original_to_internal[left]
-                        == canonical_quotient.original_to_internal[right],
-                    expected_signatures[left] == expected_signatures[right],
-                    "canonical target-only transport changed the quotient for states {left} and {right}",
-                );
-            }
-        }
+        assert_literal_pullbacks(&plan);
     }
 
     #[test]
@@ -4853,7 +4562,6 @@ mod tests {
         let class_for_original: Arc<[u32]> = vec![0, 1, 2, 3].into();
         let representative_for_class: Arc<[u32]> = vec![0, 1, 2, 3].into();
         let inner = Arc::new(TransportScannerStateMap::Quotient {
-            state_count: 4,
             class_for_original: Arc::clone(&class_for_original),
             representative_for_class: Arc::clone(&representative_for_class),
             source_class_for_target_deviations: vec![(0, 1), (1, 0)].into_boxed_slice(),
@@ -4875,14 +4583,15 @@ mod tests {
                     .iter()
                     .map(|mode| {
                         ordinary.original_to_internal
-                            [mode.scanner_state_for_original.scanner_state(source as u32) as usize]
+                            [mode.scanner_state(source as u32) as usize]
                     })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
 
         assert_ne!(expected_signatures[0], expected_signatures[1]);
-        let quotient = transport_coordinate_quotient(&ordinary, &modes);
+        let plan = TransportCoordinatePlan::new(&ordinary, &modes);
+        let quotient = &plan.state_map;
         for left in 0..expected_signatures.len() {
             for right in 0..expected_signatures.len() {
                 assert_eq!(
@@ -4892,6 +4601,57 @@ mod tests {
                 );
             }
         }
+        assert_literal_pullbacks(&plan);
+    }
+
+    #[test]
+    fn transport_family_defaults_and_sparse_rebasing_match_literal_vectors() {
+        let ordinary = ManyToOneIdMap::from_original_to_internal_allowing_unmapped(
+            vec![0, 0, 1, 1, 2, 2, u32::MAX, u32::MAX], 3,
+        );
+        let classes: Arc<[u32]> = (0..8).collect::<Vec<_>>().into();
+        let reps: Arc<[u32]> = (0..8).collect::<Vec<_>>().into();
+        let tail_reps: Arc<[u32]> = vec![2, 0, 4, 3, 1, 5, 7, 6].into();
+        let quotient = |representatives: &Arc<[u32]>, changes: &[(u32, u32)]| {
+            TransportScannerStateMap::Quotient {
+                class_for_original: Arc::clone(&classes),
+                representative_for_class: Arc::clone(representatives),
+                source_class_for_target_deviations: changes.into(),
+            }
+        };
+        let tail = Arc::new(quotient(&tail_reps, &[(0, 2), (2, 0)]));
+        let modes = vec![
+            TerminalNwaTransportMode::ordinary(8),
+            TerminalNwaTransportMode::member(quotient(&reps, &[(0, 2), (2, 0)]), 0, 1),
+            TerminalNwaTransportMode::member(quotient(&reps, &[(0, 2), (2, 0)]), 0, 2),
+            TerminalNwaTransportMode::member(quotient(&tail_reps, &[]), 0, 3),
+            TerminalNwaTransportMode::member(
+                TransportScannerStateMap::compose(
+                    Arc::clone(&tail), Arc::new(quotient(&reps, &[(1, 3), (3, 1)])),
+                ).as_ref().clone(), 0, 4,
+            ),
+            TerminalNwaTransportMode::member(
+                TransportScannerStateMap::compose(
+                    tail, Arc::new(quotient(&reps, &[])),
+                ).as_ref().clone(), 0, 5,
+            ),
+        ];
+        let plan = TransportCoordinatePlan::new(&ordinary, &modes);
+        let literal = |source| modes.iter().map(|mode| {
+            let raw = mode.scanner_state(source);
+            let coordinate = ordinary.original_to_internal[raw as usize];
+            (coordinate, (coordinate == u32::MAX).then_some(raw))
+        }).collect::<Vec<_>>();
+        for left in 0..8 {
+            for right in 0..8 {
+                assert_eq!(
+                    plan.state_map.original_to_internal[left as usize]
+                        == plan.state_map.original_to_internal[right as usize],
+                    literal(left) == literal(right),
+                );
+            }
+        }
+        assert_literal_pullbacks(&plan);
     }
 
     #[test]
@@ -4901,7 +4661,7 @@ mod tests {
             2,
             vec![0, 1],
         );
-        let member_map = TransportScannerStateMap::Explicit(vec![1, 0].into());
+        let member_map = TransportScannerStateMap::from_explicit(vec![1, 0]);
         let modes = vec![
             TerminalNwaTransportMode::ordinary(2),
             TerminalNwaTransportMode::member(member_map, 0, 1),
@@ -4932,12 +4692,8 @@ mod tests {
             0,
         );
 
-        let expanded = expand_representative_dwa_after_minimization(
-            &core,
-            &state_map,
-            &state_map,
-            &modes,
-        );
+        let plan = TransportCoordinatePlan::new(&state_map, &modes);
+        let expanded = expand_representative_dwa_after_minimization(&core, &plan);
         let member_word = expanded.eval_word(&[1, 2]);
         let ordinary_word = expanded.eval_word(&[0, 2]);
         assert!(member_word.tokens_for_tsid(0).contains(20));
@@ -4960,13 +4716,14 @@ mod tests {
         let modes = vec![
             TerminalNwaTransportMode::ordinary(3),
             TerminalNwaTransportMode::member(
-                TransportScannerStateMap::Explicit(vec![1, 0, 2].into()), 0, 1,
+                TransportScannerStateMap::from_explicit(vec![1, 0, 2]), 0, 1,
             ),
             TerminalNwaTransportMode::member(
-                TransportScannerStateMap::Explicit(vec![2, 1, 0].into()), 0, 2,
+                TransportScannerStateMap::from_explicit(vec![2, 1, 0]), 0, 2,
             ),
         ];
-        let mut lifter = PostDwaWeightLifter::new(&state_map, &state_map, &modes, &[0, 1, 2]);
+        let plan = TransportCoordinatePlan::new(&state_map, &modes);
+        let mut lifter = PostDwaWeightLifter::new(&plan, &[0, 1, 2]);
         let row = |tokens: &[u32]| -> Weight {
             Weight::from_uniform(
                 0..=2, tokens.iter().copied().collect::<range_set_blaze::RangeSetBlaze<_>>(),
@@ -4992,7 +4749,7 @@ mod tests {
             for tsid in 0..3 {
                 for token in [10, 20, 30] {
                     let expected = indices.iter().any(|&mode| {
-                        let target = modes[mode].scanner_state_for_original.scanner_state(tsid);
+                        let target = modes[mode].scanner_state(tsid);
                         gates[mode].tokens_for_tsid(tsid).contains(token)
                             && weight.tokens_for_tsid(target).contains(token)
                     });
@@ -5201,7 +4958,7 @@ mod tests {
             initial_state: 0,
         };
 
-        let (_, _, representatives) = topology.scanner_projection_from_internal_quotient(
+        let (_, representatives) = topology.scanner_projection_from_internal_quotient(
             Arc::from([0, 1]),
             Arc::from([0, 1]),
         );
