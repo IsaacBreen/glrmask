@@ -33,8 +33,8 @@ In the quickstart, supply the tokenizer's exact token bytes and the model's EOS 
 ## Quickstart
 
 ```cpp
-auto grammar = Grammar::from_json_schema(
-    R"({
+auto grammar = Grammar::from_json_schema(R"(
+    {
         "type": "object",
         "properties": {
             "color": {
@@ -45,8 +45,8 @@ auto grammar = Grammar::from_json_schema(
         },
         "required": ["color"],
         "additionalProperties": false
-    })"
-);
+    }
+)");
 
 // Token ID -> exact bytes from tokenizer
 Vocab vocab(token_bytes);
@@ -65,6 +65,75 @@ while (true) {
     output.push_back(token);
 }
 ```
+
+<details>
+<summary>Full example</summary>
+
+```cpp
+#include <glrmask.hpp>
+#include <iostream>
+#include <string>
+#include <vector>
+#include <stdexcept>
+using namespace glrmask;
+constexpr TokenId EOS = 256;
+std::vector<float> model(const std::vector<TokenId>& output) {
+    const std::string target = R"({"color": "blue"})";
+    std::vector<float> logits(257, -1.0f);
+    logits[output.size() < target.size() ? static_cast<TokenId>(target[output.size()]) : EOS] = 1;
+    return logits;
+}
+TokenId sample(const std::vector<float>& logits, const std::vector<std::uint32_t>& mask, bool accepting) {
+    TokenId token = 0;
+    bool found = false;
+    for (TokenId id = 0; id <= EOS; ++id) {
+        bool allowed = id == EOS ? accepting : ((mask[id / 32] >> (id % 32)) & 1) != 0;
+        if (allowed && (!found || logits[id] > logits[token])) { token = id; found = true; }
+    }
+    if (!found) throw std::runtime_error("no allowed token and cannot stop");
+    return token;
+}
+int main() {
+// Replace with your tokenizer's token bytes
+std::vector<VocabEntry> token_bytes;
+for (TokenId id = 0; id < 256; ++id) token_bytes.emplace_back(id, Bytes{static_cast<std::uint8_t>(id)});
+auto grammar = Grammar::from_json_schema(R"(
+    {
+        "type": "object",
+        "properties": {
+            "color": {
+                "enum": [
+                    "red", "green", "blue"
+                ]
+            }
+        },
+        "required": ["color"],
+        "additionalProperties": false
+    }
+)");
+
+// Token ID -> exact bytes from tokenizer
+Vocab vocab(token_bytes);
+auto constraint = grammar.compile(vocab);
+auto state = constraint.start();
+
+std::vector<TokenId> output;
+while (true) {
+    auto logits = model(output);
+    auto mask = state.mask();
+    auto token = sample(
+        logits, mask, state.is_accepting()
+    );
+    if (token == EOS) break;
+    if (!state.commit_token(token)) return 1;
+    output.push_back(token);
+}
+if (!state.is_accepting()) return 1;
+std::cout << std::string(output.begin(), output.end()) << '\n';
+}
+```
+
+</details>
 
 ## Learn more
 
@@ -103,16 +172,16 @@ sets](https://github.com/IsaacBreen/glrmask/blob/main/docs/token-sets.md).
 // Token ID -> exact bytes from tokenizer
 Vocab vocab(token_bytes);
 
-auto weather = Grammar::from_json_schema(
-    R"({
+auto weather = Grammar::from_json_schema(R"(
+    {
         "type": "object",
         "properties": {
             "city": {"type": "string"}
         },
         "required": ["city"],
         "additionalProperties": false
-    })"
-).compile(vocab);
+    }
+)").compile(vocab);
 
 auto parent = Grammar::from_glrm(R"(
     extern grammar ARGS
@@ -124,6 +193,47 @@ Module call(parent);
 call.bind("ARGS", weather);
 auto constraint = call.compile(vocab);
 ```
+
+<details>
+<summary>Full example</summary>
+
+```cpp
+#include <glrmask.hpp>
+#include <cassert>
+using namespace glrmask;
+int main() {
+// Replace with your tokenizer's token bytes
+std::vector<VocabEntry> token_bytes;
+for (TokenId id=0; id<256; ++id) token_bytes.emplace_back(id, Bytes{static_cast<std::uint8_t>(id)});
+// Token ID -> exact bytes from tokenizer
+Vocab vocab(token_bytes);
+
+auto weather = Grammar::from_json_schema(R"(
+    {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string"}
+        },
+        "required": ["city"],
+        "additionalProperties": false
+    }
+)").compile(vocab);
+
+auto parent = Grammar::from_glrm(R"(
+    extern grammar ARGS
+    start call
+    nt call = "<weather>" ARGS
+              "</weather>"
+)");
+Module call(parent);
+call.bind("ARGS", weather);
+auto constraint = call.compile(vocab);
+auto state = constraint.start();
+if (!state.commit_bytes(R"(<weather>{"city": "Perth"}</weather>)") || !state.is_accepting()) return 1;
+}
+```
+
+</details>
 
 On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Constraint`, `Expr`, or `TokenSet`. It changes the module in
 place; if it fails, nothing changes. Copy a module first to bind the same one in different ways. `externs().unbound()` lists the unbound names.

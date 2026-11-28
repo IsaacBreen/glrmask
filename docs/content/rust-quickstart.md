@@ -9,9 +9,10 @@
 #         .max_by(|&a, &b| logits[a as usize].total_cmp(&logits[b as usize])).expect("no allowed token and cannot stop")
 # }
 # fn main() -> glrmask::Result<()> {
+# // Replace with your tokenizer's token bytes
 # let token_bytes = (0..256u32).map(|id| (id, vec![id as u8]));
-let grammar = Grammar::from_json_schema(
-    r#"{
+let grammar = Grammar::from_json_schema(r#"
+    {
         "type": "object",
         "properties": {
             "color": {
@@ -22,8 +23,8 @@ let grammar = Grammar::from_json_schema(
         },
         "required": ["color"],
         "additionalProperties": false
-    }"#,
-)?;
+    }
+"#)?;
 
 // Token ID -> exact bytes from tokenizer
 let vocab = Vocab::new(token_bytes)?;

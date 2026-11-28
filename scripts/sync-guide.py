@@ -9,7 +9,7 @@ import re
 import sys
 import subprocess
 import tomllib
-from example_content import visible_example
+from example_content import expandable_example, full_example
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTENT = ROOT / 'docs/content'
@@ -77,9 +77,9 @@ def install(language, heading, note=''):
     return f'{heading}\n\n```bash\n{command}\n```{tail}'
 
 
-def example(name, rustdoc=False):
+def example(name, rustdoc=False, full=False):
     source = read(name)
-    return source if rustdoc else visible_example(source)
+    return source if rustdoc else full_example(source) if full else expandable_example(source)
 
 
 def quickstart(language, heading, rustdoc=False):
@@ -182,7 +182,8 @@ def python_module_source(path):
     first = ast.parse(source).body[0]
     assert isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str)
     prose = '\n\n'.join([read('introduction'), install('python', '## Installation'),
-                            '## Usage\n\n' + read('usage'), quickstart('python', '## Quickstart'), composition_section(languages=('python',)),
+                            '## Usage\n\n' + read('usage'), '## Quickstart\n\n' + example('python-quickstart', full=True),
+                            '## Composing grammars\n\n' + read('composition') + '\n\n' + example('python-composition', full=True),
                             '## Learn more\n\n[Full guide](' + REPO + '/blob/main/GUIDE.md) · [API reference](' + WEBSITE + '/api/python/)'])
     return '"""' + prose + '\n"""\n' + ''.join(source.splitlines(keepends=True)[first.end_lineno:])
 

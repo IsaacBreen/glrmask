@@ -1,6 +1,7 @@
 ```js
 // [hidden]
 import { Vocab, Grammar, Module } from '@glrmask/node';
+// Replace with your tokenizer's token bytes
 const tokenBytes = Array.from({ length: 256 }, (_, id) => [id, Uint8Array.of(id)]);
 // [/hidden]
 // Token ID -> exact bytes from tokenizer

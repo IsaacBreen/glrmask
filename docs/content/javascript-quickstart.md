@@ -1,6 +1,7 @@
 ```js
 // [hidden]
 import { Vocab, Grammar } from '@glrmask/node';
+// Replace with your tokenizer's token bytes
 const tokenBytes = Array.from({ length: 256 }, (_, id) => [id, Uint8Array.of(id)]);
 const EOS = 256;
 const target = Buffer.from('{"color": "blue"}');

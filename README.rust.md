@@ -30,8 +30,8 @@ In the quickstart, supply the tokenizer's exact token bytes and the model's EOS 
 ## Quickstart
 
 ```rust
-let grammar = Grammar::from_json_schema(
-    r#"{
+let grammar = Grammar::from_json_schema(r#"
+    {
         "type": "object",
         "properties": {
             "color": {
@@ -42,8 +42,8 @@ let grammar = Grammar::from_json_schema(
         },
         "required": ["color"],
         "additionalProperties": false
-    }"#,
-)?;
+    }
+"#)?;
 
 // Token ID -> exact bytes from tokenizer
 let vocab = Vocab::new(token_bytes)?;
@@ -63,6 +63,62 @@ loop {
 }
 ```
 
+<details>
+<summary>Full example</summary>
+
+```rust
+use glrmask::{Grammar, Vocab};
+const EOS: u32 = 256;
+fn model(output: &[u32]) -> Vec<f32> {
+    (0..257).map(|t| ((t * 7919 + output.len() * 104_729) % 1000) as f32).collect()
+}
+fn sample(logits: &[f32], mask: &[u32], accepting: bool) -> u32 {
+    (0..=EOS).filter(|&id| if id == EOS { accepting } else { mask[id as usize / 32] >> (id % 32) & 1 == 1 })
+        .max_by(|&a, &b| logits[a as usize].total_cmp(&logits[b as usize])).expect("no allowed token and cannot stop")
+}
+fn main() -> glrmask::Result<()> {
+// Replace with your tokenizer's token bytes
+let token_bytes = (0..256u32).map(|id| (id, vec![id as u8]));
+let grammar = Grammar::from_json_schema(r#"
+    {
+        "type": "object",
+        "properties": {
+            "color": {
+                "enum": [
+                    "red", "green", "blue"
+                ]
+            }
+        },
+        "required": ["color"],
+        "additionalProperties": false
+    }
+"#)?;
+
+// Token ID -> exact bytes from tokenizer
+let vocab = Vocab::new(token_bytes)?;
+let constraint = grammar.compile(&vocab)?;
+let mut state = constraint.start();
+
+let mut output = Vec::new();
+loop {
+    let logits = model(&output);
+    let mask = state.mask();
+    let token = sample(
+        &logits, &mask, state.is_accepting()
+    );
+    if token == EOS { break; }
+    assert!(state.commit_token(token));
+    output.push(token);
+}
+assert!(state.is_accepting());
+let bytes: Vec<u8> = output.into_iter().map(|t| t as u8).collect();
+println!("{}", String::from_utf8_lossy(&bytes));
+Ok(())
+}
+```
+
+</details>
+
 ## Composing grammars
 
 In a typical serving setup, a grammar constraint is one main grammar with smaller grammars nested inside it, some of which, like tool schemas, change from request to request. GLRMask is built to make this kind of composition cheap. Like modules in a program, grammars can be written and compiled as separate parts and combined later.
@@ -75,16 +131,16 @@ Resolving the interactions between them requires some extra *boundary* work. How
 // Token ID -> exact bytes from tokenizer
 let vocab = Vocab::new(token_bytes)?;
 
-let weather = Grammar::from_json_schema(
-    r#"{
+let weather = Grammar::from_json_schema(r#"
+    {
         "type": "object",
         "properties": {
             "city": {"type": "string"}
         },
         "required": ["city"],
         "additionalProperties": false
-    }"#,
-)?.compile(&vocab)?;
+    }
+"#)?.compile(&vocab)?;
 
 let parent = Grammar::from_glrm(r#"
     extern grammar ARGS
@@ -96,6 +152,46 @@ let mut call = Module::new(&parent);
 call.bind("ARGS", &weather)?;
 let constraint = call.compile(&vocab)?;
 ```
+
+<details>
+<summary>Full example</summary>
+
+```rust
+use glrmask::{Grammar, Module, Vocab};
+fn main() -> glrmask::Result<()> {
+// Replace with your tokenizer's token bytes
+let token_bytes = (0..256u32).map(|id| (id, vec![id as u8]));
+// Token ID -> exact bytes from tokenizer
+let vocab = Vocab::new(token_bytes)?;
+
+let weather = Grammar::from_json_schema(r#"
+    {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string"}
+        },
+        "required": ["city"],
+        "additionalProperties": false
+    }
+"#)?.compile(&vocab)?;
+
+let parent = Grammar::from_glrm(r#"
+    extern grammar ARGS
+    start call
+    nt call = "<weather>" ARGS
+              "</weather>"
+"#)?;
+let mut call = Module::new(&parent);
+call.bind("ARGS", &weather)?;
+let constraint = call.compile(&vocab)?;
+let mut state = constraint.start();
+assert!(state.commit_bytes(b"<weather>{\"city\": \"Perth\"}</weather>"));
+assert!(state.is_accepting());
+Ok(())
+}
+```
+
+</details>
 
 ## Learn more
 

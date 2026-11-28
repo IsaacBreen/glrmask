@@ -24,11 +24,12 @@ TokenId sample(const std::vector<float>& logits, const std::vector<std::uint32_t
     return token;
 }
 int main() {
+// Replace with your tokenizer's token bytes
 std::vector<VocabEntry> token_bytes;
 for (TokenId id = 0; id < 256; ++id) token_bytes.emplace_back(id, Bytes{static_cast<std::uint8_t>(id)});
 // [/hidden]
-auto grammar = Grammar::from_json_schema(
-    R"({
+auto grammar = Grammar::from_json_schema(R"(
+    {
         "type": "object",
         "properties": {
             "color": {
@@ -39,8 +40,8 @@ auto grammar = Grammar::from_json_schema(
         },
         "required": ["color"],
         "additionalProperties": false
-    })"
-);
+    }
+)");
 
 // Token ID -> exact bytes from tokenizer
 Vocab vocab(token_bytes);

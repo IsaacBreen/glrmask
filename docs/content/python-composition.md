@@ -1,6 +1,7 @@
 ```python
 # [hidden]
 from glrmask import Grammar, Module, Vocab
+# Replace with your tokenizer's token bytes
 token_bytes = {i: bytes([i]) for i in range(256)}
 # [/hidden]
 # Token ID -> exact bytes from tokenizer

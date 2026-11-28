@@ -135,11 +135,65 @@ while True:
     output.append(token)
 ```
 
+<details>
+<summary>Full example</summary>
+
+```python
+from glrmask import Grammar, Vocab
+import numpy as np
+
+# Replace with your tokenizer's token bytes
+token_bytes = {i: bytes([i]) for i in range(256)}
+EOS = 256
+rng = np.random.default_rng(0)
+def model(output):
+    return rng.standard_normal(257)
+def sample(logits, mask, accepting):
+    allowed = np.zeros(len(logits), dtype=bool)
+    bits = np.unpackbits(mask.astype('<u4').view(np.uint8), bitorder='little')
+    allowed[:EOS] = bits[:EOS]
+    allowed[EOS] = accepting
+    if not allowed.any():
+        raise RuntimeError('no allowed token and cannot stop')
+    return int(np.argmax(np.where(allowed, logits, -np.inf)))
+grammar = Grammar.from_json_schema({
+    "type": "object",
+    "properties": {
+        "color": {
+            "enum": ["red", "green", "blue"]
+        }
+    },
+    "required": ["color"],
+    "additionalProperties": False,
+})
+
+# Token ID -> exact bytes from tokenizer
+vocab = Vocab(token_bytes)
+state = grammar.compile(vocab).start()
+
+output = []
+while True:
+    logits = model(output)
+    mask = state.mask()
+    token = sample(
+        logits, mask, state.is_accepting()
+    )
+    if token == EOS:
+        break
+    if not state.commit_token(token):
+        raise RuntimeError("Rejected token")
+    output.append(token)
+assert state.is_accepting()
+print(bytes(output).decode())
+```
+
+</details>
+
 ### Rust quickstart
 
 ```rust
-let grammar = Grammar::from_json_schema(
-    r#"{
+let grammar = Grammar::from_json_schema(r#"
+    {
         "type": "object",
         "properties": {
             "color": {
@@ -150,8 +204,8 @@ let grammar = Grammar::from_json_schema(
         },
         "required": ["color"],
         "additionalProperties": false
-    }"#,
-)?;
+    }
+"#)?;
 
 // Token ID -> exact bytes from tokenizer
 let vocab = Vocab::new(token_bytes)?;
@@ -170,6 +224,62 @@ loop {
     output.push(token);
 }
 ```
+
+<details>
+<summary>Full example</summary>
+
+```rust
+use glrmask::{Grammar, Vocab};
+const EOS: u32 = 256;
+fn model(output: &[u32]) -> Vec<f32> {
+    (0..257).map(|t| ((t * 7919 + output.len() * 104_729) % 1000) as f32).collect()
+}
+fn sample(logits: &[f32], mask: &[u32], accepting: bool) -> u32 {
+    (0..=EOS).filter(|&id| if id == EOS { accepting } else { mask[id as usize / 32] >> (id % 32) & 1 == 1 })
+        .max_by(|&a, &b| logits[a as usize].total_cmp(&logits[b as usize])).expect("no allowed token and cannot stop")
+}
+fn main() -> glrmask::Result<()> {
+// Replace with your tokenizer's token bytes
+let token_bytes = (0..256u32).map(|id| (id, vec![id as u8]));
+let grammar = Grammar::from_json_schema(r#"
+    {
+        "type": "object",
+        "properties": {
+            "color": {
+                "enum": [
+                    "red", "green", "blue"
+                ]
+            }
+        },
+        "required": ["color"],
+        "additionalProperties": false
+    }
+"#)?;
+
+// Token ID -> exact bytes from tokenizer
+let vocab = Vocab::new(token_bytes)?;
+let constraint = grammar.compile(&vocab)?;
+let mut state = constraint.start();
+
+let mut output = Vec::new();
+loop {
+    let logits = model(&output);
+    let mask = state.mask();
+    let token = sample(
+        &logits, &mask, state.is_accepting()
+    );
+    if token == EOS { break; }
+    assert!(state.commit_token(token));
+    output.push(token);
+}
+assert!(state.is_accepting());
+let bytes: Vec<u8> = output.into_iter().map(|t| t as u8).collect();
+println!("{}", String::from_utf8_lossy(&bytes));
+Ok(())
+}
+```
+
+</details>
 
 ## Generating
 
@@ -221,20 +331,52 @@ call.bind("ARGS", weather)
 constraint = call.compile(vocab)
 ```
 
+<details>
+<summary>Full example</summary>
+
+```python
+from glrmask import Grammar, Module, Vocab
+# Replace with your tokenizer's token bytes
+token_bytes = {i: bytes([i]) for i in range(256)}
+# Token ID -> exact bytes from tokenizer
+vocab = Vocab(token_bytes)
+
+weather = Grammar.from_json_schema({
+    "type": "object",
+    "properties": {
+        "city": {"type": "string"}
+    },
+    "required": ["city"],
+    "additionalProperties": False,
+}).compile(vocab)
+
+parent = Grammar.from_glrm('''
+    extern grammar ARGS
+    start call
+    nt call = "<weather>" ARGS
+              "</weather>"
+''')
+call = Module(parent)
+call.bind("ARGS", weather)
+constraint = call.compile(vocab)
+```
+
+</details>
+
 ```rust
 // Token ID -> exact bytes from tokenizer
 let vocab = Vocab::new(token_bytes)?;
 
-let weather = Grammar::from_json_schema(
-    r#"{
+let weather = Grammar::from_json_schema(r#"
+    {
         "type": "object",
         "properties": {
             "city": {"type": "string"}
         },
         "required": ["city"],
         "additionalProperties": false
-    }"#,
-)?.compile(&vocab)?;
+    }
+"#)?.compile(&vocab)?;
 
 let parent = Grammar::from_glrm(r#"
     extern grammar ARGS
@@ -246,6 +388,46 @@ let mut call = Module::new(&parent);
 call.bind("ARGS", &weather)?;
 let constraint = call.compile(&vocab)?;
 ```
+
+<details>
+<summary>Full example</summary>
+
+```rust
+use glrmask::{Grammar, Module, Vocab};
+fn main() -> glrmask::Result<()> {
+// Replace with your tokenizer's token bytes
+let token_bytes = (0..256u32).map(|id| (id, vec![id as u8]));
+// Token ID -> exact bytes from tokenizer
+let vocab = Vocab::new(token_bytes)?;
+
+let weather = Grammar::from_json_schema(r#"
+    {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string"}
+        },
+        "required": ["city"],
+        "additionalProperties": false
+    }
+"#)?.compile(&vocab)?;
+
+let parent = Grammar::from_glrm(r#"
+    extern grammar ARGS
+    start call
+    nt call = "<weather>" ARGS
+              "</weather>"
+"#)?;
+let mut call = Module::new(&parent);
+call.bind("ARGS", &weather)?;
+let constraint = call.compile(&vocab)?;
+let mut state = constraint.start();
+assert!(state.commit_bytes(b"<weather>{\"city\": \"Perth\"}</weather>"));
+assert!(state.is_accepting());
+Ok(())
+}
+```
+
+</details>
 
 ### Modules and expressions
 
