@@ -81,13 +81,9 @@ use crate::compiler::stages::parser_dwa::{
     try_build_direct_regular_parser_top_accept_parts, try_build_immediate_parser_dwa,
     try_build_immediate_terminal_completion_weights,
 };
-use crate::compiler::stages::templates::{Templates, commit_template_dfas_enabled};
+use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::{
     try_characterize_terminals_profiled,
-};
-use crate::compiler::stages::templates::compile_dfa::{
-    specialize_template_dfa_defaults_for_commit_split_input,
-    try_split_commit_template_dfas,
 };
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
@@ -3275,43 +3271,10 @@ fn build_templates_for_compile(
     _ignore_terminal: Option<u32>,
 ) -> Result<(
     Templates,
-    Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
     f64,
 ), String> {
     let templates_started_at = Instant::now();
-    if analyzed_grammar.direct_regular_automaton.is_some()
-        && !commit_template_dfas_enabled()
-    {
-        let templates_ms = elapsed_ms(templates_started_at);
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][templates_direct_regular] terminals={} skipped=true reason=no_commit_template_dfas total_ms={:.3}",
-                analyzed_grammar.num_terminals,
-                templates_ms,
-            );
-        }
-        return Ok((
-            Templates::default(),
-            vec![None; analyzed_grammar.num_terminals as usize],
-            templates_ms,
-        ));
-    }
-    if analyzed_grammar.direct_regular_automaton.is_some()
-        && let Some(templates) =
-            Templates::from_direct_regular_table(table, analyzed_grammar.num_terminals)
-    {
-        let mut template_dfas_by_terminal = vec![None; analyzed_grammar.num_terminals as usize];
-        let commit_template_dfas_enabled = commit_template_dfas_enabled();
-        let mut commit_template_dfas_built = 0usize;
-        if commit_template_dfas_enabled {
-            for (&terminal, dfa) in &templates.by_terminal {
-                if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
-                    let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
-                    if let Some(split_commit_dfas) =
-                        try_split_commit_template_dfas(&commit_dfa)
-                    {
-                        *slot = Some(Arc::new(split_commit_dfas));
-                        commit_template_dfas_built += 1;
+    let (characterizations, characterization_profile)+= 1;
                     }
                 }
             }
@@ -3334,15 +3297,12 @@ fn build_templates_for_compile(
                 templates.by_terminal.len(),
                 dfa_states,
                 dfa_transitions,
-                commit_template_dfas_enabled,
-                commit_template_dfas_built,
-                templates_ms,
+                        templates_ms,
             );
         }
         return Ok((
             templates,
-            template_dfas_by_terminal,
-            templates_ms,
+                templates_ms,
         ));
     }
 
@@ -3352,33 +3312,9 @@ fn build_templates_for_compile(
     let (templates, template_profile) =
         Templates::try_from_characterizations_profiled(&characterizations)?;
     drop(characterizations);
-    let mut template_dfas_by_terminal = vec![None; analyzed_grammar.num_terminals as usize];
-    let commit_template_dfas_enabled = commit_template_dfas_enabled();
-    let mut commit_template_dfas_built = 0usize;
-    let mut commit_template_dfas_skipped = 0usize;
-    let mut commit_template_specialize_ms = 0.0;
-    let mut commit_template_split_ms = 0.0;
-    if commit_template_dfas_enabled {
-        for (&terminal, dfa) in &templates.by_terminal {
-            if let Some(slot) = template_dfas_by_terminal.get_mut(terminal as usize) {
-                let specialize_started_at = Instant::now();
-                let commit_dfa = specialize_template_dfa_defaults_for_commit_split_input(dfa);
-                commit_template_specialize_ms += elapsed_ms(specialize_started_at);
-                let split_started_at = Instant::now();
-                let split_commit_dfas = try_split_commit_template_dfas(&commit_dfa);
-                commit_template_split_ms += elapsed_ms(split_started_at);
-                let Some(split_commit_dfas) = split_commit_dfas else {
-                    commit_template_dfas_skipped += 1;
-                    continue;
-                };
-                *slot = Some(Arc::new(split_commit_dfas));
-                commit_template_dfas_built += 1;
-            }
-        }
-    }
     if compile_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][templates] terminals={} action_signature_classes={} action_quotient_hits={} max_action_signature_multiplicity={} characterization_signature_ms={:.3} characterization_ms={:.3} characterization_fanout_ms={:.3} characterization_validation_ms={:.3} characterization_total_ms={:.3} characterization_quotient_disabled={} unique_characterizations={} compiled_characterizations={} template_quotient_hits={} max_characterization_multiplicity={} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} template_fanout_ms={:.3} template_validation_ms={:.3} template_total_ms={:.3} template_wall_ms={:.3} template_minimize_skipped={} avg_nfa_states={:.2} avg_nfa_transitions={:.2} avg_premin_dfa_states={:.2} avg_premin_dfa_transitions={:.2} avg_dfa_states={:.2} avg_dfa_transitions={:.2} max_dfa_states={} max_dfa_transitions={} commit_template_dfas_enabled={} commit_template_dfas_built={} commit_template_dfas_skipped={} commit_template_specialize_ms={:.3} commit_template_split_ms={:.3}",
+            "[glrmask/profile][templates] terminals={} action_signature_classes={} action_quotient_hits={} max_action_signature_multiplicity={} characterization_signature_ms={:.3} characterization_ms={:.3} characterization_fanout_ms={:.3} characterization_validation_ms={:.3} characterization_total_ms={:.3} characterization_quotient_disabled={} unique_characterizations={} compiled_characterizations={} template_quotient_hits={} max_characterization_multiplicity={} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} template_fanout_ms={:.3} template_validation_ms={:.3} template_total_ms={:.3} template_wall_ms={:.3} template_minimize_skipped={} avg_nfa_states={:.2} avg_nfa_transitions={:.2} avg_premin_dfa_states={:.2} avg_premin_dfa_transitions={:.2} avg_dfa_states={:.2} avg_dfa_transitions={:.2} max_dfa_states={} max_dfa_transitions={}",
             characterization_profile.terminals,
             characterization_profile.unique_action_signatures,
             characterization_profile.quotient_hits,
@@ -3409,16 +3345,10 @@ fn build_templates_for_compile(
             template_profile.avg_dfa_transitions(),
             template_profile.max_dfa_states,
             template_profile.max_dfa_transitions,
-            commit_template_dfas_enabled,
-            commit_template_dfas_built,
-            commit_template_dfas_skipped,
-            commit_template_specialize_ms,
-            commit_template_split_ms,
         );
     }
     Ok((
         templates,
-        template_dfas_by_terminal,
         elapsed_ms(templates_started_at),
     ))
 }
@@ -3503,7 +3433,6 @@ struct TerminalDagResult {
 
 struct TemplatesDagResult {
     templates: Templates,
-    template_dfas_by_terminal: Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
         templates_ms: f64,
     templates_started_ms: f64,
     templates_finished_ms: f64,
@@ -4565,11 +4494,11 @@ impl TableStage {
 
     fn templates(&self, grammar: &GrammarDef, analysis: &AnalysisDagLane, compile_started_at: Instant) -> crate::Result<TemplatesDagResult> {
         let templates_started_ms = elapsed_ms(compile_started_at);
-        let (templates, template_dfas_by_terminal, templates_ms) =
+        let (templates, templates_ms) =
             build_templates_for_compile(&self.table, &analysis.analyzed_grammar, grammar.ignore_terminal)
                 .map_err(crate::Error::classify_template_compile_message)?;
         Ok(TemplatesDagResult {
-            templates, template_dfas_by_terminal,
+            templates,
             templates_ms, templates_started_ms, templates_finished_ms: elapsed_ms(compile_started_at),
         })
     }
@@ -4741,7 +4670,7 @@ fn compile_prepared_with_profile_and_table_construction(
             classify_finished_ms, terminal_dwa_started_ms, terminal_dwa_finished_ms,
         } = terminal;
         let TemplatesDagResult {
-            templates, template_dfas_by_terminal,
+            templates,
             templates_ms, templates_started_ms, templates_finished_ms,
         } = templates;
         let mut templates = Some(templates);

@@ -42,17 +42,6 @@ pub(crate) fn report_macro_item_timings(label: &str, timings_ms: &[f64]) {
     );
 }
 
-/// Commit-template automata remain an explicit experimental opt-in. They must
-/// not change ordinary static compilation unless the caller requests them.
-/// The disable flag wins so an operator always has an unambiguous rollback
-/// switch when testing the feature.
-pub fn commit_template_dfas_enabled() -> bool {
-    if env_flag("GLRMASK_DISABLE_COMMIT_TEMPLATE_DFAS") == Some(true) {
-        return false;
-    }
-    env_flag("GLRMASK_ENABLE_COMMIT_TEMPLATE_DFAS").unwrap_or(false)
-}
-
 /// Expensive compiler algorithm equivalence checks are validation work, not
 /// template construction. Unit tests always run them; integration tests/CI
 /// opt in explicitly. Runtime admission and input validation are independent.
