@@ -28,11 +28,11 @@ def test_hf_vocab_duck_typed():
     for vocab in [Vocab.from_tokenizer_json(tokenizer_json(), 5),
                   Vocab.from_huggingface(backend, 5),
                   Vocab.from_huggingface(SimpleNamespace(backend_tokenizer=backend), 5)]:
-        for token, spelling in [(0, b"a"), (1, b"\xff")]:
+        for token, spelling in [(0, b"a"), (1, b"\xff"), (3, b"<ordinary>")]:
             state = Grammar.from_expr(Expr.literal(spelling)).compile(vocab).start()
             assert state.commit_token(token)
             assert state.is_accepting()
-        for token in (2, 3, 4):
+        for token in (2, 4):
             state = Grammar.from_expr(Expr.sequence(TokenSet([token]))).compile(vocab).start()
             assert state.commit_token(token)
             assert state.is_accepting()
