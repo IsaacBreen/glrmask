@@ -780,12 +780,12 @@ pub(crate) fn build_exact_component_boundary_trigger(
         .collect::<Vec<_>>();
     programs.extend(source_controls);
     used_terminals.extend(controls.iter().copied());
-    let (templates, classes) = crate::template_parser::static_compile::prepare_scoped_boundary_programs(
-        &programs, parser.state_count, &used_terminals).map_err(|error| error.to_string())?;
+    let programs = crate::template_parser::static_compile::prepare_scoped_boundary_programs(
+        &programs, parser.state_count, &used_terminals, None).map_err(|error| error.to_string())?;
     let lexical = determinize(&terminal_nwa)
         .map_err(|error| format!("exact trigger lexical determinization: {error:?}"))?;
     let output = crate::compiler::boundary_transfer::template_program::compile_classed(
-        &templates, &controls, None, &lexical, &classes)?;
+        &programs, &controls, None, &lexical, None)?;
     Ok(Some(output.parser_dwa))
 }
 

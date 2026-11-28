@@ -5,6 +5,7 @@
 //! No LR table, parser action row, or grammar production is consulted here.
 use super::*;
 use std::sync::Arc;
+use crate::template_parser::static_compile::ClassedPrograms;
 type TemplateInventory = BTreeMap<u32, Arc<TemplateTopology>>;
 
 fn minimize_symbolic_class_boundary(graph: DWA) -> DWA {
@@ -75,57 +76,38 @@ fn compile_compact_classed(
     compile_shared_classed(templates,admissions,controls,Some(max_controls),lexical,classes,context)
 }
 
-/// Immutable construction-only alphabet conversion shared by the lexical
-/// shards of one link. It contains no coefficients or assembled parser query.
-pub(crate) struct PreparedClassedPrograms {
-    ids: BTreeMap<(bool,u32),usize>,
-    templates: Vec<Arc<TemplateTopology>>,
-}
-
-pub(crate) fn prepare_classed_programs(
-    templates:&TemplateInventory,admissions:Option<&TemplateInventory>,
-    classes:&glrmask_parser_dwa::__private::pop_classes::PopLabelClasses,
-)->Option<PreparedClassedPrograms> {
-    let mut ids = BTreeMap::new();
-    let mut dense_templates = Vec::<Arc<TemplateTopology>>::new();
-    let mut by_source = rustc_hash::FxHashMap::<usize, usize>::default();
-    for (admission, inventory) in std::iter::once((false, templates)).chain(admissions.map(|a| (true, a))) {
-        for (&terminal, source) in inventory {
-            let identity = Arc::as_ptr(source) as usize;
-            let index = if let Some(&index) = by_source.get(&identity) { index } else {
-                let mut dense = (**source).clone();
-                dense.remap_labels(|label| {
-                    if label >= classes.symbol_count() as i32 {
-                        let index = crate::compiler::glr::labels::DEFAULT_LABEL.checked_sub(1)?.checked_sub(label)?;
-                        if index < 0 || index as usize >= classes.len() { return None; }
-                        Some(classes.symbol_count() as i32 + index)
-                    } else { Some(label) }
-                })?;
-                let index = dense_templates.len();
-                dense_templates.push(Arc::new(dense));
-                by_source.insert(identity, index);
-                index
-            };
-            ids.insert((admission, terminal), index);
+/// Retain the expanded graph constructor as an independent reference. Test
+/// fixtures enter the same dense topology coordinate as production.
+#[cfg(test)]
+fn reference_inventory(templates: &TemplateInventory, admissions: Option<&TemplateInventory>,
+    classes: &glrmask_parser_dwa::__private::pop_classes::PopLabelClasses) -> Option<ClassedPrograms> {
+    let mut result = ClassedPrograms::new(classes.clone(), admissions.is_some());
+    for (&terminal, graph) in templates {
+        let id = result.insert_graph((**graph).clone()).ok()?;
+        result.ordinary.insert(terminal, id);
+    }
+    if let Some(admissions) = admissions {
+        for (&terminal, graph) in admissions {
+            let id = result.insert_graph((**graph).clone()).ok()?;
+            result.admissions.as_mut()?.insert(terminal, id);
         }
     }
-    Some(PreparedClassedPrograms { ids,templates:dense_templates })
+    Some(result)
 }
 
+#[cfg(test)]
 fn compile_shared_classed(
-    templates:&TemplateInventory,admissions:Option<&TemplateInventory>,controls:&[u32],
-    max_controls:Option<u32>,lexical:&DWA,classes:&glrmask_parser_dwa::__private::pop_classes::PopLabelClasses,
-    context:Option<&crate::compiler::stages::parser_dwa::FiniteParserReadSupport>,
-)->Option<SignedShardOutput> {
-    compile_shared_classed_prepared(templates,admissions,controls,max_controls,lexical,classes,context,None)
+    templates: &TemplateInventory, admissions: Option<&TemplateInventory>, controls: &[u32],
+    max_controls: Option<u32>, lexical: &DWA, classes: &glrmask_parser_dwa::__private::pop_classes::PopLabelClasses,
+    context: Option<&crate::compiler::stages::parser_dwa::FiniteParserReadSupport>,
+) -> Option<SignedShardOutput> {
+    compile_inventory(&reference_inventory(templates, admissions, classes)?, controls, max_controls, lexical, context)
 }
 
-fn compile_shared_classed_prepared(
-    templates:&TemplateInventory,admissions:Option<&TemplateInventory>,controls:&[u32],
-    max_controls:Option<u32>,lexical:&DWA,classes:&glrmask_parser_dwa::__private::pop_classes::PopLabelClasses,
-    context:Option<&crate::compiler::stages::parser_dwa::FiniteParserReadSupport>,
-    prepared:Option<&PreparedClassedPrograms>,
-)->Option<SignedShardOutput> {
+fn compile_inventory(
+    programs: &ClassedPrograms, controls: &[u32], max_controls: Option<u32>, lexical: &DWA,
+    context: Option<&crate::compiler::stages::parser_dwa::FiniteParserReadSupport>,
+) -> Option<SignedShardOutput> {
     use crate::compiler::stages::parser_dwa::{FiniteTemplateInstance,FiniteTemplateProgram,
         normalize_finite_template_program_with_pop_classes};
     use crate::compiler::boundary_weight_codec::FaithfulWeightQuotient;
@@ -133,12 +115,10 @@ fn compile_shared_classed_prepared(
     let started=Instant::now();let depths=match max_controls {Some(depth)=>depth.checked_add(1)? as usize,None=>2};
     if max_controls.is_some() && depths>16 {return None;}
     let ports=lexical.states().len().checked_mul(depths)?;
-    let alphabet=classes.symbol_count().checked_add(classes.len() as u32)?;
-    let owned;
-    let prepared=if let Some(prepared)=prepared {prepared} else {
-        owned=prepare_classed_programs(templates,admissions,classes)?; &owned
-    };
-    let ids=&prepared.ids; let dense_templates=&prepared.templates;
+    let alphabet=programs.classes.symbol_count().checked_add(programs.classes.len() as u32)?;
+    let classes = &programs.classes;
+    let admissions = programs.admissions.as_ref();
+    let dense_templates = &programs.graphs;
     let mut coefficients=vec![Weight::all()];let mut indices=rustc_hash::FxHashMap::default();
     indices.insert(coefficients[0].ptr_key(),0usize);
     let mut weight_id=|weight:&Weight| {
@@ -166,19 +146,19 @@ fn compile_shared_classed_prepared(
             let entries=(q*depths) as u32..((q+1)*depths) as u32;
             if admissions.is_some() && lexical.states()[target as usize].final_weight.as_ref()
                 .is_some_and(|final_weight|weight.is_subset(final_weight)) {
-                add(*ids.get(&(true,label as u32))?,weight_id(weight),ports as u32,entries)?;
+                add(*admissions?.get(&(label as u32))?,weight_id(weight),ports as u32,entries)?;
             } else {
-                add(*ids.get(&(false,label as u32))?,weight_id(weight),target*depths as u32,entries)?;
+                add(*programs.ordinary.get(&(label as u32))?,weight_id(weight),target*depths as u32,entries)?;
             }
         }
     }
     for q in 0..lexical.states().len() {
         if max_controls.is_none() {
-            for &control in controls {add(*ids.get(&(false,control))?,0,(q*depths+1) as u32,
+            for &control in controls {add(*programs.ordinary.get(&control)?,0,(q*depths+1) as u32,
                 (q*depths) as u32..((q+1)*depths) as u32)?;}
         } else {for depth in 0..depths-1 {for &control in controls {
             let source=(q*depths+depth) as u32;
-            add(*ids.get(&(false,control))?,0,source+1,source..source+1)?;
+            add(*programs.ordinary.get(&control)?,0,source+1,source..source+1)?;
         }}}
     }
     let profiling=crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
@@ -187,7 +167,7 @@ fn compile_shared_classed_prepared(
         if profiling {eprintln!("[glrmask/profile][native_compact_template_program] selected=false stage=instance_budget");} return None;
     }
     if max_controls.is_none() {
-        let refs=dense_templates.iter().map(Arc::as_ref).collect::<Vec<_>>();let starts=[lexical.start_state()*depths as u32];
+        let refs=dense_templates.iter().collect::<Vec<_>>();let starts=[lexical.start_state()*depths as u32];
         let program=FiniteTemplateProgram{templates:&refs,coefficients:&coefficients,port_finals:&finals,
             starts:&starts,instances:&instances};
         let prepare_ms=started.elapsed().as_secs_f64()*1000.0;
@@ -198,7 +178,7 @@ fn compile_shared_classed_prepared(
         if profiling {eprintln!("[glrmask/profile][native_shared_template_program] mode=control_star selected=true context=false templates={} instances={} profile={profile:?}",refs.len(),instances.len());}
         return Some(SignedShardOutput{parser_dwa,templates_ms:0.0,compose_ms:prepare_ms+profile.assembly_ms,
             resolve_ms:profile.resolve_ms,normalize_ms:profile.normalize_ms,signed_states:profile.input_states,
-            signed_transitions:profile.input_edges,terms:templates.len().saturating_sub(controls.len())});
+            signed_transitions:profile.input_edges,terms:programs.ordinary.len().saturating_sub(controls.len())});
     }
     let declined=|stage| {if profiling {eprintln!("[glrmask/profile][native_compact_template_program] selected=false stage={stage}");}None};
     let quotient=FaithfulWeightQuotient::new(&domain,&coefficients).or_else(||declined("faithful_weight_codec"))?;
@@ -206,7 +186,7 @@ fn compile_shared_classed_prepared(
         if profiling {eprintln!("[glrmask/profile][native_compact_template_program] selected=false stage=atom_decoder");}None
     })?;
     let encoded=coefficients.iter().map(|weight|quotient.encode(weight)).collect::<Option<Vec<_>>>()?;
-    let refs=dense_templates.iter().map(Arc::as_ref).collect::<Vec<_>>();let starts=[lexical.start_state()*depths as u32];
+    let refs=dense_templates.iter().collect::<Vec<_>>();let starts=[lexical.start_state()*depths as u32];
     let program=FiniteTemplateProgram{templates:&refs,coefficients:&encoded,port_finals:&finals,
         starts:&starts,instances:&instances};
     let prepare_ms=started.elapsed().as_secs_f64()*1000.0;
@@ -225,7 +205,7 @@ fn compile_shared_classed_prepared(
     }
     Some(SignedShardOutput{parser_dwa,templates_ms:0.0,compose_ms:prepare_ms,
         resolve_ms:profile.resolve_ms,normalize_ms:started.elapsed().as_secs_f64()*1000.0-prepare_ms-profile.resolve_ms,
-        signed_states:estimated_states,signed_transitions:estimated_edges,terms:templates.len().saturating_sub(controls.len())})
+        signed_states:estimated_states,signed_transitions:estimated_edges,terms:programs.ordinary.len().saturating_sub(controls.len())})
 }
 
 pub(super) fn assemble(
@@ -338,37 +318,9 @@ fn assemble_impl(
     Ok((arena, ordinary_states, control_states))
 }
 
-pub(crate) fn compile_classed(
-    templates: &TemplateInventory,
-    controls: &[u32],
-    certificate: Option<&ClosureCertificate>,
-    lexical: &DWA,
-    classes: &glrmask_parser_dwa::__private::pop_classes::PopLabelClasses,
-) -> Result<SignedShardOutput, String> {
-    assert!(lexical.is_acyclic(),"shared template constructor requires an acyclic lexical query");
-    let depth=certificate.map(|c|c.max_controls_per_gap).or_else(||controls.is_empty().then_some(0));
-    compile_shared_classed(templates,None,controls,depth,lexical,classes,None)
-        .ok_or_else(|| format!("{} resource budget exceeded", crate::compiler::template_boundary::TEMPLATE_DECLINE_PREFIX))
-}
-
-pub(crate) fn compile_classed_with_admissions(
-    templates:&TemplateInventory,admissions:&TemplateInventory,controls:&[u32],
-    certificate:Option<&ClosureCertificate>,lexical:&DWA,
-    classes:&glrmask_parser_dwa::__private::pop_classes::PopLabelClasses,
-    read_context:Option<&crate::compiler::stages::parser_dwa::FiniteParserReadSupport>,
-    prepared:Option<&PreparedClassedPrograms>,
-)->Result<SignedShardOutput,String> {
-    assert!(lexical.is_acyclic(),"shared template constructor requires an acyclic lexical query");
-    let depth=certificate.map(|c|c.max_controls_per_gap).or_else(||controls.is_empty().then_some(0));
-    compile_shared_classed_prepared(templates,Some(admissions),controls,depth,lexical,classes,read_context,prepared)
-        .ok_or_else(|| format!("{} resource budget exceeded", crate::compiler::template_boundary::TEMPLATE_DECLINE_PREFIX))
-}
-
-#[cfg(test)]
++#[cfg(test)]
 mod budget_decline_tests {
     use super::*;
-use std::sync::Arc;
-type TemplateInventory = BTreeMap<u32, Arc<TemplateTopology>>;
     use glrmask_parser_dwa::__private::pop_classes::PopLabelClasses;
 
     #[test]
@@ -379,7 +331,7 @@ type TemplateInventory = BTreeMap<u32, Arc<TemplateTopology>>;
         lexical.set_final_weight(0, Weight::all());
         let classes = PopLabelClasses::new(1).unwrap();
         let certificate = ClosureCertificate { max_controls_per_gap: 16, max_nesting_depth: 1 };
-        let error = match compile_classed(&BTreeMap::new(), &[0], Some(&certificate), &lexical, &classes) {
+        let error = match compile_classed(&ClassedPrograms::new(classes, false), &[0], Some(&certificate), &lexical, None) {
             Ok(_) => panic!("a declined constructor must surface as an error"),
             Err(error) => error,
         };
@@ -390,8 +342,6 @@ type TemplateInventory = BTreeMap<u32, Arc<TemplateTopology>>;
 #[cfg(test)]
 mod symbolic_class_tests {
     use super::*;
-use std::sync::Arc;
-type TemplateInventory = BTreeMap<u32, Arc<TemplateTopology>>;
 
     fn topology(nwa: NWA) -> Arc<TemplateTopology> {
         Arc::new(TemplateTopology::from_weighted_skeleton(&nwa))
@@ -575,8 +525,8 @@ type TemplateInventory = BTreeMap<u32, Arc<TemplateTopology>>;
         let mut admission=NWA::from_parts(vec![Default::default();2],vec![0]);
         admission.add_transition(0,class,1,Weight::all()); admission.set_final_weight(1,Weight::all());
         let templates=BTreeMap::from([(0,topology(template))]); let admissions=BTreeMap::from([(0,topology(admission))]);
-        let prepared=prepare_classed_programs(&templates,Some(&admissions),&classes).unwrap();
-        let snapshot=||prepared.templates.iter().map(|graph| {
+        let prepared=reference_inventory(&templates,Some(&admissions),&classes).unwrap();
+        let snapshot=||prepared.graphs.iter().map(|graph| {
             let graph=graph.to_weighted_skeleton();
             (graph.start_states().to_vec(),graph.states().to_vec())
         }).collect::<Vec<_>>();
@@ -587,7 +537,7 @@ type TemplateInventory = BTreeMap<u32, Arc<TemplateTopology>>;
             lexical.add_transition(0,0,middle,weight.clone());
             lexical.add_transition(middle,0,end,weight); lexical.set_final_weight(end,Weight::all());
             let expected=compile_shared_classed(&templates,Some(&admissions),&[],Some(0),&lexical,&classes,None).unwrap();
-            let actual=compile_shared_classed_prepared(&templates,Some(&admissions),&[],Some(0),&lexical,&classes,None,Some(&prepared)).unwrap();
+            let actual=compile_inventory(&prepared,&[],Some(0),&lexical,None).unwrap();
             assert_eq!(bincode::serialize(&expected.parser_dwa).unwrap(),bincode::serialize(&actual.parser_dwa).unwrap());
             let (mut expanded,_,_)=assemble_impl(&templates,&[],Some(0),&lexical,None,Some(&admissions)).unwrap();
             glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa_with_pop_classes(&mut expanded,&classes).unwrap();

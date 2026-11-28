@@ -357,21 +357,14 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
     }
     if profile { eprintln!("[glrmask/profile][static_template_boundary] phase=programs_selected selected={} total={} elapsed_ms={:.3}",
         selected.len(), composition.view_count(), started.elapsed().as_secs_f64() * 1000.0); }
-    let (templates, mut classes) = crate::template_parser::static_compile::prepare_scoped_boundary_programs(
-        &scoped_views, parser.state_count, &selected)?;
-    let admissions=crate::template_parser::static_compile::prepare_scoped_boundary_admissions(
-        &scoped_views,&ending_selected,&mut classes)?;
+    let programs = crate::template_parser::static_compile::prepare_scoped_boundary_programs(
+        &scoped_views, parser.state_count, &selected, Some(&ending_selected))?;
     let predecessor=metadata.and_then(|metadata|metadata.stack_effects()).filter(|summary|summary.states==parser.state_count)
         .and_then(|summary|super::boundary_stack_support::from_compiler_effects(summary).ok());
     let read_context=predecessor.as_ref().and_then(|certificate|certificate.native_context())
         .filter(|_|crate::env::var_os("GLRMASK_PROFILE_BOUNDARY_NO_READ_SUPPORT").is_none());
     if profile { eprintln!("[glrmask/profile][static_template_boundary] phase=programs_ready templates={} admissions={} pop_classes={} predecessor={} elapsed_ms={:.3}",
-        templates.len(),admissions.len(), classes.len(),read_context.is_some(), started.elapsed().as_secs_f64() * 1000.0); }
-    let prepared=if walks.is_empty() {None} else {
-        Some(super::boundary_transfer::template_program::prepare_classed_programs(
-            &templates,Some(&admissions),&classes)
-            .ok_or_else(|| fail(format!("{} prepared classed program budget exceeded", TEMPLATE_DECLINE_PREFIX)))?)
-    };
+        programs.ordinary.len(), programs.admissions.as_ref().map_or(0, BTreeMap::len), programs.classes.len(), read_context.is_some(), started.elapsed().as_secs_f64() * 1000.0); }
     let boundary_coordinate = if projected {
         if tokenizer_offsets.len() != state_counts.len() {
             return Err(fail("projected boundary tokenizer layout mismatch"));
@@ -388,8 +381,8 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
     };
     let mut published = Vec::with_capacity(walks.len());
     for walk in walks {
-        let mut output = super::boundary_transfer::template_program::compile_classed_with_admissions(
-            &templates,&admissions,&controls,certificate.as_ref(),&walk.output.dwa,&classes,read_context.as_ref(),prepared.as_ref()).map_err(fail)?;
+        let mut output = super::boundary_transfer::template_program::compile_classed(
+            &programs, &controls, certificate.as_ref(), &walk.output.dwa, read_context.as_ref()).map_err(fail)?;
         let mut id_map = walk.output.id_map;
         if projected {
             let target = InternalIdMap {

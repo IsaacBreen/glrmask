@@ -303,20 +303,29 @@ pub(crate) fn prepare_static_templates_for_terminals(
     selected: &BTreeSet<u32>,
 ) -> Result<Templates> {
     let mut budget = ExpansionBudget::default();
-    let mut terminal_templates = BTreeMap::new();
+    let mut templates = Templates::default();
+    let mut by_source = FxHashMap::default();
     for &terminal in selected {
-        let split = programs.get(terminal as usize).and_then(Option::as_deref)
+        let split = programs.get(terminal as usize).and_then(Option::as_ref)
             .ok_or_else(|| Error::Compilation(format!("missing selected terminal relation {terminal}")))?;
-        let result = (|| {
-            let nfa = concrete_action_nfa(split, symbol_count, &mut budget)?;
-            bounded_determinize(&nfa, &mut budget)
-        })().map_err(|error| Error::Compilation(format!("terminal {terminal}: {error}")))?;
-        terminal_templates.insert(terminal, result);
+        let key = Arc::as_ptr(split);
+        let graph = if let Some(graph) = by_source.get(&key) {
+            Arc::clone(graph)
+        } else {
+            let result = (|| {
+                let nfa = concrete_action_nfa(split, symbol_count, &mut budget)?;
+                bounded_determinize(&nfa, &mut budget)
+            })().map_err(|error| Error::Compilation(format!("terminal {terminal}: {error}")))?;
+            let graph = Arc::new(result);
+            by_source.insert(key, Arc::clone(&graph));
+            graph
+        };
+        templates.by_terminal.insert(terminal, graph);
     }
-    Ok(Templates::from_terminal_dfas(terminal_templates))
+    Ok(templates)
 }
 
-fn boundary_action_program(nfa: NFA, budget: &mut ExpansionBudget) -> Arc<TemplateTopology> {
+fn boundary_action_program(nfa: NFA, budget: &mut ExpansionBudget) -> TemplateTopology {
     // Reuse the ordinary action-word constructor before instantiation. Class
     // labels are distinct consuming symbols here; replacing them with their
     // finite local languages later preserves this exact subset construction.
@@ -329,43 +338,12 @@ fn boundary_action_program(nfa: NFA, budget: &mut ExpansionBudget) -> Arc<Templa
         // the ordinary constructor removes a dead literal branch.
         let dfa = crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic(&dfa);
         *budget = candidate_budget;
-        return Arc::new(TemplateTopology::from_dfa(&dfa));
+        return TemplateTopology::from_dfa(&dfa);
     }
-    Arc::new(TemplateTopology::from_nfa(&nfa))
+    TemplateTopology::from_nfa(&nfa)
 }
 
-pub(crate) fn prepare_scoped_boundary_programs(
-    programs: &[crate::runtime::parser_backend::scoped_program::ScopedProgram], symbol_count: u32,
-    selected: &BTreeSet<u32>,
-) -> Result<(BTreeMap<u32, Arc<TemplateTopology>>, PopLabelClasses)> {
-    let mut budget = ExpansionBudget::default();
-    let mut classes = PopLabelClasses::new(symbol_count).map_err(Error::Compilation)?;
-    let mut result = BTreeMap::new();
-    for &terminal in selected {
-        let view = programs.get(terminal as usize).ok_or_else(||
-            Error::Compilation(format!("missing scoped relation {terminal}")))?;
-        view.validate_coordinate(symbol_count)?;
-        let nfa = action_nfa(&view.source, symbol_count, &mut budget, Some(&mut classes), Some(view))?;
-        result.insert(terminal, boundary_action_program(nfa, &mut budget));
-    }
-    Ok((result, classes))
-}
-
-pub(crate) fn prepare_scoped_boundary_admissions(
-    programs:&[crate::runtime::parser_backend::scoped_program::ScopedProgram],
-    selected:&BTreeSet<u32>,classes:&mut PopLabelClasses,
-)->Result<BTreeMap<u32,Arc<TemplateTopology>>> {
-    selected.iter().map(|&terminal| {
-        let view=programs.get(terminal as usize).ok_or_else(||
-            Error::Compilation(format!("missing scoped admission relation {terminal}")))?;
-        view.validate_coordinate(classes.symbol_count())?;
-        let graph=view.domain.scoped_prefix_program(view.offset,view.symbols,view.guard_owner,classes)
-            .map_err(Error::Compilation)?;
-        Ok((terminal,Arc::new(TemplateTopology::from_nfa(&graph))))
-    }).collect()
-}
-
-#[cfg(test)]
++#[cfg(test)]
 mod selected_inventory_tests {
     use super::*;
 

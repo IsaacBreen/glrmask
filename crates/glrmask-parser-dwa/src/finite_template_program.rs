@@ -389,7 +389,6 @@ fn normalize_finite_template_program_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
-use super::finite_signed_graph::TemplateTopology;
 
     #[test]
     fn classed_compact_finite_program_keeps_every_pop_and_certified_context() {
