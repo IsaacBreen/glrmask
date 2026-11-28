@@ -429,42 +429,6 @@ fn raw_active_language_states(tokenizer: &Tokenizer, active_groups: &[bool]) -> 
         .collect()
 }
 
-/// Exact refinement for a caller-supplied partial deterministic graph.
-/// The graph is borrowed so repeated epsilon/byte refinement need not copy it.
-pub fn hopcroft_refine_sparse_edges(
-    initial_classes: &[u32],
-    offsets: &[u32],
-    bytes: &[u8],
-    targets: &[u32],
-) -> Option<Vec<u32>> {
-    if offsets.len() != initial_classes.len() + 1
-        || bytes.len() != targets.len()
-        || offsets.first().copied() != Some(0)
-        || offsets.last().copied().map(|value| value as usize) != Some(bytes.len())
-        || targets.iter().any(|&target| target as usize >= initial_classes.len())
-    {
-        return None;
-    }
-    for row in offsets.windows(2) {
-        let (start, end) = (row[0] as usize, row[1] as usize);
-        let labels = bytes.get(start..end)?;
-        let mut seen = [false; 256];
-        for &byte in labels {
-            if std::mem::replace(&mut seen[byte as usize], true) {
-                return None;
-            }
-        }
-    }
-    Some(refine_partition_rows(
-        initial_classes.to_vec(),
-        |state| {
-            let range = offsets[state] as usize..offsets[state + 1] as usize;
-            bytes[range.clone()].iter().copied().zip(targets[range].iter().copied())
-        },
-        None,
-    ).0)
-}
-
 fn map_from_raw_classes(classes: &[u32]) -> ManyToOneIdMap {
     let class_count = classes.iter().copied().max().map_or(0usize, |id| id as usize + 1);
     let mut internal_to_originals = vec![Vec::new(); class_count];

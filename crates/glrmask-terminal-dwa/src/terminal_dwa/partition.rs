@@ -895,14 +895,6 @@ fn build_partition_id_map_and_terminal_dwa_impl(
         );
     }
 
-    super::definition_skeleton::report_partition(
-        partition_label,
-        tokenizer,
-        vocab,
-        initial_state_map,
-        &l1_mask,
-        &l2p_mask,
-    );
     if std::env::var_os("GLRMASK_DUMP_L2P_MASKS").is_some() {
         let ids = l2p_mask
             .iter()

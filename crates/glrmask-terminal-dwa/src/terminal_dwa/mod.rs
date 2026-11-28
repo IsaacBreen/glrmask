@@ -16,7 +16,6 @@ use crate::automata::lexer::compile::{
 pub mod classify;
 mod congruence;
 pub(crate) mod env_policy;
-mod definition_skeleton;
 mod finalize_ignore;
 #[cfg(any(test, feature = "internal-api"))]
 mod identity_refinement;
