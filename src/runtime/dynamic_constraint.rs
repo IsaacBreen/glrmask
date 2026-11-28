@@ -131,18 +131,6 @@ impl<'de> serde::Deserialize<'de> for CompactTransferTokenizer {
     }
 }
 
-struct DynamicRuntimeParts {
-    table: crate::runtime::parser_backend::ParserExecutable,
-    terminal_display_names: Vec<String>,
-    tokenizer: Tokenizer,
-    ignore_terminal: Option<TerminalID>,
-    direct_regular_automaton: Option<DirectRegularAutomaton>,
-    token_bytes: Arc<BTreeMap<u32, Vec<u8>>>,
-    ignore_expr: Option<Expr>,
-    terminal_exprs: Option<Vec<Expr>>,
-    special_token_terminals: Vec<SpecialTokenTerminal>,
-}
-
 /// A constraint optimized for low compilation latency.
 ///
 /// Unlike [`Constraint`], this omits terminal-DWA, possible-match, parser-DWA,
@@ -244,47 +232,27 @@ impl DynamicConstraint {
         vocab: &Vocab,
         dynamic_mask_vocab: DynamicMaskVocab,
     ) -> crate::Result<Self> {
-        match backend {
-            crate::runtime::parser_backend::DynamicParserBackend::Native => {
+        use crate::runtime::parser_backend::{DynamicParserBackend, ParserExecutable};
+        let table = match backend {
+            DynamicParserBackend::Native => {
                 let prepared = crate::runtime::parser_backend::PreparedTemplateParser::from_compiler_parts(
                     &table, direct_regular_automaton.as_ref(), ignore_terminal, false,
                 )?;
                 drop(table);
-                let mut inner = Self::from_template_runtime_parts_unfinalized(
-                    tokenizer, terminal_display_names, ignore_terminal,
-                    Arc::new(prepared.parser), vocab, dynamic_mask_vocab,
-                );
-                inner.special_token_terminals = special_token_terminals;
-                inner.direct_regular_automaton = direct_regular_automaton;
-                Ok(Self { inner, alternatives: Vec::new(), composition_grammars: vec![None],
-                    external_vocab_artifact_cache: None })
+                ParserExecutable::Native(Arc::new(prepared.parser))
             }
-            crate::runtime::parser_backend::DynamicParserBackend::LrTable => {
-                let ignore_expr = ignore_terminal
-                    .and_then(|terminal| tokenizer.terminal_expr(terminal).cloned());
-                let terminal_exprs = tokenizer.terminal_exprs().map(ToOwned::to_owned);
-                let payload = DynamicRuntimeParts {
-                    table: crate::runtime::parser_backend::ParserExecutable::explicit(table),
-                    terminal_display_names,
-                    tokenizer,
-                    ignore_terminal,
-                    direct_regular_automaton,
-                    token_bytes: vocab.entries_arc(),
-                    ignore_expr,
-                    terminal_exprs,
-                    special_token_terminals,
-                };
-                let inner = Self::constraint_from_runtime_parts(payload, dynamic_mask_vocab, Some(vocab));
-                // Retain the supplied vocabulary so the external-vocabulary
-                // artifact can embed the exact canonical content digest for
-                // load validation.
-                let _ = inner.late_bind_vocab.set(vocab.clone());
-                assert!(inner.table.is_present(), "retained LR constructor must retain its LR table");
-                assert!(inner.template_parser().is_none(), "retained LR constructor must not install a template parser");
-                Ok(Self { inner, alternatives: Vec::new(), composition_grammars: vec![None],
-                    external_vocab_artifact_cache: None })
-            }
-        }
+            DynamicParserBackend::LrTable => ParserExecutable::explicit(table),
+        };
+        let inner = Self::compile_runtime_language(
+            table, tokenizer, terminal_display_names, direct_regular_automaton,
+            ignore_terminal, special_token_terminals, vocab, dynamic_mask_vocab,
+        );
+        Ok(Self {
+            inner,
+            alternatives: Vec::new(),
+            composition_grammars: vec![None],
+            external_vocab_artifact_cache: None,
+        })
     }
 
     pub(crate) fn from_parts_with_possible_matches(
@@ -317,82 +285,36 @@ impl DynamicConstraint {
         Ok(result)
     }
 
-    /// Shared assembly accepts exactly the selected executable parser, before
-    /// any runtime-derived caches are initialized.
-    fn constraint_from_runtime_parts(
-        mut payload: DynamicRuntimeParts,
+    /// Publish the exact selected executable without copying the tokenizer's
+    /// attached expressions or constructing a second payload.
+    fn compile_runtime_language(
+        table: crate::runtime::parser_backend::ParserExecutable,
+        mut tokenizer: Tokenizer,
+        terminal_display_names: Vec<String>,
+        direct_regular_automaton: Option<DirectRegularAutomaton>,
+        ignore_terminal: Option<TerminalID>,
+        special_token_terminals: Vec<SpecialTokenTerminal>,
+        vocab: &Vocab,
         dynamic_mask_vocab: DynamicMaskVocab,
-        source_vocab: Option<&Vocab>,
     ) -> Constraint {
-        payload
-            .tokenizer
-            .restore_terminal_exprs(payload.terminal_exprs.take())
+        let ignore_expr = ignore_terminal.and_then(|terminal| tokenizer.terminal_expr(terminal).cloned());
+        tokenizer.restore_attached_virtual_runtime()
             .expect("dynamic payload terminal expressions must match tokenizer terminal count");
-        // Compile callers own precisely this Vocab's immutable byte inventory.
-        // Loaded payloads have no such identity witness and must derive the
-        // summary from their authoritative decoded bytes instead.
-        let empty_byte_token_ids = if let Some(vocab) = source_vocab {
-            assert!(Arc::ptr_eq(&payload.token_bytes, &vocab.entries_arc()),
-                "compiled dynamic payload must retain its source vocabulary byte inventory");
-            crate::compiler::compile::vocab_empty_byte_token_ids(vocab)
-        } else {
-            payload.token_bytes.iter()
-                .filter_map(|(&id, bytes)| bytes.is_empty().then_some(id))
-                .collect::<Vec<u32>>().into()
-        };
-        
-        Constraint::from_data(crate::runtime::ConstraintData {
-            end_tokens: std::sync::Arc::from([]),
-            marker_queries: None,
-            runtime_backend: crate::runtime::ConstraintRuntimeBackend::Dynamic,
-            static_dynamic_overlay: None,
-            boundary_trigger: crate::runtime::BoundaryTrigger::None,
-            boundary_candidate_summary: std::sync::OnceLock::new(),
-            late_grammar_slots: Vec::new(),
-            late_bind_vocab: std::sync::OnceLock::new(),
-            pending_vocab_fingerprint: None,
-            pending_special_token_ids: None,
-            parser_dwa: crate::runtime::ParserDwaStorage::Absent,
-            non_dwa_weights: Default::default(),
-            direct_regular_wide_frontier_acceptance: Vec::new(),
-            direct_regular_dynamic_hot_frontiers: Vec::new(),
-            direct_regular_parser_state_acceptance: Vec::new(),
-            direct_regular_automaton: payload.direct_regular_automaton,
-            table: payload.table,
-            terminal_display_names: payload.terminal_display_names,
-            tokenizer: payload.tokenizer.into(),
-            tokenizer_has_epsilon_transitions: false,
-            ignore_terminal: payload.ignore_terminal,
-            special_token_terminals: payload.special_token_terminals,
+        Constraint::from_compiler_parts(
+            crate::runtime::RuntimeLanguage {
+                table,
+                tokenizer: tokenizer.into(),
+                terminal_display_names,
+                direct_regular_automaton,
+                ignore_terminal,
+                ignore_expr,
+                special_token_terminals,
+            },
+            vocab,
+            crate::runtime::CompiledMask::Dynamic,
             dynamic_mask_vocab,
-            lazy_dynamic_mask_vocab: std::sync::OnceLock::new(),
-            empty_byte_token_ids,
-            possible_matches_complete: false,
-            tokenizer_tsids: Default::default(),
-                composition_grammar_summary: None,
-            token_classes: Default::default(),
-            token_bytes: crate::runtime::TokenByteDomain::from_entries(payload.token_bytes),
-            token_projection: Default::default(),
-            internal_token_dense_words: 0,
-            weight_token_masks: Default::default(),
-            packed_dwa_token_dense_masks: Default::default(),
-            seed_terminal_dense: Default::default(),
-            seed_terminal_dense_fallback: Default::default(),
-            seed_universe_dense: Arc::from(Vec::<u64>::new().into_boxed_slice()),
-            dwa_fast_transitions: Default::default(),
-            parser_runtime_caches_prebuilt: false,
-            indexed_dag_dense_transitions: Vec::new(),
-            indexed_dag_dense_finals: Vec::new(),
-            tokenizer_fast_transitions: Default::default(),
-            parser_state_domain_labels: Vec::new(),
-            ignore_expr: payload.ignore_expr,
-            serialized_artifact_cache: None,
-            deferred_terminal_exprs_blob: None,
-            deferred_terminal_exprs: Default::default(),
-            deferred_composition_metadata_blob: None,
-                deferred_table_rules_blob: None,
-            deferred_table_rules: Default::default(),
-        })
+            Default::default(),
+        )
     }
 
     pub(crate) fn from_template_runtime_parts(
@@ -418,19 +340,11 @@ impl DynamicConstraint {
         vocab: &Vocab,
         dynamic_vocab: DynamicMaskVocab,
     ) -> Constraint {
-        let ignore_expr = ignore_terminal.and_then(|t|tokenizer.terminal_expr(t).cloned());
-        let terminal_exprs = tokenizer.terminal_exprs().map(ToOwned::to_owned);
-        let payload = DynamicRuntimeParts {
-            table: crate::runtime::parser_backend::ParserExecutable::Native(parser),
-            terminal_display_names, tokenizer, ignore_terminal,
-            direct_regular_automaton: None, token_bytes: vocab.entries_arc(),
-            ignore_expr, terminal_exprs,
-            special_token_terminals: Vec::new(),
-        };
-        let mut inner = Self::constraint_from_runtime_parts(payload, dynamic_vocab, Some(vocab));
-        let _ = inner.late_bind_vocab.set(vocab.clone());
-        assert!(!inner.table.is_present(), "data-only constructor created an LR table");
-        inner
+        Self::compile_runtime_language(
+            crate::runtime::parser_backend::ParserExecutable::Native(parser),
+            tokenizer, terminal_display_names, None, ignore_terminal, Vec::new(),
+            vocab, dynamic_vocab,
+        )
     }
 
     pub(crate) fn from_alternatives(mut alternatives: Vec<Self>) -> Self {

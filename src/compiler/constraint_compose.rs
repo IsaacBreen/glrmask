@@ -51,7 +51,7 @@ use crate::ds::weight::{
     Weight,
 };
 use crate::runtime::{
-    Constraint, ConstraintRuntimeBackend, SpecialTokenTerminal,
+    Constraint, SpecialTokenTerminal,
 };
 use crate::Vocab;
 
@@ -1151,62 +1151,22 @@ fn build_recursive_coordinator(
     vocab: &Vocab,
 ) -> ConstraintComposition {
     let parser_state_relations = vec![Vec::new(); terminal_offsets.len()];
-    let tokenizer_has_epsilon_transitions = tokenizer.has_epsilon_transitions();
     debug_assert_eq!(parser.terminal_count as usize, terminal_display_names.len());
-    let token_bytes = crate::runtime::TokenByteDomain::from_entries(vocab.entries_arc());
-    let constraint = Constraint::from_data(crate::runtime::ConstraintData {
-            end_tokens: std::sync::Arc::from([]),
-            marker_queries: None,
-        runtime_backend: ConstraintRuntimeBackend::Static,
-        static_dynamic_overlay: None,
-        boundary_trigger: crate::runtime::BoundaryTrigger::None,
-        boundary_candidate_summary: std::sync::OnceLock::new(),
-        late_grammar_slots: Vec::new(),
-        late_bind_vocab: OnceLock::from(vocab.clone()),
-        pending_vocab_fingerprint: None,
-        pending_special_token_ids: None,
-        parser_dwa: crate::runtime::ParserDwaStorage::Absent,
-        non_dwa_weights: Default::default(),
-        direct_regular_wide_frontier_acceptance: Vec::new(),
-        direct_regular_dynamic_hot_frontiers: Vec::new(),
-        direct_regular_parser_state_acceptance: Vec::new(),
-        direct_regular_automaton: None,
-        table: crate::runtime::parser_backend::ParserExecutable::LinkedLr(parser),
-        terminal_display_names,
-        tokenizer,
-        tokenizer_has_epsilon_transitions,
-        ignore_terminal: None,
-        special_token_terminals,
-        dynamic_mask_vocab: Default::default(),
-        lazy_dynamic_mask_vocab: OnceLock::new(),
-        empty_byte_token_ids: crate::compiler::compile::vocab_empty_byte_token_ids(vocab),
-        possible_matches_complete: true,
-        // No outer TSID quotient is needed by the provider runtime.
-        tokenizer_tsids: crate::runtime::TokenizerTsidMap::partition(vec![0], vec![vec![0]]),
-        composition_grammar_summary: None,
-        token_classes: crate::runtime::TokenClasses::mapped(Vec::new(), Vec::new()),
-        token_bytes,
-        token_projection: Default::default(),
-        internal_token_dense_words: 0,
-        weight_token_masks: Default::default(),
-        packed_dwa_token_dense_masks: Default::default(),
-        seed_terminal_dense: FxHashMap::default(),
-        seed_terminal_dense_fallback: Default::default(),
-        seed_universe_dense: Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
-        dwa_fast_transitions: Default::default(),
-        parser_runtime_caches_prebuilt: false,
-        indexed_dag_dense_transitions: Vec::new(),
-        indexed_dag_dense_finals: Vec::new(),
+    let constraint = Constraint::from_compiler_parts(
+        crate::runtime::RuntimeLanguage {
+            table: crate::runtime::parser_backend::ParserExecutable::LinkedLr(parser),
+            tokenizer,
+            terminal_display_names,
+            direct_regular_automaton: None,
+            ignore_terminal: None,
+            ignore_expr: None,
+            special_token_terminals,
+        },
+        vocab,
+        crate::runtime::CompiledMask::Linked,
+        Default::default(),
         tokenizer_fast_transitions,
-        parser_state_domain_labels: Vec::new(),
-        ignore_expr: None,
-        serialized_artifact_cache: None,
-        deferred_terminal_exprs_blob: None,
-        deferred_terminal_exprs: Default::default(),
-        deferred_composition_metadata_blob: None,
-        deferred_table_rules_blob: None,
-        deferred_table_rules: Default::default(),
-    });
+    );
     ConstraintComposition {
         constraint,
         terminal_offsets,

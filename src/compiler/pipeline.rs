@@ -3226,12 +3226,12 @@ impl RuntimeTokenizerDagResult {
         self.separate.as_ref().map_or(observation, |(exact, _)| exact)
     }
 
-    fn lift(&self, observation: &ManyToOneIdMap) -> ManyToOneIdMap {
+    fn lift(&self, observation: ManyToOneIdMap) -> ManyToOneIdMap {
         if let Some((_, MaskCoordinate::WholeToken(certified))) = &self.separate {
-            certified.lift_internal_tsid_map(observation)
+            certified.lift_internal_tsid_map(&observation)
                 .expect("certified full lexer state map must lift the final synthesized TSID map")
         } else {
-            observation.clone()
+            observation
         }
     }
 
@@ -4220,18 +4220,19 @@ fn compile_prepared_with_profile_and_table_construction(
             parser_pm_pair.into_parts();
         // Only the real final coordinate can define a token projection.
         // Its construction can overlap the independent exact runtime-state lift.
+        let observation_state_map = internal_ids.tokenizer_states;
+        let vocab_token_map = internal_ids.vocab_tokens;
         let ((runtime_tokenizer_state_map, runtime_state_map_lift_ms), prebuilt_token_mask_caches) = macro_join(
             "runtime_state_map_and_token_projection",
             || {
                 let started = Instant::now();
-                let map = runtime_lexer.lift(&internal_ids.tokenizer_states);
+                let map = runtime_lexer.lift(observation_state_map);
                 (map, elapsed_ms(started))
             },
             || {
                 env_flag_enabled_by_default("GLRMASK_EARLY_TOKEN_CACHE_PREBUILD").then(|| {
-                    let internal_to_tokens = internal_ids.vocab_tokens.internal_to_originals_vecs();
-                    let mask_words = internal_ids.vocab_tokens.original_to_internal.len().div_ceil(32);
-                    crate::runtime::TokenProjection::build(&internal_to_tokens, mask_words)
+                    let mask_words = vocab_token_map.original_to_internal.len().div_ceil(32);
+                    crate::runtime::TokenProjection::build(&vocab_token_map.internal_to_originals, mask_words)
                 })
             },
         );
@@ -4310,7 +4311,6 @@ fn compile_prepared_with_profile_and_table_construction(
         profile.parser_pm_joint_interned_ranges = parser_pm_joint_interned_ranges;
 
         let finalize_started_at = Instant::now();
-        let token_bytes = crate::runtime::TokenByteDomain::from_indexed_vocab(vocab);
         let special_token_terminals = collect_special_token_terminals(&prepared_grammar);
         let ignore_expr = prepared_grammar
             .ignore_terminal
@@ -4332,68 +4332,38 @@ fn compile_prepared_with_profile_and_table_construction(
         if !crate::automata::lexer::tokenizer::artifact_serde::compact_large_runtime(&mut tokenizer) {
             crate::automata::lexer::tokenizer::artifact_serde::compact_large_fast_runtime(&mut tokenizer);
         }
-        let mut constraint = Constraint::from_data(crate::runtime::ConstraintData {
-            end_tokens: std::sync::Arc::from([]),
-            marker_queries: None,
-            runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
-            static_dynamic_overlay: None,
-            boundary_trigger: crate::runtime::BoundaryTrigger::None,
-            boundary_candidate_summary: std::sync::OnceLock::new(),
-            late_grammar_slots: Vec::new(),
-            late_bind_vocab: std::sync::OnceLock::from(vocab.clone()),
-            pending_vocab_fingerprint: None,
-            pending_special_token_ids: None,
-            parser_dwa: crate::runtime::ParserDwaStorage::Owned(parser_dwa),
-            non_dwa_weights: crate::runtime::NonDwaWeightStorage::Materialized(
-                crate::runtime::NonDwaWeights {
+        let mut constraint = Constraint::from_compiler_parts(
+            crate::runtime::RuntimeLanguage {
+                table: crate::runtime::parser_backend::ParserExecutable::Native(Arc::new(prepared_parser.parser)),
+                tokenizer: tokenizer.into(),
+                terminal_display_names: analyzed_grammar.terminal_display_names.clone(),
+                direct_regular_automaton: analyzed_grammar.direct_regular_automaton.clone(),
+                ignore_terminal: prepared_grammar.ignore_terminal,
+                ignore_expr,
+                special_token_terminals,
+            },
+            vocab,
+            crate::runtime::CompiledMask::Weighted {
+                parser_dwa,
+                non_dwa_weights: crate::runtime::NonDwaWeights {
                     parser_top_accept,
                     parser_top_accept_parts,
                     direct_regular_l1_complete_by_terminal: direct_l1_complete_by_terminal,
                     possible_matches: possible_matches_artifact,
                 },
-            ),
-            direct_regular_wide_frontier_acceptance: Vec::new(),
-            direct_regular_dynamic_hot_frontiers: Vec::new(),
-            direct_regular_parser_state_acceptance: Vec::new(),
-            direct_regular_automaton: analyzed_grammar.direct_regular_automaton.clone(),
-            table: crate::runtime::parser_backend::ParserExecutable::Native(Arc::new(prepared_parser.parser)),
-            terminal_display_names: analyzed_grammar.terminal_display_names.clone(),
-            tokenizer: tokenizer.into(),
-            tokenizer_has_epsilon_transitions: false,
-            ignore_terminal: prepared_grammar.ignore_terminal,
-            special_token_terminals,
+                possible_matches_complete,
+                tokenizer_tsids: crate::runtime::TokenizerTsidMap::partition(
+                    runtime_tokenizer_state_map.original_to_internal,
+                    runtime_tokenizer_state_map.internal_to_originals,
+                ),
+                composition_grammar_summary,
+                token_classes: crate::runtime::TokenClasses::mapped(
+                    vocab_token_map.original_to_internal, vocab_token_map.internal_to_originals,
+                ),
+            },
             dynamic_mask_vocab,
-            lazy_dynamic_mask_vocab: std::sync::OnceLock::new(),
-            empty_byte_token_ids: crate::compiler::compile::vocab_empty_byte_token_ids(vocab),
-            possible_matches_complete,
-            tokenizer_tsids: crate::runtime::TokenizerTsidMap::partition(
-                runtime_tokenizer_state_map.original_to_internal,
-                runtime_tokenizer_state_map.internal_to_originals,
-            ),
-            composition_grammar_summary,
-            token_classes: crate::runtime::TokenClasses::mapped(internal_ids.vocab_tokens.original_to_internal.clone(), internal_ids.vocab_tokens.internal_to_originals_vecs()),
-            token_bytes,
-            token_projection: Default::default(),
-            internal_token_dense_words: 0,
-            weight_token_masks: Default::default(),
-            packed_dwa_token_dense_masks: Default::default(),
-            seed_terminal_dense: rustc_hash::FxHashMap::default(),
-            seed_terminal_dense_fallback: Default::default(),
-            seed_universe_dense: std::sync::Arc::<[u64]>::from(Vec::<u64>::new().into_boxed_slice()),
-            dwa_fast_transitions: Default::default(),
-            parser_runtime_caches_prebuilt: false,
-            indexed_dag_dense_transitions: Vec::new(),
-            indexed_dag_dense_finals: Vec::new(),
-            tokenizer_fast_transitions: prebuilt_tokenizer_fast_transitions,
-            parser_state_domain_labels: Vec::new(),
-            ignore_expr,
-            serialized_artifact_cache: None,
-            deferred_terminal_exprs_blob: None,
-            deferred_terminal_exprs: Default::default(),
-            deferred_composition_metadata_blob: None,
-                deferred_table_rules_blob: None,
-            deferred_table_rules: Default::default(),
-        });
+            prebuilt_tokenizer_fast_transitions,
+        );
         if build_packed_parser_dwa {
             let packed_started_at = crate::env::var_os("GLRMASK_PROFILE_DWA_SERIALIZATION")
                 .is_some()

@@ -8906,6 +8906,124 @@ pub struct ConstraintInner {
 
 pub(crate) type Constraint = ConstraintInner;
 
+/// Semantic language data shared by all newly compiled runtime forms.
+pub(crate) struct RuntimeLanguage {
+    pub table: super::parser_backend::ParserExecutable,
+    pub tokenizer: Arc<Tokenizer>,
+    pub terminal_display_names: Vec<String>,
+    pub direct_regular_automaton: Option<DirectRegularAutomaton>,
+    pub ignore_terminal: Option<TerminalID>,
+    pub ignore_expr: Option<Expr>,
+    pub special_token_terminals: Vec<SpecialTokenTerminal>,
+}
+
+/// The mask program and the coordinates in which its weights are expressed.
+/// A linked coordinator has no global weighted program; its leaves own theirs.
+pub(crate) enum CompiledMask {
+    Weighted {
+        parser_dwa: DWA,
+        non_dwa_weights: NonDwaWeights<Weight>,
+        possible_matches_complete: bool,
+        tokenizer_tsids: super::TokenizerTsidMap,
+        token_classes: super::TokenClasses,
+        composition_grammar_summary: Option<CompositionGrammarSummary>,
+    },
+    Dynamic,
+    Linked,
+}
+
+impl Constraint {
+    pub(crate) fn from_compiler_parts(
+        language: RuntimeLanguage,
+        vocab: &crate::Vocab,
+        mask: CompiledMask,
+        dynamic_mask_vocab: DynamicMaskVocab,
+        tokenizer_fast_transitions: FastTokenizerTransitions,
+    ) -> Self {
+        use super::parser_backend::ParserExecutable;
+        let (runtime_backend, parser_dwa, non_dwa_weights, possible_matches_complete,
+            tokenizer_tsids, token_classes, composition_grammar_summary, token_bytes,
+            tokenizer_has_epsilon_transitions) = match mask {
+            CompiledMask::Weighted {
+                parser_dwa, non_dwa_weights, possible_matches_complete,
+                tokenizer_tsids, token_classes, composition_grammar_summary,
+            } => {
+                assert!(matches!(&language.table, ParserExecutable::Native(_)));
+                (ConstraintRuntimeBackend::Static, ParserDwaStorage::Owned(parser_dwa),
+                    NonDwaWeightStorage::Materialized(non_dwa_weights), possible_matches_complete,
+                    tokenizer_tsids, token_classes, composition_grammar_summary,
+                    TokenByteDomain::from_indexed_vocab(vocab), false)
+            }
+            CompiledMask::Dynamic => {
+                assert!(matches!(&language.table, ParserExecutable::Native(_) | ParserExecutable::ExplicitLr(_)));
+                (ConstraintRuntimeBackend::Dynamic, ParserDwaStorage::Absent, Default::default(),
+                    false, Default::default(), Default::default(), None,
+                    TokenByteDomain::from_entries(vocab.entries_arc()), false)
+            }
+            CompiledMask::Linked => {
+                assert!(matches!(&language.table, ParserExecutable::LinkedLr(_)));
+                (ConstraintRuntimeBackend::Static, ParserDwaStorage::Absent, Default::default(),
+                    true, super::TokenizerTsidMap::partition(vec![0], vec![vec![0]]),
+                    super::TokenClasses::mapped(Vec::new(), Vec::new()), None,
+                    TokenByteDomain::from_entries(vocab.entries_arc()),
+                    language.tokenizer.has_epsilon_transitions())
+            }
+        };
+        Self::from_data(ConstraintData {
+            end_tokens: Arc::from([]),
+            marker_queries: None,
+            runtime_backend,
+            static_dynamic_overlay: None,
+            boundary_trigger: BoundaryTrigger::None,
+            boundary_candidate_summary: OnceLock::new(),
+            late_grammar_slots: Vec::new(),
+            late_bind_vocab: OnceLock::from(vocab.clone()),
+            pending_vocab_fingerprint: None,
+            pending_special_token_ids: None,
+            parser_dwa,
+            non_dwa_weights,
+            direct_regular_wide_frontier_acceptance: Vec::new(),
+            direct_regular_dynamic_hot_frontiers: Vec::new(),
+            direct_regular_parser_state_acceptance: Vec::new(),
+            direct_regular_automaton: language.direct_regular_automaton,
+            table: language.table,
+            terminal_display_names: language.terminal_display_names,
+            tokenizer: language.tokenizer,
+            tokenizer_has_epsilon_transitions,
+            ignore_terminal: language.ignore_terminal,
+            special_token_terminals: language.special_token_terminals,
+            dynamic_mask_vocab,
+            lazy_dynamic_mask_vocab: OnceLock::new(),
+            empty_byte_token_ids: crate::compiler::compile::vocab_empty_byte_token_ids(vocab),
+            possible_matches_complete,
+            tokenizer_tsids,
+            composition_grammar_summary,
+            token_classes,
+            token_bytes,
+            token_projection: Default::default(),
+            internal_token_dense_words: 0,
+            weight_token_masks: Default::default(),
+            packed_dwa_token_dense_masks: Default::default(),
+            seed_terminal_dense: Default::default(),
+            seed_terminal_dense_fallback: Default::default(),
+            seed_universe_dense: Arc::from([]),
+            dwa_fast_transitions: Default::default(),
+            parser_runtime_caches_prebuilt: false,
+            indexed_dag_dense_transitions: Vec::new(),
+            indexed_dag_dense_finals: Vec::new(),
+            tokenizer_fast_transitions,
+            parser_state_domain_labels: Vec::new(),
+            ignore_expr: language.ignore_expr,
+            serialized_artifact_cache: None,
+            deferred_terminal_exprs_blob: None,
+            deferred_terminal_exprs: Default::default(),
+            deferred_composition_metadata_blob: None,
+            deferred_table_rules_blob: None,
+            deferred_table_rules: Default::default(),
+        })
+    }
+}
+
 impl Constraint {
     pub(crate) fn from_data(data: ConstraintData) -> Self {
         Self { data: Arc::new(data), cached_mask_bit_len: OnceLock::new() }

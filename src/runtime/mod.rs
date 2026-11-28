@@ -23,7 +23,7 @@ pub(crate) mod static_observation;
 pub(crate) use glrmask_artifact::CommitTemplateDfas;
 #[allow(unused_imports)]
 pub(crate) use artifact::{
-    ConstraintData,
+    CompiledMask, RuntimeLanguage, ConstraintData,
     dynamic_mask_vocab_layout_class, BoundaryTrigger,
     BoundaryCandidateFingerprint, BoundaryCandidateSummary, OriginalTokenSet,
     SummaryPrecision, SummaryUnavailable,

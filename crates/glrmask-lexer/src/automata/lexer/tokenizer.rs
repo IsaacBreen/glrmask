@@ -8935,7 +8935,22 @@ impl Tokenizer {
     /// expressions with the wrong terminal IDs.
     pub fn restore_terminal_exprs(&mut self, exprs: Option<Vec<Expr>>) -> Result<(), String> {
         self.restore_terminal_exprs_only(exprs)?;
-        if self.exprs.is_none() {
+        self.restore_attached_virtual_runtime()
+    }
+
+    /// Restore runtime sidecars for expressions already owned by this tokenizer.
+    /// Avoid copying the complete expression tree merely to restore the same
+    /// metadata during compiled constraint publication.
+    #[doc(hidden)]
+    pub fn restore_attached_virtual_runtime(&mut self) -> Result<(), String> {
+        if let Some(exprs) = &self.exprs {
+            if exprs.len() != self.num_terminals as usize {
+                return Err(format!(
+                    "tokenizer has {} terminal expressions for {} terminals",
+                    exprs.len(), self.num_terminals,
+                ));
+            }
+        } else {
             return Ok(());
         }
         self.restore_virtual_unit_repeat_runtime()?;
