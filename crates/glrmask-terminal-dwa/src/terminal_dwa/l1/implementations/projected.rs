@@ -21,6 +21,7 @@ use crate::automata::lexer::{DFA, Lexer};
 use crate::terminal_dwa::l1::implementations::support::{DEAD, Scanner};
 use crate::Vocab;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
+use crate::vocab::VocabularySuffixIndex;
 
 const UNKNOWN: u32 = u32::MAX - 1;
 
@@ -1565,15 +1566,6 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
 }
 
 
-struct ReverseVocabTrie {
-    // Nodes are topological: every parent index is smaller than its child.
-    // Keeping the fields split avoids padding a ~170k-node p2 trie and makes
-    // the hot parent/byte scan denser.
-    parents: Box<[u32]>,
-    bytes: Box<[u8]>,
-    token_node: Box<[u32]>,
-}
-
 struct FiniteVocabProjection {
     aliases: Arc<Vec<Vec<u32>>>,
     /// `(original_token_id, unique_token_index)` sorted by original token ID.
@@ -1586,7 +1578,7 @@ struct FiniteVocabProjection {
     /// grammar instead of rescanning all token bytes.
     vocab_bytes: Arc<[u8]>,
     trie: Arc<VocabPrefixTree>,
-    reverse_trie: Option<ReverseVocabTrie>,
+    reverse_trie: Option<Arc<VocabularySuffixIndex>>,
 }
 
 impl crate::vocab::VocabDerivedArtifact for FiniteVocabProjection {}
@@ -1624,96 +1616,6 @@ fn residual_prepared_vocab_min_tokens(input: BuildInput<'_>) -> usize {
         })
 }
 
-fn build_reverse_vocab_trie(tokens: &[Arc<[u8]>]) -> ReverseVocabTrie {
-    let mut order = (0..tokens.len() as u32).collect::<Vec<_>>();
-    order.sort_unstable_by(|&left, &right| {
-        tokens[left as usize]
-            .iter()
-            .rev()
-            .cmp(tokens[right as usize].iter().rev())
-            .then_with(|| left.cmp(&right))
-    });
-
-    let edge_count = tokens.iter().map(|token| token.len()).sum::<usize>();
-    let mut parents = Vec::with_capacity(edge_count + 1);
-    let mut bytes = Vec::with_capacity(edge_count + 1);
-    let mut token_node = vec![u32::MAX; tokens.len()];
-    parents.push(u32::MAX);
-    bytes.push(0);
-
-    let mut path = vec![0u32];
-    let mut previous: Option<u32> = None;
-    for token_index in order {
-        let token = &tokens[token_index as usize];
-        let lcp = previous.map_or(0, |previous| {
-            tokens[previous as usize]
-                .iter()
-                .rev()
-                .zip(token.iter().rev())
-                .take_while(|(left, right)| left == right)
-                .count()
-        });
-        path.truncate(lcp + 1);
-        let mut parent = *path.last().expect("reverse vocabulary trie has root");
-        for &byte in token[..token.len() - lcp].iter().rev() {
-            let node = parents.len() as u32;
-            parents.push(parent);
-            bytes.push(byte);
-            path.push(node);
-            parent = node;
-        }
-        debug_assert_eq!(token_node[token_index as usize], u32::MAX);
-        token_node[token_index as usize] = parent;
-        previous = Some(token_index);
-    }
-    // Reorder the immutable trie breadth-first.  Parents remain before children,
-    // while nodes at the same depth become contiguous; this layout is markedly
-    // friendlier to the compile-time parent-state scan than DFS/LCP order.
-    let mut depths = vec![0usize; parents.len()];
-    let mut max_depth = 0usize;
-    for node in 1..parents.len() {
-        let parent = parents[node] as usize;
-        let depth = depths[parent] + 1;
-        depths[node] = depth;
-        max_depth = max_depth.max(depth);
-    }
-    let mut counts = vec![0usize; max_depth + 1];
-    for &depth in &depths {
-        counts[depth] += 1;
-    }
-    let mut level_offsets = Vec::with_capacity(counts.len() + 1);
-    level_offsets.push(0u32);
-    for &count in &counts {
-        level_offsets.push(level_offsets.last().copied().unwrap() + count as u32);
-    }
-    let mut cursors = level_offsets[..counts.len()]
-        .iter()
-        .map(|&offset| offset as usize)
-        .collect::<Vec<_>>();
-    let mut old_to_new = vec![0u32; parents.len()];
-    for (old, &depth) in depths.iter().enumerate() {
-        let new = cursors[depth];
-        cursors[depth] += 1;
-        old_to_new[old] = new as u32;
-    }
-    debug_assert_eq!(old_to_new[0], 0);
-    let mut reordered_parents = vec![u32::MAX; parents.len()];
-    let mut reordered_bytes = vec![0u8; bytes.len()];
-    for old in 1..parents.len() {
-        let new = old_to_new[old] as usize;
-        reordered_parents[new] = old_to_new[parents[old] as usize];
-        reordered_bytes[new] = bytes[old];
-    }
-    for node in &mut token_node {
-        *node = old_to_new[*node as usize];
-    }
-    ReverseVocabTrie {
-        parents: reordered_parents.into_boxed_slice(),
-        bytes: reordered_bytes.into_boxed_slice(),
-        token_node: token_node.into_boxed_slice(),
-    }
-}
-
 fn reverse_vocab_trie_min_tokens() -> usize {
     std::env::var("GLRMASK_L1_REVERSE_TRIE_MIN_TOKENS")
         .ok()
@@ -1736,7 +1638,7 @@ fn build_finite_vocab_projection(vocab: &Vocab) -> Arc<FiniteVocabProjection> {
     let vocab_bytes = vocab.relevant_bytes();
     let trie = order.trie();
     let reverse_trie =
-        (tokens.len() >= reverse_vocab_trie_min_tokens()).then(|| build_reverse_vocab_trie(&tokens));
+        (tokens.len() >= reverse_vocab_trie_min_tokens()).then(|| order.suffix_index());
     let projection = Arc::new(FiniteVocabProjection {
         aliases,
         original_order: Some(original_order),
@@ -1782,7 +1684,7 @@ fn finite_vocab_projection(input: BuildInput<'_>) -> (Arc<FiniteVocabProjection>
     let vocab_bytes = input.vocab.relevant_bytes();
     let trie = Arc::new(VocabPrefixTree::from_ordered_tokens(Arc::clone(&tokens)));
     let reverse_trie =
-        (tokens.len() >= reverse_vocab_trie_min_tokens()).then(|| build_reverse_vocab_trie(&tokens));
+        (tokens.len() >= reverse_vocab_trie_min_tokens()).then(|| Arc::new(VocabularySuffixIndex::build(&tokens)));
     (
         Arc::new(FiniteVocabProjection {
             aliases,
@@ -3344,7 +3246,7 @@ fn build_residual_projection(input: BuildInput<'_>, publication: ResidualPublica
             let parent = trie.parents[node] as usize;
             subset_at_node[node] = prepend(subset_at_node[parent], trie.bytes[node]);
         }
-        trie.token_node.iter().map(|&node| subset_at_node[node as usize]).collect::<Vec<_>>()
+        trie.token_nodes.iter().map(|&node| subset_at_node[node as usize]).collect::<Vec<_>>()
     } else {
         tokens.iter().map(|token| token.iter().rev().copied().fold(0, &mut prepend)).collect::<Vec<_>>()
     };

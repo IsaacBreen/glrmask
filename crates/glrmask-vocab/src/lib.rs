@@ -125,6 +125,7 @@ pub struct LexicalVocabulary {
     original_order: OnceLock<Arc<[(u32, u32)]>>,
     trie: OnceLock<Arc<vocab_prefix_tree::VocabPrefixTree>>,
     split_offsets: OnceLock<Box<[usize]>>,
+    suffix_index: OnceLock<Arc<suffix_index::VocabularySuffixIndex>>,
 }
 
 impl VocabDerivedArtifact for LexicalVocabulary {}
@@ -151,6 +152,7 @@ impl LexicalVocabulary {
             original_order: OnceLock::new(),
             trie: OnceLock::new(),
             split_offsets: OnceLock::new(),
+            suffix_index: OnceLock::new(),
         }
     }
 
@@ -181,6 +183,12 @@ impl LexicalVocabulary {
             }
             offsets.into_boxed_slice()
         })
+    }
+
+    pub fn suffix_index(&self) -> Arc<suffix_index::VocabularySuffixIndex> {
+        Arc::clone(self.suffix_index.get_or_init(|| Arc::new(
+            suffix_index::VocabularySuffixIndex::build(&self.ordered_token_bytes)
+        )))
     }
 
     pub fn original_order(&self) -> Arc<[(u32, u32)]> {
@@ -508,6 +516,7 @@ impl Vocab {
 }
 
 pub(crate) mod vocab_prefix_tree;
+mod suffix_index;
 
 /// Implementation details shared by the GLRMask workspace.
 ///
@@ -518,6 +527,7 @@ pub mod __private {
     pub use super::derived_artifact::VocabDerivedArtifact;
     pub use super::error::internal::{error_message, new_error, with_source_span};
     pub use super::{Vocab, LexicalVocabulary};
+    pub use super::suffix_index::VocabularySuffixIndex;
 
     pub mod vocab_prefix_tree {
         pub use super::super::vocab_prefix_tree::*;

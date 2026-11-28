@@ -696,26 +696,17 @@ struct CommonAtomPartialTrace {
 }
 
 #[derive(Debug)]
-struct CommonAtomSuffixUniverse {
-    token_offsets: Vec<usize>,
-    suffix_ids: Vec<u32>,
-    representatives: Vec<(usize, usize)>,
-    lengths: Vec<usize>,
-}
-
-#[derive(Debug)]
 pub struct PreparedCommonAtomSuffixIndex {
-    all_tokens: CommonAtomSuffixUniverse,
-    token_bytes: Box<[Vec<u8>]>,
-    ids_by_len: Box<[Box<[u32]>]>,
+    lexical: Arc<crate::vocab::LexicalVocabulary>,
+    suffixes: Arc<crate::vocab::VocabularySuffixIndex>,
+    original_order: Arc<[(u32, u32)]>,
 }
-
 impl crate::vocab::VocabDerivedArtifact for PreparedCommonAtomSuffixIndex {}
 
 #[derive(Debug)]
 pub struct PreparedCommonAtomSuffixView {
     index: Arc<PreparedCommonAtomSuffixIndex>,
-    /// Child-vocabulary entry position -> entry position in `index.token_bytes`.
+    /// Child-vocabulary entry position -> original entry position in the parent vocabulary.
     parent_entry_indices: Box<[usize]>,
 }
 
@@ -761,99 +752,16 @@ pub fn prepare_vocab_suffix_index(vocab: &Vocab) {
     {
         return;
     }
-    let token_bytes = vocab.entries_map().values().cloned().collect::<Vec<_>>();
-    let all_tokens = CommonAtomSuffixUniverse::build(&token_bytes);
-    let max_len = all_tokens.lengths.iter().copied().max().unwrap_or(0);
-    let mut ids_by_len = vec![Vec::<u32>::new(); max_len + 1];
-    for (id, &len) in all_tokens.lengths.iter().enumerate() {
-        ids_by_len[len].push(id as u32);
-    }
+    let lexical = vocab.lexical_vocabulary();
+    let suffixes = lexical.suffix_index();
+    suffixes.positions();
+    let original_order = lexical.original_order();
     let prepared = Arc::new(PreparedCommonAtomSuffixIndex {
-        all_tokens,
-        token_bytes: token_bytes.into_boxed_slice(),
-        ids_by_len: ids_by_len
-            .into_iter()
-            .map(Vec::into_boxed_slice)
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
+        lexical,
+        suffixes,
+        original_order,
     });
     vocab.vocab_derived_cache_set(prepared);
-}
-
-impl CommonAtomSuffixUniverse {
-    fn build<S: AsRef<[u8]> + Sync>(tokens: &[S]) -> Self {
-        let total_positions = tokens
-            .iter()
-            .map(|token| token.as_ref().len() + 1)
-            .sum::<usize>();
-        let mut token_offsets = Vec::with_capacity(tokens.len() + 1);
-        let mut suffix_ids = Vec::with_capacity(total_positions);
-        let mut representatives = vec![(0usize, tokens.first().map_or(0, |t| t.as_ref().len()))];
-        let mut lengths = vec![0usize];
-
-        // Equal suffixes are equal prefixes after reversing the token bytes.
-        // Sort those reversed strings once, then reuse exactly the LCP nodes
-        // from the previous token. This constructs the same canonical reverse
-        // trie as `(byte, tail_id)` hash-consing without any edge dictionary.
-        token_offsets.resize(tokens.len() + 1, 0);
-        for (index, token) in tokens.iter().enumerate() {
-            token_offsets[index + 1] = token_offsets[index] + token.as_ref().len() + 1;
-        }
-        suffix_ids.resize(*token_offsets.last().unwrap_or(&0), 0);
-        let mut order = (0..tokens.len()).collect::<Vec<_>>();
-        order.par_sort_unstable_by(|&left, &right| {
-            tokens[left]
-                .as_ref()
-                .iter()
-                .rev()
-                .cmp(tokens[right].as_ref().iter().rev())
-                .then_with(|| left.cmp(&right))
-        });
-        let mut previous_token = None::<usize>;
-        let mut previous_ids = vec![0u32];
-        for token_index in order {
-            let bytes = tokens[token_index].as_ref();
-            let lcp = previous_token.map_or(0usize, |previous_index| {
-                tokens[previous_index]
-                    .as_ref()
-                    .iter()
-                    .rev()
-                    .zip(bytes.iter().rev())
-                    .take_while(|(left, right)| left == right)
-                    .count()
-            });
-            let base = token_offsets[token_index];
-            suffix_ids[base + bytes.len()] = 0;
-            let mut current_ids = Vec::with_capacity(bytes.len() + 1);
-            current_ids.push(0);
-            for depth in 1..=bytes.len() {
-                let id = if depth <= lcp {
-                    previous_ids[depth]
-                } else {
-                    let offset = bytes.len() - depth;
-                    let id = representatives.len() as u32;
-                    representatives.push((token_index, offset));
-                    lengths.push(depth);
-                    id
-                };
-                current_ids.push(id);
-                suffix_ids[base + bytes.len() - depth] = id;
-            }
-            previous_token = Some(token_index);
-            previous_ids = current_ids;
-        }
-        Self {
-            token_offsets,
-            suffix_ids,
-            representatives,
-            lengths,
-        }
-    }
-
-    #[inline]
-    fn suffix_id(&self, token_index: usize, offset: usize) -> u32 {
-        self.suffix_ids[self.token_offsets[token_index] + offset]
-    }
 }
 
 fn compact_trace(
@@ -944,10 +852,35 @@ struct PreparedSuffixContext<'a> {
 }
 
 enum CommonAtomSuffixSource<'a> {
-    Local(CommonAtomSuffixUniverse),
+    Local(crate::vocab::VocabularySuffixIndex),
     Prepared {
         context: PreparedSuffixContext<'a>,
     },
+}
+
+impl CommonAtomSuffixSource<'_> {
+    fn index(&self) -> &crate::vocab::VocabularySuffixIndex {
+        match self {
+            Self::Local(index) => index,
+            Self::Prepared { context } => &context.index.suffixes,
+        }
+    }
+
+    fn spelling_index(&self, token: usize) -> usize {
+        match self {
+            Self::Local(_) => token,
+            Self::Prepared { context } => {
+                context.index.original_order[context.representative_original_indices[token]].1 as usize
+            }
+        }
+    }
+
+    fn bytes<'a, S: AsRef<[u8]>>(&'a self, tokens: &'a [S], entry: usize) -> &'a [u8] {
+        match self {
+            Self::Local(_) => tokens[entry].as_ref(),
+            Self::Prepared { context } => context.index.lexical.ordered_token_bytes[entry].as_ref(),
+        }
+    }
 }
 
 fn classify_tokens_phased<S: AsRef<[u8]> + Sync>(
@@ -969,36 +902,19 @@ fn classify_tokens_phased<S: AsRef<[u8]> + Sync>(
     let suffix_source = if let Some(context) = prepared_suffixes {
         CommonAtomSuffixSource::Prepared { context }
     } else {
-        CommonAtomSuffixSource::Local(CommonAtomSuffixUniverse::build(tokens))
+        let mut order = (0..tokens.len()).collect::<Vec<_>>();
+        order.par_sort_unstable_by(|&left, &right| {
+            tokens[left].as_ref().iter().rev()
+                .cmp(tokens[right].as_ref().iter().rev())
+                .then_with(|| left.cmp(&right))
+        });
+        CommonAtomSuffixSource::Local(crate::vocab::VocabularySuffixIndex::build_reverse_sorted(tokens, order))
     };
+    let index = suffix_source.index();
+    let positions = index.positions();
     let suffix_build_ms = suffix_build_started.elapsed().as_secs_f64() * 1000.0;
-
-    let local_ids_by_len;
-    let (ids_by_len, semantic_slot_count, suffix_count): (&[Box<[u32]>], usize, usize) =
-        match &suffix_source {
-            CommonAtomSuffixSource::Local(local) => {
-                let max_len = local.lengths.iter().copied().max().unwrap_or(0);
-                let mut buckets = vec![Vec::<u32>::new(); max_len + 1];
-                for (id, &len) in local.lengths.iter().enumerate() {
-                    buckets[len].push(id as u32);
-                }
-                local_ids_by_len = buckets
-                    .into_iter()
-                    .map(Vec::into_boxed_slice)
-                    .collect::<Vec<_>>();
-                (
-                    local_ids_by_len.as_slice(),
-                    local.representatives.len(),
-                    local.representatives.len(),
-                )
-            }
-            CommonAtomSuffixSource::Prepared { context } => (
-                context.index.ids_by_len.as_ref(),
-                context.index.all_tokens.representatives.len(),
-                context.index.all_tokens.representatives.len(),
-            ),
-        };
-
+    let suffix_count = index.parents.len();
+    let semantic_slot_count = suffix_count;
     let root_started = Instant::now();
     let cut_filtered_root =
         std::env::var_os("GLRMASK_DISABLE_COMMON_ATOM_CUT_FILTERED_ROOT").is_none();
@@ -1016,14 +932,7 @@ fn classify_tokens_phased<S: AsRef<[u8]> + Sync>(
                 let bit = cuts.trailing_zeros() as usize;
                 cuts &= cuts - 1;
                 let cut = bit + 1;
-                let suffix_id = match &suffix_source {
-                    CommonAtomSuffixSource::Local(local) => local.suffix_id(token_index, cut),
-                    CommonAtomSuffixSource::Prepared { context, .. } => {
-                        let original_index = context.representative_original_indices[token_index];
-                        let source = &context.index.all_tokens;
-                        source.suffix_ids[source.token_offsets[original_index] + cut]
-                    }
-                } as usize;
+                let suffix_id = positions.suffix_id(suffix_source.spelling_index(token_index), cut) as usize;
                 needed[suffix_id] = true;
             }
         }
@@ -1034,25 +943,13 @@ fn classify_tokens_phased<S: AsRef<[u8]> + Sync>(
                          semantic_ids: &mut FxHashMap<SmallVec<[u32; 32]>, u32>,
                          semantic_by_suffix: &mut [u32]|
      -> bool {
-        for ids in ids_by_len {
-            if ids.is_empty() {
-                continue;
-            }
-            let raw_signatures = ids
-                .par_iter()
-                .filter(|&&id| filter.is_none_or(|needed| needed[id as usize]))
-                .map(|&id| {
-                    let (bytes, offset, source_token_index) = match &suffix_source {
-                        CommonAtomSuffixSource::Local(local) => {
-                            let (token_index, offset) = local.representatives[id as usize];
-                            (tokens[token_index].as_ref(), offset, token_index)
-                        }
-                        CommonAtomSuffixSource::Prepared { context } => {
-                            let (entry_index, offset) =
-                                context.index.all_tokens.representatives[id as usize];
-                            (context.index.token_bytes[entry_index].as_slice(), offset, entry_index)
-                        }
-                    };
+        for level in index.level_offsets.windows(2) {
+            let raw_signatures = (level[0]..level[1])
+                .into_par_iter()
+                .filter(|&id| filter.is_none_or(|needed| needed[id]))
+                .map(|id| {
+                    let (source_token_index, offset) = positions.representative(id);
+                    let bytes = suffix_source.bytes(tokens, source_token_index);
                     let suffix = &bytes[offset..];
                     let (future_terminals, matches) = root_observation(machine, suffix);
                     let mut signature = SmallVec::<[u32; 32]>::new();
@@ -1068,16 +965,7 @@ fn classify_tokens_phased<S: AsRef<[u8]> + Sync>(
                     signature.push(matches.len() as u32);
                     for (terminal, width) in matches {
                         debug_assert!(width > 0 && offset + width <= bytes.len());
-                        let continuation_id = match &suffix_source {
-                            CommonAtomSuffixSource::Local(local) => {
-                                local.suffix_id(source_token_index, offset + width)
-                            }
-                            CommonAtomSuffixSource::Prepared { context, .. } => {
-                                let source = &context.index.all_tokens;
-                                source.suffix_ids
-                                    [source.token_offsets[source_token_index] + offset + width]
-                            }
-                        } as usize;
+                        let continuation_id = positions.suffix_id(source_token_index, offset + width) as usize;
                         let continuation = semantic_by_suffix[continuation_id];
                         if continuation == u32::MAX {
                             return (id, None);
@@ -1126,14 +1014,7 @@ fn classify_tokens_phased<S: AsRef<[u8]> + Sync>(
                 let bit = cuts.trailing_zeros() as usize;
                 cuts &= cuts - 1;
                 let cut = bit + 1;
-                let suffix_id = match &suffix_source {
-                    CommonAtomSuffixSource::Local(local) => local.suffix_id(token_index, cut),
-                    CommonAtomSuffixSource::Prepared { context, .. } => {
-                        let original_index = context.representative_original_indices[token_index];
-                        let source = &context.index.all_tokens;
-                        source.suffix_ids[source.token_offsets[original_index] + cut]
-                    }
-                } as usize;
+                let suffix_id = positions.suffix_id(suffix_source.spelling_index(token_index), cut) as usize;
                 let semantic = semantic_by_suffix[suffix_id];
                 debug_assert_ne!(semantic, u32::MAX);
                 partial.root_semantics.push((cut as u8, semantic));
