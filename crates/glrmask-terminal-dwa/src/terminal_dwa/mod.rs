@@ -53,7 +53,7 @@ use crate::Vocab;
 use finalize_ignore::erase_ignore_after_ti;
 use grammar_helpers::{compute_always_allowed_follows, ignore_transparent_disallowed_follows};
 use l2p::equivalence_analysis::state_equivalence::{
-    resolve_global_pipeline_config, run_state_equivalence_pipeline, StateEquivalenceScope,
+    includes_source_observation,
 };
 use types::{
     compile_profile_enabled, compile_profile_join, compile_profile_uses_serial_partition_schedule,
@@ -1588,8 +1588,7 @@ pub fn build_global_max_length_state_map_with_initial(
         && global_max_length_env_override() != Some(true)
         && std::env::var_os("GLRMASK_DISABLE_SMALL_GLOBAL_EQUIV_FAST_PATH").is_none();
     if small_default_pipeline_fast_path {
-        let config = resolve_global_pipeline_config(false);
-        if config.passes.is_empty() {
+        if !includes_source_observation("GLRMASK_GLOBAL_STATE_EQUIV_PASSES", false) {
             let state_map = initial_state_map.cloned().unwrap_or_else(|| {
                 let ids = (0..num_states_u32).collect::<Vec<_>>();
                 ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
@@ -1616,21 +1615,23 @@ pub fn build_global_max_length_state_map_with_initial(
     let stable_signature_cells = global_max_length_stable_signature_cells(tokenizer, &global_statistic);
     let stable_signature_cell_limit = global_max_length_stable_signature_cell_limit();
 
-    let config = resolve_global_pipeline_config(use_global_max_length(tokenizer, &global_statistic));
-    let (state_map, profile) = run_state_equivalence_pipeline(
-        tokenizer,
-        vocab,
-        initial_state_map,
-        None,
-        StateEquivalenceScope::Global,
-        &config,
-        None,
-        None,
-        None,
+    use l2p::equivalence_analysis::state_equivalence::{identity_state_map, max_length};
+    let enabled = includes_source_observation(
+        "GLRMASK_GLOBAL_STATE_EQUIV_PASSES",
+        use_global_max_length(tokenizer, &global_statistic),
     );
+    let initial = initial_state_map.cloned().unwrap_or_else(|| identity_state_map(num_states));
+    let state_map = if enabled {
+        max_length::compute_state_map(
+            tokenizer, &global_statistic, Some(&initial), None,
+            max_length::MaxLengthMode::StableByteRestricted, None, None,
+        )
+    } else {
+        initial
+    };
 
     if compile_profile_enabled() {
-        if profile.max_length_skipped {
+        if !enabled {
             eprintln!(
                 "[glrmask/profile][global_max_length] mode=identity skipped=true states={} reps={} tokens_included=0 max_token_len=0 stable_signature_cells={} stable_signature_cell_limit={} ms={:.3}",
                 num_states,
@@ -1648,7 +1649,7 @@ pub fn build_global_max_length_state_map_with_initial(
                 max_token_len,
                 stable_signature_cells,
                 stable_signature_cell_limit,
-                profile.max_length_state_equiv_ms,
+                started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
     }

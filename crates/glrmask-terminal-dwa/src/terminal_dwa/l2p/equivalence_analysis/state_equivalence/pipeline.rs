@@ -1,513 +1,153 @@
 use crate::automata::lexer::Lexer;
+use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::Vocab;
 use std::time::Instant;
 
-use crate::Vocab;
-use crate::automata::lexer::tokenizer::Tokenizer;
-
 use super::super::compat::TokenizerView;
-use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use super::{identity_state_map, max_length, nfa, restricted_observation};
 
-use super::identity_state_map;
-use super::max_length::{self, MaxLengthMode};
-use super::restricted_observation;
-
+/// The local quotient either preserves the incoming coordinate, observes
+/// destinations only, or also observes the source. The latter establishes
+/// a right congruence and therefore subsumes every bounded byte observer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StateEquivalencePassKind {
-    RestrictedObservation,
-    MaxLength,
-}
-
-impl StateEquivalencePassKind {
-    fn parse(value: &str) -> Result<Self, String> {
-        match value.trim() {
-            "restricted_observation" => Ok(Self::RestrictedObservation),
-            "max_length" => Ok(Self::MaxLength),
-            other => Err(format!(
-                "unknown state-equivalence pass `{other}`; expected one of: restricted_observation, max_length"
-            )),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StateEquivalenceScope {
-    Global,
-    L2p,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct StateEquivalencePipelineConfig {
-    pub passes: Vec<StateEquivalencePassKind>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StateEquivalencePassProfile {
-    pub kind: StateEquivalencePassKind,
-    pub name: &'static str,
-    pub elapsed_ms: f64,
-    pub representative_count: usize,
-    pub skipped: bool,
+pub enum LocalObservation {
+    Skip,
+    Destinations,
+    SourceAndDestinations,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct StateEquivalencePipelineProfile {
-    pub pass_profiles: Vec<StateEquivalencePassProfile>,
     pub restricted_observation_state_equiv_ms: f64,
     pub restricted_observation_reps: usize,
     pub max_length_skipped: bool,
     pub max_length_state_equiv_ms: f64,
     pub max_length_reps: usize,
-    pub max_length_congruence_certified: bool,
-    /// The current map is an output-labelled right congruence over the
-    /// vocabulary byte alphabet and can be materialized directly as the exact
-    /// analysis quotient without a second whole-DFA scan.
     pub relevant_byte_congruence_certified: bool,
 }
 
-fn parse_passes(value: &str) -> Vec<StateEquivalencePassKind> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
+/// Keep the existing private diagnostic switches, but interpret the list as
+/// a selection of observations, not an executable sequence of passes.
+pub fn includes_source_observation(scoped_env: &str, default: bool) -> bool {
+    let Ok(value) = std::env::var(scoped_env)
+        .or_else(|_| std::env::var("GLRMASK_STATE_EQUIV_PASSES"))
+    else { return default; };
+    if value.trim().is_empty() { return false; }
+    let mut include = false;
+    for item in value.split(',').map(str::trim) {
+        match item {
+            "restricted_observation" => {}
+            "max_length" => include = true,
+            other => panic!("Invalid GLRMASK_STATE_EQUIV_PASSES value: unknown state-equivalence pass `{other}`"),
+        }
     }
-    trimmed
-        .split(',')
-        .map(StateEquivalencePassKind::parse)
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_else(|err| panic!("Invalid GLRMASK_STATE_EQUIV_PASSES value: {err}"))
+    include
 }
 
-fn resolve_pipeline_config(
-    scoped_env: &str,
-    default_passes: &[StateEquivalencePassKind],
-) -> StateEquivalencePipelineConfig {
-    let passes = std::env::var(scoped_env)
-        .ok()
-        .map(|value| parse_passes(&value))
-        .or_else(|| {
-            std::env::var("GLRMASK_STATE_EQUIV_PASSES")
-                .ok()
-                .map(|value| parse_passes(&value))
-        })
-        .unwrap_or_else(|| default_passes.to_vec());
-    StateEquivalencePipelineConfig { passes }
+impl LocalObservation {
+    pub fn resolve(include_source: bool) -> Self {
+        if includes_source_observation("GLRMASK_L2P_STATE_EQUIV_PASSES", include_source) {
+            Self::SourceAndDestinations
+        } else {
+            Self::Destinations
+        }
+    }
 }
 
-pub fn resolve_global_pipeline_config(
-    default_include_max_length: bool,
-) -> StateEquivalencePipelineConfig {
-    let default_passes = if default_include_max_length {
-        &[StateEquivalencePassKind::MaxLength][..]
-    } else {
-        &[][..]
-    };
-    let mut config = resolve_pipeline_config("GLRMASK_GLOBAL_STATE_EQUIV_PASSES", default_passes);
-    // Restricted observation depends on a local L2P vocabulary partition and
-    // is deliberately unavailable to the global pipeline.
-    config
-        .passes
-        .retain(|kind| !matches!(kind, StateEquivalencePassKind::RestrictedObservation));
-    config
-}
-
-pub fn resolve_l2p_pipeline_config(
-    default_include_max_length: bool,
-) -> StateEquivalencePipelineConfig {
-    let default_passes = if default_include_max_length {
-        &[
-            StateEquivalencePassKind::RestrictedObservation,
-            StateEquivalencePassKind::MaxLength,
-        ][..]
-    } else {
-        &[StateEquivalencePassKind::RestrictedObservation][..]
-    };
-    let mut config = resolve_pipeline_config("GLRMASK_L2P_STATE_EQUIV_PASSES", default_passes);
-    // This is the coordinate-preserving replacement for L2P tokenizer
-    // simplification, so it is mandatory and always precedes every optional
-    // pass, including an environment-selected max-length pass.
-    config
-        .passes
-        .retain(|kind| !matches!(kind, StateEquivalencePassKind::RestrictedObservation));
-    config
-        .passes
-        .insert(0, StateEquivalencePassKind::RestrictedObservation);
-    config
-}
-
-pub fn run_state_equivalence_pipeline(
+pub fn local_observation_map(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
-    initial_state_map: Option<&ManyToOneIdMap>,
+    initial: Option<&ManyToOneIdMap>,
     active_groups: Option<&[bool]>,
-    scope: StateEquivalenceScope,
-    config: &StateEquivalencePipelineConfig,
-    prebuilt_nfa_refinement: Option<&super::nfa::PrebuiltSparsePowersetRefinement<'_>>,
-    kbounded_tokenizer_view: Option<&TokenizerView>,
-    kbounded_byte_to_class: Option<&[u8; 256]>,
+    observation: LocalObservation,
+    prebuilt: Option<&nfa::PrebuiltSparsePowersetRefinement<'_>>,
+    view: Option<&TokenizerView>,
+    byte_to_class: Option<&[u8; 256]>,
+    certified: bool,
 ) -> (ManyToOneIdMap, StateEquivalencePipelineProfile) {
-    run_state_equivalence_pipeline_with_initial_restricted_observation_certificate(
-        tokenizer,
-        vocab,
-        initial_state_map,
-        active_groups,
-        scope,
-        config,
-        prebuilt_nfa_refinement,
-        kbounded_tokenizer_view,
-        kbounded_byte_to_class,
-        false,
-    )
-}
-
-/// Run the ordinary state-equivalence pipeline, optionally certifying that the
-/// incoming state map is already the stable restricted-observation quotient for
-/// this exact tokenizer, active-terminal mask, and vocabulary-byte alphabet.
-///
-/// This is stronger than merely supplying an `initial_state_map`: a certified
-/// map is already an output-labelled right congruence for the mandatory L2P
-/// restricted-observation pass. Re-running that fixed point can therefore only
-/// reproduce the same partition. The certificate also implies every bounded
-/// max-length observer over the same byte alphabet, matching the existing
-/// post-restricted-observation certification logic below.
-pub fn run_state_equivalence_pipeline_with_initial_restricted_observation_certificate(
-    tokenizer: &Tokenizer,
-    vocab: &Vocab,
-    initial_state_map: Option<&ManyToOneIdMap>,
-    active_groups: Option<&[bool]>,
-    scope: StateEquivalenceScope,
-    config: &StateEquivalencePipelineConfig,
-    prebuilt_nfa_refinement: Option<&super::nfa::PrebuiltSparsePowersetRefinement<'_>>,
-    kbounded_tokenizer_view: Option<&TokenizerView>,
-    kbounded_byte_to_class: Option<&[u8; 256]>,
-    initial_restricted_observation_certified: bool,
-) -> (ManyToOneIdMap, StateEquivalencePipelineProfile) {
-    assert!(
-        !initial_restricted_observation_certified
-            || (initial_state_map.is_some() && matches!(scope, StateEquivalenceScope::L2p)),
-        "a restricted-observation certificate requires an L2P initial state map",
-    );
-    let mut current_state_map = initial_state_map
-        .cloned()
+    assert!(!certified || initial.is_some());
+    let initial = initial.cloned()
         .unwrap_or_else(|| identity_state_map(tokenizer.num_states() as usize));
+    let initial_reps = initial.num_internal_ids() as usize;
+    let includes_source = observation == LocalObservation::SourceAndDestinations;
     let mut profile = StateEquivalencePipelineProfile {
-        max_length_skipped: !config
-            .passes
-            .iter()
-            .any(|kind| matches!(kind, StateEquivalencePassKind::MaxLength)),
-        restricted_observation_reps: current_state_map.num_internal_ids() as usize,
-        max_length_reps: current_state_map.num_internal_ids() as usize,
-        ..StateEquivalencePipelineProfile::default()
+        restricted_observation_reps: initial_reps,
+        max_length_reps: initial_reps,
+        max_length_skipped: !includes_source,
+        relevant_byte_congruence_certified: certified,
+        ..Default::default()
     };
-    let statistic = max_length::cached_statistic(vocab);
-    let mut stable_restricted_observation = initial_restricted_observation_certified;
-    profile.relevant_byte_congruence_certified = initial_restricted_observation_certified;
-
-    for kind in &config.passes {
-        let bounded_observer_already_certified =
-            matches!(kind, StateEquivalencePassKind::MaxLength)
-                && matches!(scope, StateEquivalenceScope::L2p)
-                && (stable_restricted_observation
-                    || (!tokenizer.has_epsilon_transitions()
-                        && kbounded_tokenizer_view.is_some_and(|view| {
-                            view.is_relevant_byte_congruent(
-                                &current_state_map,
-                                statistic.relevant_bytes(),
-                            )
-                        })));
-        if bounded_observer_already_certified {
-            // A stable visible-output right congruence over the vocabulary
-            // bytes is stronger than every finite-depth observer over those
-            // same bytes. For epsilon tokenizers the mandatory restricted-
-            // observation pass computes that stable congruence directly; for
-            // DFA views `is_relevant_byte_congruent` certifies it.
-            //
-            // Keep the finer congruence and let the following exact token
-            // refinement perform any additional safe merging. The bounded
-            // max-length pass here can only coarsen the partition; it is not
-            // required for correctness.
-            profile.max_length_skipped = false;
-            profile.max_length_state_equiv_ms = 0.0;
-            profile.max_length_reps = current_state_map.num_internal_ids() as usize;
-            profile.max_length_congruence_certified = true;
-            profile.relevant_byte_congruence_certified = true;
-            profile.pass_profiles.push(StateEquivalencePassProfile {
-                kind: StateEquivalencePassKind::MaxLength,
-                name: "max_length_congruence_certified",
-                elapsed_ms: 0.0,
-                representative_count: current_state_map.num_internal_ids() as usize,
-                skipped: false,
-            });
-            continue;
-        }
-
-        match *kind {
-            StateEquivalencePassKind::RestrictedObservation => {
-                assert!(
-                    matches!(scope, StateEquivalenceScope::L2p),
-                    "restricted-observation state equivalence is L2P-only",
-                );
-                if stable_restricted_observation {
-                    profile.restricted_observation_state_equiv_ms = 0.0;
-                    profile.restricted_observation_reps =
-                        current_state_map.num_internal_ids() as usize;
-                    profile.pass_profiles.push(StateEquivalencePassProfile {
-                        kind: StateEquivalencePassKind::RestrictedObservation,
-                        name: "restricted_observation_certified",
-                        elapsed_ms: 0.0,
-                        representative_count: current_state_map.num_internal_ids() as usize,
-                        skipped: true,
-                    });
-                    continue;
-                }
-                let started_at = Instant::now();
-                current_state_map = if tokenizer.has_epsilon_transitions() {
-                    if let Some(prebuilt) = prebuilt_nfa_refinement {
-                        // The sparse relevant powerset is already exact over the
-                        // active terminal language and relevant vocabulary bytes.
-                        // Reuse its topology for the stable quotient instead of
-                        // traversing the raw epsilon NFA a second time.
-                        prebuilt.compute_state_map(
-                            tokenizer,
-                            Some(&current_state_map),
-                            super::nfa::RefinementDepth::Stable,
-                        )
-                    } else {
-                        super::nfa::compute_state_map(
-                            tokenizer,
-                            statistic.relevant_bytes(),
-                            active_groups,
-                            Some(&current_state_map),
-                            super::nfa::RefinementDepth::Stable,
-                        )
-                    }
-                } else {
-                    let tokenizer_view = kbounded_tokenizer_view
-                        .expect("L2P restricted observation requires the shared analysis view");
-                    restricted_observation::compute_state_map(
-                        tokenizer_view,
-                        statistic.relevant_bytes(),
-                        Some(&current_state_map),
-                        kbounded_byte_to_class,
-                        config
-                            .passes
-                            .iter()
-                            .any(|kind| matches!(kind, StateEquivalencePassKind::MaxLength)),
-                    )
-                };
-                record_restricted_observation_profile(
-                    &mut profile,
-                    started_at.elapsed().as_secs_f64() * 1000.0,
-                    current_state_map.num_internal_ids() as usize,
-                );
-                // The stable epsilon-NFA construction includes frozen
-                // visible outputs directly. For deterministic views, the
-                // source-observation seed used whenever max-length is present
-                // likewise makes the fixed point output-labelled. In either
-                // case the resulting partition is already the exact right
-                // congruence that downstream quotient materialization needs.
-                let includes_source_observation = config
-                    .passes
-                    .iter()
-                    .any(|kind| matches!(kind, StateEquivalencePassKind::MaxLength));
-                stable_restricted_observation =
-                    tokenizer.has_epsilon_transitions() || includes_source_observation;
-                profile.relevant_byte_congruence_certified = stable_restricted_observation;
-            }
-            StateEquivalencePassKind::MaxLength => {
-                stable_restricted_observation = false;
-                profile.relevant_byte_congruence_certified = false;
-                let mode = match scope {
-                    StateEquivalenceScope::Global => MaxLengthMode::StableByteRestricted,
-                    StateEquivalenceScope::L2p => MaxLengthMode::KBoundedByteRestricted,
-                };
-                let started_at = Instant::now();
-                current_state_map = if tokenizer.has_epsilon_transitions()
-                    && matches!(scope, StateEquivalenceScope::L2p)
-                    && let Some(prebuilt) = prebuilt_nfa_refinement
-                {
-                    prebuilt.compute_state_map(
-                        tokenizer,
-                        Some(&current_state_map),
-                        super::nfa::RefinementDepth::Bounded(statistic.max_token_len()),
-                    )
-                } else {
-                    max_length::compute_state_map(
-                        tokenizer,
-                        &statistic,
-                        Some(&current_state_map),
-                        active_groups,
-                        mode,
-                        kbounded_tokenizer_view,
-                        kbounded_byte_to_class,
-                    )
-                };
-                record_max_length_profile(
-                    &mut profile,
-                    *kind,
-                    mode,
-                    started_at.elapsed().as_secs_f64() * 1000.0,
-                    current_state_map.num_internal_ids() as usize,
-                );
-            }
-        }
+    if observation == LocalObservation::Skip || certified {
+        return (initial, profile);
     }
-
-    (current_state_map, profile)
+    let started = Instant::now();
+    let statistic = max_length::cached_statistic(vocab);
+    let epsilon = tokenizer.has_epsilon_transitions();
+    let map = if epsilon {
+        if let Some(prebuilt) = prebuilt {
+            prebuilt.compute_state_map(tokenizer, Some(&initial), nfa::RefinementDepth::Stable)
+        } else {
+            nfa::compute_state_map(
+                tokenizer, statistic.relevant_bytes(), active_groups,
+                Some(&initial), nfa::RefinementDepth::Stable,
+            )
+        }
+    } else {
+        restricted_observation::compute_state_map(
+            view.expect("L2P restricted observation requires the shared analysis view"),
+            statistic.relevant_bytes(), Some(&initial), byte_to_class, includes_source,
+        )
+    };
+    profile.restricted_observation_state_equiv_ms = started.elapsed().as_secs_f64() * 1000.0;
+    profile.restricted_observation_reps = map.num_internal_ids() as usize;
+    profile.relevant_byte_congruence_certified = epsilon || includes_source;
+    if includes_source {
+        profile.max_length_reps = profile.restricted_observation_reps;
+    }
+    (map, profile)
 }
-
-fn record_restricted_observation_profile(
-    profile: &mut StateEquivalencePipelineProfile,
-    elapsed_ms: f64,
-    representative_count: usize,
-) {
-    profile.restricted_observation_state_equiv_ms = elapsed_ms;
-    profile.restricted_observation_reps = representative_count;
-    profile.pass_profiles.push(StateEquivalencePassProfile {
-        kind: StateEquivalencePassKind::RestrictedObservation,
-        name: "restricted_observation",
-        elapsed_ms,
-        representative_count,
-        skipped: false,
-    });
-}
-
-fn record_max_length_profile(
-    profile: &mut StateEquivalencePipelineProfile,
-    kind: StateEquivalencePassKind,
-    mode: MaxLengthMode,
-    elapsed_ms: f64,
-    representative_count: usize,
-) {
-    profile.max_length_skipped = false;
-    profile.max_length_state_equiv_ms = elapsed_ms;
-    profile.max_length_reps = representative_count;
-    profile.pass_profiles.push(StateEquivalencePassProfile {
-        kind,
-        name: mode.name(),
-        elapsed_ms,
-        representative_count,
-        skipped: false,
-    });
-}
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer;
 
-    fn same_partition(left: &ManyToOneIdMap, right: &ManyToOneIdMap) -> bool {
-        left.original_to_internal.len() == right.original_to_internal.len()
-            && (0..left.original_to_internal.len()).all(|i| {
-                (0..left.original_to_internal.len()).all(|j| {
-                    (left.original_to_internal[i] == left.original_to_internal[j])
-                        == (right.original_to_internal[i] == right.original_to_internal[j])
-                })
-            })
-    }
-
-
     #[test]
-    fn deterministic_restricted_observation_carries_exact_right_congruence() {
-        use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::TokenizerView;
-
-        let source = arbitrary_epsilon_l1_test_tokenizer();
-        let tokenizer = source
+    fn deterministic_source_observation_is_a_right_congruence() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer()
             .try_full_determinization(1_024, 100_000)
-            .expect("small test tokenizer determinizes")
-            .tokenizer;
+            .expect("small test tokenizer determinizes").tokenizer;
         assert!(!tokenizer.has_epsilon_transitions());
-
         let vocab = Vocab::from_entries_unchecked(vec![
-            (0, b"a".to_vec()),
-            (1, b"b".to_vec()),
-            (2, b"ab".to_vec()),
-            (3, b"ba".to_vec()),
+            (0, b"a".to_vec()), (1, b"b".to_vec()),
+            (2, b"ab".to_vec()), (3, b"ba".to_vec()),
         ]);
-        let config = StateEquivalencePipelineConfig {
-            passes: vec![
-                StateEquivalencePassKind::RestrictedObservation,
-                StateEquivalencePassKind::MaxLength,
-            ],
-        };
-        let tokenizer_view = TokenizerView::new(&tokenizer);
-        let (state_map, profile) = run_state_equivalence_pipeline(
-            &tokenizer,
-            &vocab,
-            None,
-            None,
-            StateEquivalenceScope::L2p,
-            &config,
-            None,
-            Some(&tokenizer_view),
-            None,
+        let view = TokenizerView::new(&tokenizer);
+        let (map, profile) = local_observation_map(
+            &tokenizer, &vocab, None, None, LocalObservation::SourceAndDestinations,
+            None, Some(&view), None, false,
         );
-
-        let mut relevant_bytes = [false; 256];
-        for &byte in vocab.relevant_bytes().iter() {
-            relevant_bytes[byte as usize] = true;
-        }
         assert!(profile.relevant_byte_congruence_certified);
-        assert!(profile.max_length_congruence_certified);
-        assert!(TokenizerView::new(&tokenizer)
-            .is_relevant_byte_congruent(&state_map, &relevant_bytes));
+        assert!(view.is_relevant_byte_congruent(&map, max_length::cached_statistic(&vocab).relevant_bytes()));
     }
+
     #[test]
-    fn stable_epsilon_restricted_observation_certifies_bounded_max_length() {
+    fn epsilon_observation_includes_source_even_when_not_requested() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
-        let vocab = Vocab::from_entries_unchecked(
-            vec![
-                (0, b"a".to_vec()),
-                (1, b"b".to_vec()),
-                (2, b"ab".to_vec()),
-                (3, b"ba".to_vec()),
-            ]);
-        let restricted_only = StateEquivalencePipelineConfig {
-            passes: vec![StateEquivalencePassKind::RestrictedObservation],
-        };
-        let with_max_length = StateEquivalencePipelineConfig {
-            passes: vec![
-                StateEquivalencePassKind::RestrictedObservation,
-                StateEquivalencePassKind::MaxLength,
-            ],
-        };
-
-        let (restricted_map, _) = run_state_equivalence_pipeline(
-            &tokenizer,
-            &vocab,
-            None,
-            None,
-            StateEquivalenceScope::L2p,
-            &restricted_only,
-            None,
-            None,
-            None,
+        let vocab = Vocab::from_entries_unchecked(vec![
+            (0, b"a".to_vec()), (1, b"b".to_vec()),
+            (2, b"ab".to_vec()), (3, b"ba".to_vec()),
+        ]);
+        let (map, profile) = local_observation_map(
+            &tokenizer, &vocab, None, None, LocalObservation::Destinations,
+            None, None, None, false,
         );
-        let (certified_map, profile) = run_state_equivalence_pipeline(
-            &tokenizer,
-            &vocab,
-            None,
-            None,
-            StateEquivalenceScope::L2p,
-            &with_max_length,
-            None,
-            None,
-            None,
+        let (other, _) = local_observation_map(
+            &tokenizer, &vocab, None, None, LocalObservation::SourceAndDestinations,
+            None, None, None, false,
         );
-
-        assert!(same_partition(&restricted_map, &certified_map));
-        assert!(profile.max_length_congruence_certified);
-        assert_eq!(profile.max_length_state_equiv_ms, 0.0);
-        assert_eq!(
-            profile.max_length_reps,
-            profile.restricted_observation_reps
-        );
-        assert_eq!(
-            profile
-                .pass_profiles
-                .last()
-                .expect("max-length profile")
-                .name,
-            "max_length_congruence_certified"
-        );
+        assert!(profile.relevant_byte_congruence_certified);
+        assert_eq!(map.original_to_internal, other.original_to_internal);
     }
 }

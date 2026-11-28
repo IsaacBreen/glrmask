@@ -12,10 +12,7 @@ use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use super::state_equivalence::global_token_position::GlobalTokenPositionStatePartition;
 use crate::compiler::stages::id_map_and_terminal_dwa::grammar_helpers::ignore_transparent_disallowed_follows;
 use super::state_equivalence::{
-    build_state_map_from_subset_representatives, identity_state_map, resolve_l2p_pipeline_config,
-    run_state_equivalence_pipeline,
-    run_state_equivalence_pipeline_with_initial_restricted_observation_certificate,
-    StateEquivalenceScope,
+    build_state_map_from_subset_representatives, identity_state_map, local_observation_map, LocalObservation,
 };
 use super::state_equivalence::pipeline::StateEquivalencePipelineProfile;
 use super::state_equivalence::nfa::{
@@ -2612,7 +2609,7 @@ fn analyze_equivalences_impl(
             );
         }
 
-        let mut pipeline_config = resolve_l2p_pipeline_config(!max_length_skipped);
+        let mut observation = LocalObservation::resolve(!max_length_skipped);
         // On large p1 domains the exact finite-vocabulary refinement already
         // collapses the state space aggressively. The preliminary stable
         // restricted-observation pass walks tens of thousands of states but saves
@@ -2649,14 +2646,14 @@ fn analyze_equivalences_impl(
                         .any(|candidate| candidate == partition_label)
                 });
         if skip_pipeline_prepass {
-            pipeline_config.passes.clear();
+            observation = LocalObservation::Skip;
         }
         if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some() {
             eprintln!(
-                "[glrmask/profile][l2p_state_pipeline_plan] partition={} skip={} passes={:?}",
+                "[glrmask/profile][l2p_state_pipeline_plan] partition={} skip={} observation={:?}",
                 partition_label,
                 skip_pipeline_prepass,
-                pipeline_config.passes,
+                observation,
             );
         }
         let (tokenizer_states, pipeline_profile) = if vocab_only_direct_states {
@@ -2680,13 +2677,12 @@ fn analyze_equivalences_impl(
                 },
             )
         } else {
-            run_state_equivalence_pipeline_with_initial_restricted_observation_certificate(
+            local_observation_map(
                 tokenizer,
                 vocab,
                 initial_state_map,
                 active_groups,
-                StateEquivalenceScope::L2p,
-                &pipeline_config,
+                observation,
                 prebuilt_nfa_refinement.as_ref(),
                 None,
                 None,
@@ -2696,16 +2692,16 @@ fn analyze_equivalences_impl(
         if initial_state_map_has_stable_restricted_observation
             && std::env::var_os("GLRMASK_VALIDATE_TI_RESTRICTED_OBSERVATION_REUSE").is_some()
         {
-            let (reference, _) = run_state_equivalence_pipeline(
+            let (reference, _) = local_observation_map(
                 tokenizer,
                 vocab,
                 initial_state_map,
                 active_groups,
-                StateEquivalenceScope::L2p,
-                &pipeline_config,
+                observation,
                 None,
                 None,
                 None,
+                false,
             );
             // The legacy reference expands excluded raw states into additional
             // classes. Compare both partitions on the actual requested seed
@@ -3532,17 +3528,17 @@ fn analyze_equivalences_impl(
         max_token_len,
         active_byte_count,
     );
-    let pipeline_config = resolve_l2p_pipeline_config(!max_length_skipped);
-    let (pre_state_map, pipeline_profile) = run_state_equivalence_pipeline(
+    let observation = LocalObservation::resolve(!max_length_skipped);
+    let (pre_state_map, pipeline_profile) = local_observation_map(
         tokenizer,
         vocab,
         initial_state_map,
         active_groups,
-        StateEquivalenceScope::L2p,
-        &pipeline_config,
+        observation,
         None,
         Some(&tokenizer_view),
         Some(&byte_to_class),
+        false,
     );
     // Restricted observation is a fixed point over the vocabulary byte
     // alphabet. When its map is also output-labelled congruent, token paths can

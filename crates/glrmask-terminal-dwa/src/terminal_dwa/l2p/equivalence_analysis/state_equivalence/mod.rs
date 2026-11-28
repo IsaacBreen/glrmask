@@ -6,11 +6,7 @@ pub mod nfa;
 pub mod pipeline;
 pub mod restricted_observation;
 
-pub use pipeline::{
-    resolve_global_pipeline_config, resolve_l2p_pipeline_config, run_state_equivalence_pipeline,
-    run_state_equivalence_pipeline_with_initial_restricted_observation_certificate,
-    StateEquivalenceScope,
-};
+pub use pipeline::{includes_source_observation, local_observation_map, LocalObservation};
 
 pub fn identity_state_map(num_states: usize) -> ManyToOneIdMap {
     let original_to_internal: Vec<u32> = (0..num_states as u32).collect();
