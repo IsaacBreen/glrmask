@@ -236,14 +236,9 @@ fn build_boundary_terminal_dwa_with_shared(
     };
     let first_ms=first_started.elapsed().as_secs_f64()*1000.0;
     let allow_identity_tiles = crate::env::var_os("GLRMASK_BOUNDARY_IDENTITY_TILES").is_some();
-    let synthesized = (identity && scoped.scope.require_crossing()
-        && crate::env::var_os("GLRMASK_BOUNDARY_FINITE_CONTEXT_LEXER").is_some())
-        .then(|| build_boundary_terminal_dwa_synthesized(&scoped,
-            crate::env::var_os("GLRMASK_BOUNDARY_FINITE_CONTEXT_FULL").is_none()))
-        .flatten();
-    let mut output=synthesized.or_else(|| build_boundary_terminal_dwa_query(&scoped,shared,
+    let mut output = build_boundary_terminal_dwa_query(&scoped, shared,
         if identity && !allow_identity_tiles { None } else { tile_size },
-        terminal_support && !identity,query_view,identity))?;
+        terminal_support && !identity, query_view, identity)?;
     if let (Some(plan),Some(_))=(&first,&narrowed) {
         let old=&output.id_map.tokenizer_states;
         let mut lifted=old.original_to_internal.clone();
@@ -267,106 +262,6 @@ fn build_boundary_terminal_dwa_with_shared(
         eprintln!("[glrmask/validate][boundary_query_tiles] component={} exact=true",inputs.scope.start_component().0);
     }
     Some(output)
-}
-
-fn build_boundary_terminal_dwa_synthesized(
-    inputs: &BoundaryWalkInputs,
-    completion_only: bool,
-) -> Option<BoundaryWalkOutput> {
-    if !inputs.scope.require_crossing() { return None; }
-    let started = Instant::now();
-    let prepared = super::boundary_finite_lexer::prepare(
-        inputs.merged_tokenizer, inputs.vocab, inputs.scope.initial_states().keep_raw(),
-        inputs.scope.ownership(), inputs.scope.start_component(), completion_only,
-    )?;
-    let scope = tdwa::scope::BoundaryAnalysisScope::new(
-        tdwa::scope::InitialStateDomain::from_mask(prepared.seeds.len(), prepared.seeds.clone()).ok()?,
-        prepared.tokenizer.deterministic_reset_states().into_vec(),
-        Arc::new(inputs.scope.ownership().clone()), inputs.scope.start_component(), true,
-        inputs.scope.follow_transparent().cloned(),
-    ).ok()?;
-    let preparation_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let mut output = build_boundary_terminal_dwa_on_view_policy(&BoundaryWalkInputs {
-        merged_tokenizer: &prepared.tokenizer, vocab: inputs.vocab, grammar: inputs.grammar,
-        disallowed_follows: inputs.disallowed_follows, ignore_terminal: inputs.ignore_terminal,
-        follow_transparent_ignores: inputs.follow_transparent_ignores, scope: &scope,
-        retain_non_crossing_paths: false, flat_trans: None,
-    }, None, None, true)?;
-    lift_initial_states(inputs, &mut output, &prepared.original_to_synth)?;
-    output.profile.setup_ms += preparation_ms;
-    output.profile.walk_ms = started.elapsed().as_secs_f64() * 1000.0;
-    if compose_profile_enabled() {
-        eprintln!("[glrmask/profile][boundary_finite_context] component={} selected=true completion_only={completion_only} total_ms={:.3} preparation_ms={preparation_ms:.3} profile={:?} tdwa_states={} tdwa_edges={}",
-            inputs.scope.start_component().0, output.profile.walk_ms, prepared.profile,
-            output.dwa.num_states(), output.dwa.num_transitions());
-    }
-    Some(output)
-}
-
-#[cfg(test)]
-mod finite_context_gate {
-    use super::*;
-    use crate::automata::lexer::ast::{bytes, choice, plus};
-    use crate::automata::lexer::compile::{build_regex_monolithic, build_regex_partitioned};
-    use crate::grammar::flat::{Rule, Symbol};
-
-    #[test]
-    fn finite_context_matches_independent_original_terminal_languages() {
-        let local_expr = vec![choice(vec![bytes(b"abcdef"), bytes(b"xydef"), bytes(b"ab")]),
-            plus(choice(vec![bytes(b"a"), bytes(b"bc")])), plus(bytes(b" "))];
-        let foreign_expr = vec![bytes(b"!def"), choice(vec![bytes(b"b"), bytes(b"c"), bytes(b"a!")])];
-        let foreign = build_regex_partitioned(&foreign_expr, &[0,1]).into_tokenizer(2, None);
-        let mut random = 3347u64;
-        let mut next = || { random = random.wrapping_mul(6364136223846793005).wrapping_add(1); (random >> 32) as usize };
-        let mut comparisons = 0;
-        for partitioned in [false, true] {
-            let local = if partitioned { build_regex_partitioned(&local_expr, &[0,1,2]) }
-                else { build_regex_monolithic(&local_expr) }.into_tokenizer(3, None);
-            let (mut tokenizer, _) = Tokenizer::disjoint_union_with_terminal_offsets(&[(&local,0),(&foreign,3)]);
-            let mut expressions = local_expr.clone(); expressions.extend(foreign_expr.clone());
-            tokenizer.restore_terminal_exprs_without_virtual_runtime(Some(expressions)).unwrap();
-            let rules = vec![Rule { lhs:0, rhs:vec![Symbol::Nonterminal(1)] }].into_iter()
-                .chain((0..5).flat_map(|t| [Rule { lhs:1, rhs:vec![Symbol::Terminal(t)] },
-                    Rule { lhs:1, rhs:vec![Symbol::Terminal(t),Symbol::Nonterminal(1)] }])).collect();
-            let grammar = AnalyzedGrammar::from_composed_rules(rules,5,
-                (0..5).map(|t|format!("t{t}")).collect(),vec!["start".into(),"body".into()],0);
-            let owners = Arc::new(tdwa::scope::BoundaryOwnership::flat(&[0,3],5).unwrap());
-            let flat = Arc::from(tdwa::l1::build_flat_transition_table(&tokenizer));
-            for case in 0..32 {
-                let mut words = vec![b"def!".to_vec(),b"ab!".to_vec(),b"abc".to_vec(),b"a b".to_vec(),b"!defa".to_vec()];
-                for _ in 0..10 { let len=1+next()%6; words.push((0..len).map(|_|b"abcdef! "[next()%8]).collect()); }
-                let vocab = Vocab::from_entries_unchecked(words.iter().enumerate().map(|(i,w)|((i*7)as u32,w.clone())).collect());
-                let mut selected = (0..tokenizer.num_states()).map(|_| next()%3 != 0).collect::<Vec<_>>();
-                selected[0] = true; // Exercise a mixed-owner epsilon dispatcher too.
-                let mut follows = BTreeMap::new();
-                if case%3 != 0 { let mut row=BitSet::new(5); row.set(3); follows.insert(1,row); }
-                let ignore = (case%3 == 0).then_some(2);
-                let scope = tdwa::scope::BoundaryAnalysisScope::new(
-                    tdwa::scope::InitialStateDomain::from_mask(selected.len(),selected).unwrap(),
-                    tokenizer.deterministic_reset_states().into_vec(), Arc::clone(&owners),
-                    tdwa::scope::ImmediateComponentId(0), true, None,
-                ).unwrap();
-                let inputs = BoundaryWalkInputs { merged_tokenizer:&tokenizer, vocab:&vocab,
-                    grammar:&grammar, disallowed_follows:&follows, ignore_terminal:ignore,
-                    follow_transparent_ignores:None, scope:&scope, retain_non_crossing_paths:false,
-                    flat_trans:Some(&flat) };
-                // The reference directly invokes the ordinary family path:
-                // no FIRST classes, context synthesis, packing, or query view.
-                let reference = build_boundary_terminal_dwa_on_view(&inputs,None).unwrap();
-                for completion_only in [false,true] {
-                    let candidate = build_boundary_terminal_dwa_synthesized(&inputs,completion_only).unwrap();
-                    assert!(candidate.id_map.tokenizer_states.original_to_internal.iter().all(|&id| id != u32::MAX),
-                        "published synthesized view must map even omitted raw states to a proven dead class");
-                    tdwa::l2p::compare_terminal_dwa_artifacts(
-                        &tdwa::types::LocalIdMapTerminalDwa { dwa:reference.dwa.clone(), id_map:reference.id_map.clone(), profile:Default::default() },
-                        &tdwa::types::LocalIdMapTerminalDwa { dwa:candidate.dwa, id_map:candidate.id_map, profile:Default::default() },
-                    ).unwrap_or_else(|error|panic!("case={case} partitioned={partitioned} completion={completion_only}: {error:?}"));
-                    comparisons += 1;
-                }
-            }
-        }
-        assert_eq!(comparisons,128);
-    }
 }
 
 fn build_boundary_terminal_dwa_query(
