@@ -86,9 +86,8 @@ fn ready_adapter_preserves_template_and_runtime_arc_identity() {
         crate::runtime::parser_backend::PreparedTemplateParser::from_compiler_parts(
             &table,
             None,
-            &[],
+            None,
             grammar.ignore_terminal,
-            true,
             false,
         )
         .unwrap();

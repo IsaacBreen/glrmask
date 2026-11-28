@@ -439,7 +439,7 @@ impl Templates {
                 let merged = union_unweighted_dfas(
                     terminals
                         .iter()
-                        .filter_map(|terminal| self.by_terminal.get(terminal)),
+                        .filter_map(|terminal| self.by_terminal.get(terminal).map(Arc::as_ref)),
                 );
                 (terminals, Arc::new(merged))
             };
@@ -495,7 +495,7 @@ impl Templates {
             profile.group_dfa_cache_misses += usize::from(group_cache.is_some());
             let group_started_at = Instant::now();
             let merged = union_unweighted_dfas(
-                terminals.iter().filter_map(|terminal| self.by_terminal.get(terminal)),
+                terminals.iter().filter_map(|terminal| self.by_terminal.get(terminal).map(Arc::as_ref)),
             );
             let group_ms = elapsed_ms(group_started_at);
             profile.union_groups_ms += group_ms;
@@ -530,7 +530,7 @@ impl Templates {
                 group_dfas.push((*weight, BundleGroupDfa::Cached(Arc::clone(cached))));
             } else {
                 let merged = union_unweighted_dfas(
-                    terminals.iter().filter_map(|terminal| self.by_terminal.get(terminal)),
+                    terminals.iter().filter_map(|terminal| self.by_terminal.get(terminal).map(Arc::as_ref)),
                 );
                 group_dfas.push((*weight, BundleGroupDfa::Owned(merged)));
             }
@@ -1522,8 +1522,9 @@ fn union_unweighted_dfas<'a>(dfas: impl Iterator<Item = &'a UnweightedDfa>) -> U
     let shared_start = nfa.add_state();
     nfa.start_states.push(shared_start);
 
+    let mut seen = rustc_hash::FxHashSet::default();
     for dfa in dfas {
-        if dfa.states.is_empty() {
+        if !seen.insert(dfa as *const UnweightedDfa) || dfa.states.is_empty() {
             continue;
         }
         let offset = checked_usize_to_u32(nfa.states.len(), "bundle-union NFA offset");
@@ -1660,9 +1661,9 @@ mod tests {
 
         let templates = Templates {
             by_terminal: BTreeMap::from([
-                (0, template(1, 10)),
-                (1, template(1, 11)),
-                (2, template(2, 12)),
+                (0, Arc::new(template(1, 10))),
+                (1, Arc::new(template(1, 11))),
+                (2, Arc::new(template(2, 12))),
             ]),
         };
         let first_shared = weight(0..=7);
@@ -1712,7 +1713,7 @@ mod tests {
 
         let templates = Templates {
             by_terminal: (0..16u32)
-                .map(|terminal| (terminal, long_template(terminal as i32)))
+                .map(|terminal| (terminal, Arc::new(long_template(terminal as i32))))
                 .collect(),
         };
         let bundles = (0..20u32)

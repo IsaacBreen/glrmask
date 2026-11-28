@@ -861,7 +861,7 @@ fn empty_transfer() -> TerminalCharacterization {
 #[derive(Clone)]
 pub(crate) struct FragmentLibrary {
     pub templates: BTreeMap<TerminalID, NWA>,
-    pub diagnostic_dfas: Option<BTreeMap<TerminalID, UnweightedDfa>>,
+    pub diagnostic_dfas: Option<BTreeMap<TerminalID, std::sync::Arc<UnweightedDfa>>>,
     /// Synthetic fragment key per link index for Entry / Finish exports.
     pub entry_keys: Vec<TerminalID>,
     pub finish_keys: Vec<TerminalID>,
@@ -873,7 +873,7 @@ pub(crate) struct FragmentLibrary {
 /// template inventory after conversion unless an opt-in diagnostic needs it.
 fn boundary_template_inventory(
     templates: Templates,
-) -> (BTreeMap<TerminalID, NWA>, Option<BTreeMap<TerminalID, UnweightedDfa>>) {
+) -> (BTreeMap<TerminalID, NWA>, Option<BTreeMap<TerminalID, std::sync::Arc<UnweightedDfa>>>) {
     use glrmask_parser_dwa::__private::templates::compile_dfa::dfa_to_nwa_skeleton;
     let diagnostics = crate::env::var_os("GLRMASK_PROFILE_BOUNDARY_LEAF_TEMPLATES").is_some();
     let mut skeletons = BTreeMap::new();

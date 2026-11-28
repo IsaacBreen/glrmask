@@ -5,6 +5,7 @@
 //! produce an acyclic unweighted DFA.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
@@ -1181,15 +1182,7 @@ fn try_compile_template_dfa_with_profile(
 
 #[derive(Debug, Clone, Default)]
 pub struct Templates {
-    pub by_terminal: BTreeMap<TerminalID, UnweightedDfa>,
-}
-
-/// One raw graph for an existing exact characterization class. Consumers keep
-/// terminal coordinates separate while transforming this owned graph once.
-#[derive(Debug, Clone)]
-pub struct TemplateDfaGroup {
-    pub terminals: Vec<TerminalID>,
-    pub dfa: UnweightedDfa,
+    pub by_terminal: BTreeMap<TerminalID, Arc<UnweightedDfa>>,
 }
 
 type CompiledCharacterization = (Vec<TerminalID>, UnweightedDfa, TemplateCompilationSample);
@@ -1250,7 +1243,7 @@ impl Templates {
     pub fn from_terminal_dfas(
         by_terminal: BTreeMap<TerminalID, UnweightedDfa>,
     ) -> Self {
-        Self { by_terminal }
+        Self { by_terminal: by_terminal.into_iter().map(|(terminal, dfa)| (terminal, Arc::new(dfa))).collect() }
     }
 
     /// Build exact templates for a constant-depth direct-regular parser table.
@@ -1315,7 +1308,7 @@ impl Templates {
                     dfa.add_transition(dfa.start_state, encode_positive_label(source), middle);
                 }
             }
-            by_terminal.insert(terminal, dfa);
+            by_terminal.insert(terminal, Arc::new(dfa));
         }
 
         Some(Self {
@@ -1350,57 +1343,6 @@ impl Templates {
         Self::compile_characterizations(characterizations)
     }
 
-    /// Compile the authoritative terminal template languages.
-    pub fn dfas_from_characterizations(
-        characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
-    ) -> BTreeMap<TerminalID, UnweightedDfa> {
-        Self::try_dfas_from_characterizations(characterizations)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_dfas_from_characterizations(
-        characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
-    ) -> Result<BTreeMap<TerminalID, UnweightedDfa>, String> {
-        Self::compile_characterizations(characterizations)
-            .map(|output| output.0.by_terminal)
-    }
-
-    /// Preserve the existing exact quotient without cloning raw graphs for
-    /// terminal fanout. All raw compilation and debug validation still run.
-    pub fn grouped_dfas_from_characterizations(
-        characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
-    ) -> (Vec<TemplateDfaGroup>, TemplateCompileProfile) {
-        Self::try_grouped_dfas_from_characterizations(characterizations)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_grouped_dfas_from_characterizations(
-        characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
-    ) -> Result<(Vec<TemplateDfaGroup>, TemplateCompileProfile), String> {
-        let started_at = Instant::now();
-        let (groups, compiled, mut profile) =
-            try_compile_characterization_groups(characterizations)?;
-        let fanout_started_at = Instant::now();
-        let output = compiled.into_iter().map(|(terminals, dfa, sample)| {
-            profile.observe_compilation(&sample, terminals.len());
-            TemplateDfaGroup { terminals, dfa }
-        }).collect::<Vec<_>>();
-        profile.fanout_ms = elapsed_ms(fanout_started_at);
-        profile.total_ms += profile.fanout_ms;
-        let validation_started_at = Instant::now();
-        if template_quotient_validation_enabled() {
-            assert_eq!(groups.len(), output.len());
-            for ((characterization, terminals), group) in groups.iter().zip(&output) {
-                assert_eq!(terminals, &group.terminals, "template quotient terminal fanout mismatch");
-                validate_template_quotient_representative(characterization, &group.dfa, terminals[0]);
-            }
-        }
-        profile.validation_ms = elapsed_ms(validation_started_at);
-        profile.total_ms += profile.validation_ms;
-        profile.wall_ms = elapsed_ms(started_at);
-        Ok((output, profile))
-    }
-
     fn compile_characterizations(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
         ) -> Result<(Self, TemplateCompileProfile), String> {
@@ -1412,8 +1354,9 @@ impl Templates {
         let fanout_started_at = Instant::now();
         for (terminals, dfa, sample) in compiled {
             profile.observe_compilation(&sample, terminals.len());
+            let dfa = Arc::new(dfa);
             for terminal in terminals {
-                by_terminal.insert(terminal, dfa.clone());
+                by_terminal.insert(terminal, Arc::clone(&dfa));
             }
         }
         profile.fanout_ms = elapsed_ms(fanout_started_at);
@@ -1493,7 +1436,7 @@ fn find_dfa_language_mismatch(
 
 fn validate_template_quotient(
     groups: &[(&TerminalCharacterization, Vec<TerminalID>)],
-    by_terminal: &BTreeMap<TerminalID, UnweightedDfa>,
+    by_terminal: &BTreeMap<TerminalID, Arc<UnweightedDfa>>,
 ) {
     for (characterization, terminals) in groups {
         let representative = terminals[0];
@@ -2234,26 +2177,12 @@ mod tests {
             let (dfa_only, profile) =
                 Templates::compile_characterizations(&input).unwrap();
             assert_eq!(complete.by_terminal, dfa_only.by_terminal);
-            assert_eq!(Templates::dfas_from_characterizations(&input), complete.by_terminal);
             assert_eq!(profile.unique_characterizations, 2);
             assert_eq!(profile.max_characterization_multiplicity, 3);
-            let (raw_groups, grouped_profile) = Templates::grouped_dfas_from_characterizations(&input);
-            assert_eq!(raw_groups.len(), 2);
-            assert_eq!(grouped_profile.num_terminals, profile.num_terminals);
-            assert_eq!(grouped_profile.unique_characterizations, profile.unique_characterizations);
-            assert_eq!(grouped_profile.compiled_characterizations, profile.compiled_characterizations);
-            assert_eq!(grouped_profile.quotient_hits, profile.quotient_hits);
-            assert_eq!(grouped_profile.max_characterization_multiplicity, profile.max_characterization_multiplicity);
-            assert_eq!(grouped_profile.total_nfa_states, profile.total_nfa_states);
-            assert_eq!(grouped_profile.total_dfa_states, profile.total_dfa_states);
-            assert_eq!(grouped_profile.total_dfa_transitions, profile.total_dfa_transitions);
-            let mut expanded = BTreeMap::new();
-            for group in raw_groups {
-                for terminal in group.terminals {
-                    assert!(expanded.insert(terminal, group.dfa.clone()).is_none());
-                }
+            for terminal in [12, 101] {
+                assert!(std::sync::Arc::ptr_eq(&complete.by_terminal[&0], &complete.by_terminal[&terminal]));
             }
-            assert_eq!(expanded, complete.by_terminal);
+            assert!(!std::sync::Arc::ptr_eq(&complete.by_terminal[&0], &complete.by_terminal[&4]));
             let mut grouped = BTreeMap::<&TerminalCharacterization, Vec<u32>>::new();
             for (&terminal, characterization) in &input {
                 grouped.entry(characterization).or_default().push(terminal);
@@ -2270,11 +2199,8 @@ mod tests {
     fn dfa_only_empty_inventory_preserves_no_outputs() {
         let input = std::collections::BTreeMap::new();
         let full = super::Templates::from_characterizations(&input);
-        let only = super::Templates::dfas_from_characterizations(&input);
         assert!(full.by_terminal.is_empty());
-        assert_eq!(only, full.by_terminal);
-        let (groups, profile) = super::Templates::grouped_dfas_from_characterizations(&input);
-        assert!(groups.is_empty());
+        let (_, profile) = super::Templates::try_from_characterizations_profiled(&input).unwrap();
         assert_eq!(profile.num_terminals, 0);
         assert_eq!(profile.unique_characterizations, 0);
         assert_eq!(profile.quotient_hits, 0);

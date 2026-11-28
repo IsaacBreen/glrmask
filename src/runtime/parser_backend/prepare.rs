@@ -21,6 +21,7 @@ use glrmask_parser_dwa::__private::templates::admissibility::{
 };
 
 use crate::automata::unweighted_u32::dfa::DFA;
+use glrmask_parser_dwa::__private::templates::compile_dfa::Templates;
 use crate::compiler::glr::table::GLRTable;
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
@@ -533,9 +534,8 @@ fn metadata(
 pub(super) fn from_compiler_parts(
     table: &GLRTable,
     direct_regular: Option<&DirectRegularAutomaton>,
-    retained_templates: &[Option<DFA>],
+    compiler_templates: Option<&Templates>,
     ignore: Option<u32>,
-    dynamic: bool,
     preserve_coordinate: bool,
 ) -> crate::Result<PreparedTemplateParser> {
     let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
@@ -578,16 +578,25 @@ pub(super) fn from_compiler_parts(
         });
     }
 
-    let retained = if !dynamic
-        && retained_templates.len() == table.num_terminals as usize
-    {
-        retained_templates
-    } else {
-        &[]
-    };
-    let selected = (0..table.num_terminals as usize).map(|terminal| {
-        retained.get(terminal).is_none_or(Option::is_none)
-    }).collect::<Vec<_>>();
+    // The static weighted index and native preparation borrow the same
+    // immutable signed graphs. Prepare each exact source identity only once.
+    let mut groups_by_source = FxHashMap::<usize, usize>::default();
+    let mut compiled_inputs = Vec::<(Vec<u32>, &Arc<DFA>)>::new();
+    let mut selected = vec![true; table.num_terminals as usize];
+    if let Some(templates) = compiler_templates {
+        for (&terminal, source) in &templates.by_terminal {
+            let Some(missing) = selected.get_mut(terminal as usize) else {
+                return Err(crate::Error::Compilation(format!("template terminal {terminal} outside compiler domain")));
+            };
+            *missing = false;
+            let id = Arc::as_ptr(source) as usize;
+            let group = *groups_by_source.entry(id).or_insert_with(|| {
+                compiled_inputs.push((Vec::new(), source));
+                compiled_inputs.len() - 1
+            });
+            compiled_inputs[group].0.push(terminal);
+        }
+    }
 
     let index_started = profile.then(Instant::now);
     let index = NativeTableIndex::new(table, &selected)
@@ -604,26 +613,21 @@ pub(super) fn from_compiler_parts(
                         PreparedRelation::prepare(source, table.num_states, true)
                     }),
                     || {
-                        let inputs = retained.iter().enumerate()
-                            .filter_map(|(terminal, raw)| {
-                                raw.as_ref().map(|raw| (terminal as u32, raw))
-                            })
-                            .collect::<Vec<_>>();
-                        let build = |&(terminal, raw): &(u32, &DFA)| {
+                        let build = |(terminals, raw): &(Vec<u32>, &Arc<DFA>)| {
                             compiler.compile_raw(raw)
                                 .and_then(|source| {
                                     PreparedRelation::prepare(Arc::new(source), table.num_states, true)
                                 })
                                 .map(|program| CompiledGroup {
-                                    terminals: vec![terminal],
+                                    terminals: terminals.clone(),
                                     program: Arc::new(program),
                                 })
-                                .map_err(|message| NativeCompileError { terminal, message })
+                                .map_err(|message| NativeCompileError { terminal: terminals[0], message })
                         };
                         if parallel() {
-                            inputs.par_iter().map(build).collect::<Vec<_>>()
+                            compiled_inputs.par_iter().map(build).collect::<Vec<_>>()
                         } else {
-                            inputs.iter().map(build).collect::<Vec<_>>()
+                            compiled_inputs.iter().map(build).collect::<Vec<_>>()
                         }
                     },
                 );
@@ -692,7 +696,7 @@ pub(super) fn from_compiler_parts(
             index.unique_action_count(),
             signature_groups,
             exact_groups,
-            retained.iter().filter(|raw| raw.is_some()).count(),
+            compiler_templates.map_or(0, |templates| templates.by_terminal.len()),
             started.elapsed().as_secs_f64() * 1000.0,
         );
     }
@@ -723,7 +727,7 @@ mod tests {
             ],
             &[&[], &[]],
         );
-        let built = from_compiler_parts(&table, None, &[], None, true, false).unwrap();
+        let built = from_compiler_parts(&table, None, None, None, false).unwrap();
         for terminal in [1usize, 2] {
             assert!(Arc::ptr_eq(
                 built.parser.terminal_source(0).unwrap(),
@@ -764,10 +768,10 @@ mod tests {
         let chars = try_characterize_selected_terminals_for_terminal_count(
             &table, 2, &[true, true],
         ).unwrap();
-        let mut raw = Templates::try_dfas_from_characterizations(&chars).unwrap();
-        let retained = vec![raw.remove(&0), None];
-        let rebuilt = from_compiler_parts(&table, None, &[], None, false, true).unwrap();
-        let reused = from_compiler_parts(&table, None, &retained, None, false, true).unwrap();
+        let mut raw = Templates::try_from_characterizations(&chars).unwrap();
+        raw.by_terminal.remove(&1);
+        let rebuilt = from_compiler_parts(&table, None, None, None, true).unwrap();
+        let reused = from_compiler_parts(&table, None, Some(&raw), None, true).unwrap();
         for terminal in 0..2 {
             assert_eq!(
                 rebuilt.parser.local_domain(terminal).unwrap().to_bytes().unwrap(),

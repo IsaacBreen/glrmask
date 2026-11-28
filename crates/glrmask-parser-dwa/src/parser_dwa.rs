@@ -779,7 +779,7 @@ fn terminal_bundle_has_acceptance(bundle: &TerminalBundle, templates: &Templates
             && templates
                 .by_terminal
                 .get(&terminal)
-                .is_some_and(terminal_template_has_acceptance)
+                .is_some_and(|template| terminal_template_has_acceptance(template))
     })
 }
 

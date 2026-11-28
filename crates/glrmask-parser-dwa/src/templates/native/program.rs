@@ -134,7 +134,7 @@ impl ProgramCompiler {
             // Independent established builder, including its own NFA and raw
             // minimization. This work is deliberately absent in normal builds.
             let input = BTreeMap::from([(0, characterization.clone())]);
-            let raw = Templates::dfas_from_characterizations(&input)
+            let raw = Templates::from_characterizations(&input).by_terminal
                 .remove(&0).expect("reference singleton template");
             let reference = specialize_template_dfa_defaults_for_commit_split_input(&raw);
             assert_eq!(

@@ -219,14 +219,12 @@ impl PreparedTemplateParser {
     pub(crate) fn from_compiler_parts(
         table: &GLRTable,
         direct_regular: Option<&DirectRegularAutomaton>,
-        retained_templates: &[Option<DFA>],
+        compiler_templates: Option<&glrmask_parser_dwa::__private::templates::compile_dfa::Templates>,
         ignore: Option<u32>,
-        dynamic: bool,
         preserve_coordinate: bool,
     ) -> crate::Result<Self> {
         prepare::from_compiler_parts(
-            table, direct_regular, retained_templates, ignore,
-            dynamic, preserve_coordinate,
+            table, direct_regular, compiler_templates, ignore, preserve_coordinate,
         )
     }
 }
@@ -925,9 +923,8 @@ impl Constraint {
         PreparedTemplateParser::from_compiler_parts(
             &self.table,
             self.direct_regular_automaton.as_ref(),
-            &[],
+            None,
             self.ignore_terminal,
-            self.uses_dynamic_runtime(),
             preserve_coordinate,
         )
     }

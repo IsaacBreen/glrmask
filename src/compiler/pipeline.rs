@@ -4895,12 +4895,6 @@ fn compile_prepared_with_profile_and_table_construction(
         } else {
             crate::runtime::FastTokenizerTransitions::default()
         };
-        let mut compiler_templates = vec![None; analyzed_grammar.num_terminals as usize];
-        for (terminal, dfa) in templates.by_terminal {
-            if let Some(slot) = compiler_templates.get_mut(terminal as usize) {
-                *slot = Some(dfa);
-            }
-        }
         let composition_grammar_summary = crate::env::var_os(
             "GLRMASK_DISABLE_COMPOSITION_GRAMMAR_SUMMARY",
         )
@@ -4922,10 +4916,10 @@ fn compile_prepared_with_profile_and_table_construction(
             crate::automata::lexer::tokenizer::artifact_serde::compact_large_fast_runtime(&mut tokenizer);
         }
         let prepared_parser = crate::runtime::parser_backend::PreparedTemplateParser::from_compiler_parts(
-            &table, analyzed_grammar.direct_regular_automaton.as_ref(), &compiler_templates,
-            prepared_grammar.ignore_terminal, false, true,
+            &table, analyzed_grammar.direct_regular_automaton.as_ref(), Some(&templates),
+            prepared_grammar.ignore_terminal, true,
         ).expect("source compiler must produce a finite template parser before Constraint materialization");
-        drop(compiler_templates);
+        drop(templates);
         drop(table);
         let mut constraint = Constraint::from_data(crate::runtime::ConstraintData {
             end_tokens: std::sync::Arc::from([]),
