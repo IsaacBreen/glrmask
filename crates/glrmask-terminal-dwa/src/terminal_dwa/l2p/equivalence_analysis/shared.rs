@@ -1,4 +1,3 @@
-use glrmask_vocab::__private::VocabExt as _;
 use std::sync::Arc;
 
 use super::compat::TokenizerView;

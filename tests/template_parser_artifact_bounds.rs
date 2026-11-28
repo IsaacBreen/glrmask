@@ -1,5 +1,6 @@
 //! Field-aware malformed-program regressions for both template runtimes.
 //! These tests check structural rejection, not authentication of artifact data.
+use glrmask_vocab::__private::VocabExt as _;
 use glrmask::template_parser::{
     LexerDefinition, ParserDefinition, ParserProgram, StackLabel, StackTemplate,
     TemplateBuildOptions, TerminalPattern,

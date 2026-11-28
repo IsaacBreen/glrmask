@@ -8,7 +8,6 @@
 //! alternative stack path, allocation-based simulation, or LR action is needed.
 //! A non-matching shape leaves the complete existing interpreter authoritative.
 
-use glrmask_vocab::__private::VocabExt as _;
 use crate::compiler::glr::labels::{is_negative_label, negative_to_positive_label};
 #[cfg(test)]
 use crate::compiler::glr::parser::ParserGSS;
@@ -161,6 +160,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
     use crate::automata::unweighted_u32::dfa::DFA;
     use crate::compiler::glr::accumulator::TerminalsDisallowed;

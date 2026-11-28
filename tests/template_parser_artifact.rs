@@ -1,6 +1,7 @@
 //! Persistence must not reintroduce an executable LR table into a mandatory
 //! template backend. These tests use the same shared mask/commit engines before
 //! and after loading, including invalid prefixes and exact EOF completion.
+use glrmask_vocab::__private::VocabExt as _;
 use glrmask::{ConstraintInner as Constraint, DynamicConstraint, Grammar, Vocab};
 use glrmask::__private::{DynamicConstraintExt, parser_backend_report, dynamic_parser_backend_report};
 

@@ -1,5 +1,6 @@
 //! Independent final-API semantic review. No benchmarks or internal engine APIs.
 //! All reference languages are compiled directly from fully bound descriptions.
+use glrmask_vocab::__private::VocabExt as _;
 use glrmask::test_modes::MaskMode;
 use glrmask::{BuildOptions, ConstraintInner as Constraint, Grammar, PreparedGrammar, TokenSet, Vocab};
 

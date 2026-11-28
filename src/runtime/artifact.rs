@@ -1,4 +1,3 @@
-use glrmask_vocab::__private::VocabExt as _;
 use glrmask_artifact::CommitTemplateDfas;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, VecDeque};
@@ -11574,6 +11573,7 @@ pub(crate) mod immutable_tokenizer_serde {
 
 #[cfg(test)]
 mod immutable_tokenizer_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
     use crate::automata::lexer::ast::{bytes, choice, plus};
     use crate::automata::lexer::compile::{build_regex_monolithic, build_regex_partitioned};
@@ -11613,6 +11613,7 @@ mod immutable_tokenizer_tests {
 
 #[cfg(test)]
 mod raw_terminal_radius_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
     use crate::{runtime::Constraint, Grammar, Vocab};
 

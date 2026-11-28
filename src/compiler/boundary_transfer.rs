@@ -42,7 +42,6 @@ mod admission;
 #[path = "boundary_direct_program.rs"]
 mod direct_program;
 
-use glrmask_vocab::__private::VocabExt as _;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
@@ -3514,6 +3513,7 @@ pub(crate) fn eof_terminal() -> TerminalID {
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     #[test]
     fn batched_slot_entries_match_every_original_predicate_and_first_error() {
         use super::*;

@@ -1,7 +1,6 @@
 pub(crate) mod profile;
 pub(crate) mod queue;
 mod static_dwa_walk;
-use glrmask_vocab::__private::VocabExt as _;
 use static_dwa_walk::{StackWalkEvent, walk_single_stack};
 
 use crate::automata::lexer::Lexer;
@@ -2036,6 +2035,7 @@ impl<'a> BoundaryMask64DagEvaluator<'a> {
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::{
         exact_component_trigger_accepted_weight, single_path_direct_plan_reuse_dominates,
         single_path_direct_stack_work,

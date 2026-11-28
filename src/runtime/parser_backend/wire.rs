@@ -3,7 +3,6 @@
 //! and the exact EOF relation. Neither save nor load constructs an LR table.
 mod compact;
 
-use glrmask_vocab::__private::VocabExt as _;
 use std::collections::BTreeSet;
 use crate::runtime::artifact::TemplateDfasByTerminal;
 use std::sync::Arc;
@@ -207,6 +206,7 @@ pub(crate) mod core_programs {
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
 
     #[test]

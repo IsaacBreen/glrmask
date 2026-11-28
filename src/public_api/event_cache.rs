@@ -3,7 +3,6 @@
 //! No cache lives on a runtime masking object or on a process-global registry.
 //! A definition owns a vocabulary and this cache; the cached component does not
 //! reference the definition/cache, so retaining its vocabulary creates no cycle.
-use glrmask_vocab::__private::VocabExt as _;
 use super::*;
 use std::{collections::HashMap, sync::Mutex};
 const CAPACITY:usize=64;

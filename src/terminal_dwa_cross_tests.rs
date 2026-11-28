@@ -1,5 +1,5 @@
-use glrmask_vocab::__private::VocabExt as _;
 mod ti_mre_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use std::ffi::OsString;
 
     use crate::{env, runtime::Constraint as Constraint, Vocab, TEST_ENV_LOCK as ENV_LOCK};
@@ -241,6 +241,7 @@ nt S = FROM V | SPACE V SPACE CLASS;
 
 
 mod synthetic_state_facade_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use crate::{DynamicConstraint, runtime::Constraint as Constraint, Vocab};
 
     struct LlGuidanceCompatGuard;

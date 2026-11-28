@@ -1,7 +1,6 @@
 //! Finite boundary observations are independent of a component's local mask
 //! quotient. Their horizon covers the full linked vocabulary, including tokens
 //! which leave a component before their final byte.
-use glrmask_vocab::__private::VocabExt as _;
 use std::sync::{Arc, OnceLock};
 use crate::automata::lexer::{Lexer, tokenizer::{Tokenizer, VirtualResidualMaskProjection},
     runtime_unit_repeat::VirtualZeroMinUnitRepeatMaskProjection,

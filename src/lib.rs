@@ -314,7 +314,6 @@ pub mod test_modes {
 pub mod __private {
     use crate::ErrorExt as _;
     pub use glrmask_vocab::__private::{MAX_TOKEN_ID, TokenSetExt, VocabExt as VocabAccess};
-    use VocabAccess as _;
     pub use crate::error::compilation_error;
     pub use crate::runtime::boundary_cpu_profile::{
         begin as begin_boundary_cpu_profile, take as take_boundary_cpu_profile, BoundaryCpuReport,

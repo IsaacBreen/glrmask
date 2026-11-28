@@ -3,7 +3,6 @@
 //! Composition supplies namespaces and CALL/RETURN reset routing. Vocabulary
 //! traversal, exact lexer execution, guard advancement and product caching are
 //! the ordinary masking implementations, not another composition mask walk.
-use glrmask_vocab::__private::VocabExt as _;
 use super::*;
 
 #[derive(Clone, Copy)]
@@ -596,6 +595,7 @@ fn with_provider_and_baseline(
 
 #[cfg(test)]
 mod epsilon_reset_boundary_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
     use crate::{runtime::Constraint, Grammar, Vocab};
     use std::collections::BTreeSet;
@@ -683,6 +683,7 @@ mod epsilon_reset_boundary_tests {
 
 #[cfg(test)]
 mod closed_admission_support_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
     use crate::{runtime::Constraint, Grammar, Vocab};
     use std::collections::BTreeSet;

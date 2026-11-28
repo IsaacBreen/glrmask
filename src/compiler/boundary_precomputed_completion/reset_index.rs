@@ -1,7 +1,6 @@
 //! Component-only exact reset observations over factors of the FULL model
 //! vocabulary. No caller, partner, boundary word list, or initial seed set is
 //! an input. Missing transitions decline; a recorded dead edge means empty.
-use glrmask_vocab::__private::VocabExt as _;
 use glrmask_lexer::__private::automata::lexer::{Lexer,tokenizer::Tokenizer};
 use rustc_hash::FxHashMap;
 use std::{collections::BTreeMap,sync::Arc};

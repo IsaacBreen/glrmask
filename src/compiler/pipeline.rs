@@ -2092,6 +2092,7 @@ mod huge_parser_top_accept_collapse_tests {
 
 #[cfg(test)]
 mod lexer_partition_plan_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use std::collections::BTreeSet;
 
     use super::{

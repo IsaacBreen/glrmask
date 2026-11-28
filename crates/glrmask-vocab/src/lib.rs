@@ -389,7 +389,7 @@ mod workspace_api {
     }
 }
 
-use workspace_api::{TokenSetExt as _, VocabExt as _};
+use workspace_api::VocabExt as _;
 
 pub(crate) mod vocab_prefix_tree;
 

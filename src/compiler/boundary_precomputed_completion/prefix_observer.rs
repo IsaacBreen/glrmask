@@ -4,7 +4,6 @@
 //! byte b composes with the ordinary epsilon-NFA byte relation. No origin is
 //! existentially forgotten. Therefore querying any later start subset S is
 //! exactly relational image T_x[S], not a superset prepared for another S.
-use glrmask_vocab::__private::VocabExt as _;
 use glrmask_lexer::__private::automata::lexer::{Lexer,tokenizer::Tokenizer};
 use rustc_hash::FxHashMap;
 use serde::{Serialize,Deserialize};

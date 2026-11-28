@@ -1,4 +1,3 @@
-use glrmask_vocab::__private::VocabExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 use crate::automata::lexer::Lexer;
@@ -505,6 +504,7 @@ pub(super) fn execute_tokenizer_from_state_small_into(
 
 #[cfg(test)]
 mod reset_projection_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
     use crate::{BuildOptions, runtime::Constraint, Grammar, InternalMaskStrategy, Vocab};
 

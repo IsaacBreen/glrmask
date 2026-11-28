@@ -3,7 +3,6 @@
 //! This implementation intentionally does not consult the parser DWA. It walks
 //! the vocabulary byte trie while advancing the lexer and GLR parser directly.
 
-use glrmask_vocab::__private::VocabExt as _;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use std::hash::{Hash, Hasher};
@@ -10367,6 +10366,7 @@ fn fill_mask_dynamic_impl(
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     #[test]
     fn packed_boundary_vocab_preserves_aliases_bytes_and_complete_masks() {
         let entries = vec![(0,vec![]),(1,b"P".to_vec()),(2,b"a".to_vec()),
@@ -13025,6 +13025,7 @@ nt start = A;
 
 #[cfg(test)]
 mod epsilon_only_reset_config_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
     use crate::{runtime::Constraint,Grammar,Vocab};
 

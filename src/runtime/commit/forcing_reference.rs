@@ -1,7 +1,6 @@
 //! Conservative grammar-forced byte prefixes, with internal token-ID oracles.
 //! The public query never consumes exact events or mutates the source state.
 //! Proof limits may shorten the prefix; they never weaken the proof.
-use glrmask_vocab::__private::VocabExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 
@@ -326,6 +325,7 @@ fn force_inner(states: &mut Vec<ConstraintState>, dynamic: Option<bool>) -> Vec<
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
     use crate::{Grammar, TokenSet, Vocab};
 

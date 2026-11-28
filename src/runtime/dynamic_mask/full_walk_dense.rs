@@ -1,4 +1,3 @@
-use glrmask_vocab::__private::VocabExt as _;
 use super::*;
 use super::boundary_cache::FullWalkBoundaryDirectCache;
 use crate::runtime::artifact::{DynamicLazyUnionRow, DynamicMaskTrieFullWalkOp};
@@ -8569,6 +8568,7 @@ fn try_full_walk_mask_with_table_from_initial_in_output_scope<
 
 #[cfg(test)]
 mod full_walk_acceleration_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
 
     #[test]

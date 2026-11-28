@@ -1,4 +1,3 @@
-use glrmask_vocab::__private::VocabExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1672,6 +1671,7 @@ fn prepare_grammar_transforms_impl(
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
 
     fn nt(id: NonterminalID) -> Symbol {

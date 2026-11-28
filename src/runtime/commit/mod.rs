@@ -1,4 +1,3 @@
-use glrmask_vocab::__private::VocabExt as _;
 use crate::runtime::markers::{CommitObserver, NoMarkers};
 use crate::automata::lexer::Lexer;
 pub(crate) mod profile;
@@ -9475,6 +9474,7 @@ impl ConstraintState {
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
     use crate::{runtime::Constraint as Constraint, DynamicConstraint, Grammar, Vocab};
     use std::collections::BTreeSet;

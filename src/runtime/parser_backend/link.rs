@@ -1,7 +1,6 @@
 //! Link table-free components through shared programs and offset descriptors.
 //! Lexer execution, vocabulary walking and CALL/RETURN closure stay in the
 //! common recursive runtime. No LR action/goto representation is constructed.
-use glrmask_vocab::__private::VocabExt as _;
 use crate::ErrorExt as _;
 #[cfg(test)]
 use crate::test_modes::MaskMode;
@@ -297,6 +296,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
 
 #[cfg(test)]
 mod candidate_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
     use crate::{BuildOptions, Grammar, InternalMaskStrategy, ParserBackend};
 

@@ -11,7 +11,6 @@
 // arithmetic is trusted anywhere.
 
 /// Automatic mask decoding: the set of set bits, low bit first.
-use glrmask_vocab::__private::VocabExt as _;
 fn mb_scoped_mask_bits(mask: &[u32]) -> Vec<u32> {
     let mut bits = Vec::new();
     for (word_index, &word) in mask.iter().enumerate() {

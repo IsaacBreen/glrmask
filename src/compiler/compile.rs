@@ -230,6 +230,7 @@ pub(crate) fn prepare_vocab_for_compile(vocab: &crate::Vocab) {
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::vocab_packed_token_bytes;
     use crate::Vocab;
     use std::sync::Arc;
@@ -298,6 +299,7 @@ mod buffered_digest_tests {
 
 #[cfg(test)]
 mod fingerprint_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::vocab_fingerprint;
     use crate::Vocab;
 
@@ -316,6 +318,7 @@ mod fingerprint_tests {
 
 #[cfg(test)]
 mod empty_byte_summary_tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::vocab_empty_byte_token_ids;
     use crate::Vocab;
     use std::sync::{Arc, Barrier};

@@ -13,7 +13,6 @@
 //! interchange map. The initial lexer state must occur in the same class on both
 //! sides.
 
-use glrmask_vocab::__private::VocabExt as _;
 use std::collections::{BTreeMap, BTreeSet, VecDeque, hash_map::Entry};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;

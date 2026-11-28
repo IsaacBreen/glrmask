@@ -14,7 +14,6 @@
 //! are deliberately excluded at the schema root so a computed expression
 //! cannot replace the entire arguments object and bypass its shape.
 
-use glrmask_vocab::__private::VocabExt as _;
 use std::collections::BTreeSet;
 
 use crate::compiler::constraint_compose::{
@@ -379,6 +378,7 @@ fn is_ascii_identifier_name(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use glrmask_vocab::__private::VocabExt as _;
     use super::*;
 
     fn vocab() -> Vocab {
