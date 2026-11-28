@@ -463,7 +463,7 @@ fn caller_eos_equivalence_at_sampled_prefixes() {
     let mut seed = 813u64;
     for (label, body) in grammars {
         for strategy in [MaskStrategy::FAST_MASKS, MaskStrategy::FAST_COMPILE] {
-            let options=CompileOptions::default().mask_strategy(strategy);
+            let options=CompileOptions::default().mask_strategy(strategy.clone());
             let b=body.compile_with(&vocab,options.clone()).unwrap();
             for ends in [&[130][..], &[130,160][..]] {
                 let a=with_end(&body,ends).compile_with(&vocab,options.clone()).unwrap();
