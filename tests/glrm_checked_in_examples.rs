@@ -148,7 +148,8 @@ fn shipped_example_sources_import() {
         }
         assert!(found > 0, "{name}: example literal not found");
     }
-    assert_eq!(count, 17);
+    // Four generated README/guide full examples repeat their short literals.
+    assert_eq!(count, 21);
 }
 
 #[test]

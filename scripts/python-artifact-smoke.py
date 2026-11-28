@@ -52,6 +52,7 @@ def main() -> None:
         run(str(python), "-I", "-X", "faulthandler", str(repo_root / "scripts" / "python-wheel-smoke.py"), version, cwd=Path(tmp))
         run(str(python), "-I", "-X", "faulthandler", "-m", "pytest", "-q", "-p", "no:cacheprovider",
             str(repo_root / "python" / "tests" / "test_python_compatibility.py"),
+            str(repo_root / "python" / "tests" / "test_hf_vocab.py"),
             str(repo_root / "python" / "tests" / "test_core_batch.py"),
             str(repo_root / "python" / "tests" / "test_forcing_semantics.py"),
             str(repo_root / "python" / "tests" / "test_module_expr.py"),
