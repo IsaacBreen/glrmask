@@ -150,100 +150,53 @@ impl RelevantPowersetView {
     }
 }
 
-fn mark_relevant_powerset_trie_trajectories(
-    view: &RelevantPowersetView,
-    rows: &ByteRows,
-    start_states: &[u32],
-    trie: &[ByteTrieNode],
-    selected: &mut [bool],
-    observed_bytes: &mut [[u64; 4]],
-) {
-    if trie.is_empty() || start_states.is_empty() {
-        return;
+struct PowersetTrajectory<'a> {
+    view: &'a RelevantPowersetView,
+    rows: &'a ByteRows,
+    selected: &'a mut [bool],
+    observed_bytes: &'a mut [[u64; 4]],
+}
+
+impl PowersetTrajectory<'_> {
+    fn record(&mut self, source: u32, byte: u8, target: u32) {
+        self.observed_bytes[source as usize][byte as usize / 64] |= 1u64 << (byte as usize % 64);
+        self.selected[target as usize] = true;
     }
 
-    let mut node_state_start = vec![0u32; trie.len()];
-    let mut node_state_len = vec![0u32; trie.len()];
-    let mut product_states = Vec::<u32>::with_capacity(start_states.len());
-    product_states.extend_from_slice(start_states);
-    node_state_len[0] = start_states.len() as u32;
-    for &state in start_states {
-        selected[state as usize] = true;
+    fn mark(&mut self, starts: &[u32], trie: &[ByteTrieNode]) {
+        for &state in starts {
+            self.selected[state as usize] = true;
+        }
+        traverse_frontiers(self, starts, trie, None, 0)
+            .expect("unbounded powerset trajectory");
+    }
+}
+
+impl FrontierMachine for PowersetTrajectory<'_> {
+    fn state_count(&self) -> usize { self.view.states.len() }
+    fn sparse_root(&self) -> bool { true }
+
+    fn step(&mut self, source: u32, byte: u8) -> u32 {
+        let target = self.rows.trans(source as usize, byte as usize);
+        if target != u32::MAX {
+            self.record(source, byte, target);
+        }
+        target
     }
 
-    let mut state_marks = vec![0u32; view.states.len()];
-    let mut generation = 0u32;
-    for node_index in 0..trie.len() {
-        let state_start = node_state_start[node_index] as usize;
-        let state_len = node_state_len[node_index] as usize;
-        if state_len == 0 {
-            continue;
-        }
-
-        // The root frontier can contain tens of thousands of states. Route its
-        // sparse outgoing edges to matching trie children once per source,
-        // rather than probing every root byte from every source.
-        if node_index == 0 && trie[node_index].children.len() > 1 {
-            let mut child_slot_by_byte = [u16::MAX; 256];
-            for (slot, &(byte, _)) in trie[node_index].children.iter().enumerate() {
-                child_slot_by_byte[byte as usize] = slot as u16;
+    fn route_root(
+        &mut self, source: u32, _children: &[(u8, usize)],
+        slots: &[usize; 256], frontiers: &mut [Vec<u32>],
+    ) {
+        let start = self.view.edge_offsets[source as usize] as usize;
+        let end = self.view.edge_offsets[source as usize + 1] as usize;
+        for edge in start..end {
+            let (byte, target) = self.view.edges[edge];
+            let slot = slots[byte as usize];
+            if slot != usize::MAX {
+                self.record(source, byte, target);
+                frontiers[slot].push(target);
             }
-            let mut child_frontiers =
-                vec![Vec::<u32>::new(); trie[node_index].children.len()];
-            for offset in 0..state_len {
-                let source = product_states[state_start + offset];
-                let edge_start = view.edge_offsets[source as usize] as usize;
-                let edge_end = view.edge_offsets[source as usize + 1] as usize;
-                for &(byte, target) in &view.edges[edge_start..edge_end] {
-                    let slot = child_slot_by_byte[byte as usize];
-                    if slot == u16::MAX {
-                        continue;
-                    }
-                    let word = byte as usize / 64;
-                    observed_bytes[source as usize][word] |= 1u64 << (byte as usize % 64);
-                    selected[target as usize] = true;
-                    child_frontiers[slot as usize].push(target);
-                }
-            }
-            for ((_, child), frontier) in trie[node_index]
-                .children
-                .iter()
-                .zip(child_frontiers.iter_mut())
-            {
-                frontier.sort_unstable();
-                frontier.dedup();
-                let child_start = product_states.len();
-                product_states.extend_from_slice(frontier);
-                node_state_start[*child] = child_start as u32;
-                node_state_len[*child] = frontier.len() as u32;
-            }
-            continue;
-        }
-
-        for &(token_byte, child) in &trie[node_index].children {
-            generation = generation.wrapping_add(1);
-            if generation == 0 {
-                state_marks.fill(0);
-                generation = 1;
-            }
-            let byte = token_byte;
-            let child_start = product_states.len();
-            for offset in 0..state_len {
-                let source = product_states[state_start + offset];
-                let target = rows.trans(source as usize, byte as usize);
-                if target == u32::MAX {
-                    continue;
-                }
-                let word = byte as usize / 64;
-                observed_bytes[source as usize][word] |= 1u64 << (byte as usize % 64);
-                selected[target as usize] = true;
-                if state_marks[target as usize] != generation {
-                    state_marks[target as usize] = generation;
-                    product_states.push(target);
-                }
-            }
-            node_state_start[child] = child_start as u32;
-            node_state_len[child] = (product_states.len() - child_start) as u32;
         }
     }
 }
@@ -273,22 +226,13 @@ pub fn build_bounded_analysis_view_from_relevant_powerset(
         .collect::<Vec<_>>();
     raw_seed_states.sort_unstable();
     raw_seed_states.dedup();
-    mark_relevant_powerset_trie_trajectories(
-        view,
-        &rows,
-        &raw_seed_states,
-        &token_trie,
-        &mut selected,
-        &mut observed_bytes,
-    );
-    mark_relevant_powerset_trie_trajectories(
-        view,
-        &rows,
-        std::slice::from_ref(&(view.start_state as u32)),
-        &suffix_trie,
-        &mut selected,
-        &mut observed_bytes,
-    );
+    {
+        let mut trajectory = PowersetTrajectory {
+            view, rows: &rows, selected: &mut selected, observed_bytes: &mut observed_bytes,
+        };
+        trajectory.mark(&raw_seed_states, &token_trie);
+        trajectory.mark(std::slice::from_ref(&(view.start_state as u32)), &suffix_trie);
+    }
     selected[view.start_state] = true;
 
     let mut old_to_new = vec![u32::MAX; view.states.len()];
@@ -1550,10 +1494,178 @@ struct BoundedExpansion<'a> {
     target_generation: &'a mut u32,
 }
 
+/// The exact image recurrence on a byte trie is independent of how its
+/// transition relation is obtained: a closed prebuilt powerset or lazy
+/// configuration interning. Only the current root-to-leaf frontier is live.
+trait FrontierMachine {
+    fn state_count(&self) -> usize;
+    fn step(&mut self, state: u32, byte: u8) -> u32;
+    fn sparse_root(&self) -> bool;
+    fn route_root(
+        &mut self, state: u32, children: &[(u8, usize)],
+        slots: &[usize; 256], frontiers: &mut [Vec<u32>],
+    );
+}
+
 struct FrontierFrame {
     node: usize,
     next_child: usize,
     states: Vec<u32>,
+}
+
+fn charge_frontier(
+    configurations: usize,
+    visits: &mut usize,
+    count: usize,
+    budget: Option<TokenBoundedAnalysisWorkBudget>,
+) -> Result<(), TokenBoundedAnalysisWork> {
+    if let Some(budget) = budget {
+        if visits.saturating_add(count) > budget.max_trie_visits {
+            return Err(TokenBoundedAnalysisWork {
+                configurations,
+                trie_visits: budget.max_trie_visits.saturating_add(1),
+            });
+        }
+        if configurations > budget.max_configurations {
+            return Err(TokenBoundedAnalysisWork { configurations, trie_visits: *visits });
+        }
+    }
+    *visits = visits.saturating_add(count);
+    Ok(())
+}
+
+struct FrontierScratch {
+    visits: usize,
+    budget: Option<TokenBoundedAnalysisWorkBudget>,
+    marks: Vec<u32>,
+    generation: u32,
+    spare: Vec<Vec<u32>>,
+}
+
+impl FrontierScratch {
+    fn walk(
+        &mut self, machine: &mut impl FrontierMachine,
+        node: usize, states: Vec<u32>, trie: &[ByteTrieNode],
+    ) -> Result<(), TokenBoundedAnalysisWork> {
+        if states.is_empty() {
+            self.spare.push(states);
+            return Ok(());
+        }
+        charge_frontier(machine.state_count(), &mut self.visits, states.len(), self.budget)?;
+        let mut stack = vec![FrontierFrame { node, next_child: 0, states }];
+        while let Some(frame) = stack.last_mut() {
+            let Some(&(byte, child)) = trie[frame.node].children.get(frame.next_child) else {
+                let mut finished = stack.pop().expect("current frontier frame").states;
+                finished.clear();
+                self.spare.push(finished);
+                continue;
+            };
+            frame.next_child += 1;
+            self.generation = self.generation.wrapping_add(1);
+            if self.generation == 0 {
+                self.marks.fill(0);
+                self.generation = 1;
+            }
+            let mut targets = self.spare.pop().unwrap_or_default();
+            targets.clear();
+            for &state in &frame.states {
+                let target = machine.step(state, byte);
+                if target == u32::MAX {
+                    continue;
+                }
+                if self.marks.len() < machine.state_count() {
+                    self.marks.resize(machine.state_count(), 0);
+                }
+                if self.marks[target as usize] != self.generation {
+                    self.marks[target as usize] = self.generation;
+                    targets.push(target);
+                }
+            }
+            charge_frontier(machine.state_count(), &mut self.visits, targets.len(), self.budget)?;
+            if targets.is_empty() {
+                self.spare.push(targets);
+            } else {
+                stack.push(FrontierFrame { node: child, next_child: 0, states: targets });
+            }
+        }
+        Ok(())
+    }
+}
+
+fn traverse_frontiers(
+    machine: &mut impl FrontierMachine, starts: &[u32], trie: &[ByteTrieNode],
+    budget: Option<TokenBoundedAnalysisWorkBudget>, prior_visits: usize,
+) -> Result<usize, TokenBoundedAnalysisWork> {
+    if trie.is_empty() || starts.is_empty() {
+        return Ok(0);
+    }
+    let mut scratch = FrontierScratch {
+        visits: prior_visits, budget, marks: vec![0; machine.state_count()],
+        generation: 0, spare: Vec::new(),
+    };
+    if machine.sparse_root() && trie[0].children.len() > 1 {
+        // Route a broad root's sparse edges to matching first-byte frontiers
+        // once per source instead of probing every possible first byte.
+        charge_frontier(machine.state_count(), &mut scratch.visits, starts.len(), budget)?;
+        let children = &trie[0].children;
+        let mut slots = [usize::MAX; 256];
+        for (slot, &(byte, _)) in children.iter().enumerate() {
+            slots[byte as usize] = slot;
+        }
+        let mut frontiers = vec![Vec::new(); children.len()];
+        for &state in starts {
+            machine.route_root(state, children, &slots, &mut frontiers);
+        }
+        for ((_, child), mut frontier) in children.iter().zip(frontiers) {
+            frontier.sort_unstable();
+            frontier.dedup();
+            scratch.walk(machine, *child, frontier, trie)?;
+        }
+    } else {
+        scratch.walk(machine, 0, starts.to_vec(), trie)?;
+    }
+    charge_frontier(machine.state_count(), &mut scratch.visits, 0, budget)?;
+    Ok(scratch.visits - prior_visits)
+}
+
+struct LazyTrajectory<'a, 'b> {
+    expansion: &'a mut BoundedExpansion<'b>,
+    preseeded: Option<&'a [u32]>,
+}
+
+impl FrontierMachine for LazyTrajectory<'_, '_> {
+    fn state_count(&self) -> usize { self.expansion.configs.len() }
+    fn sparse_root(&self) -> bool { self.preseeded.is_some() }
+
+    fn step(&mut self, state: u32, byte: u8) -> u32 {
+        self.expansion.step(state, byte, self.preseeded)
+    }
+
+    fn route_root(
+        &mut self, state: u32, children: &[(u8, usize)],
+        slots: &[usize; 256], frontiers: &mut [Vec<u32>],
+    ) {
+        let tokenizer = self.expansion.tokenizer;
+        if let [source] = self.expansion.configs[state as usize].as_ref() {
+            let source = *source;
+            for (byte, _) in tokenizer.transitions_from(source) {
+                let slot = slots[byte as usize];
+                if slot != usize::MAX {
+                    let target = self.step(state, byte);
+                    if target != u32::MAX {
+                        frontiers[slot].push(target);
+                    }
+                }
+            }
+        } else {
+            for (slot, &(byte, _)) in children.iter().enumerate() {
+                let target = self.step(state, byte);
+                if target != u32::MAX {
+                    frontiers[slot].push(target);
+                }
+            }
+        }
+    }
 }
 
 impl BoundedExpansion<'_> {
@@ -1569,154 +1681,17 @@ impl BoundedExpansion<'_> {
     }
 
     fn charge(
-        &self,
-        visits: &mut usize,
-        count: usize,
-        budget: Option<TokenBoundedAnalysisWorkBudget>,
+        &self, visits: &mut usize, count: usize, budget: Option<TokenBoundedAnalysisWorkBudget>,
     ) -> Result<(), TokenBoundedAnalysisWork> {
-        if let Some(budget) = budget {
-            if visits.saturating_add(count) > budget.max_trie_visits {
-                return Err(TokenBoundedAnalysisWork {
-                    configurations: self.configs.len(),
-                    trie_visits: budget.max_trie_visits.saturating_add(1),
-                });
-            }
-            if self.configs.len() > budget.max_configurations {
-                return Err(TokenBoundedAnalysisWork {
-                    configurations: self.configs.len(),
-                    trie_visits: *visits,
-                });
-            }
-        }
-        *visits = visits.saturating_add(count);
-        Ok(())
-    }
-
-    /// Each trie node has one parent. Its reachable configuration set is
-    /// therefore exactly the image of that parent's frontier under one byte.
-    /// Keep only the current root-to-leaf path, recycling child buffers when
-    /// a branch finishes. No global product-state list or visited-pair table.
-    fn walk_frontier(
-        &mut self,
-        node: usize,
-        states: Vec<u32>,
-        trie: &[ByteTrieNode],
-        preseeded: Option<&[u32]>,
-        budget: Option<TokenBoundedAnalysisWorkBudget>,
-        visits: &mut usize,
-        marks: &mut Vec<u32>,
-        generation: &mut u32,
-        spare: &mut Vec<Vec<u32>>,
-    ) -> Result<(), TokenBoundedAnalysisWork> {
-        if states.is_empty() {
-            spare.push(states);
-            return Ok(());
-        }
-        self.charge(visits, states.len(), budget)?;
-        let mut stack = vec![FrontierFrame { node, next_child: 0, states }];
-        while let Some(frame) = stack.last_mut() {
-            let Some(&(byte, child)) = trie[frame.node].children.get(frame.next_child) else {
-                let mut finished = stack.pop().expect("current frontier frame").states;
-                finished.clear();
-                spare.push(finished);
-                continue;
-            };
-            frame.next_child += 1;
-            *generation = generation.wrapping_add(1);
-            if *generation == 0 {
-                marks.fill(0);
-                *generation = 1;
-            }
-            let mut targets = spare.pop().unwrap_or_default();
-            targets.clear();
-            for &state in &frame.states {
-                let target = self.step(state, byte, preseeded);
-                if target == u32::MAX {
-                    continue;
-                }
-                if marks.len() < self.configs.len() {
-                    marks.resize(self.configs.len(), 0);
-                }
-                if marks[target as usize] != *generation {
-                    marks[target as usize] = *generation;
-                    targets.push(target);
-                }
-            }
-            self.charge(visits, targets.len(), budget)?;
-            if targets.is_empty() {
-                spare.push(targets);
-            } else {
-                stack.push(FrontierFrame { node: child, next_child: 0, states: targets });
-            }
-        }
-        Ok(())
+        charge_frontier(self.configs.len(), visits, count, budget)
     }
 
     fn expand(
-        &mut self,
-        start_states: &[u32],
-        trie: &[ByteTrieNode],
-        preseeded: Option<&[u32]>,
-        budget: Option<TokenBoundedAnalysisWorkBudget>,
-        prior_visits: usize,
+        &mut self, start_states: &[u32], trie: &[ByteTrieNode], preseeded: Option<&[u32]>,
+        budget: Option<TokenBoundedAnalysisWorkBudget>, prior_visits: usize,
     ) -> Result<usize, TokenBoundedAnalysisWork> {
-        if trie.is_empty() || start_states.is_empty() {
-            return Ok(0);
-        }
-        let mut visits = prior_visits;
-        let mut marks = vec![0u32; self.configs.len()];
-        let mut generation = 0u32;
-        let mut spare = Vec::new();
-        if preseeded.is_some() && trie[0].children.len() > 1 {
-            // A broad root usually contains physical singleton closures.
-            // Route their actual sparse edges to the relevant first bytes
-            // rather than scanning the entire alphabet for every seed.
-            self.charge(&mut visits, start_states.len(), budget)?;
-            let children = &trie[0].children;
-            let mut slot_by_byte = [usize::MAX; 256];
-            for (slot, &(byte, _)) in children.iter().enumerate() {
-                slot_by_byte[byte as usize] = slot;
-            }
-            let mut frontiers = vec![Vec::new(); children.len()];
-            let tokenizer = self.tokenizer;
-            for &state in start_states {
-                if let [source] = self.configs[state as usize].as_ref() {
-                    let source = *source;
-                    for (byte, _) in tokenizer.transitions_from(source) {
-                        let slot = slot_by_byte[byte as usize];
-                        if slot == usize::MAX {
-                            continue;
-                        }
-                        let target = self.step(state, byte, preseeded);
-                        if target != u32::MAX {
-                            frontiers[slot].push(target);
-                        }
-                    }
-                } else {
-                    for (slot, &(byte, _)) in children.iter().enumerate() {
-                        let target = self.step(state, byte, preseeded);
-                        if target != u32::MAX {
-                            frontiers[slot].push(target);
-                        }
-                    }
-                }
-            }
-            for ((_, child), mut frontier) in children.iter().zip(frontiers) {
-                frontier.sort_unstable();
-                frontier.dedup();
-                self.walk_frontier(
-                    *child, frontier, trie, preseeded, budget, &mut visits,
-                    &mut marks, &mut generation, &mut spare,
-                )?;
-            }
-        } else {
-            self.walk_frontier(
-                0, start_states.to_vec(), trie, preseeded, budget, &mut visits,
-                &mut marks, &mut generation, &mut spare,
-            )?;
-        }
-        self.charge(&mut visits, 0, budget)?;
-        Ok(visits - prior_visits)
+        traverse_frontiers(&mut LazyTrajectory { expansion: self, preseeded },
+            start_states, trie, budget, prior_visits)
     }
 
     /// Independent literal product traversal, deliberately not implemented
