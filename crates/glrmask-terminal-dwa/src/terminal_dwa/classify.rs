@@ -16,7 +16,7 @@ use crate::vocab::LexicalVocabulary;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 
 use super::l2p::equivalence_analysis::compat::{FlatDfa, compute_tokenizer_byte_classes};
-use crate::automata::lexer::observation::{column_representatives, ConfigInterner};
+use crate::automata::lexer::observation::{column_representatives, ConfigActionCache};
 use super::l2p::equivalence_analysis::state_equivalence::nfa::{
     TokenBoundedAnalysisTrie,
     build_bounded_analysis_view_from_combined_starts_prefix_only_with_trie,
@@ -3464,43 +3464,6 @@ fn exact_terminal_path_two_plus_finite_literals(
     Some(ExactTerminalPathTwoPlus { two_plus, witnesses })
 }
 
-/// A canonical configuration has one owner and one memo row. When the
-/// physical column proof is available, every byte in a class shares the
-/// same image, including epsilon closure and subsequent active filtering.
-struct PrefixConfigCache {
-    configs: ConfigInterner,
-    classes: [u8; 256],
-    columns: usize,
-    transitions: Vec<u32>,
-}
-
-impl PrefixConfigCache {
-    fn new(index: Option<&ByteTransitionIndex>) -> Self {
-        let classes = index.map_or_else(|| std::array::from_fn(|byte| byte as u8), |index| index.classes);
-        let columns = classes.iter().copied().max().unwrap() as usize + 1;
-        Self { configs: ConfigInterner::default(), classes, columns, transitions: Vec::new() }
-    }
-
-    fn intern(&mut self, mut states: Vec<u32>) -> (u32, bool) {
-        if states.is_empty() { return (PREFIX_DEAD_STATE, false); }
-        states.sort_unstable();
-        states.dedup();
-        let before = self.configs.len();
-        let state = self.configs.intern(states);
-        assert!(state < PREFIX_UNKNOWN_STATE, "prefix configuration ID exhausted");
-        let inserted = self.configs.len() != before;
-        if inserted {
-            self.transitions.resize(self.configs.len() * self.columns, PREFIX_UNKNOWN_STATE);
-        }
-        (state, inserted)
-    }
-
-    #[inline]
-    fn slot(&self, state: u32, byte: u8) -> usize {
-        state as usize * self.columns + self.classes[byte as usize] as usize
-    }
-}
-
 struct CandidatePrefixPowerset<'a> {
     tokenizer: &'a Tokenizer,
     words_per_mask: usize,
@@ -3509,7 +3472,7 @@ struct CandidatePrefixPowerset<'a> {
     singleton_epsilon_closures: Option<Vec<Option<Box<[u32]>>>>,
     closure_marks: Vec<u32>,
     closure_generation: u32,
-    cache: PrefixConfigCache,
+    cache: ConfigActionCache,
     config_membership_words: Vec<Box<[u64]>>,
     matched_masks: Vec<u64>,
     future_masks: Vec<u64>,
@@ -3525,7 +3488,7 @@ struct ActivePrefixPowerset<'a> {
     active: &'a BitSet,
     active_language: Vec<bool>,
     words_per_mask: usize,
-    cache: PrefixConfigCache,
+    cache: ConfigActionCache,
     matched_masks: Vec<u64>,
 }
 
@@ -3553,7 +3516,7 @@ impl<'a> ActivePrefixPowerset<'a> {
             active,
             active_language,
             words_per_mask,
-            cache: PrefixConfigCache::new(None),
+            cache: ConfigActionCache::new(0..=u8::MAX, |byte| byte as usize, None),
             matched_masks: Vec::new(),
         };
         let start = scanner.intern(start_states);
@@ -3563,7 +3526,7 @@ impl<'a> ActivePrefixPowerset<'a> {
     fn intern(&mut self, states: Vec<u32>) -> u32 {
         let (state, inserted) = self.cache.intern(states);
         if !inserted { return state; }
-        let states = self.cache.configs[state as usize].as_ref();
+        let states = self.cache.configs()[state as usize].as_ref();
         let mask_base = self.matched_masks.len();
         self.matched_masks.resize(mask_base + self.words_per_mask, 0);
         for &raw_state in states {
@@ -3582,19 +3545,17 @@ impl<'a> ActivePrefixPowerset<'a> {
         if state == PREFIX_DEAD_STATE {
             return PREFIX_DEAD_STATE;
         }
-        let slot = self.cache.slot(state, byte);
-        let cached = self.cache.transitions[slot];
-        if cached != PREFIX_UNKNOWN_STATE {
+        if let Some(cached) = self.cache.get(state, byte) {
             return cached;
         }
         let targets = self
             .tokenizer
-            .step_all(self.cache.configs[state as usize].as_ref(), byte)
+            .step_all(self.cache.configs()[state as usize].as_ref(), byte)
             .into_iter()
             .filter(|&target| self.active_language[target as usize])
             .collect::<Vec<_>>();
         let target = self.intern(targets);
-        self.cache.transitions[slot] = target;
+        self.cache.set(state, byte, target);
         target
     }
 
@@ -3626,7 +3587,7 @@ impl<'a> CandidatePrefixPowerset<'a> {
                 Vec::new()
             },
             closure_generation: 0,
-            cache: PrefixConfigCache::new(sparse_transitions_by_byte),
+            cache: ConfigActionCache::new(0..=u8::MAX, |byte| sparse_transitions_by_byte.map_or(byte as usize, |index| index.class(byte)), None),
             config_membership_words: Vec::new(),
             matched_masks: Vec::new(),
             future_masks: Vec::new(),
@@ -3662,7 +3623,7 @@ impl<'a> CandidatePrefixPowerset<'a> {
     fn intern(&mut self, states: Vec<u32>) -> u32 {
         let (state, inserted) = self.cache.intern(states);
         if !inserted { return state; }
-        let states = self.cache.configs[state as usize].as_ref();
+        let states = self.cache.configs()[state as usize].as_ref();
         let mask_base = self.matched_masks.len();
         self.matched_masks
             .resize(mask_base + self.words_per_mask, 0);
@@ -3698,16 +3659,14 @@ impl<'a> CandidatePrefixPowerset<'a> {
         if state == PREFIX_DEAD_STATE {
             return PREFIX_DEAD_STATE;
         }
-        let slot = self.cache.slot(state, byte);
-        let cached = self.cache.transitions[slot];
-        if cached != PREFIX_UNKNOWN_STATE {
+        if let Some(cached) = self.cache.get(state, byte) {
             return cached;
         }
         let direct_targets = if let Some(sparse_transitions_by_byte) =
             self.sparse_transitions_by_byte
         {
             let sparse = sparse_transitions_by_byte.sparse(byte);
-            let config = self.cache.configs[state as usize].as_ref();
+            let config = self.cache.configs()[state as usize].as_ref();
             if sparse.len() < config.len() {
                 let membership = self.config_membership_words[state as usize].as_ref();
                 sparse
@@ -3729,7 +3688,7 @@ impl<'a> CandidatePrefixPowerset<'a> {
                     .collect::<Vec<_>>()
             }
         } else {
-            self.cache.configs[state as usize]
+            self.cache.configs()[state as usize]
                 .iter()
                 .filter_map(|&raw_state| {
                     let target = self.tokenizer.get_transition(raw_state, byte);
@@ -3766,7 +3725,7 @@ impl<'a> CandidatePrefixPowerset<'a> {
             direct_targets
         };
         let target = self.intern(targets);
-        self.cache.transitions[slot] = target;
+        self.cache.set(state, byte, target);
         target
     }
 
@@ -4822,7 +4781,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                 split_offsets.last().copied().unwrap_or(0),
                 total_splits,
                 candidate_splits,
-                prefix_scanner.cache.configs.len(),
+                prefix_scanner.cache.configs().len(),
                 compile_ms,
                 trie_ms,
                 prefix_ms,
@@ -5064,7 +5023,7 @@ fn exact_terminal_path_two_plus_candidate_dfa(
             total_splits,
             total_splits,
             candidate_splits,
-            prefix_scanner.cache.configs.len(),
+            prefix_scanner.cache.configs().len(),
             split_checks,
             allowed_pairs,
             two_plus.count_ones(),
@@ -5101,7 +5060,6 @@ fn exact_terminal_path_two_plus_deterministic<S: ExactBoundaryDeterministicScann
     )
 }
 
-const PREFIX_UNKNOWN_STATE: u32 = u32::MAX - 1;
 const PREFIX_DEAD_STATE: u32 = u32::MAX;
 
 #[derive(Default)]
@@ -5476,7 +5434,7 @@ fn exact_terminal_path_two_plus_fused_nfa(
             vocab.len(),
             active.count_ones(),
             raw_start_states.len(),
-            prefix_scanner.cache.configs.len(),
+            prefix_scanner.cache.configs().len(),
             split_checks,
             allowed_pairs,
             two_plus.count_ones(),

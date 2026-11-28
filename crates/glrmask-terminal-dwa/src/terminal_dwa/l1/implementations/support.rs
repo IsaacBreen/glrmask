@@ -1,207 +1,122 @@
 //! Exact scanner for projected L1 construction.
 
 use std::sync::Arc;
-
 use rustc_hash::FxHashMap;
 
 use super::BuildInput;
+use crate::automata::lexer::observation::{ConfigActionCache, ConfigInterner, EpsilonImageScratch};
 use crate::automata::lexer::tokenizer::SingletonEpsilonClosures;
 use crate::automata::lexer::Lexer;
 
-pub(super) const UNKNOWN: u32 = u32::MAX - 1;
 pub(super) const DEAD: u32 = u32::MAX;
 
 pub(super) struct Scanner<'a> {
     input: BuildInput<'a>,
-    pub configs: Vec<Box<[u32]>>,
-    ids: FxHashMap<Vec<u32>, u32>,
-    singleton_ids: Vec<u32>,
-    transitions: Vec<u32>,
-    byte_slot: [u16; 256],
-    transition_width: usize,
+    action: ConfigActionCache,
     pub signatures: Vec<Vec<u32>>,
     signature_ids: FxHashMap<Vec<u32>, u32>,
     config_signature: Vec<u32>,
     singleton_closures: Arc<SingletonEpsilonClosures>,
+    image: Option<EpsilonImageScratch>,
 }
 
 impl<'a> Scanner<'a> {
     pub fn new(input: BuildInput<'a>) -> Self {
         let relevant_bytes = input.vocab.relevant_bytes();
-        let mut byte_slot = [u16::MAX; 256];
-        for (slot, &byte) in relevant_bytes.iter().enumerate() {
-            byte_slot[byte as usize] = slot as u16;
-        }
-        let transition_width = relevant_bytes.len();
-        let transition_capacity = (input.tokenizer.num_states() as usize)
-            .saturating_mul(transition_width);
+        let state_count = input.tokenizer.num_states() as usize;
         Self {
             input,
-            configs: Vec::new(),
-            ids: FxHashMap::default(),
-            singleton_ids: vec![UNKNOWN; input.tokenizer.num_states() as usize],
-            transitions: Vec::with_capacity(transition_capacity),
-            byte_slot,
-            transition_width,
+            action: ConfigActionCache::new(
+                relevant_bytes.iter().copied(),
+                |byte| input.transitions_by_byte.map_or(byte as usize, |index| index.class(byte)),
+                Some(state_count),
+            ),
             signatures: vec![Vec::new()],
             signature_ids: FxHashMap::from_iter([(Vec::new(), 0)]),
             config_signature: Vec::new(),
             singleton_closures: input.tokenizer.all_singleton_epsilon_closures(),
+            image: None,
         }
     }
 
     #[inline]
-    fn push_transition_row(&mut self) {
-        self.transitions
-            .extend(std::iter::repeat_n(UNKNOWN, self.transition_width));
-    }
+    pub fn configs(&self) -> &ConfigInterner { self.action.configs() }
 
-    fn intern_signature(&mut self, signature: Vec<u32>) -> u32 {
-        let next_signature = self.signatures.len() as u32;
-        *self.signature_ids.entry(signature.clone()).or_insert_with(|| {
+    fn register_signature(&mut self, id: u32, inserted: bool) -> u32 {
+        if !inserted { return id; }
+        let signature = if let [state] = self.action.configs()[id as usize].as_ref() {
+            super::super::collect_active_terminal_signature(
+                self.input.tokenizer, *state, self.input.active_terminals,
+            )
+        } else {
+            let mut signature = self.action.configs()[id as usize]
+                .iter()
+                .flat_map(|&state| {
+                    super::super::collect_active_terminal_signature(
+                        self.input.tokenizer, state, self.input.active_terminals,
+                    )
+                })
+                .collect::<Vec<_>>();
+            signature.sort_unstable();
+            signature.dedup();
+            signature
+        };
+        let next = self.signatures.len() as u32;
+        let signature_id = *self.signature_ids.entry(signature.clone()).or_insert_with(|| {
             self.signatures.push(signature);
-            next_signature
-        })
-    }
-
-    fn intern_singleton(&mut self, state: u32) -> u32 {
-        let existing = self.singleton_ids[state as usize];
-        if existing != UNKNOWN {
-            return existing;
-        }
-        let signature = super::super::collect_active_terminal_signature(
-            self.input.tokenizer,
-            state,
-            self.input.active_terminals,
-        );
-        let signature_id = self.intern_signature(signature);
-        let id = self.configs.len() as u32;
-        self.singleton_ids[state as usize] = id;
-        self.configs.push(Box::new([state]));
-        self.push_transition_row();
-        self.config_signature.push(signature_id);
-        id
-    }
-
-    fn intern(&mut self, mut states: Vec<u32>) -> u32 {
-        if states.is_empty() {
-            return DEAD;
-        }
-        if states.len() == 1 {
-            return self.intern_singleton(states[0]);
-        }
-        states.sort_unstable();
-        states.dedup();
-        if states.len() == 1 {
-            return self.intern_singleton(states[0]);
-        }
-        if let Some(&id) = self.ids.get(&states) {
-            return id;
-        }
-        let mut signature = states
-            .iter()
-            .flat_map(|&state| {
-                super::super::collect_active_terminal_signature(
-                    self.input.tokenizer,
-                    state,
-                    self.input.active_terminals,
-                )
-            })
-            .collect::<Vec<_>>();
-        signature.sort_unstable();
-        signature.dedup();
-        let signature_id = self.intern_signature(signature);
-        let id = self.configs.len() as u32;
-        self.ids.insert(states.clone(), id);
-        self.configs.push(states.into_boxed_slice());
-        self.push_transition_row();
+            next
+        });
         self.config_signature.push(signature_id);
         id
     }
 
     pub fn start(&mut self, state: u32) -> u32 {
-        let closure = &self.singleton_closures[state as usize];
-        if closure.len() == 1 {
-            let singleton = closure[0];
-            self.intern_singleton(singleton)
-        } else {
-            let states = closure.to_vec();
-            self.intern(states)
-        }
+        let (id, inserted) = self.action.intern_canonical_slice(&self.singleton_closures[state as usize]);
+        self.register_signature(id, inserted)
     }
 
     #[inline]
     pub fn step(&mut self, config: u32, byte: u8) -> u32 {
-        if config == DEAD {
-            return DEAD;
+        if config == DEAD { return DEAD; }
+        if let Some(target) = self.action.get(config, byte) {
+            return target;
         }
-        let slot = self.byte_slot[byte as usize];
-        let cache_index = if slot == u16::MAX {
-            None
-        } else {
-            Some(config as usize * self.transition_width + slot as usize)
-        };
-        if let Some(cache_index) = cache_index {
-            let cached = self.transitions[cache_index];
-            if cached != UNKNOWN {
-                return cached;
-            }
-        }
-        let target = if self.configs[config as usize].len() == 1 {
-            let state = self.configs[config as usize][0];
-            // L1 callers already carry the tokenizer's exact dense transition
-            // table.  The finite projected scanner used to rediscover the same
-            // edge through `Tokenizer::step` for every uncached singleton
-            // `(config, byte)` pair.  Large p2 vocabularies generate hundreds
-            // of thousands of these probes; use the O(1) dense row directly.
-            let raw_target = self.input.flat_trans[state as usize * 256 + byte as usize];
-            if raw_target == u32::MAX {
-                DEAD
+        let (id, inserted) = if let [state] = self.action.configs()[config as usize].as_ref() {
+            // Direct singleton lookup retains the inexpensive closure fast path.
+            let raw_target = self.input.flat_trans[*state as usize * 256 + byte as usize];
+            if raw_target == DEAD {
+                (DEAD, false)
             } else {
-                let closure = &self.singleton_closures[raw_target as usize];
-                if closure.len() == 1 {
-                    let singleton = closure[0];
-                    self.intern_singleton(singleton)
-                } else {
-                    let states = closure.to_vec();
-                    self.intern(states)
-                }
+                self.action.intern_canonical_slice(&self.singleton_closures[raw_target as usize])
             }
         } else {
-            // `configs` are already epsilon-closed.  Calling `Tokenizer::step_all`
-            // here closes the source set again, performs sparse transition
-            // lookup, then closes the targets.  Reuse the dense transition table
-            // and the precomputed singleton closures instead; unioning those
-            // closures is exactly the same target configuration.
-            let sources = &self.configs[config as usize];
-            let mut states = Vec::with_capacity(sources.len().saturating_mul(2));
-            for &state in sources.iter() {
-                let raw_target = self.input.flat_trans[state as usize * 256 + byte as usize];
-                if raw_target != u32::MAX {
-                    states.extend_from_slice(&self.singleton_closures[raw_target as usize]);
-                }
-            }
-            self.intern(states)
+            // Unrestricted L1 configurations are already epsilon-closed.
+            // Filter the terminal signature, not the source/target state set.
+            let flat = self.input.flat_trans;
+            let image = self.image.get_or_insert_with(|| EpsilonImageScratch::new(flat.len() / 256));
+            let states = image.step(
+                self.action.configs()[config as usize].as_ref(), byte, true,
+                self.singleton_closures.as_ref(), None,
+                |state, byte| flat[state as usize * 256 + byte as usize],
+            );
+            self.action.intern_canonical_slice(states)
         };
-        if let Some(cache_index) = cache_index {
-            self.transitions[cache_index] = target;
-        }
+        let target = self.register_signature(id, inserted);
+        self.action.set(config, byte, target);
         target
     }
 
     pub fn step_bytes(&mut self, mut config: u32, bytes: &[u8]) -> u32 {
         for &byte in bytes {
             config = self.step(config, byte);
-            if config == DEAD {
-                break;
-            }
+            if config == DEAD { break; }
         }
         config
     }
 
     #[inline]
     pub fn singleton_state(&self, config: u32) -> Option<u32> {
-        let states = self.configs.get(config as usize)?;
+        let states = self.action.configs().get(config as usize)?;
         (states.len() == 1).then_some(states[0])
     }
 

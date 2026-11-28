@@ -135,6 +135,7 @@ impl ByteRows {
 pub struct ConfigInterner {
     ids_by_hash: rustc_hash::FxHashMap<u64, smallvec::SmallVec<[u32; 1]>>,
     configs: Vec<Box<[u32]>>,
+    singleton_ids: Vec<u32>,
 }
 
 impl std::ops::Deref for ConfigInterner {
@@ -143,6 +144,22 @@ impl std::ops::Deref for ConfigInterner {
 }
 
 impl ConfigInterner {
+    /// Dense singleton indexing is useful for scanners seeded at every raw
+    /// state; sparse powerset consumers keep the ordinary hash-only layout.
+    pub fn with_singletons(state_count: usize) -> Self {
+        Self { singleton_ids: vec![u32::MAX; state_count], ..Self::default() }
+    }
+
+    fn intern_singleton(&mut self, state: u32) -> Option<u32> {
+        let existing = *self.singleton_ids.get(state as usize)?;
+        if existing != u32::MAX { return Some(existing); }
+        let id = u32::try_from(self.configs.len()).expect("configuration ID overflow");
+        assert_ne!(id, u32::MAX, "configuration ID exhausted");
+        self.configs.push(Box::new([state]));
+        self.singleton_ids[state as usize] = id;
+        Some(id)
+    }
+
     fn hash(states: &[u32]) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = rustc_hash::FxHasher::default();
@@ -164,18 +181,113 @@ impl ConfigInterner {
     }
 
     pub fn intern(&mut self, states: Vec<u32>) -> u32 {
+        if let [state] = states.as_slice() {
+            if let Some(id) = self.intern_singleton(*state) { return id; }
+        }
         let hash = Self::hash(&states);
         if let Some(id) = self.lookup(hash, &states) { return id; }
         self.insert(hash, states.into_boxed_slice())
     }
 
     pub fn intern_slice(&mut self, states: &[u32]) -> u32 {
+        if let [state] = states {
+            if let Some(id) = self.intern_singleton(*state) { return id; }
+        }
         let hash = Self::hash(states);
         if let Some(id) = self.lookup(hash, states) { return id; }
         self.insert(hash, states.into())
     }
 
     pub fn into_configs(self) -> Vec<Box<[u32]>> { self.configs }
+}
+
+/// A lazy exact configuration action. The caller supplies the byte domain
+/// and, optionally, a physical-column equivalence proof. Bytes outside that
+/// domain may still be evaluated but cannot read or write a memo row.
+/// Observed configurations have a single canonical ID and one transition row.
+pub struct ConfigActionCache {
+    configs: ConfigInterner,
+    byte_slot: [u16; 256],
+    width: usize,
+    transitions: Vec<u32>,
+}
+
+impl ConfigActionCache {
+    pub const DEAD: u32 = u32::MAX;
+    const UNKNOWN: u32 = u32::MAX - 1;
+
+    pub fn new(
+        bytes: impl IntoIterator<Item = u8>,
+        physical_class: impl Fn(u8) -> usize,
+        singleton_state_count: Option<usize>,
+    ) -> Self {
+        let mut byte_slot = [u16::MAX; 256];
+        let mut physical_slots = [u16::MAX; 256];
+        let mut width = 0usize;
+        for byte in bytes {
+            let slot = &mut physical_slots[physical_class(byte)];
+            if *slot == u16::MAX {
+                *slot = width as u16;
+                width += 1;
+            }
+            byte_slot[byte as usize] = *slot;
+        }
+        let configs = singleton_state_count.map_or_else(
+            ConfigInterner::default, ConfigInterner::with_singletons,
+        );
+        Self {
+            configs, byte_slot, width,
+            transitions: Vec::with_capacity(singleton_state_count.unwrap_or(0).saturating_mul(width)),
+        }
+    }
+
+    pub fn configs(&self) -> &ConfigInterner { &self.configs }
+
+    fn publish_config(&mut self, before: usize, id: u32) -> (u32, bool) {
+        assert!(id < Self::UNKNOWN, "configuration ID exhausted");
+        let inserted = self.configs.len() != before;
+        if inserted {
+            self.transitions.resize(self.configs.len() * self.width, Self::UNKNOWN);
+        }
+        (id, inserted)
+    }
+
+    pub fn intern(&mut self, mut states: Vec<u32>) -> (u32, bool) {
+        if states.is_empty() { return (Self::DEAD, false); }
+        states.sort_unstable();
+        states.dedup();
+        let before = self.configs.len();
+        let id = self.configs.intern(states);
+        self.publish_config(before, id)
+    }
+
+    /// Only use for a sorted, deduplicated configuration.
+    pub fn intern_canonical_slice(&mut self, states: &[u32]) -> (u32, bool) {
+        if states.is_empty() { return (Self::DEAD, false); }
+        debug_assert!(states.windows(2).all(|w| w[0] < w[1]));
+        let before = self.configs.len();
+        let id = self.configs.intern_slice(states);
+        self.publish_config(before, id)
+    }
+
+    #[inline]
+    fn slot(&self, state: u32, byte: u8) -> Option<usize> {
+        let slot = self.byte_slot[byte as usize];
+        if slot == u16::MAX { None } else { Some(state as usize * self.width + slot as usize) }
+    }
+
+    #[inline]
+    pub fn get(&self, state: u32, byte: u8) -> Option<u32> {
+        let target = self.transitions[self.slot(state, byte)?];
+        (target != Self::UNKNOWN).then_some(target)
+    }
+
+    #[inline]
+    pub fn set(&mut self, state: u32, byte: u8, target: u32) {
+        if let Some(slot) = self.slot(state, byte) {
+            self.transitions[slot] = target;
+        }
+    }
 }
 
 /// Reusable exact epsilon-image accumulator. The caller selects the
@@ -228,5 +340,31 @@ impl EpsilonImageScratch {
         }
         self.targets.sort_unstable();
         &self.targets
+    }
+}
+#[cfg(test)]
+mod config_action_tests {
+    use super::*;
+
+    #[test]
+    fn memo_rows_share_only_proven_observed_columns() {
+        let mut cache = ConfigActionCache::new([b'a', b'b', b'c'],
+            |byte| if byte == b'b' || byte == b'd' { b'a' as usize } else { byte as usize },
+            Some(8));
+        let (a, inserted) = cache.intern_canonical_slice(&[3]);
+        assert!(inserted);
+        assert_eq!(cache.intern(vec![3, 3]), (a, false));
+        let (b, inserted) = cache.intern(vec![5, 1, 5]);
+        assert!(inserted);
+        assert_eq!(cache.configs()[b as usize].as_ref(), &[1, 5]);
+        cache.set(a, b'a', b);
+        assert_eq!(cache.get(a, b'b'), Some(b));
+        assert_eq!(cache.get(a, b'c'), None);
+        assert_eq!(cache.get(a, b'd'), None);
+        cache.set(a, b'd', ConfigActionCache::DEAD);
+        assert_eq!(cache.get(a, b'a'), Some(b));
+        cache.set(b, b'c', ConfigActionCache::DEAD);
+        assert_eq!(cache.get(b, b'c'), Some(ConfigActionCache::DEAD));
+        assert_eq!(cache.intern(Vec::new()), (ConfigActionCache::DEAD, false));
     }
 }

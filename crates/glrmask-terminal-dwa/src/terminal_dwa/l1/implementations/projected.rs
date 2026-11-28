@@ -931,7 +931,7 @@ fn build_one_byte(
     for raw in 0..input.tokenizer.num_states() {
         raw_to_start.push(scanner.start(raw));
     }
-    let mut raw_by_start = vec![Vec::<u32>::new(); scanner.configs.len()];
+    let mut raw_by_start = vec![Vec::<u32>::new(); scanner.configs().len()];
     for (raw, &start) in raw_to_start.iter().enumerate() {
         raw_by_start[start as usize].push(raw as u32);
     }
@@ -950,7 +950,7 @@ fn build_one_byte(
         if raw_states.is_empty() {
             continue;
         }
-        let singleton = (scanner.configs[start].len() == 1).then_some(scanner.configs[start][0]);
+        let singleton = (scanner.configs()[start].len() == 1).then_some(scanner.configs()[start][0]);
         let representative_signatures = byte_representatives
             .iter()
             .map(|&byte| {
@@ -1000,7 +1000,7 @@ fn build_one_byte(
             input.tokenizer.num_states(),
             tokens.len(),
             byte_representatives.len(),
-            scanner.configs.len(),
+            scanner.configs().len(),
             scanner.signatures.len(),
             finished.state_classes,
             finished.token_classes,
@@ -1465,7 +1465,7 @@ fn profile_vector_projection_shape(input: BuildInput<'_>) {
     let (bytes, _) = quotient_input_bytes(input, &vocab_bytes);
     let mut transitions = Vec::<Vec<(u8, u32)>>::new();
     let mut state = 0usize;
-    while state < scanner.configs.len() {
+    while state < scanner.configs().len() {
         let mut row = Vec::new();
         for (symbol, &byte) in bytes.iter().enumerate() {
             let target = scanner.step(state as u32, byte);
@@ -1477,7 +1477,7 @@ fn profile_vector_projection_shape(input: BuildInput<'_>) {
         state += 1;
     }
     let build_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let outputs = (0..scanner.configs.len())
+    let outputs = (0..scanner.configs().len())
         .map(|state| scanner.signature(state as u32))
         .collect::<Vec<_>>();
     let minimize_started = Instant::now();
@@ -1724,14 +1724,14 @@ impl FrozenFiniteScanner {
 
         let mut transitions = Vec::<u32>::new();
         let mut state = 0usize;
-        while state < scanner.configs.len() {
+        while state < scanner.configs().len() {
             transitions.reserve(width);
             for &byte in &representatives {
                 transitions.push(scanner.step(state as u32, byte));
             }
             state += 1;
         }
-        let num_states = scanner.configs.len();
+        let num_states = scanner.configs().len();
         debug_assert_eq!(transitions.len(), num_states * width);
         let signatures = (0..num_states)
             .map(|state| scanner.signature(state as u32))
@@ -2647,7 +2647,7 @@ fn observe_finite_projection(
         eprintln!(
             "[glrmask/profile][l1_finite_observation] partition={} raw_states={} tokens={} trie_nodes={} configs={} signatures={} bucket_cache={} cache_hits={} pair_visits={} uniform_subtrees={} uniform_tokens={} profile_runs={} profiles={} state_classes={} vocab_cache_hit={} prep_ms={:.3} scan_ms={:.3}",
             input.partition_label, input.tokenizer.num_states(), aliases.len(), trie.len(),
-            scanner.configs.len(), scanner.signatures.len(), bucket_cache.len(), cache_hits,
+            scanner.configs().len(), scanner.signatures.len(), bucket_cache.len(), cache_hits,
             pair_visits, uniform_subtrees, uniform_tokens,
             store.runs, store.profiles.len(),
             rows.fingerprints.len(), finite_vocab_cache_hit, prep_ms, scan_ms,
