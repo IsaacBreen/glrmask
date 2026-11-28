@@ -3274,36 +3274,8 @@ fn build_templates_for_compile(
     f64,
 ), String> {
     let templates_started_at = Instant::now();
-    let (characterizations, characterization_profile)+= 1;
-                    }
-                }
-            }
-        }
-        let dfa_states = templates
-            .by_terminal
-            .values()
-            .map(|dfa| dfa.states.len())
-            .sum::<usize>();
-        let dfa_transitions = templates
-            .by_terminal
-            .values()
-            .flat_map(|dfa| dfa.states.iter())
-            .map(|state| state.transitions.len())
-            .sum::<usize>();
-        let templates_ms = elapsed_ms(templates_started_at);
-        if compile_profile_enabled() {
-            eprintln!(
-                "[glrmask/profile][templates_direct_regular] terminals={} dfa_states={} dfa_transitions={} commit_template_dfas_enabled={} commit_template_dfas_built={} total_ms={:.3}",
-                templates.by_terminal.len(),
-                dfa_states,
-                dfa_transitions,
-                        templates_ms,
-            );
-        }
-        return Ok((
-            templates,
-                templates_ms,
-        ));
+    if analyzed_grammar.direct_regular_automaton.is_some() {
+        return Ok((Templates::default(), elapsed_ms(templates_started_at)));
     }
 
     let (characterizations, characterization_profile) =
