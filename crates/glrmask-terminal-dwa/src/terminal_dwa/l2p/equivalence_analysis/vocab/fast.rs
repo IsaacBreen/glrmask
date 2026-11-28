@@ -1424,11 +1424,12 @@ fn run_batch_inner(
     state_offset: usize,
     num_states: usize,
 ) {
-    let num_groups = dfa.num_groups;
     let len = slice.len();
     let dirty_words = scratch.dirty_words;
 
     scratch.active_indices.clear();
+    let mut log = DepthChangeLog::new();
+    let mut stats = DfsStepStats::default();
     {
         let mask_start = state_offset * dirty_words;
         let mask_end = (state_offset + num_states) * dirty_words;
@@ -1472,27 +1473,9 @@ fn run_batch_inner(
             let class_base = class * dfa.num_states;
             for idx in 0..active_len {
                 let i = scratch.active_indices[idx];
-                let base = i * num_groups;
-                let next_state = unsafe { *dfa.trans_by_class.get_unchecked(class_base + scratch.current_states[i]) };
-                if next_state != NONE {
-                    let ns = next_state as usize;
-                    scratch.current_states[i] = ns;
-                    for &gid in &dfa.finalizers[ns] {
-                        if gid < num_groups {
-                            let ix = base + gid;
-                            if scratch.match_positions[ix] == NONE {
-                                mark_dirty_group(scratch, i, gid);
-                            }
-                            scratch.match_positions[ix] = position;
-                        }
-                    }
-                    if dfa.is_dead_end[ns] {
-                        scratch.current_states[i] = STATE_NONE;
-                    }
-                } else {
-                    scratch.current_states[i] = STATE_NONE;
-                }
-                if scratch.current_states[i] != STATE_NONE {
+                if advance_observation_row::<false, false>(
+                    dfa, scratch, i, byte, class_base, position, &mut log, &mut stats,
+                ) {
                     scratch.active_indices[next_len] = i;
                     next_len += 1;
                 }
@@ -1518,17 +1501,10 @@ fn run_batch_inner(
                     let token_len = len as u32;
                     for idx in 0..active_len {
                         let i = scratch.active_indices[idx];
-                        let base = i * num_groups;
-                        let s = scratch.current_states[i];
-                        for &gid in &dfa.finalizers[s] {
-                            if gid < num_groups {
-                                let ix = base + gid;
-                                if scratch.match_positions[ix] == NONE {
-                                    mark_dirty_group(scratch, i, gid);
-                                }
-                                scratch.match_positions[ix] = token_len;
-                            }
-                        }
+                        let state = scratch.current_states[i];
+                        observe_finalizers::<false, false>(
+                            dfa, scratch, i, state, token_len, &mut log, &mut stats,
+                        );
                     }
                     break;
                 }
@@ -2695,8 +2671,100 @@ struct DfsStepStats {
     noop_self_loops: usize,
 }
 
-/// Walk one byte forward at the given depth, recording all state changes
-/// to the change log for later backtracking.
+/// One longest-match action, specialized at compile time for the reversible
+/// prefix traversal or the destructive direct scan. Terminal observations
+/// survive the death of the lexical path; only the endpoint becomes absent.
+#[inline(always)]
+fn observe_finalizers<const REVERSIBLE: bool, const PROFILE: bool>(
+    dfa: &Dfa,
+    scratch: &mut Scratch,
+    row: usize,
+    state: usize,
+    position: u32,
+    log: &mut DepthChangeLog,
+    stats: &mut DfsStepStats,
+) {
+    let base = row * dfa.num_groups;
+    for &gid in &dfa.finalizers[state] {
+        if gid >= dfa.num_groups {
+            continue;
+        }
+        let index = base + gid;
+        let old = scratch.match_positions[index];
+        if old == NONE {
+            if REVERSIBLE {
+                let word = row * scratch.dirty_words + gid / 64;
+                log.dirty_changes.push((word, scratch.dirty_group_masks[word]));
+                if scratch.dirty_state_flags[row] == 0 {
+                    log.dirty_state_flag_changes.push((row, 0));
+                    set_dirty_state_bit(&mut scratch.dirty_state_bits, row);
+                    if PROFILE {
+                        stats.new_dirty_states += 1;
+                    }
+                }
+            }
+            mark_dirty_group(scratch, row, gid);
+            if PROFILE {
+                stats.new_dirty_groups += 1;
+            }
+        }
+        if REVERSIBLE {
+            log.match_changes.push((index, old));
+            update_trie_target_aggregate(scratch, gid, old, position);
+        }
+        scratch.match_positions[index] = position;
+    }
+}
+
+#[inline(always)]
+fn advance_observation_row<const REVERSIBLE: bool, const PROFILE: bool>(
+    dfa: &Dfa,
+    scratch: &mut Scratch,
+    row: usize,
+    byte: u8,
+    class_base: usize,
+    position: u32,
+    log: &mut DepthChangeLog,
+    stats: &mut DfsStepStats,
+) -> bool {
+    let old = scratch.current_states[row];
+    debug_assert_ne!(old, STATE_NONE);
+    if PROFILE {
+        stats.states_visited += 1;
+    }
+    if REVERSIBLE && dfa.finalizers[old].is_empty() && dfa.self_loop_bytes[old].contains(byte) {
+        if PROFILE {
+            stats.noop_self_loops += 1;
+        }
+        return true;
+    }
+    // Every active row holds an in-domain state, and class_base selects its
+    // complete transposed transition column.
+    let target = unsafe { *dfa.trans_by_class.get_unchecked(class_base + old) };
+    if REVERSIBLE {
+        log.state_changes.push((row, old));
+    }
+    let dirty_before = stats.new_dirty_groups;
+    let next = if target == NONE {
+        STATE_NONE
+    } else {
+        let state = target as usize;
+        observe_finalizers::<REVERSIBLE, PROFILE>(
+            dfa, scratch, row, state, position, log, stats,
+        );
+        if dfa.is_dead_end[state] { STATE_NONE } else { state }
+    };
+    scratch.current_states[row] = next;
+    if PROFILE && next == STATE_NONE {
+        stats.dead_transitions += 1;
+        if stats.new_dirty_groups == dirty_before {
+            stats.dead_without_new_dirty += 1;
+        }
+    }
+    next != STATE_NONE
+}
+
+/// Walk one byte forward at the given depth, retaining an undo log.
 fn dfs_step<const PROFILE: bool>(
     dfa: &Dfa,
     scratch: &mut Scratch,
@@ -2707,98 +2775,26 @@ fn dfs_step<const PROFILE: bool>(
     batch_len: usize,
 ) -> DfsStepStats {
     trie.ensure_depth(depth);
-    let TrieWalkState {
-        root_active_indices,
-        depth_logs,
-    } = trie;
+    let TrieWalkState { root_active_indices, depth_logs } = trie;
     let (source_indices, log) = if depth == 0 {
         (root_active_indices.as_slice(), &mut depth_logs[0])
     } else {
         let (previous, current) = depth_logs.split_at_mut(depth);
-        (
-            previous[depth - 1].active_indices.as_slice(),
-            &mut current[0],
-        )
+        (previous[depth - 1].active_indices.as_slice(), &mut current[0])
     };
     log.clear();
-
-    let mut step_stats = DfsStepStats::default();
-
-    let num_groups = dfa.num_groups;
-    let dirty_words = scratch.dirty_words;
+    let mut stats = DfsStepStats::default();
     let position = (position_offset + depth + 1) as u32;
-    let class = dfa.byte_to_class[byte as usize] as usize;
-    let class_base = class * dfa.num_states;
-
+    let class_base = dfa.byte_to_class[byte as usize] as usize * dfa.num_states;
     debug_assert!(source_indices.iter().all(|&i| i < batch_len));
-    for &i in source_indices {
-        let old_state = scratch.current_states[i];
-        debug_assert_ne!(old_state, STATE_NONE);
-        if PROFILE { step_stats.states_visited += 1; }
-        if dfa.finalizers[old_state].is_empty()
-            && dfa.self_loop_bytes[old_state].contains(byte)
-        {
-            log.active_indices.push(i);
-            if PROFILE { step_stats.noop_self_loops += 1; }
-            continue;
-        }
-
-        let mut state_new_dirty_groups = 0usize;
-
-        let next_state_raw =
-            unsafe { *dfa.trans_by_class.get_unchecked(class_base + old_state) };
-        if next_state_raw == NONE {
-            log.state_changes.push((i, old_state));
-            scratch.current_states[i] = STATE_NONE;
-            if PROFILE { step_stats.dead_transitions += 1; }
-            if PROFILE { step_stats.dead_without_new_dirty += 1; }
-            continue;
-        }
-
-        let ns = next_state_raw as usize;
-        log.state_changes.push((i, old_state));
-        scratch.current_states[i] = ns;
-
-        let base = i * num_groups;
-        for &gid in &dfa.finalizers[ns] {
-            if gid < num_groups {
-                let ix = base + gid;
-                let old_mp = scratch.match_positions[ix];
-                if old_mp == NONE {
-                    let word_idx = gid / 64;
-                    let bit = gid % 64;
-                    let flat_idx = i * dirty_words + word_idx;
-                    log.dirty_changes
-                        .push((flat_idx, scratch.dirty_group_masks[flat_idx]));
-                    if scratch.dirty_state_flags[i] == 0 {
-                        log.dirty_state_flag_changes
-                            .push((i, scratch.dirty_state_flags[i]));
-                        scratch.dirty_state_flags[i] = 1;
-                        set_dirty_state_bit(&mut scratch.dirty_state_bits, i);
-                        if PROFILE { step_stats.new_dirty_states += 1; }
-                    }
-                    scratch.dirty_group_masks[flat_idx] |= 1u64 << bit;
-                    if PROFILE { step_stats.new_dirty_groups += 1; }
-                    if PROFILE { state_new_dirty_groups += 1; }
-                }
-                log.match_changes.push((ix, old_mp));
-                update_trie_target_aggregate(scratch, gid, old_mp, position);
-                scratch.match_positions[ix] = position;
-            }
-        }
-
-        if dfa.is_dead_end[ns] {
-            scratch.current_states[i] = STATE_NONE;
-            if PROFILE { step_stats.dead_transitions += 1; }
-            if PROFILE && state_new_dirty_groups == 0 {
-                if PROFILE { step_stats.dead_without_new_dirty += 1; }
-            }
-        } else {
-            log.active_indices.push(i);
+    for &row in source_indices {
+        if advance_observation_row::<true, PROFILE>(
+            dfa, scratch, row, byte, class_base, position, log, &mut stats,
+        ) {
+            log.active_indices.push(row);
         }
     }
-
-    step_stats
+    stats
 }
 
 /// Undo all changes recorded at a single depth level.
