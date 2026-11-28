@@ -5958,7 +5958,7 @@ mod tests {
         ).unwrap();
         let child = native_dynamic_fixture(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
         let retained = parent.inner.token_bytes.vocab().expect("retain supplied vocabulary");
-        assert!(Arc::ptr_eq(&retained.entries_arc(), &vocab.entries_arc()));
+        assert!(retained.shares_storage_with(&vocab));
 
         let loaded = DynamicConstraint::from_constraints(vec![
             RuntimeConstraint::load_body_external_artifact(parent.inner.save(), &vocab).unwrap(),
@@ -5966,11 +5966,9 @@ mod tests {
         assert!(loaded.inner.token_bytes.vocab().is_some());
         let first = loaded.bind_grammar_dynamic_boundary("child", &child).unwrap();
         let first_backing = loaded.inner.token_bytes.vocab()
-            .expect("prime retained loaded parent, not a throwaway clone").entries_arc();
+            .expect("retained loaded parent").clone();
         let second = loaded.bind_grammar_dynamic_boundary("child", &child).unwrap();
-        assert!(Arc::ptr_eq(
-            &first_backing, &loaded.inner.token_bytes.vocab().unwrap().entries_arc(),
-        ));
+        assert!(first_backing.shares_storage_with(loaded.inner.token_bytes.vocab().unwrap()));
         assert_eq!(first.start().mask(), second.start().mask());
         let reloaded = DynamicConstraint::from_constraints(vec![
             RuntimeConstraint::load_body_external_artifact(loaded.inner.save(), &vocab).unwrap(),

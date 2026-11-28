@@ -10732,21 +10732,12 @@ mod dense_internal_token_mask_tests {
         )
         .unwrap();
 
-        assert!(!Arc::ptr_eq(&constraint.token_bytes.entries_arc(), &vocab_b.entries_arc()));
+        assert!(!constraint.token_bytes.vocab().unwrap().shares_storage_with(&vocab_b));
         constraint.bind_vocab_exact(&vocab_b).unwrap();
-        assert!(Arc::ptr_eq(&constraint.token_bytes.entries_arc(), &vocab_b.entries_arc()));
-        assert!(constraint.token_bytes.vocab().is_some());
-        assert!(Arc::ptr_eq(
-            &constraint
-                .token_bytes.vocab()
-                .expect("exact vocab bind should seed late-bind vocab")
-                .entries_arc(),
-            &vocab_b.entries_arc(),
-        ));
-
-        let bound = constraint.token_bytes.entries_arc();
+        assert!(constraint.token_bytes.vocab().unwrap().shares_storage_with(&vocab_b));
+        let bound = constraint.token_bytes.vocab().unwrap().clone();
         assert!(constraint.bind_vocab_exact(&vocab_bad).is_err());
-        assert!(Arc::ptr_eq(&constraint.token_bytes.entries_arc(), &bound));
+        assert!(constraint.token_bytes.vocab().unwrap().shares_storage_with(&bound));
     }
 
     #[test]
@@ -10764,7 +10755,7 @@ mod dense_internal_token_mask_tests {
         let mut loaded = Constraint::load(saved.clone(), &vocab_a).unwrap();
         assert_eq!(loaded.token_bytes.len(), vocab_a.len());
         loaded.bind_vocab_exact(&vocab_b).unwrap();
-        assert!(Arc::ptr_eq(&loaded.token_bytes.entries_arc(), &vocab_b.entries_arc()));
+        assert!(loaded.token_bytes.vocab().unwrap().shares_storage_with(&vocab_b));
 
         let mut mismatched = Constraint::load(saved, &vocab_a).unwrap();
         assert_eq!(mismatched.token_bytes.len(), vocab_a.len());

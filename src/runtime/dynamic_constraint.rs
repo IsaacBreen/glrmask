@@ -4675,18 +4675,7 @@ nt start = A;
         let original = DynamicConstraint::from_ebnf("start ::= 'a'+ 'b'", &vocab).unwrap();
         let loaded = DynamicConstraint::load_with_vocab(&original.save(), &vocab).unwrap();
 
-        assert!(std::sync::Arc::ptr_eq(
-            &loaded.inner.token_bytes.entries_arc(),
-            &vocab.entries_arc(),
-        ));
-        assert!(std::sync::Arc::ptr_eq(
-            &loaded
-                .inner
-                .token_bytes.vocab()
-                .expect("dynamic load_with_vocab should seed late-bind vocab")
-                .entries_arc(),
-            &vocab.entries_arc(),
-        ));
+        assert!(loaded.inner.token_bytes.vocab().unwrap().shares_storage_with(&vocab));
     }
 
     #[test]

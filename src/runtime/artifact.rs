@@ -8346,11 +8346,6 @@ impl TokenByteDomain {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn entries_arc(&self) -> Arc<crate::vocab::VocabEntries> {
-        self.vocab().expect("bound runtime vocabulary").entries_arc()
-    }
-
     pub(crate) fn matches_vocab(&self, vocab: &crate::Vocab) -> bool {
         self.vocab().is_some_and(|bound| bound.same_model_vocab(vocab))
     }
