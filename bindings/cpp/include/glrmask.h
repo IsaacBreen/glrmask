@@ -131,6 +131,7 @@ GLRMASK_API const char *glrmask_error_message(void);
 /// Initializes the caller-owned options buffer with defaults and its size in bytes.
 GLRMASK_API glrmask_status glrmask_compile_options_init(glrmask_compile_options* opts,size_t struct_size);
 
+/// Fails on duplicate IDs.
 GLRMASK_API glrmask_status glrmask_vocab_new(const glrmask_vocab_entry* entries,size_t n,glrmask_vocab** out);
 GLRMASK_API glrmask_status glrmask_vocab_clone(const glrmask_vocab* vocab,glrmask_vocab** out);
 GLRMASK_API void glrmask_vocab_free(glrmask_vocab* vocab);

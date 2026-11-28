@@ -5,6 +5,7 @@ export declare const version: string;
 export declare class Vocab implements Disposable {
   private readonly __vocabBrand: void;
 
+  /** Fails on duplicate IDs. */
   constructor(entries: Iterable<readonly [number, Uint8Array]>);
 
   clone(): Vocab;

@@ -145,7 +145,7 @@ impl Clone for Vocab {
 }
 
 impl Vocab {
-    /// Fails with `ErrorKind::InvalidInput` on duplicate or out-of-range IDs.
+    /// Fails on duplicate IDs.
     pub fn new(entries: impl IntoIterator<Item = (u32, Vec<u8>)>) -> Result<Self, Error> {
         let mut ids = BTreeSet::new();
         let mut validated = Vec::new();

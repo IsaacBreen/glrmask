@@ -696,7 +696,7 @@ impl Module {
         self.precompile_with(vocab, CompileOptions::default())
     }
 
-    /// Compiles what it can now, even with externs unbound. Further compilation must use the same `vocab`.
+    /// Like `precompile()`, with `options`.
     pub fn precompile_with(&mut self, vocab: &Vocab, options: CompileOptions) -> Result<()> {
         with_deep_stack(|| {
             let run = |opts: &CompileOptions| -> Result<Module> {
@@ -1090,7 +1090,7 @@ impl Module {
         self.compile_with(vocab, CompileOptions::default())
     }
 
-    /// Finishes compiling the module into a constraint.
+    /// Like `compile()`, with `options`.
     pub fn compile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Constraint> {
         self.compile_inner_with(vocab, options).map(Constraint::from_runtime)
     }

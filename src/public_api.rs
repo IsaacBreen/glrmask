@@ -840,7 +840,7 @@ impl Grammar {
         Module::new(self).compile(vocab)
     }
 
-    /// Compiles the grammar into a constraint.
+    /// Like `compile()`, with `options`.
     pub fn compile_with(
         &self,
         vocab: &Vocab,

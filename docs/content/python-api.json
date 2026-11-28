@@ -1,5 +1,6 @@
 {
   "Vocab": "Each token ID and its bytes.",
+  "Vocab.__init__": "Fails on duplicate IDs.",
   "Grammar": "",
   "Grammar.from_glrm": "Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source.",
   "Grammar.from_lark": "Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats) source.",

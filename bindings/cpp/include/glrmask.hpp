@@ -205,6 +205,7 @@ class Vocab : public detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vo
     }
 public:
 
+    /// Fails on duplicate IDs.
     explicit Vocab(const std::vector<VocabEntry>& entries) : Base(create(entries)) {}
 };
 

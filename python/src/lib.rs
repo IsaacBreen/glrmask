@@ -518,6 +518,7 @@ impl PyVocab {
         }
     }
 
+    /// Fails on duplicate IDs.
     #[new]
     #[pyo3(signature = (id_to_bytes, /))]
     fn new(id_to_bytes: &Bound<'_, PyAny>) -> PyResult<Self> {

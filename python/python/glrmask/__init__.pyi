@@ -90,6 +90,7 @@ __all__: list[str] = [
 class Vocab:
     """Each token ID and its bytes."""
     def __init__(self, id_to_bytes: Mapping[int, bytes], /) -> None:
+        """Fails on duplicate IDs."""
         ...
 
 @final

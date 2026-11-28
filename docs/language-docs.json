@@ -13,6 +13,7 @@
   "guide_url": "https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md",
   "python_symbols": {
     "Vocab": "Each token ID and its bytes.",
+    "Vocab.__init__": "Fails on duplicate IDs.",
     "Grammar": "",
     "Grammar.from_glrm": "Parses [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) source.",
     "Grammar.from_lark": "Parses [Lark](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md#grammar-formats) source.",
@@ -178,5 +179,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "41b2913641fe5ce3ca4ec8ef488d6d5ffa04b9052945b0a56b5fac43415a56cb"
+  "content_sha256": "61ceaf8e5e74f68954e87e2a3484f95f2ffe64498192268cb6033f3e7d453d0e"
 }
