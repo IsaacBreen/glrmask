@@ -20,7 +20,7 @@ use crate::automata::weighted::minimize::minimize_owned;
 use crate::automata::weighted::nwa::NWA;
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
-use crate::compiler::stages::mapped_artifact::{MappedArtifact, refine_observation_classes, refine_sparse_memberships};
+use crate::compiler::stages::mapped_artifact::{MappedArtifact, refine_observation_classes, refine_sparse_memberships, local_to_refined_classes};
 use crate::ds::weight::{ScopedWeightOpCache, Weight};
 
 use super::types::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile, compile_profile_enabled};
@@ -2244,88 +2244,13 @@ fn build_direct_local_to_global_token_map(local_to_global: &[u32]) -> Vec<Vec<u3
         .collect()
 }
 
-/// Map local TSIDs to the global composite TSIDs.
-///
-/// `build_unified_global_id_map` constructs each global TSID from the tuple of
-/// all input-local TSIDs. Therefore any representative original tokenizer
-/// state of a global class identifies the unique local class that owns it.
-/// Iterating global representatives emits each destination once, in ascending
-/// global-ID order, avoiding the old per-input `BTreeSet` aggregation.
-fn build_local_to_global_tsid_map(
-    local_id_map: &InternalIdMap,
-    global_id_map: &InternalIdMap,
-) -> Vec<Vec<u32>> {
-    let mut local_to_global = vec![Vec::new(); local_id_map.num_tsids() as usize];
-    for (global_tsid, &representative_state) in global_id_map
-        .tokenizer_states
-        .representative_original_ids
-        .iter()
-        .enumerate()
-    {
-        let local_tsid = local_id_map.tokenizer_states.original_to_internal
-            [representative_state as usize];
-        if local_tsid == u32::MAX {
-            #[cfg(debug_assertions)]
-            for &original_state in
-                &global_id_map.tokenizer_states.internal_to_originals[global_tsid]
-            {
-                debug_assert_eq!(
-                    local_id_map.tokenizer_states.original_to_internal
-                        [original_state as usize],
-                    u32::MAX,
-                    "a global composite TSID must refine the local unmapped sentinel",
-                );
-            }
-            continue;
-        }
-        let local_tsid = local_tsid as usize;
-        local_to_global[local_tsid].push(global_tsid as u32);
-
-        #[cfg(debug_assertions)]
-        for &original_state in &global_id_map.tokenizer_states.internal_to_originals[global_tsid] {
-            debug_assert_eq!(
-                local_id_map.tokenizer_states.original_to_internal[original_state as usize],
-                local_tsid as u32,
-                "a global composite TSID must refine every local TSID map",
-            );
-        }
-    }
-    local_to_global
+/// Both dimensions transport weights along the exact common partition.
+fn build_local_to_global_tsid_map(local: &InternalIdMap, global: &InternalIdMap) -> Vec<Vec<u32>> {
+    local_to_refined_classes(&local.tokenizer_states, &global.tokenizer_states)
 }
 
-/// Map local internal token classes to global internal token classes.
-fn build_local_to_global_token_map(
-    local_id_map: &InternalIdMap,
-    global_id_map: &InternalIdMap,
-) -> Vec<Vec<u32>> {
-    let num_local = local_id_map.num_internal_tokens() as usize;
-    let mut local_to_global = vec![BTreeSet::new(); num_local];
-
-    for (orig, &local_class) in local_id_map
-        .vocab_tokens
-        .original_to_internal
-        .iter()
-        .enumerate()
-    {
-        if local_class == u32::MAX {
-            continue;
-        }
-        let global_class = global_id_map
-            .vocab_tokens
-            .original_to_internal
-            .get(orig)
-            .copied()
-            .unwrap_or(u32::MAX);
-        if global_class == u32::MAX {
-            continue;
-        }
-        local_to_global[local_class as usize].insert(global_class);
-    }
-
-    local_to_global
-        .into_iter()
-        .map(|s| s.into_iter().collect())
-        .collect()
+fn build_local_to_global_token_map(local: &InternalIdMap, global: &InternalIdMap) -> Vec<Vec<u32>> {
+    local_to_refined_classes(&local.vocab_tokens, &global.vocab_tokens)
 }
 
 /// Remap all weights in an NWA from local TSID/token space to global space.

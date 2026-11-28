@@ -772,79 +772,43 @@ fn reorder_common_classes<K: Ord>(
     *representatives = new_representatives;
 }
 
-fn build_local_to_common_tsid_map(
-    local_id_map: &InternalIdMap,
-    common_id_map: &InternalIdMap,
+/// Project a local observation coordinate onto an exact refinement. One
+/// representative per nonempty common class suffices; destinations are
+/// already unique and ordered by common class ID.
+pub fn local_to_refined_classes(
+    local: &ManyToOneIdMap,
+    common: &ManyToOneIdMap,
 ) -> Vec<Vec<u32>> {
-    let num_local = local_id_map.num_tsids() as usize;
-    let mut local_to_common = vec![Vec::new(); num_local];
-
-    for (state, &local_tsid) in local_id_map
-        .tokenizer_states
-        .original_to_internal
-        .iter()
-        .enumerate()
-    {
-        if local_tsid == u32::MAX {
-            continue;
+    let mut fanout = vec![Vec::new(); local.internal_to_originals.len()];
+    for (destination, originals) in common.internal_to_originals.iter().enumerate() {
+        let Some(&representative) = originals.first() else { continue };
+        let local_class = local.original_to_internal.get(representative as usize)
+            .copied().unwrap_or(u32::MAX);
+        #[cfg(debug_assertions)]
+        for &original in originals {
+            debug_assert_eq!(local.original_to_internal.get(original as usize)
+                .copied().unwrap_or(u32::MAX), local_class,
+                "destination must refine the local observation classes");
         }
-        let common_tsid = common_id_map
-            .tokenizer_states
-            .original_to_internal
-            .get(state)
-            .copied()
-            .unwrap_or(u32::MAX);
-        if common_tsid == u32::MAX {
-            continue;
+        if local_class != u32::MAX {
+            fanout[local_class as usize].push(destination as u32);
         }
-        local_to_common[local_tsid as usize].push(common_tsid);
     }
+    fanout
+}
 
-    sort_dedup_local_to_common(local_to_common)
+fn build_local_to_common_tsid_map(
+    local: &InternalIdMap,
+    common: &InternalIdMap,
+) -> Vec<Vec<u32>> {
+    local_to_refined_classes(&local.tokenizer_states, &common.tokenizer_states)
 }
 
 fn build_local_to_common_token_map_from_common_classes(
-    local_id_map: &InternalIdMap,
-    common_id_map: &InternalIdMap,
+    local: &InternalIdMap,
+    common: &InternalIdMap,
 ) -> Vec<Vec<u32>> {
-    let num_local = local_id_map.num_internal_tokens() as usize;
-    let mut local_to_common = vec![Vec::new(); num_local];
-
-    for (common_token, originals) in common_id_map
-        .vocab_tokens
-        .internal_to_originals
-        .iter()
-        .enumerate()
-    {
-        let Some(&representative) = originals.first() else {
-            continue;
-        };
-        let local_token = local_id_map
-            .vocab_tokens
-            .original_to_internal
-            .get(representative as usize)
-            .copied()
-            .unwrap_or(u32::MAX);
-        if local_token == u32::MAX {
-            continue;
-        }
-        if let Some(common_tokens) = local_to_common.get_mut(local_token as usize) {
-            common_tokens.push(common_token as u32);
-        }
-    }
-
-    sort_dedup_local_to_common(local_to_common)
-}
-
-fn sort_dedup_local_to_common(mut local_to_common: Vec<Vec<u32>>) -> Vec<Vec<u32>> {
-    for ids in &mut local_to_common {
-        if ids.len() <= 1 {
-            continue;
-        }
-        ids.sort_unstable();
-        ids.dedup();
-    }
-    local_to_common
+    local_to_refined_classes(&local.vocab_tokens, &common.vocab_tokens)
 }
 
 #[derive(Debug)]
