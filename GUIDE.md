@@ -47,8 +47,8 @@ Time between masks. Lower is better.
 
 <p align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-javascript-guide-2026-10-19-dark.svg?v=72d7d58641e9">
-  <img src="docs/assets/benchmark-tbm-javascript-guide-2026-10-19.svg?v=34926080a044" alt="JavaScript time between masks: measured GLRMask, GLRMask dynamic, llguidance 1.9.1 and XGrammar 0.2.8 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-javascript-guide-2026-10-19-dark.svg?v=f432047fa2f8">
+  <img src="docs/assets/benchmark-tbm-javascript-guide-2026-10-19.svg?v=27cac0f32b16" alt="JavaScript time between masks: measured GLRMask, GLRMask dynamic, llguidance 1.9.1 and XGrammar 0.2.8 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480">
 </picture>
 </p>
 

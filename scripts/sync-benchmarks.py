@@ -187,7 +187,9 @@ def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dyn
             region=[yy for xx,yy in points if right-155<=xx<=right]
             baseline=max(previous+24,max(region)+21)
         baseline=min(bottom-8,max(top+16,baseline)); previous=baseline
-        if abs(baseline-(end_y-10))>2:
+        # Website series labels have no leader: a vertical leader at the
+        # last sample can look like a spurious latency jump.
+        if not website and abs(baseline-(end_y-10))>2:
             out.append(f'<path d="M{right},{end_y:.2f} V{baseline-6:.2f}" stroke="{palette[mode]}" stroke-width="0.8" opacity="0.65"/>')
         fade=f' opacity="{spec["dynamic_preview"]["static_opacity"]}"' if include_dynamic and mode=='static' else ''
         out.append(f'<text x="{right-6}" y="{baseline:.2f}" fill="{palette[mode]}" font-size="14" font-weight="600" text-anchor="end"{fade}>{name}</text>')

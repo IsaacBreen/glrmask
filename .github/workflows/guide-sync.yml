@@ -28,6 +28,7 @@ on:
       - 'scripts/check-readme-archives.py'
       - 'docs/design/documentation-sync.md'
       - 'scripts/sync-benchmarks.py'
+      - 'scripts/test-benchmark-plots.py'
       - 'docs/benchmarks/**'
       - 'docs/assets/benchmark-tbm-*'
       - '.github/workflows/guide-sync.yml'
@@ -58,6 +59,7 @@ on:
       - 'scripts/check-readme-archives.py'
       - 'docs/design/documentation-sync.md'
       - 'scripts/sync-benchmarks.py'
+      - 'scripts/test-benchmark-plots.py'
       - 'docs/benchmarks/**'
       - 'docs/assets/benchmark-tbm-*'
       - '.github/workflows/guide-sync.yml'
@@ -71,6 +73,7 @@ jobs:
         with:
           python-version: '3.x'
       - run: python scripts/sync-benchmarks.py --check
+      - run: python scripts/test-benchmark-plots.py
       - run: python scripts/sync-guide.py --check
       - name: Rust documentation examples
         run: cargo test --doc --locked -p glrmask
