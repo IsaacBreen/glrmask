@@ -3729,106 +3729,139 @@ fn first_transition_factor_parallel_buckets_default(
             || num_initial_states < FIRST_TRANSITION_FACTOR_HIGH_THREAD_SEQUENTIAL_MIN_STATES)
 }
 
-/// Restrict a tokenizer view to exactly the states reachable from the state
-/// representatives and lexer start along bytes that appear in `strings`.
-///
-/// This happens before building the analysis DFA, rather than after it.  The
-/// finite-vocabulary equivalence pass cannot observe any omitted transition:
-/// every token walk starts from one of these roots and consumes only these
-/// bytes.  Keeping the start root also preserves the suffix observations used
-/// by the trellis hash.
+/// A compact analysis coordinate is an ordered subset of source states.
+/// Reset is an independent root obligation, even when no initial state can
+/// reach it by token bytes. A finite trajectory witness additionally limits
+/// the queried edges, not the endpoint metadata.
+struct AnalysisStateDomain {
+    original_to_compact: Vec<u32>,
+    compact_to_original: Vec<usize>,
+}
+
+impl AnalysisStateDomain {
+    fn from_reached(reached: &[bool], count: usize) -> Self {
+        let mut original_to_compact = vec![NONE; reached.len()];
+        let mut compact_to_original = Vec::with_capacity(count);
+        for (original, &live) in reached.iter().enumerate() {
+            if live {
+                original_to_compact[original] = compact_to_original.len() as u32;
+                compact_to_original.push(original);
+            }
+        }
+        Self { original_to_compact, compact_to_original }
+    }
+
+    fn closed(
+        count: usize,
+        reset: usize,
+        initial: &[usize],
+        symbols: &[usize],
+        transition: impl Fn(usize, usize) -> u32,
+        max_ratio: f64,
+    ) -> Option<Self> {
+        let mut reached = vec![false; count];
+        let mut queue = VecDeque::new();
+        let visit = |state: usize, reached: &mut [bool], queue: &mut VecDeque<usize>| {
+            if state < reached.len() && !reached[state] {
+                reached[state] = true;
+                queue.push_back(state);
+            }
+        };
+        visit(reset, &mut reached, &mut queue);
+        for &state in initial {
+            visit(state, &mut reached, &mut queue);
+        }
+        while let Some(state) = queue.pop_front() {
+            for &symbol in symbols {
+                let target = transition(state, symbol);
+                if target != NONE {
+                    visit(target as usize, &mut reached, &mut queue);
+                }
+            }
+        }
+        let live_count = reached.iter().filter(|&&live| live).count();
+        if live_count as f64 / count as f64 > max_ratio {
+            return None;
+        }
+        Some(Self::from_reached(&reached, live_count))
+    }
+
+    fn map(&self, state: usize) -> usize {
+        let mapped = self.original_to_compact[state];
+        assert_ne!(mapped, NONE, "analysis root omitted from compact coordinate");
+        mapped as usize
+    }
+
+    fn target(&self, state: u32) -> u32 {
+        if state == NONE { NONE } else { self.original_to_compact[state as usize] }
+    }
+
+    fn initial(&self, initial: &[usize]) -> Vec<usize> {
+        initial.iter().map(|&state| self.map(state)).collect()
+    }
+
+    fn flat_view(
+        &self,
+        source: &FlatDfa,
+        relevant: &[bool; 256],
+        queried_edges: Option<&[U8Set]>,
+    ) -> FlatDfa {
+        let classes = conservative_byte_classes(relevant)
+            .unwrap_or_else(|| std::array::from_fn(|byte| byte as u8));
+        let width = classes.iter().copied().max().unwrap() as usize + 1;
+        let mut transitions = vec![NONE; self.compact_to_original.len() * width];
+        let mut states = Vec::with_capacity(self.compact_to_original.len());
+        for (compact, &original) in self.compact_to_original.iter().enumerate() {
+            states.push(source.states[original].clone());
+            for (byte, &used) in relevant.iter().enumerate() {
+                if !used || queried_edges.is_some_and(|edges| !edges[original].contains(byte as u8)) {
+                    continue;
+                }
+                let target = source.trans(original, byte);
+                let mapped = self.target(target);
+                debug_assert!(target == NONE || mapped != NONE, "observed token edge omitted");
+                transitions[compact * width + classes[byte] as usize] = mapped;
+            }
+        }
+        FlatDfa {
+            states,
+            start_state: self.map(source.start_state),
+            transitions: ByteRows::new(Arc::from(transitions), classes),
+        }
+    }
+}
+
+fn observed_bytes<S: AsRef<[u8]>>(strings: &[S]) -> [bool; 256] {
+    let mut relevant = [false; 256];
+    for string in strings {
+        for &byte in string.as_ref() {
+            relevant[byte as usize] = true;
+        }
+    }
+    relevant
+}
+
 fn compact_tokenizer_view_for_tokens<S: AsRef<[u8]>>(
-    tokenizer: &FlatDfa,
+    source: &FlatDfa,
     initial_states: &[usize],
     strings: &[S],
 ) -> Option<(FlatDfa, Vec<usize>, Vec<usize>)> {
-    let source = tokenizer;
     if source.states.len() < INPUT_VIEW_COMPACT_MIN_STATES || strings.is_empty() {
         return None;
     }
-
-    let mut relevant_bytes = [false; 256];
-    for string in strings {
-        for &byte in string.as_ref() {
-            relevant_bytes[byte as usize] = true;
-        }
-    }
-    if !relevant_bytes.iter().any(|&used| used) {
+    let relevant = observed_bytes(strings);
+    let symbols: Vec<usize> = relevant.iter().enumerate()
+        .filter_map(|(byte, &used)| used.then_some(byte)).collect();
+    if symbols.is_empty() {
         return None;
     }
-
-    let mut reachable = vec![false; source.states.len()];
-    let mut queue = VecDeque::new();
-    let visit = |state: usize, reachable: &mut [bool], queue: &mut VecDeque<usize>| {
-        if state < reachable.len() && !reachable[state] {
-            reachable[state] = true;
-            queue.push_back(state);
-        }
-    };
-    visit(source.start_state, &mut reachable, &mut queue);
-    for &state in initial_states {
-        visit(state, &mut reachable, &mut queue);
-    }
-    while let Some(state) = queue.pop_front() {
-        for (byte, &used) in relevant_bytes.iter().enumerate() {
-            if !used {
-                continue;
-            }
-            let target = source.trans(state, byte);
-            if target != NONE {
-                visit(target as usize, &mut reachable, &mut queue);
-            }
-        }
-    }
-
-    let reachable_count = reachable.iter().filter(|&&state| state).count();
-    if reachable_count as f64 / source.states.len() as f64 > INPUT_VIEW_COMPACT_MAX_RATIO {
-        return None;
-    }
-
-    let mut original_to_compact = vec![NONE; source.states.len()];
-    let mut compact_to_original = Vec::with_capacity(reachable_count);
-    for (original, &is_reachable) in reachable.iter().enumerate() {
-        if is_reachable {
-            original_to_compact[original] = compact_to_original.len() as u32;
-            compact_to_original.push(original);
-        }
-    }
-
-    let classes = conservative_byte_classes(&relevant_bytes).unwrap_or_else(|| std::array::from_fn(|byte| byte as u8));
-    let width = classes.iter().copied().max().unwrap() as usize + 1;
-    let mut transitions = vec![NONE; reachable_count * width];
-    let mut states = Vec::with_capacity(reachable_count);
-    for (compact, &original) in compact_to_original.iter().enumerate() {
-        states.push(source.states[original].clone());
-        let compact_base = compact * width;
-        for (byte, &used) in relevant_bytes.iter().enumerate() {
-            if !used {
-                continue;
-            }
-            let target = source.trans(original, byte);
-            if target != NONE {
-                let mapped = original_to_compact[target as usize];
-                debug_assert_ne!(mapped, NONE, "reachable token edge omitted from compact view");
-                transitions[compact_base + classes[byte] as usize] = mapped;
-            }
-        }
-    }
-
-    let compact_initial = initial_states
-        .iter()
-        .map(|&state| original_to_compact[state] as usize)
-        .collect();
-    let start_state = original_to_compact[source.start_state] as usize;
-    Some((
-        FlatDfa {
-            states,
-            start_state,
-            transitions: ByteRows::new(Arc::from(transitions), classes),
-        },
-        compact_initial,
-        compact_to_original,
-    ))
+    let domain = AnalysisStateDomain::closed(
+        source.states.len(), source.start_state, initial_states, &symbols,
+        |state, byte| source.trans(state, byte), INPUT_VIEW_COMPACT_MAX_RATIO,
+    )?;
+    let view = domain.flat_view(source, &relevant, None);
+    let initial = domain.initial(initial_states);
+    Some((view, initial, domain.compact_to_original))
 }
 
 fn raw_states_by_transition_diversity<S: AsRef<[u8]>>(
@@ -3875,116 +3908,42 @@ fn raw_states_by_transition_diversity<S: AsRef<[u8]>>(
 /// the signature algorithm, so arbitrary closure under the union of token
 /// bytes would add irrelevant cross-product states.
 fn finite_token_probe_view<S: AsRef<[u8]>>(
-    tokenizer: &FlatDfa,
+    source: &FlatDfa,
     initial_states: &[usize],
     strings: &[S],
 ) -> (FlatDfa, Vec<usize>) {
-    let source = tokenizer;
     let mut reached = vec![false; source.states.len()];
-    let mut compact_to_original = Vec::new();
-    let visit = |state: usize, reached: &mut [bool], compact_to_original: &mut Vec<usize>| {
-        if !reached[state] {
+    let mut queried_edges = vec![U8Set::empty(); source.states.len()];
+    reached[source.start_state] = true;
+    for &initial in initial_states {
+        reached[initial] = true;
+    }
+    let mut walk = |mut state: usize, bytes: &[u8]| {
+        for &byte in bytes {
+            queried_edges[state].insert(byte);
+            let target = source.trans(state, byte as usize);
+            if target == NONE {
+                break;
+            }
+            state = target as usize;
             reached[state] = true;
-            compact_to_original.push(state);
         }
     };
-
-    visit(source.start_state, &mut reached, &mut compact_to_original);
     for &initial in initial_states {
-        visit(initial, &mut reached, &mut compact_to_original);
         for string in strings {
-            let mut state = initial;
-            for &byte in string.as_ref() {
-                let target = source.trans(state, byte as usize);
-                if target == NONE {
-                    break;
-                }
-                state = target as usize;
-                visit(state, &mut reached, &mut compact_to_original);
-            }
+            walk(initial, string.as_ref());
         }
     }
     for string in strings {
         let bytes = string.as_ref();
         for suffix_start in 0..bytes.len() {
-            let mut state = source.start_state;
-            for &byte in &bytes[suffix_start..] {
-                let target = source.trans(state, byte as usize);
-                if target == NONE {
-                    break;
-                }
-                state = target as usize;
-                visit(state, &mut reached, &mut compact_to_original);
-            }
+            walk(source.start_state, &bytes[suffix_start..]);
         }
     }
 
-    compact_to_original.sort_unstable();
-    let mut original_to_compact = vec![NONE; source.states.len()];
-    for (compact, &original) in compact_to_original.iter().enumerate() {
-        original_to_compact[original] = compact as u32;
-    }
-
-    let mut queried_edges = vec![U8Set::empty(); source.states.len()];
-    for &initial in initial_states {
-        for string in strings {
-            let mut state = initial;
-            for &byte in string.as_ref() {
-                queried_edges[state].insert(byte);
-                let target = source.trans(state, byte as usize);
-                if target == NONE {
-                    break;
-                }
-                state = target as usize;
-            }
-        }
-    }
-    for string in strings {
-        let bytes = string.as_ref();
-        for suffix_start in 0..bytes.len() {
-            let mut state = source.start_state;
-            for &byte in &bytes[suffix_start..] {
-                queried_edges[state].insert(byte);
-                let target = source.trans(state, byte as usize);
-                if target == NONE {
-                    break;
-                }
-                state = target as usize;
-            }
-        }
-    }
-
-    let mut transitions = vec![NONE; compact_to_original.len() * 256];
-    let states = compact_to_original
-        .iter()
-        .enumerate()
-        .map(|(compact, &original)| {
-            let base = compact * 256;
-            for byte in queried_edges[original].iter() {
-                let target = source.trans(original, byte as usize);
-                if target != NONE {
-                    let mapped = original_to_compact[target as usize];
-                    debug_assert_ne!(mapped, NONE, "queried token trajectory target omitted");
-                    transitions[base + byte as usize] = mapped;
-                }
-            }
-            source.states[original].clone()
-        })
-        .collect();
-    let compact_initial = initial_states
-        .iter()
-        .map(|&state| original_to_compact[state] as usize)
-        .collect();
-    let start_state = original_to_compact[source.start_state] as usize;
-
-    (
-        FlatDfa {
-            states,
-            start_state,
-            transitions: ByteRows::dense(Arc::from(transitions)),
-        },
-        compact_initial,
-    )
+    let domain = AnalysisStateDomain::from_reached(&reached, reached.iter().filter(|&&live| live).count());
+    let view = domain.flat_view(source, &observed_bytes(strings), Some(&queried_edges));
+    (view, domain.initial(initial_states))
 }
 
 fn token_signatures_for_states<S: AsRef<[u8]>>(
@@ -4108,64 +4067,22 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
         return None;
     }
 
-    // Relevant byte classes from the partition's tokens.
-    let mut byte_used = [false; 256];
-    for s in strings {
-        for &b in s.as_ref() {
-            byte_used[b as usize] = true;
-        }
-    }
+    let relevant = observed_bytes(strings);
     let num_classes = dfa.byte_to_class.iter().copied().max().map_or(0usize, |m| m as usize + 1);
     let mut class_used = vec![false; num_classes];
-    for b in 0..=255u8 {
-        if byte_used[b as usize] {
-            class_used[dfa.byte_to_class[b as usize] as usize] = true;
+    for (byte, &used) in relevant.iter().enumerate() {
+        if used {
+            class_used[dfa.byte_to_class[byte] as usize] = true;
         }
     }
-    let relevant_classes: Vec<usize> = class_used
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &u)| if u { Some(i) } else { None })
-        .collect();
-
-    // BFS from initial_states following only relevant-class transitions.
-    let mut visited = vec![false; dfa.num_states];
-    let mut queue = std::collections::VecDeque::new();
-    for &s in initial_states {
-        if s < dfa.num_states && !visited[s] {
-            visited[s] = true;
-            queue.push_back(s);
-        }
-    }
-    while let Some(s) = queue.pop_front() {
-        for &c in &relevant_classes {
-            let t = dfa.trans_by_class[c * dfa.num_states + s];
-            if t != NONE {
-                let t = t as usize;
-                if !visited[t] {
-                    visited[t] = true;
-                    queue.push_back(t);
-                }
-            }
-        }
-    }
-
-    let restricted_reachable = visited.iter().filter(|&&v| v).count();
-    let ratio = restricted_reachable as f64 / dfa.num_states as f64;
-    if ratio > COMPACT_DFA_MAX_RATIO {
-        return None;
-    }
-
-    // Build state remapping.
-    let mut original_to_compact = vec![u32::MAX; dfa.num_states];
-    let mut compact_to_original = Vec::with_capacity(restricted_reachable);
-    for (i, &v) in visited.iter().enumerate() {
-        if v {
-            original_to_compact[i] = compact_to_original.len() as u32;
-            compact_to_original.push(i);
-        }
-    }
-    let compact_num = compact_to_original.len();
+    let relevant_classes: Vec<usize> = class_used.iter().enumerate()
+        .filter_map(|(class, &used)| used.then_some(class)).collect();
+    let domain = AnalysisStateDomain::closed(
+        dfa.num_states, dfa.start_state, initial_states, &relevant_classes,
+        |state, class| dfa.trans_by_class[class * dfa.num_states + state], COMPACT_DFA_MAX_RATIO,
+    )?;
+    let compact_num = domain.compact_to_original.len();
+    let compact_to_original = &domain.compact_to_original;
 
     // Build compact transition table (all classes, compact states).
     let mut compact_trans = vec![NONE; num_classes * compact_num];
@@ -4176,7 +4093,7 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
             let orig = compact_to_original[cs];
             let t = dfa.trans_by_class[src_base + orig];
             if t != NONE {
-                let mapped = original_to_compact[t as usize];
+                let mapped = domain.target(t);
                 // Only keep transition if target is in the compact set.
                 if mapped != u32::MAX {
                     compact_trans[dst_base + cs] = mapped;
@@ -4197,18 +4114,9 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
     let compact_pfg: Vec<SmallVec<[usize; 4]>> =
         compact_to_original.iter().map(|&s| dfa.possible_future_groups[s].clone()).collect();
 
-    // Remap initial states.
-    let compact_initial: Vec<usize> = initial_states
-        .iter()
-        .map(|&s| original_to_compact[s] as usize)
-        .collect();
-
+    let compact_initial = domain.initial(initial_states);
     let compact_dfa = Dfa {
-        start_state: if dfa.start_state < original_to_compact.len() && original_to_compact[dfa.start_state] != u32::MAX {
-            original_to_compact[dfa.start_state] as usize
-        } else {
-            0
-        },
+        start_state: domain.map(dfa.start_state),
         num_states: compact_num,
         byte_to_class: dfa.byte_to_class,
         trans_by_class: Arc::from(compact_trans),
@@ -4222,7 +4130,7 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
         disallowed_follows: dfa.disallowed_follows.clone(),
     };
 
-    Some((compact_dfa, compact_initial, compact_to_original))
+    Some((compact_dfa, compact_initial, domain.compact_to_original))
 }
 
 /// When `active_groups` is provided, the DFA only tracks groups marked `true`.
@@ -5917,6 +5825,25 @@ mod shared_base_tests {
         assert_eq!(
             token_signatures_for_states(&probe, &tokens, &probe_initial),
             token_signatures_for_states(&full, &tokens, &initial_states),
+        );
+    }
+
+    #[test]
+    fn compact_analysis_keeps_independent_suffix_reset_root() {
+        let view = padded_sample_dfa();
+        let dfa = build_dfa(&view, &BTreeMap::new(), None);
+        // The source is state 1; neither 1 nor its byte successors can reach
+        // the real reset state 0. The size gate must not make reset optional.
+        let initial = vec![1usize; COMPACT_DFA_MIN_STATES];
+        let tokens = vec![b"ab".as_slice(); COMPACT_DFA_MIN_WORK.div_ceil(initial.len())];
+        let (compact, starts, originals) =
+            compact_dfa_for_tokens(&dfa, &initial, &tokens).expect("compact fixture");
+        assert_eq!(originals[compact.start_state], dfa.start_state);
+        assert_eq!(originals[starts[0]], 1);
+        let words: Vec<&[u8]> = vec![b"a", b"b", b"ab", b"ba", b"aba"];
+        assert_eq!(
+            token_signatures_for_states(&dfa, &words, &[1]),
+            token_signatures_for_states(&compact, &words, &starts[..1]),
         );
     }
 
