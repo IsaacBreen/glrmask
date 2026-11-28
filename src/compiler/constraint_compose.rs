@@ -19,7 +19,6 @@ use crate::automata::weighted_u32::determinize::determinize;
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::automata::weighted_u32::nwa::NWA;
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
-use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::compiler::glr::labels::{
     DEFAULT_LABEL, encode_negative_label, encode_positive_label, is_negative_label,
     negative_to_positive_label,
@@ -938,47 +937,6 @@ fn component_possible_matches(
 }
 
 
-fn remap_composition_template_label(label: i32, state_relation: &[Vec<u32>]) -> Option<i32> {
-    if label == DEFAULT_LABEL {
-        return Some(label);
-    }
-    let (local_state, negative) = if is_negative_label(label) {
-        (negative_to_positive_label(label) as u32, true)
-    } else if label >= 0 {
-        (label as u32, false)
-    } else {
-        return None;
-    };
-    let mapped = state_relation.get(local_state as usize)?;
-    if mapped.len() != 1 {
-        return None;
-    }
-    Some(if negative {
-        encode_negative_label(mapped[0])
-    } else {
-        encode_positive_label(mapped[0])
-    })
-}
-
-
-/// Relocate the authoritative template topology. Its consuming weighted
-/// backend attaches weights only after selecting the fragment.
-pub(crate) fn transport_composition_template_dfa(
-    mut dfa: UnweightedDfa,
-    state_relation: &[Vec<u32>],
-) -> Option<UnweightedDfa> {
-    for state in &mut dfa.states {
-        let mut mapped = BTreeMap::new();
-        for (label, target) in std::mem::take(&mut state.transitions) {
-            let mapped_label = remap_composition_template_label(label, state_relation)?;
-            if let Some(previous) = mapped.insert(mapped_label, target)
-                && previous != target { return None; }
-        }
-        state.transitions = mapped;
-    }
-    Some(dfa)
-}
-
 pub(crate) fn merged_terminal_display_names(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
@@ -1225,7 +1183,6 @@ fn build_recursive_coordinator(
         possible_matches_complete: true,
         // No outer TSID quotient is needed by the provider runtime.
         tokenizer_tsids: crate::runtime::TokenizerTsidMap::partition(vec![0], vec![vec![0]]),
-        composition_parser_templates_by_terminal: Vec::new(),
         composition_grammar_summary: None,
         token_classes: crate::runtime::TokenClasses::mapped(Vec::new(), Vec::new()),
         token_bytes,

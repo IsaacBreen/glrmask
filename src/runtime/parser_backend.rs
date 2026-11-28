@@ -881,14 +881,6 @@ impl Constraint {
         self.install_template_parser_in_coordinate(false)
     }
 
-    pub(crate) fn install_template_parser_from_compile(&mut self) -> crate::Result<()> {
-        if self.has_template_parser() { return Ok(()); }
-        if self.uses_compact_segmented_parser_runtime() {
-            return self.install_composition_template_parser();
-        }
-        self.install_template_parser_impl(true, false)
-    }
-
     pub(crate) fn install_template_parser_in_coordinate(
         &mut self, preserve_coordinate: bool,
     ) -> crate::Result<()> {
@@ -896,18 +888,15 @@ impl Constraint {
         if self.uses_compact_segmented_parser_runtime() {
             return self.install_composition_template_parser();
         }
-        self.install_template_parser_impl(false, preserve_coordinate)
+        self.install_template_parser_impl(preserve_coordinate)
     }
 
     fn install_template_parser_impl(
         &mut self,
-        reuse_compiler_templates: bool,
         preserve_coordinate: bool,
     ) -> crate::Result<()> {
         if self.has_template_parser() { return Ok(()); }
-        let prepared = self.prepare_template_parser_impl(
-            reuse_compiler_templates, preserve_coordinate,
-        )?;
+        let prepared = self.prepare_template_parser_impl(preserve_coordinate)?;
         self.install_prepared_template_parser(prepared)
     }
 
@@ -920,12 +909,11 @@ impl Constraint {
                 "prepared standalone template parser is not valid for segmented composition".into()
             ));
         }
-        self.prepare_template_parser_impl(false, false).map(Some)
+        self.prepare_template_parser_impl(false).map(Some)
     }
 
     fn prepare_template_parser_impl(
         &self,
-        reuse_compiler_templates: bool,
         preserve_coordinate: bool,
     ) -> crate::Result<PreparedTemplateParser> {
         if self.parser_has_controls() || self.uses_compact_segmented_parser_runtime() {
@@ -937,11 +925,7 @@ impl Constraint {
         PreparedTemplateParser::from_compiler_parts(
             &self.table,
             self.direct_regular_automaton.as_ref(),
-            if reuse_compiler_templates {
-                &self.composition_parser_templates_by_terminal
-            } else {
-                &[]
-            },
+            &[],
             self.ignore_terminal,
             self.uses_dynamic_runtime(),
             preserve_coordinate,

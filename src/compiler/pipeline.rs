@@ -4673,7 +4673,6 @@ fn compile_prepared_with_profile_and_table_construction(
             templates,
             templates_ms, templates_started_ms, templates_finished_ms,
         } = templates;
-        let mut templates = Some(templates);
         let ParserDagResult {
             parser_dwa, parser_dwa_ms, parser_dwa_started_ms, parser_dwa_finished_ms,
             terminal_run_collapse_ms, prebuilt_token_mask_caches,
@@ -4924,19 +4923,12 @@ fn compile_prepared_with_profile_and_table_construction(
         } else {
             crate::runtime::FastTokenizerTransitions::default()
         };
-        let composition_parser_templates_by_terminal = templates
-            .take()
-            .map(|templates| {
-                let mut by_terminal =
-                    vec![None; analyzed_grammar.num_terminals as usize];
-                for (terminal, dfa) in templates.by_terminal {
-                    if let Some(slot) = by_terminal.get_mut(terminal as usize) {
-                        *slot = Some(dfa);
-                    }
-                }
-                by_terminal
-            })
-            .unwrap_or_default();
+        let mut compiler_templates = vec![None; analyzed_grammar.num_terminals as usize];
+        for (terminal, dfa) in templates.by_terminal {
+            if let Some(slot) = compiler_templates.get_mut(terminal as usize) {
+                *slot = Some(dfa);
+            }
+        }
         let composition_grammar_summary = crate::env::var_os(
             "GLRMASK_DISABLE_COMPOSITION_GRAMMAR_SUMMARY",
         )
@@ -4958,9 +4950,10 @@ fn compile_prepared_with_profile_and_table_construction(
             crate::automata::lexer::tokenizer::artifact_serde::compact_large_fast_runtime(&mut tokenizer);
         }
         let prepared_parser = crate::runtime::parser_backend::PreparedTemplateParser::from_compiler_parts(
-            &table, analyzed_grammar.direct_regular_automaton.as_ref(), &composition_parser_templates_by_terminal,
+            &table, analyzed_grammar.direct_regular_automaton.as_ref(), &compiler_templates,
             prepared_grammar.ignore_terminal, false, true,
         ).expect("source compiler must produce a finite template parser before Constraint materialization");
+        drop(compiler_templates);
         drop(table);
         let mut constraint = Constraint::from_data(crate::runtime::ConstraintData {
             end_tokens: std::sync::Arc::from([]),
@@ -5000,7 +4993,6 @@ fn compile_prepared_with_profile_and_table_construction(
                 runtime_tokenizer_state_map.original_to_internal,
                 runtime_tokenizer_state_map.internal_to_originals,
             ),
-            composition_parser_templates_by_terminal,
             composition_grammar_summary,
             token_classes: crate::runtime::TokenClasses::mapped(internal_ids.vocab_tokens.original_to_internal.clone(), internal_ids.vocab_tokens.internal_to_originals_vecs()),
             token_bytes,

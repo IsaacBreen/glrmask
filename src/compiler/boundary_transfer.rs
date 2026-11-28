@@ -540,10 +540,6 @@ pub(crate) struct SignedLinkContext<'a> {
     /// Fixed table/link certificate; constructed lazily inside this link timer.
     predecessor_support: std::sync::OnceLock<Result<super::boundary_stack_support::Certificate,String>>,
     pub parent_table: &'a GLRTable,
-    /// Unspecialized local template DFAs retained by the *same* component
-    /// artifact as each table. These remain local until an injective link-time
-    /// label relocation; they never contain knowledge of future links.
-    pub component_template_sources: Vec<std::borrow::Cow<'a, [Option<UnweightedDfa>]>>,
     pub child_tables: Vec<&'a GLRTable>,
     pub links: Vec<ScopedSubgrammarLink>,
     pub terminal_offsets: Vec<u32>,
@@ -561,44 +557,6 @@ pub(crate) struct SignedLinkContext<'a> {
 }
 
 impl<'a> SignedLinkContext<'a> {
-    pub(crate) fn with_component_template_sources(
-        mut self,
-        components: &[&'a Constraint],
-    ) -> Result<Self, String> {
-        if components.len() != self.state_offsets.len() {
-            return Err("prepared template sources differ from link component count".into());
-        }
-        for (index, component) in components.iter().enumerate() {
-            // Establish provenance structurally: sources cannot be paired with
-            // an unrelated/rebuilt table that happens to have equal dimensions.
-            if !std::ptr::eq(&*component.table, self.component_table(index as u32)?) {
-                return Err(format!("prepared template source {index} is not the context's table"));
-            }
-        }
-        let decode = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_REUSE_RETAINED_TEMPLATES");
-        let started = Instant::now();
-        self.component_template_sources = components.iter()
-            .map(|component| {
-                // A reconstructed recursive table has a different scoped state
-                // coordinate from its original component cache. Its leaf sources
-                // can still reuse their own templates, but this aggregate cannot.
-                if component.uses_compact_segmented_parser_runtime() {
-                    Ok(std::borrow::Cow::Borrowed(&[][..]))
-                } else if decode {
-                    component.retained_parser_templates_for_compilation()
-                } else {
-                    Ok(std::borrow::Cow::Borrowed(component.composition_parser_templates_by_terminal.as_slice()))
-                }
-            })
-            .collect::<Result<_, String>>()?;
-        if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
-            eprintln!("[glrmask/profile][boundary_retained_template_sources] enabled={decode} components={} templates={} decode_ms={:.3}",
-                components.len(), self.component_template_sources.iter().map(|v| v.iter().filter(|d| d.is_some()).count()).sum::<usize>(),
-                started.elapsed().as_secs_f64() * 1000.0);
-        }
-        Ok(self)
-    }
-
     fn component_table(&self, component: u32) -> Result<&'a GLRTable, String> {
         if component == 0 {
             return Ok(self.parent_table);
@@ -767,8 +725,6 @@ pub(crate) fn build_signed_link_context<'a>(
         num_terminals,
         global_ignores,
         unbound_slots,
-    )?.with_component_template_sources(
-        &std::iter::once(parent).chain(children.iter().map(|child| child.constraint)).collect::<Vec<_>>(),
     )
 }
 
@@ -843,7 +799,6 @@ pub(crate) fn build_signed_link_context_from_parts<'a>(
     let closure = certify_bounded_closure(&links)?;
     let context = SignedLinkContext {
         predecessor_support: std::sync::OnceLock::new(),
-        component_template_sources: Vec::new(),
         parent_table,
         child_tables,
         links,
@@ -1457,65 +1412,11 @@ pub(crate) fn build_fragment_library_cached(
     emitted: &[bool],
     start_component: u32,
 ) -> Result<FragmentLibrary, String> {
-    let reuse = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_REUSE_RETAINED_TEMPLATES");
-    let result = build_fragment_library_cached_impl(context, cache, emitted, start_component, reuse)?;
-    if reuse && crate::env::var_os("GLRMASK_VALIDATE_BOUNDARY_RETAINED_TEMPLATES").is_some() {
-        let reference_cache = FragmentTransferCache::new(context)?;
-        let reference = build_fragment_library_cached_impl(
-            context, &reference_cache, emitted, start_component, false,
-        )?;
-        assert_eq!(result.templates.by_terminal.len(), reference.templates.by_terminal.len());
-        for (terminal, expected) in &reference.templates.by_terminal {
-            let actual = result.templates.by_terminal.get(terminal)
-                .expect("retained template build omitted demanded terminal");
-            assert_same_template_language(actual, expected)?;
-        }
-        eprintln!("[glrmask/validate][boundary_retained_templates] component={start_component} terminals={} exact=true",
-            result.templates.by_terminal.len());
-    }
-    Ok(result)
-}
-
-/// Booleanize a template DFA, then use the existing exact weighted-language
-/// comparator. Template skeleton weights are placeholders and cannot be used
-/// directly for equivalence (EMPTY weights would make every template empty).
-fn assert_same_template_language(actual: &UnweightedDfa, expected: &UnweightedDfa) -> Result<(), String> {
-    fn booleanize(source: &UnweightedDfa) -> DWA {
-        let mut out = DWA::new(1, 0);
-        for _ in 1..source.states.len() { out.add_state(); }
-        out.set_start_state(source.start_state);
-        for (id, state) in source.states.iter().enumerate() {
-            if state.is_accepting { out.set_final_weight(id as u32, Weight::all()); }
-            for (&label, &target) in &state.transitions {
-                out.add_transition(id as u32, label, target, Weight::all());
-            }
-        }
-        out
-    }
-    let difference = crate::automata::weighted_u32::equivalence::find_difference(
-        &booleanize(actual), &booleanize(expected),
-    ).map_err(|error| error.to_string())?;
-    match difference {
-        None => Ok(()),
-        Some(word) => Err(format!("retained local template differs from fresh scoped template on {word:?}")),
-    }
-}
-
-fn build_fragment_library_cached_impl(
-    context: &SignedLinkContext,
-    cache: &FragmentTransferCache,
-    emitted: &[bool],
-    start_component: u32,
-    reuse_prepared: bool,
-) -> Result<FragmentLibrary, String> {
     let templates_started = Instant::now();
     let mut combined = cache.controls.clone();
     let mut by_owner = BTreeMap::<u32, Vec<(TerminalID, TerminalID)>>::new();
     let mut special_terminals = Vec::<TerminalID>::new();
     let mut ordinary_terms = 0usize;
-    let mut reused = Templates::default();
-    let mut relocated_states = BTreeMap::<u32, Vec<Vec<u32>>>::new();
-    let reuse_started = Instant::now();
     for (terminal, &demanded) in emitted.iter().enumerate() {
         if !demanded {
             continue;
@@ -1542,41 +1443,9 @@ fn build_fragment_library_cached_impl(
         if owner_ignore {
             special_terminals.push(terminal);
         } else {
-            if reuse_prepared
-                && let Some(cached) = context.component_template_sources.get(owner as usize)
-                    .and_then(|by_terminal| by_terminal.get(local as usize))
-                    .and_then(Option::as_ref)
-            {
-                let table = context.component_table(owner)?;
-                let injection = context.injection(owner)?;
-                let relation = if let Some(relation) = relocated_states.get(&owner) {
-                    relation
-                } else {
-                    let relation = (0..table.num_states)
-                        .map(|state| injection.scope_state(state).map(|scoped| vec![scoped]))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    relocated_states.insert(owner, relation);
-                    relocated_states.get(&owner).expect("just inserted relocation")
-                };
-                // This is the ordinary compiler's existing exact template
-                // relocation + skeleton construction. Only concrete read/pop
-                // and write/push labels are renamed; DEFAULT remains universal.
-                // No cancellation or template specialization is done here.
-                if let Some(dfa) =
-                    crate::compiler::constraint_compose::transport_composition_template_dfa(
-                        cached.clone(), relation,
-                    )
-                {
-                    reused.by_terminal.insert(terminal, dfa);
-                    continue;
-                }
-            }
             by_owner.entry(owner).or_default().push((terminal, local));
         }
     }
-
-    let reused_count = reused.by_terminal.len();
-    let relocation_ms = reuse_started.elapsed().as_secs_f64() * 1000.0;
 
     if !special_terminals.is_empty() {
         let mut special_cache = cache
@@ -1663,14 +1532,9 @@ fn build_fragment_library_cached_impl(
         }
     }
 
-    let mut templates = Templates::from_characterizations(&combined);
-    templates.by_terminal.append(&mut reused.by_terminal);
+    let templates = Templates::from_characterizations(&combined);
     let (templates, diagnostic_dfas) = boundary_template_inventory(templates);
     let templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
-    if crate::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
-        eprintln!("[glrmask/profile][boundary_prepared_templates] component={start_component} enabled={reuse_prepared} ordinary={ordinary_terms} reused={reused_count} rebuilt={} relocation_ms={relocation_ms:.3} total_ms={templates_ms:.3}",
-            ordinary_terms - reused_count);
-    }
     for (&key, fragment) in &templates {
         if !fragment.is_acyclic() {
             return Err(format!(
@@ -2695,51 +2559,6 @@ mod tests {
         table.set_embedded_start_nullable(grammar.root_nullable);
         table.set_embedded_end_token_ids(&grammar.embedded_end_token_ids);
         table
-    }
-
-    #[test]
-    fn retained_template_relocation_matches_fresh_characterization() {
-        let mut mixed = identity_transfer(5);
-        mixed.escapes.push(InitialEscape {
-            pop: vec![StackMatcher::States(vec![1, 3]), StackMatcher::Any],
-            pushes: vec![4, 2],
-        });
-        mixed.escapes.push(InitialEscape {
-            pop: vec![StackMatcher::Any], pushes: vec![0],
-        });
-        let mut chained = empty_transfer();
-        chained.reduces.push(InitialReduce {
-            pop: vec![StackMatcher::State(2)], nonterminal: 0,
-        });
-        chained.nt_escapes.push(NtEscape {
-            source_nonterminal: 0,
-            pop: vec![StackMatcher::Any], pushes: vec![3],
-        });
-        chained.all_nts.insert(0);
-        for local in [empty_transfer(), identity_transfer(5), mixed, chained] {
-            let original = Templates::from_characterizations(&BTreeMap::from([(0, local.clone())]));
-            for offset in [0, 7, 1031] {
-                let injection = StateInjection { offset };
-                let scoped = scope_characterization(&local, &injection).unwrap();
-                let fresh = Templates::from_characterizations(&BTreeMap::from([(0, scoped)]));
-                let relation = (0..5).map(|state| vec![state + offset]).collect::<Vec<_>>();
-                let relocated =
-                    crate::compiler::constraint_compose::transport_composition_template_dfa(
-                        original.by_terminal[&0].clone(), &relation,
-                    ).unwrap();
-                assert_same_template_language(&relocated, &fresh.by_terminal[&0]).unwrap();
-            }
-        }
-    }
-
-    #[test]
-    fn retained_template_comparator_does_not_compare_empty_skeletons() {
-        let mut left = UnweightedDfa::new();
-        let end = left.add_state();
-        left.add_transition(left.start_state, 3, end);
-        left.set_accepting(end, true);
-        let right = UnweightedDfa::new();
-        assert!(assert_same_template_language(&left, &right).is_err());
     }
 
     use super::*;

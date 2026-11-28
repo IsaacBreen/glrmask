@@ -369,7 +369,6 @@ impl DynamicConstraint {
             empty_byte_token_ids,
             possible_matches_complete: false,
             tokenizer_tsids: Default::default(),
-            composition_parser_templates_by_terminal: Vec::new(),
                 composition_grammar_summary: None,
             token_classes: Default::default(),
             token_bytes: crate::runtime::TokenByteDomain::from_entries(payload.token_bytes),

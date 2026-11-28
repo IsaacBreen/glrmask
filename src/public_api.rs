@@ -938,7 +938,7 @@ impl Grammar {
                             &mut constraint,
                             vocab,
                         );
-                        constraint.install_template_parser_from_compile()?;
+                        constraint.install_template_parser()?;
                     }
                     let _ = constraint.late_bind_vocab.set(vocab.clone());
                     apply_final_boundary_trigger(&mut constraint, detail)?;
@@ -2930,20 +2930,21 @@ fn should_prime_first_save_artifact(constraint: &RuntimeConstraint) -> bool {
     if constraint.tokenizer.has_virtual_residual_runtime() {
         return true;
     }
+    let Some(parser) = constraint.template_parser() else { return false; };
     let mut template_states = 0usize;
-    for template in constraint
-        .composition_parser_templates_by_terminal
-        .iter()
-        .flatten()
-    {
-        template_states = template_states.saturating_add(template.states.len());
-        if template_states >= FIRST_SAVE_TEMPLATE_STATE_PRIME_THRESHOLD {
-            return true;
+    for terminal in 0..parser.terminal_count as usize {
+        if let Some(source) = parser.terminal_source(terminal) {
+            template_states = template_states
+                .saturating_add(source.pop.states.len())
+                .saturating_add(source.read.states.len())
+                .saturating_add(source.push.states.len());
+            if template_states >= FIRST_SAVE_TEMPLATE_STATE_PRIME_THRESHOLD {
+                return true;
+            }
         }
     }
     false
 }
-
 fn retains_dynamic_component(constraint: &RuntimeConstraint) -> bool {
     if constraint.uses_dynamic_runtime() {
         return true;
@@ -3847,24 +3848,6 @@ mod tests {
         assert!(!token_allowed(&optimized_mask, 3), "ay must remain rejected by the parent boundary");
         assert!(token_allowed(&optimized_mask, 4), "bx must cross child -> parent boundary");
         assert!(!token_allowed(&optimized_mask, 5), "by must remain rejected by the parent boundary");
-    }
-
-    #[test]
-    fn first_save_priming_threshold_tracks_large_composition_cache() {
-        let vocab = Vocab::from_entries_unchecked(vec![(0, b"a".to_vec())]);
-        let mut constraint = RuntimeConstraint::compile(
-            Grammar::glrm("glrm 1;\nstart start;\nt A = \"a\";\nnt start = A;\n"),
-            &vocab,
-        )
-        .unwrap();
-        assert!(!should_prime_first_save_artifact(&constraint));
-
-        let mut large = crate::automata::unweighted_u32::dfa::DFA::new();
-        large
-            .states
-            .resize_with(FIRST_SAVE_TEMPLATE_STATE_PRIME_THRESHOLD, Default::default);
-        constraint.composition_parser_templates_by_terminal = vec![Some(large)];
-        assert!(should_prime_first_save_artifact(&constraint));
     }
 
     fn component_backend_flags(constraint: &RuntimeConstraint) -> Vec<bool> {

@@ -2048,7 +2048,7 @@ fn compile_leaf_boundary_link(
         expansion.num_terminals,
         global_ignores,
         unbound.into_iter().collect(),
-    )?.with_component_template_sources(leaves)?;
+    )?;
     let link_context_ms = link_context_started.elapsed().as_secs_f64() * 1000.0;
     let post_context_setup_started = Instant::now();
 

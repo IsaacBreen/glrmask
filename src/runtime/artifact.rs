@@ -17,7 +17,6 @@ use crate::automata::lexer::runtime_repeat_product::VirtualBinaryRepeatIntersect
 use crate::automata::lexer::tokenizer::VirtualResidualMaskProjection;
 use crate::automata::lexer::runtime_unit_repeat::VirtualZeroMinUnitRepeatMaskProjection;
 use crate::automata::regex::Expr;
-use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted::dwa::{DWA, DwaTransitionMap};
 use crate::compiler::glr::labels::DEFAULT_LABEL;
 use crate::compiler::glr::parser::{
@@ -9075,14 +9074,6 @@ constraint_data_schema! {
     @serde(default)
     pub(crate) possible_matches_complete: bool,
     pub(crate) tokenizer_tsids: crate::runtime::TokenizerTsidMap,
-    /// Composition-time parser stack-effect templates retained from the
-    /// original compile. These are the unspecialized per-terminal DFAs used to
-    /// build parser DWAs, so a later linker can transport unchanged component
-    /// behavior instead of re-characterizing the component LR table.
-    /// Stored in the outer versioned artifact envelope for compatibility with
-    /// older inner `Constraint` bincode layouts.
-    @serde(skip, default)
-    pub(crate) composition_parser_templates_by_terminal: Vec<Option<UnweightedDfa>>,
     /// Composition-time grammar adjacency summary. Stored in the outer
     /// versioned artifact envelope so older inner `Constraint` layouts remain
     /// loadable unchanged.

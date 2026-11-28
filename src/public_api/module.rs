@@ -868,7 +868,7 @@ impl Module {
                 let inner = Arc::make_mut(&mut p.inner);
                 crate::compiler::boundary_candidates::persist_boundary_candidate_summary(inner, vocab);
                 let _ = inner.late_bind_vocab.set(vocab.clone());
-                inner.install_template_parser_from_compile()?;
+                inner.install_template_parser()?;
                 if build_boundary {
                     inner.build_boundary_trigger(target_b).map_err(Error::Compilation)?;
                 }
