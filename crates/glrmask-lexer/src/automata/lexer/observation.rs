@@ -88,3 +88,106 @@ impl ByteRows {
     }
 }
 
+
+/// Exact interning of canonical state configurations. The hash index owns
+/// only candidate IDs; a configuration has one allocation, and collisions
+/// are resolved by equality of its complete state sequence.
+#[derive(Default)]
+pub struct ConfigInterner {
+    ids_by_hash: rustc_hash::FxHashMap<u64, smallvec::SmallVec<[u32; 1]>>,
+    configs: Vec<Box<[u32]>>,
+}
+
+impl std::ops::Deref for ConfigInterner {
+    type Target = [Box<[u32]>];
+    fn deref(&self) -> &Self::Target { &self.configs }
+}
+
+impl ConfigInterner {
+    fn hash(states: &[u32]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        states.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn lookup(&self, hash: u64, states: &[u32]) -> Option<u32> {
+        self.ids_by_hash.get(&hash)?.iter().copied()
+            .find(|&id| self.configs[id as usize].as_ref() == states)
+    }
+
+    fn insert(&mut self, hash: u64, states: Box<[u32]>) -> u32 {
+        let id = u32::try_from(self.configs.len()).expect("configuration ID overflow");
+        assert_ne!(id, u32::MAX, "configuration ID exhausted");
+        self.configs.push(states);
+        self.ids_by_hash.entry(hash).or_default().push(id);
+        id
+    }
+
+    pub fn intern(&mut self, states: Vec<u32>) -> u32 {
+        let hash = Self::hash(&states);
+        if let Some(id) = self.lookup(hash, &states) { return id; }
+        self.insert(hash, states.into_boxed_slice())
+    }
+
+    pub fn intern_slice(&mut self, states: &[u32]) -> u32 {
+        let hash = Self::hash(states);
+        if let Some(id) = self.lookup(hash, states) { return id; }
+        self.insert(hash, states.into())
+    }
+
+    pub fn into_configs(self) -> Vec<Box<[u32]>> { self.configs }
+}
+
+/// Reusable exact epsilon-image accumulator. The caller selects the
+/// observation domain and whether the source is already closed. In
+/// particular a PM boundary projection may require re-closing the source.
+pub struct EpsilonImageScratch {
+    marks: Vec<u32>,
+    generation: u32,
+    targets: Vec<u32>,
+}
+
+impl EpsilonImageScratch {
+    pub fn new(state_count: usize) -> Self {
+        Self { marks: vec![0; state_count], generation: 0, targets: Vec::new() }
+    }
+
+    pub fn step(
+        &mut self,
+        config: &[u32],
+        byte: u8,
+        source_closed: bool,
+        closures: &super::dfa::SingletonEpsilonClosures,
+        active: Option<&[bool]>,
+        mut transition: impl FnMut(u32, u8) -> u32,
+    ) -> &[u32] {
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.marks.fill(0);
+            self.generation = 1;
+        }
+        self.targets.clear();
+        for &source in config {
+            let sources = if source_closed {
+                std::slice::from_ref(&source)
+            } else {
+                closures[source as usize].as_ref()
+            };
+            for &closed_source in sources {
+                let target = transition(closed_source, byte);
+                if target == u32::MAX { continue; }
+                for &reachable in closures[target as usize].iter() {
+                    if active.is_some_and(|a| !a[reachable as usize]) { continue; }
+                    let mark = &mut self.marks[reachable as usize];
+                    if *mark != self.generation {
+                        *mark = self.generation;
+                        self.targets.push(reachable);
+                    }
+                }
+            }
+        }
+        self.targets.sort_unstable();
+        &self.targets
+    }
+}

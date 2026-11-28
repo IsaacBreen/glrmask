@@ -11,7 +11,7 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
-use crate::automata::lexer::observation::ByteRows;
+use crate::automata::lexer::observation::{ByteRows, ConfigInterner, EpsilonImageScratch};
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_possible_matches::collector::{
     ByteTransitions, IntervalPossibleMatchMap, TerminalRangeGroup, TrieClassBuildResult,
@@ -1481,50 +1481,21 @@ fn delayed_terminal_demand(tokenizer: &Tokenizer) -> DelayedTerminalDemand {
     }
 }
 
-fn intern_possible_match_config(
-    mut config: Vec<u32>,
-    is_closed: bool,
-    config_ids: &mut FxHashMap<Vec<u32>, u32>,
-    configs: &mut Vec<Box<[u32]>>,
-    config_is_closed: &mut Vec<bool>,
-) -> Option<u32> {
-    config.sort_unstable();
-    config.dedup();
-    if config.is_empty() {
-        return None;
-    }
-    if let Some(&id) = config_ids.get(&config) {
-        config_is_closed[id as usize] |= is_closed;
-        return Some(id);
-    }
-    let id = configs.len() as u32;
-    config_ids.insert(config.clone(), id);
-    configs.push(config.into_boxed_slice());
-    config_is_closed.push(is_closed);
-    Some(id)
-}
-
-fn intern_possible_match_canonical_config(
+/// Empty PM configurations are implicit dead states. The closed flag is
+/// only an acceleration certificate; boundary projections may require
+/// re-closing their source before consuming the next byte.
+fn intern_pm_config(
+    configs: &mut ConfigInterner,
+    closed: &mut Vec<bool>,
     config: &[u32],
     is_closed: bool,
-    config_ids: &mut FxHashMap<Vec<u32>, u32>,
-    configs: &mut Vec<Box<[u32]>>,
-    config_is_closed: &mut Vec<bool>,
-) -> Option<u32> {
-    if config.is_empty() {
-        return None;
-    }
+) -> u32 {
+    if config.is_empty() { return u32::MAX; }
     debug_assert!(config.windows(2).all(|pair| pair[0] < pair[1]));
-    if let Some(&id) = config_ids.get(config) {
-        config_is_closed[id as usize] |= is_closed;
-        return Some(id);
-    }
-    let id = configs.len() as u32;
-    let owned = config.to_vec();
-    config_ids.insert(owned.clone(), id);
-    configs.push(owned.into_boxed_slice());
-    config_is_closed.push(is_closed);
-    Some(id)
+    let id = configs.intern_slice(config);
+    closed.resize(configs.len(), false);
+    closed[id as usize] |= is_closed;
+    id
 }
 
 fn build_possible_match_powerset_view(
@@ -1534,27 +1505,23 @@ fn build_possible_match_powerset_view(
     demand: &DelayedTerminalDemand,
 ) -> PossibleMatchPowersetView {
     let singleton_closures = tokenizer.all_singleton_epsilon_closures();
-    let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
-    let mut configs = Vec::<Box<[u32]>>::new();
+    let mut configs = ConfigInterner::default();
     let mut config_is_closed = Vec::<bool>::new();
     let raw_start_to_view = (0..tokenizer.num_states())
         .map(|raw_state| {
             if !demand.raw_query_state[raw_state as usize] {
                 return u32::MAX;
             }
-            let relevant_closure = singleton_closures[raw_state as usize]
+            let mut relevant_closure = singleton_closures[raw_state as usize]
                 .iter()
                 .copied()
                 .filter(|&state| demand.raw_state_relevant[state as usize])
                 .collect::<Vec<_>>();
-            intern_possible_match_config(
-                relevant_closure,
-                true,
-                &mut config_ids,
-                &mut configs,
-                &mut config_is_closed,
-            )
-            .expect("a PM query-state closure must retain an active terminal residual")
+            relevant_closure.sort_unstable();
+            relevant_closure.dedup();
+            let state = intern_pm_config(&mut configs, &mut config_is_closed, &relevant_closure, true);
+            assert_ne!(state, u32::MAX, "a PM query-state closure must retain an active terminal residual");
+            state
         })
         .collect::<Vec<_>>();
 
@@ -1593,9 +1560,7 @@ fn build_possible_match_powerset_view(
     let mut self_loop_bytes = Vec::<U8Set>::new();
     let mut boundary_state = Vec::<u32>::new();
     let mut is_end = Vec::<bool>::new();
-    let mut target_marks = vec![0u32; tokenizer.num_states() as usize];
-    let mut target_generation = 0u32;
-    let mut target_config = Vec::<u32>::new();
+    let mut image = EpsilonImageScratch::new(tokenizer.num_states() as usize);
     let mut config_index = 0usize;
     while config_index < configs.len() {
         let config = configs[config_index].to_vec();
@@ -1616,62 +1581,19 @@ fn build_possible_match_powerset_view(
             .collect::<Vec<_>>();
         is_end.push(live_config.is_empty());
         boundary_state.push(
-            intern_possible_match_canonical_config(
-                &live_config,
-                false,
-                &mut config_ids,
-                &mut configs,
-                &mut config_is_closed,
-            )
-            .unwrap_or(u32::MAX),
+            intern_pm_config(&mut configs, &mut config_is_closed, &live_config, false),
         );
 
         let mut self_loops = U8Set::empty();
         if dead_column != 0 { byte_targets.push(u32::MAX); }
         let source_is_closed = config_is_closed[config_index];
         for &(byte, ref class_members) in &active_byte_classes {
-            target_generation = target_generation.wrapping_add(1);
-            if target_generation == 0 {
-                target_marks.fill(0);
-                target_generation = 1;
-            }
-            target_config.clear();
-            // Ordinary powerset configurations are already epsilon-closed, so
-            // re-expanding every member's source closure is redundant. A
-            // boundary projection may have accepting/end states removed and
-            // is not necessarily closed; those configurations retain the
-            // exact source-closure walk.
-            for &source in &config {
-                let sources = if source_is_closed {
-                    std::slice::from_ref(&source)
-                } else {
-                    singleton_closures[source as usize].as_ref()
-                };
-                for &closed_source in sources {
-                    let target = tokenizer.get_transition(closed_source, byte);
-                    if target == u32::MAX {
-                        continue;
-                    }
-                    for &reachable in singleton_closures[target as usize].iter() {
-                        if !demand.raw_state_relevant[reachable as usize] {
-                            continue;
-                        }
-                        let mark = &mut target_marks[reachable as usize];
-                        if *mark != target_generation {
-                            *mark = target_generation;
-                            target_config.push(reachable);
-                        }
-                    }
-                }
-            }
-            target_config.sort_unstable();
-            let target = intern_possible_match_canonical_config(
-                &target_config,
-                true,
-                &mut config_ids,
-                &mut configs,
-                &mut config_is_closed,
-            ).unwrap_or(u32::MAX);
+            let targets = image.step(
+                &config, byte, source_is_closed, singleton_closures.as_ref(),
+                Some(&demand.raw_state_relevant),
+                |source, byte| tokenizer.get_transition(source, byte),
+            );
+            let target = intern_pm_config(&mut configs, &mut config_is_closed, targets, true);
             byte_targets.push(target);
             if target == config_index as u32 {
                 for &class_byte in class_members {

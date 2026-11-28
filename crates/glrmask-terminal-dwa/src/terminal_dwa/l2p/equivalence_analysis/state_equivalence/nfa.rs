@@ -1,10 +1,10 @@
-use rustc_hash::{FxHashMap, FxHasher};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::automata::lexer::Lexer;
+use crate::automata::lexer::observation::{ConfigInterner, EpsilonImageScratch};
 use crate::automata::lexer::tokenizer::{SingletonEpsilonClosures, Tokenizer};
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
@@ -305,43 +305,6 @@ enum RepresentativeClosure {
     Multi(Box<[u32]>),
 }
 
-/// Intern powerset configurations without storing every state vector twice.
-/// The old `FxHashMap<Vec<u32>, u32>` kept one heap allocation as the map key
-/// and cloned the same vector into `configs`. Large powersets therefore paid a
-/// full configuration copy and roughly doubled configuration storage for every
-/// newly discovered state. Keep the canonical vectors only in `configs`; the
-/// hash table stores compact candidate IDs and resolves rare hash collisions by
-/// exact slice comparison.
-#[derive(Default)]
-struct RelevantConfigInterner {
-    ids_by_hash: FxHashMap<u64, SmallVec<[u32; 1]>>,
-}
-
-impl RelevantConfigInterner {
-    #[inline]
-    fn hash(states: &[u32]) -> u64 {
-        let mut hasher = FxHasher::default();
-        states.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn intern(&mut self, states: Vec<u32>, configs: &mut Vec<Box<[u32]>>) -> u32 {
-        let hash = Self::hash(&states);
-        if let Some(candidates) = self.ids_by_hash.get(&hash)
-            && let Some(id) = candidates
-                .iter()
-                .copied()
-                .find(|&id| configs[id as usize].as_ref() == states.as_slice())
-            {
-                return id;
-            }
-        let id = configs.len() as u32;
-        configs.push(states.into_boxed_slice());
-        self.ids_by_hash.entry(hash).or_default().push(id);
-        id
-    }
-}
-
 impl RepresentativeClosure {
     #[inline]
     fn singleton(&self) -> Option<u32> {
@@ -430,17 +393,6 @@ fn mapped_target_config(
     target_config.sort_unstable();
     target_config.dedup();
     target_config
-}
-
-fn intern_mapped_target_config(
-    targets: &[u32],
-    state_map: &ManyToOneIdMap,
-    class_active_language: Option<&[bool]>,
-    config_ids: &mut RelevantConfigInterner,
-    configs: &mut Vec<Box<[u32]>>,
-) -> u32 {
-    let target_config = mapped_target_config(targets, state_map, class_active_language);
-    config_ids.intern(target_config, configs)
 }
 
 impl BoundedAnalysisView {
@@ -545,11 +497,10 @@ fn try_build_relevant_powerset_view(
         mapped_class_active_language(state_map, raw_active_language.as_deref())
     });
 
-    let (mut config_ids, mut configs, raw_start_to_view, mut worklist, mut queued) =
+    let (mut configs, raw_start_to_view, mut worklist, mut queued) =
         if let Some(state_map) = state_map {
             let class_count = state_map.representative_original_ids.len();
-            let mut config_ids = RelevantConfigInterner::default();
-            let mut configs = Vec::<Box<[u32]>>::new();
+            let mut configs = ConfigInterner::default();
             let mut class_to_view = vec![u32::MAX; class_count];
             let mut worklist = VecDeque::<u32>::new();
             let mut queued = Vec::<bool>::new();
@@ -562,7 +513,7 @@ fn try_build_relevant_powerset_view(
                 } else {
                     Vec::new()
                 };
-                let state = config_ids.intern(config, &mut configs);
+                let state = configs.intern(config);
                 class_to_view[class as usize] = state;
                 if queued.len() < configs.len() {
                     queued.resize(configs.len(), false);
@@ -578,15 +529,13 @@ fn try_build_relevant_powerset_view(
                 .map(|&class| class_to_view[class as usize])
                 .collect::<Vec<_>>();
             (
-                config_ids,
                 configs,
                 raw_start_to_view,
                 worklist,
                 queued,
             )
         } else {
-            let mut config_ids = RelevantConfigInterner::default();
-            let mut configs = Vec::<Box<[u32]>>::new();
+            let mut configs = ConfigInterner::default();
             let mut raw_start_to_view = vec![u32::MAX; raw_state_count];
             let mut worklist = VecDeque::<u32>::new();
             let mut queued = Vec::<bool>::new();
@@ -597,7 +546,7 @@ fn try_build_relevant_powerset_view(
                         .to_vec(),
                     raw_active_language.as_deref(),
                 );
-                let state = config_ids.intern(closure, &mut configs);
+                let state = configs.intern(closure);
                 raw_start_to_view[raw_state] = state;
                 if queued.len() < configs.len() {
                     queued.resize(configs.len(), false);
@@ -608,7 +557,6 @@ fn try_build_relevant_powerset_view(
                 }
             }
             (
-                config_ids,
                 configs,
                 raw_start_to_view,
                 worklist,
@@ -722,13 +670,7 @@ fn try_build_relevant_powerset_view(
                     }
                     let targets = tokenizer.execute_from_state_end_only(&[], raw_target);
                     debug_assert!(!targets.is_empty());
-                    let target = intern_mapped_target_config(
-                        &targets,
-                        state_map,
-                        class_active_language.as_deref(),
-                        &mut config_ids,
-                        &mut configs,
-                    );
+                    let target = configs.intern(mapped_target_config(&targets, state_map, class_active_language.as_deref()));
                     if queued.len() < configs.len() {
                         queued.resize(configs.len(), false);
                     }
@@ -767,7 +709,7 @@ fn try_build_relevant_powerset_view(
                         continue;
                     }
                     target_config.sort_unstable();
-                    let target = config_ids.intern(target_config, &mut configs);
+                    let target = configs.intern(target_config);
                     if queued.len() < configs.len() {
                         queued.resize(configs.len(), false);
                     }
@@ -923,7 +865,7 @@ fn try_build_relevant_powerset_view(
                 if projected.is_empty() {
                     continue;
                 }
-                let target = config_ids.intern(projected, &mut configs);
+                let target = configs.intern(projected);
                 if queued.len() < configs.len() {
                     queued.resize(configs.len(), false);
                 }
@@ -1006,7 +948,7 @@ fn try_build_relevant_powerset_view(
         edge_offsets,
         edges,
         raw_start_to_view: Arc::from(raw_start_to_view),
-        configurations: Arc::from(configs),
+        configurations: Arc::from(configs.into_configs()),
     })
 }
 
@@ -1377,8 +1319,7 @@ fn ensure_config_transition(
     raw_transitions: Option<&[u32]>,
     state: u32,
     byte: u8,
-    configs: &mut Vec<Box<[u32]>>,
-    config_ids: &mut FxHashMap<Vec<u32>, u32>,
+    configs: &mut ConfigInterner,
     transitions: &mut Vec<u32>,
     known_transitions: &mut Vec<u8>,
     byte_to_column: &[u8; 256],
@@ -1386,8 +1327,7 @@ fn ensure_config_transition(
     preseeded_raw_closures: Option<&[u32]>,
     singleton_closures: &SingletonEpsilonClosures,
     active_language: Option<&[bool]>,
-    target_marks: &mut [u32],
-    target_generation: &mut u32,
+    image: &mut EpsilonImageScratch,
 ) -> u32 {
     let slot = state as usize * width + byte_to_column[byte as usize] as usize;
     if known_transitions[slot] != 0 {
@@ -1410,20 +1350,17 @@ fn ensure_config_transition(
             return target;
         }
     }
-    let targets = step_epsilon_closed_config_cached(
-        tokenizer,
-        raw_transitions,
-        configs[state as usize].as_ref(),
-        byte,
-        singleton_closures,
-        active_language,
-        target_marks,
-        target_generation,
+    let targets = image.step(
+        &configs[state as usize], byte, true, singleton_closures,
+        active_language, |source, byte| raw_transitions.map_or_else(
+            || tokenizer.get_transition(source, byte),
+            |transitions| transitions[source as usize * 256 + byte as usize],
+        ),
     );
     if targets.is_empty() {
         return u32::MAX;
     }
-    let target = intern_config(targets, config_ids, configs);
+    let target = configs.intern_slice(targets);
     if transitions.len() < configs.len() * width {
         transitions.resize(configs.len() * width, u32::MAX);
         known_transitions.resize(configs.len() * width, 0);
@@ -1432,66 +1369,20 @@ fn ensure_config_transition(
     target
 }
 
-/// Step a configuration that is already epsilon-closed (possibly after an
-/// active-language projection) without closing its source again. The target is
-/// exactly the union of the cached singleton epsilon closures reached by direct
-/// byte transitions from the closed source configuration.
-fn step_epsilon_closed_config_cached(
-    tokenizer: &Tokenizer,
-    raw_transitions: Option<&[u32]>,
-    config: &[u32],
-    byte: u8,
-    singleton_closures: &SingletonEpsilonClosures,
-    active_language: Option<&[bool]>,
-    target_marks: &mut [u32],
-    target_generation: &mut u32,
-) -> Vec<u32> {
-    *target_generation = target_generation.wrapping_add(1);
-    if *target_generation == 0 {
-        target_marks.fill(0);
-        *target_generation = 1;
-    }
-    let generation = *target_generation;
-    let mut targets = Vec::<u32>::new();
-    for &source in config {
-        let direct_target = raw_transitions.map_or_else(
-            || tokenizer.get_transition(source, byte),
-            |transitions| transitions[source as usize * 256 + byte as usize],
-        );
-        if direct_target == u32::MAX {
-            continue;
-        }
-        for &target in singleton_closures[direct_target as usize].iter() {
-            if active_language.is_some_and(|active| !active[target as usize]) {
-                continue;
-            }
-            let mark = &mut target_marks[target as usize];
-            if *mark != generation {
-                *mark = generation;
-                targets.push(target);
-            }
-        }
-    }
-    targets.sort_unstable();
-    targets
-}
-
 /// Mutable transition interning state shared by prefix and reset-suffix walks.
 /// A cached transition describes an exact epsilon-closed configuration step,
 /// independently of the trie position that first requested it.
 struct BoundedExpansion<'a> {
     tokenizer: &'a Tokenizer,
     raw_transitions: Option<&'a [u32]>,
-    configs: &'a mut Vec<Box<[u32]>>,
-    config_ids: &'a mut FxHashMap<Vec<u32>, u32>,
+    configs: &'a mut ConfigInterner,
     transitions: &'a mut Vec<u32>,
     known_transitions: &'a mut Vec<u8>,
     byte_to_column: &'a [u8; 256],
     width: usize,
     singleton_closures: &'a SingletonEpsilonClosures,
     active_language: Option<&'a [bool]>,
-    target_marks: &'a mut [u32],
-    target_generation: &'a mut u32,
+    image: &'a mut EpsilonImageScratch,
 }
 
 /// The exact image recurrence on a byte trie is independent of how its
@@ -1673,10 +1564,10 @@ impl BoundedExpansion<'_> {
     fn step(&mut self, state: u32, byte: u8, preseeded: Option<&[u32]>) -> u32 {
         ensure_config_transition(
             self.tokenizer, self.raw_transitions, state, byte,
-            self.configs, self.config_ids, self.transitions, self.known_transitions,
+            self.configs, self.transitions, self.known_transitions,
             self.byte_to_column, self.width,
             preseeded, self.singleton_closures, self.active_language,
-            self.target_marks, self.target_generation,
+            self.image,
         )
     }
 
@@ -1858,8 +1749,7 @@ impl TokenBoundedAnalysisTopology {
         // states. Since an inactive-language state has no active-language
         // successor, projecting after each prebuilt transition is equivalent to
         // projecting its source before taking that transition.
-        let mut projected_ids = FxHashMap::<Vec<u32>, u32>::default();
-        let mut projected_configs = Vec::<Box<[u32]>>::new();
+        let mut projected_configs = ConfigInterner::default();
         let projected_state_by_topology_state = self
             .configurations
             .iter()
@@ -1869,7 +1759,7 @@ impl TokenBoundedAnalysisTopology {
                     .copied()
                     .filter(|&raw| active_language[raw as usize])
                     .collect::<Vec<_>>();
-                intern_config(projected, &mut projected_ids, &mut projected_configs)
+                projected_configs.intern(projected)
             })
             .collect::<Vec<_>>();
 
@@ -1965,8 +1855,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
     let total_started_at = profile_timing.then(std::time::Instant::now);
     let setup_started_at = profile_timing.then(std::time::Instant::now);
     let raw_state_count = tokenizer.num_states() as usize;
-    let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
-    let mut configs = Vec::<Box<[u32]>>::new();
+    let mut configs = ConfigInterner::default();
     let mut raw_start_to_view = vec![u32::MAX; raw_state_count];
     let singleton_closures = tokenizer.all_singleton_epsilon_closures();
     let active_language = raw_active_language_states(tokenizer, active_groups);
@@ -1983,7 +1872,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
     };
 
     let start_closure = project_closure(&singleton_closures[tokenizer.initial_state_id() as usize]);
-    let start_state = intern_config(start_closure, &mut config_ids, &mut configs);
+    let start_state = configs.intern(start_closure);
     if combine_start_states {
         let mut closure = Vec::<u32>::new();
         for &raw_state in raw_start_states {
@@ -2001,7 +1890,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
         }
         closure.sort_unstable();
         closure.dedup();
-        let state = intern_config(closure, &mut config_ids, &mut configs);
+        let state = configs.intern(closure);
         for &raw_state in raw_start_states {
             raw_start_to_view[raw_state] = state;
         }
@@ -2009,7 +1898,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
         for &raw_state in raw_start_states {
             assert!(raw_state < raw_state_count, "invalid raw NFA analysis seed");
             let closure = project_closure(&singleton_closures[raw_state]);
-            let state = intern_config(closure, &mut config_ids, &mut configs);
+            let state = configs.intern(closure);
             raw_start_to_view[raw_state] = state;
         }
     }
@@ -2075,8 +1964,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
     let mut transitions = vec![u32::MAX; configs.len() * width];
     let mut known_transitions = vec![0u8; transitions.len()];
     let expansion_started_at = profile_timing.then(std::time::Instant::now);
-    let mut target_marks = vec![0u32; raw_state_count];
-    let mut target_generation = 0u32;
+    let mut image = EpsilonImageScratch::new(raw_state_count);
     let mut seeded_configs = raw_start_states
         .iter()
         .map(|&raw| raw_start_to_view[raw])
@@ -2088,15 +1976,13 @@ fn build_bounded_analysis_topology_impl_with_expansion(
         tokenizer,
         raw_transitions,
         configs: &mut configs,
-        config_ids: &mut config_ids,
         transitions: &mut transitions,
         known_transitions: &mut known_transitions,
         byte_to_column: &classes,
         width,
         singleton_closures: singleton_closures.as_ref(),
         active_language: active_language.as_deref(),
-        target_marks: &mut target_marks,
-        target_generation: &mut target_generation,
+        image: &mut image,
     };
     if let Some(first_byte) = common_first_byte {
         seeded_configs = seeded_configs.into_iter()
@@ -2145,7 +2031,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
     }
     Ok((
         TokenBoundedAnalysisTopology {
-            configurations: Arc::from(configs),
+            configurations: Arc::from(configs.into_configs()),
             start_state: start_state as usize,
             transitions: ByteRows::new(Arc::from(transitions), classes),
             raw_start_to_view: Arc::from(raw_start_to_view),
@@ -2581,20 +2467,6 @@ pub fn build_token_bounded_analysis_view_from_combined_starts(
     .expect("unbounded token analysis topology build")
     .0
     .materialize(tokenizer, active_groups)
-}
-
-fn intern_config(
-    states: Vec<u32>,
-    config_ids: &mut FxHashMap<Vec<u32>, u32>,
-    configs: &mut Vec<Box<[u32]>>,
-) -> u32 {
-    if let Some(&id) = config_ids.get(&states) {
-        return id;
-    }
-    let id = configs.len() as u32;
-    config_ids.insert(states.clone(), id);
-    configs.push(states.into_boxed_slice());
-    id
 }
 
 fn candidate_partition(
@@ -3317,8 +3189,7 @@ pub fn compute_state_map(
     let singleton_closures = tokenizer.all_singleton_epsilon_closures();
     let raw_active_language = raw_active_language_states(tokenizer, active_groups);
 
-    let mut config_ids = FxHashMap::<Vec<u32>, u32>::default();
-    let mut configs = Vec::<Box<[u32]>>::new();
+    let mut configs = ConfigInterner::default();
     let start_configs = candidate_representatives
         .iter()
         .map(|&state| {
@@ -3326,7 +3197,7 @@ pub fn compute_state_map(
                 singleton_closures[state].to_vec(),
                 raw_active_language.as_deref(),
             );
-            intern_config(config, &mut config_ids, &mut configs)
+            configs.intern(config)
         })
         .collect::<Vec<_>>();
 
@@ -3343,46 +3214,17 @@ pub fn compute_state_map(
     }
 
     let mut target_configs = vec![u32::MAX; num_candidates * active_bytes.len()];
-    let mut target_marks = vec![0u32; num_states];
-    let mut target_generation = 0u32;
-    let mut target_config = Vec::<u32>::new();
+    let mut image = EpsilonImageScratch::new(num_states);
     for candidate in 0..num_candidates {
-        let source = configs[start_configs[candidate] as usize].to_vec();
         for (slot, &byte) in active_bytes.iter().enumerate() {
-            target_generation = target_generation.wrapping_add(1);
-            if target_generation == 0 {
-                target_marks.fill(0);
-                target_generation = 1;
-            }
-            target_config.clear();
-            // Every source config is already epsilon-closed.  Consume the byte
-            // from each member and union cached singleton closures of the raw
-            // targets.  This is exactly `step_all` without re-closing the
-            // source, allocating a per-call seen vector, or sorting an
-            // intermediate direct-target list.
-            for &source_state in &source {
-                let raw_target = tokenizer.get_transition(source_state, byte);
-                if raw_target == u32::MAX {
-                    continue;
-                }
-                for &reachable in singleton_closures[raw_target as usize].iter() {
-                    if raw_active_language
-                        .as_deref()
-                        .is_some_and(|active| !active[reachable as usize])
-                    {
-                        continue;
-                    }
-                    let mark = &mut target_marks[reachable as usize];
-                    if *mark != target_generation {
-                        *mark = target_generation;
-                        target_config.push(reachable);
-                    }
-                }
-            }
-            if !target_config.is_empty() {
-                target_config.sort_unstable();
+            let targets = image.step(
+                &configs[start_configs[candidate] as usize], byte, true,
+                singleton_closures.as_ref(), raw_active_language.as_deref(),
+                |source, byte| tokenizer.get_transition(source, byte),
+            );
+            if !targets.is_empty() {
                 target_configs[candidate * active_bytes.len() + slot] =
-                    intern_config(target_config.clone(), &mut config_ids, &mut configs);
+                    configs.intern_slice(targets);
             }
         }
     }
@@ -3644,8 +3486,7 @@ mod tests {
 
         for active_groups in active_group_masks {
             let active_language = raw_active_language_states(&tokenizer, active_groups);
-            let mut target_marks = vec![0u32; tokenizer.num_states() as usize];
-            let mut target_generation = 0u32;
+            let mut image = EpsilonImageScratch::new(tokenizer.num_states() as usize);
             for raw_state in 0..tokenizer.num_states() as usize {
                 let config = singleton_closures[raw_state]
                     .iter()
@@ -3667,29 +3508,19 @@ mod tests {
                                 .is_none_or(|active| active[state as usize])
                         })
                         .collect::<Vec<_>>();
-                    let cached = step_epsilon_closed_config_cached(
-                        &tokenizer,
-                        None,
-                        &config,
-                        byte,
-                        singleton_closures.as_ref(),
+                    let cached = image.step(
+                        &config, byte, true, singleton_closures.as_ref(),
                         active_language.as_deref(),
-                        &mut target_marks,
-                        &mut target_generation,
+                        |source, byte| tokenizer.get_transition(source, byte),
                     );
-                    assert_eq!(cached, scalar, "raw_state={raw_state} byte={byte}");
-                    let cached_from_raw = step_epsilon_closed_config_cached(
-                        &tokenizer,
-                        Some(&raw_transitions),
-                        &config,
-                        byte,
-                        singleton_closures.as_ref(),
+                    assert_eq!(cached, scalar.as_slice(), "raw_state={raw_state} byte={byte}");
+                    let cached_from_raw = image.step(
+                        &config, byte, true, singleton_closures.as_ref(),
                         active_language.as_deref(),
-                        &mut target_marks,
-                        &mut target_generation,
+                        |source, byte| raw_transitions[source as usize * 256 + byte as usize],
                     );
                     assert_eq!(
-                        cached_from_raw, scalar,
+                        cached_from_raw, scalar.as_slice(),
                         "raw transition table raw_state={raw_state} byte={byte}",
                     );
                 }
