@@ -79,6 +79,50 @@ pub struct TerminalDwaBuildProfile {
 
 pub use glrmask_dwa_merge::__private::{LocalIdMapTerminalDwa, TerminalDwaPhaseProfile};
 
+/// The vocabulary projection has no weighted automaton or TSID domain.
+pub enum TerminalBuildOutput<T> {
+    Weighted(T),
+    VocabMap {
+        map: crate::compiler::stages::equiv_types::ManyToOneIdMap,
+        profile: TerminalDwaPhaseProfile,
+    },
+}
+
+impl<T> TerminalBuildOutput<T> {
+    pub fn into_weighted(self) -> T {
+        match self {
+            Self::Weighted(part) => part,
+            Self::VocabMap { .. } => unreachable!("weighted build returned only a vocabulary map"),
+        }
+    }
+
+    pub fn into_vocab_map(self) -> crate::compiler::stages::equiv_types::ManyToOneIdMap {
+        match self {
+            Self::VocabMap { map, .. } => map,
+            Self::Weighted(_) => unreachable!("vocabulary build returned a weighted relation"),
+        }
+    }
+
+}
+
+pub type LocalTerminalBuild = TerminalBuildOutput<LocalIdMapTerminalDwa>;
+
+impl TerminalBuildOutput<LocalIdMapTerminalDwa> {
+    pub fn profile(&self) -> TerminalDwaPhaseProfile {
+        match self {
+            Self::Weighted(part) => part.profile,
+            Self::VocabMap { profile, .. } => *profile,
+        }
+    }
+
+    pub fn profile_mut(&mut self) -> &mut TerminalDwaPhaseProfile {
+        match self {
+            Self::Weighted(part) => &mut part.profile,
+            Self::VocabMap { profile, .. } => profile,
+        }
+    }
+}
+
 /// The independently-built terminal-DWA pieces produced by one vocabulary
 /// partition.  The third slot is the cheap L1 construction over tokens split
 /// away from an L2P terminal set because they never cross an L2P boundary.

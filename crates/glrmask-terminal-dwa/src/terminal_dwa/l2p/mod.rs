@@ -54,7 +54,7 @@ use crate::compiler::possible_matches::PossibleMatchesComputer;
 use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use equivalence_analysis::combined::CombinedEquivalenceProfile;
 use crate::compiler::stages::mapped_artifact::MappedArtifact;
-use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
+use crate::compiler::stages::id_map_and_terminal_dwa::types::{LocalIdMapTerminalDwa, LocalTerminalBuild};
 use crate::ds::bitset::BitSet;
 use crate::ds::vocab_prefix_tree::VocabPrefixTree;
 use crate::ds::weight::Weight;
@@ -867,7 +867,7 @@ pub fn build_l2p_id_map_and_terminal_dwa(
         false,
         None,
         None,
-    )
+    ).map(LocalTerminalBuild::into_weighted)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -896,7 +896,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     id_map_only: bool,
     seed_state_filter: Option<&[bool]>,
     shard_options: Option<&L2pShardBuildOptions>,
-) -> Option<LocalIdMapTerminalDwa> {
+) -> Option<LocalTerminalBuild> {
     if vocab.is_empty() {
         return None;
     }
@@ -1398,13 +1398,8 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 id_map_ms,
             );
         }
-        let dwa = crate::automata::weighted_u32::dwa::DWA::new(
-            simplified_id_map.num_tsids(),
-            simplified_id_map.max_internal_token_id(),
-        );
-        return Some(LocalIdMapTerminalDwa {
-            id_map: simplified_id_map,
-            dwa,
+        return Some(LocalTerminalBuild::VocabMap {
+            map: simplified_id_map.vocab_tokens,
             profile: TerminalDwaPhaseProfile {
                 id_map_ms,
                 ..TerminalDwaPhaseProfile::default()
@@ -2312,7 +2307,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 seed_state_filter,
                 shard_options,
             )
-            .expect("terminal interchangeability baseline L2P build unexpectedly returned None")
+            .expect("terminal interchangeability baseline L2P build unexpectedly returned None").into_weighted()
         };
         let strict_baseline_build_ms = strict_baseline_started_at.elapsed().as_secs_f64() * 1000.0;
         let strict_compare_started_at = Instant::now();
@@ -2340,7 +2335,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
         }
     }
 
-    Some(output)
+    Some(LocalTerminalBuild::Weighted(output))
 }
 
 #[cfg(test)]
@@ -2474,7 +2469,7 @@ mod ti_mre_tests {
             Some(&seed_filter),
             Some(&options),
         )
-        .expect("scoped witnessed TI fixture must build");
+        .expect("scoped witnessed TI fixture must build").into_weighted();
         assert!(!output.dwa.states().is_empty());
     }
 
@@ -2568,7 +2563,7 @@ mod ti_mre_tests {
             Some(&seed_filter),
             Some(&options),
         )
-        .expect("scoped witnessed TI fixture must build");
+        .expect("scoped witnessed TI fixture must build").into_weighted();
         assert!(!output.dwa.states().is_empty());
     }
 

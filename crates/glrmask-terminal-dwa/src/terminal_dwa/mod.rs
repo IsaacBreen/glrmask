@@ -1463,7 +1463,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
         None,
         None,
         false,
-    ).into_families()
+    ).into_weighted()
 }
 
 pub fn build_vocab_partition_from_static_id_maps(
@@ -1646,26 +1646,7 @@ pub fn build_vocab_equivalence_partition_with_precomputed_global_max_length(
     result
 }
 
-enum TerminalBuildOutput {
-    Families(TerminalDwaFamilies, TerminalDwaPhaseProfile),
-    VocabMap(ManyToOneIdMap),
-}
-
-impl TerminalBuildOutput {
-    fn into_families(self) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
-        match self {
-            Self::Families(families, profile) => (families, profile),
-            Self::VocabMap(_) => unreachable!("weighted family build returned only a vocabulary map"),
-        }
-    }
-
-    fn into_vocab_map(self) -> ManyToOneIdMap {
-        match self {
-            Self::VocabMap(map) => map,
-            Self::Families(..) => unreachable!("vocabulary-only build returned weighted families"),
-        }
-    }
-}
+type FamilyBuildOutput = types::TerminalBuildOutput<(TerminalDwaFamilies, TerminalDwaPhaseProfile)>;
 
 fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     tokenizer: &Tokenizer,
@@ -1684,7 +1665,7 @@ fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     terminal_filter: Option<&[bool]>,
     boundary_scope: Option<&scope::BoundaryAnalysisScope>,
     id_map_only: bool,
-) -> TerminalBuildOutput {
+) -> FamilyBuildOutput {
     let total_started_at = Instant::now();
     let mut profile = TerminalDwaPhaseProfile::default();
     if compile_profile_enabled() {
@@ -1774,8 +1755,10 @@ fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             id_map_only,
         ) {
             if id_map_only {
-                return TerminalBuildOutput::VocabMap(result.id_map.vocab_tokens);
+                let profile = result.profile();
+                return FamilyBuildOutput::VocabMap { map: result.into_vocab_map(), profile };
             }
+            let result = result.into_weighted();
             let total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
             let mut profile = result.profile;
             profile.split_terminal_dwa_total_ms = total_ms;
@@ -1790,7 +1773,7 @@ fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                     total_ms,
                 );
             }
-            return TerminalBuildOutput::Families(
+            return FamilyBuildOutput::Weighted((
                 TerminalDwaFamilies {
                     l1: Some(MappedArtifact::new(
                         TerminalAutomaton::Dwa(result.dwa),
@@ -1800,7 +1783,7 @@ fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                     special: None,
                 },
                 profile,
-            );
+            ));
         }
     }
 
@@ -2131,7 +2114,7 @@ fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 started.elapsed().as_secs_f64() * 1000.0,
             );
         }
-        return TerminalBuildOutput::VocabMap(vocab_tokens);
+        return FamilyBuildOutput::VocabMap { map: vocab_tokens, profile };
     }
 
     use rayon::prelude::*;
@@ -2406,7 +2389,7 @@ fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             },
             deferred_vocab_singleton_original_ids: None,
         };
-        return TerminalBuildOutput::Families(
+        return FamilyBuildOutput::Weighted((
             TerminalDwaFamilies {
                 l1: Some(MappedArtifact::new(
                     TerminalAutomaton::Dwa(DWA::new(1, 0)),
@@ -2416,7 +2399,7 @@ fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 special: None,
             },
             profile,
-        );
+        ));
     }
 
     let partition_result_finalize_ms =
@@ -2618,7 +2601,7 @@ fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         );
     }
 
-    TerminalBuildOutput::Families(terminal_families, profile)
+    FamilyBuildOutput::Weighted((terminal_families, profile))
 }
 
 /// Compatibility wrapper for callers that still require one terminal
@@ -2855,7 +2838,7 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa_with_filter(
             terminal_filter,
             Some(scope),
             false,
-        ).into_families();
+        ).into_weighted();
 
     if std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
         for (name, family) in [("l1", families.l1.as_ref()), ("l2p", families.l2p.as_ref())] {

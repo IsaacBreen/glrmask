@@ -6,13 +6,12 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use super::types::{
-    LocalIdMapTerminalDwa, TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled,
+    LocalIdMapTerminalDwa, LocalTerminalBuild, TerminalColoring, TerminalDwaPhaseProfile, compile_profile_enabled,
 };
 use crate::Vocab;
 use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
-use crate::automata::weighted::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
-use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::grammar::flat::TerminalID;
 
 const L1_GENERIC_NFA_TOKEN_BOUNDED_MAX_VOCAB: usize = 20_000;
@@ -253,7 +252,7 @@ pub fn build_l1_id_map_and_terminal_dwa(
         subset_parent_order,
         false,
         false,
-    )
+    ).map(LocalTerminalBuild::into_weighted)
 }
 
 pub fn build_l1_id_map_and_terminal_dwa_mode(
@@ -277,7 +276,7 @@ pub fn build_l1_id_map_and_terminal_dwa_mode(
     subset_parent_order: Option<&L1IdentityVocabOrder>,
     initial_state_domain_is_exact: bool,
     id_map_only: bool,
-) -> Option<LocalIdMapTerminalDwa> {
+) -> Option<LocalTerminalBuild> {
     let input = implementations::BuildInput {
         partition_label,
         tokenizer,
@@ -302,24 +301,8 @@ pub fn build_l1_id_map_and_terminal_dwa_mode(
         // constructing tokenizer-state/DWA-shaped artifacts and discarding
         // them immediately afterwards.
         let result = implementations::build_projected_vocab_equivalence(input)?;
-        let tokenizer_states = initial_state_map.cloned().unwrap_or_else(|| {
-            let ids = (0..tokenizer.num_states()).collect::<Vec<_>>();
-            ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-                ids.clone(),
-                ids,
-            )
-        });
-        let mut id_map = InternalIdMap {
-            tokenizer_states,
-            vocab_tokens: result.vocab_map,
-            deferred_vocab_singleton_original_ids: None,
-        };
-        if initial_state_domain_is_exact {
-            super::scope::complete_with_continuation_singletons(&mut id_map.tokenizer_states);
-        }
-        return Some(LocalIdMapTerminalDwa {
-            dwa: DWA::new(id_map.num_tsids(), id_map.max_internal_token_id()),
-            id_map,
+        return Some(LocalTerminalBuild::VocabMap {
+            map: result.vocab_map,
             profile: TerminalDwaPhaseProfile {
                 id_map_ms: result.total_wall_ms,
                 compact_ms: result.compact_ms,
@@ -331,7 +314,7 @@ pub fn build_l1_id_map_and_terminal_dwa_mode(
     if initial_state_domain_is_exact {
         super::scope::complete_with_continuation_singletons(&mut result.id_map.tokenizer_states);
     }
-    Some(result)
+    Some(LocalTerminalBuild::Weighted(result))
 }
 
 fn collect_active_terminal_signature(

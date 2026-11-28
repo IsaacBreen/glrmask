@@ -189,7 +189,7 @@ fn build_identity_common(
         None, None, None, None, None, None, Some(&flat_trans), None,
         Some(&id_map.tokenizer_states), false,
         Some(scope.initial_states().keep_raw()), Some(&options),
-        )
+        ).map(super::types::LocalTerminalBuild::into_weighted)
     };
     let direct=(crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_DIRECT_IDENTITY_ENTRY")
         &&crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_EVENT_PIPELINE")
