@@ -4,9 +4,10 @@ mod compaction;
 mod reconcile;
 
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 
-use crate::automata::weighted_u32::dwa::DWA;
-use crate::automata::weighted_u32::nwa::NWA;
+use crate::automata::weighted_u32::dwa::{DWA, DWAState};
+use crate::automata::weighted_u32::nwa::{NWA, NWAState};
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::equiv_types::InternalIdMap;
 use crate::ds::weight::Weight;
@@ -35,211 +36,187 @@ pub fn joint_observation_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
     }
 }
 
+/// One ordered traversal through weight-bearing leaves. Nested artifacts
+/// never allocate intermediate reference lists; a presence query may stop
+/// at the first leaf without allocating any list at all.
 pub trait WeightRefs {
-    fn weight_refs(&self) -> Vec<&Weight>;
-    fn weight_refs_mut(&mut self) -> Vec<&mut Weight>;
-}
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()>;
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()>;
 
-impl WeightRefs for DWA {
     fn weight_refs(&self) -> Vec<&Weight> {
-        let mut weights = Vec::new();
-        for state in self.states() {
-            if let Some(final_weight) = state.final_weight.as_ref() {
-                weights.push(final_weight);
-            }
-            for (_, weight) in state.transitions.values() {
-                weights.push(weight);
-            }
-        }
-        weights
+        let mut out = Vec::new();
+        let _ = self.visit_weights(&mut |weight| {
+            out.push(weight);
+            ControlFlow::Continue(())
+        });
+        out
     }
 
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
-        let mut weights = Vec::new();
-        for state in self.states_mut() {
-            if let Some(final_weight) = state.final_weight.as_mut() {
-                weights.push(final_weight);
-            }
-            for (_, weight) in state.transitions.values_mut() {
-                weights.push(weight);
-            }
-        }
-        weights
+        let mut out = Vec::new();
+        let _ = self.visit_weights_mut(&mut |weight| {
+            out.push(weight);
+            ControlFlow::Continue(())
+        });
+        out
+    }
+
+    fn has_weights(&self) -> bool {
+        self.visit_weights(&mut |_| ControlFlow::Break(())).is_break()
+    }
+}
+
+impl WeightRefs for Weight {
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        visit(self)
+    }
+
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        visit(self)
+    }
+}
+
+impl WeightRefs for DWAState {
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        if let Some(weight) = &self.final_weight { visit(weight)?; }
+        for (_, weight) in self.transitions.values() { visit(weight)?; }
+        ControlFlow::Continue(())
+    }
+
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        if let Some(weight) = &mut self.final_weight { visit(weight)?; }
+        for (_, weight) in self.transitions.values_mut() { visit(weight)?; }
+        ControlFlow::Continue(())
+    }
+}
+
+impl WeightRefs for NWAState {
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        if let Some(weight) = &self.final_weight { visit(weight)?; }
+        for (_, weight) in self.transitions.values().flatten().chain(&self.epsilons) { visit(weight)?; }
+        ControlFlow::Continue(())
+    }
+
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        if let Some(weight) = &mut self.final_weight { visit(weight)?; }
+        for (_, weight) in self.transitions.values_mut().flatten().chain(&mut self.epsilons) { visit(weight)?; }
+        ControlFlow::Continue(())
+    }
+}
+
+impl WeightRefs for DWA {
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.states().visit_weights(visit)
+    }
+
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.states_mut().visit_weights_mut(visit)
     }
 }
 
 impl WeightRefs for NWA {
-    fn weight_refs(&self) -> Vec<&Weight> {
-        let mut weights = Vec::new();
-        for state in self.states() {
-            if let Some(weight) = state.final_weight.as_ref() {
-                weights.push(weight);
-            }
-            for branches in state.transitions.values() {
-                for (_, weight) in branches {
-                    weights.push(weight);
-                }
-            }
-            for (_, weight) in &state.epsilons {
-                weights.push(weight);
-            }
-        }
-        weights
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.states().visit_weights(visit)
     }
 
-    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
-        let mut weights = Vec::new();
-        for state in self.states_mut() {
-            if let Some(weight) = state.final_weight.as_mut() {
-                weights.push(weight);
-            }
-            for branches in state.transitions.values_mut() {
-                for (_, weight) in branches {
-                    weights.push(weight);
-                }
-            }
-            for (_, weight) in &mut state.epsilons {
-                weights.push(weight);
-            }
-        }
-        weights
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.states_mut().visit_weights_mut(visit)
     }
 }
 
 impl WeightRefs for TerminalAutomaton {
-    fn weight_refs(&self) -> Vec<&Weight> {
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()> {
         match self {
-            Self::Dwa(dwa) => dwa.weight_refs(),
-            Self::TokenDeterministicNwa(nwa) | Self::EpsilonNwa(nwa) => nwa.weight_refs(),
+            Self::Dwa(dwa) => dwa.visit_weights(visit),
+            Self::TokenDeterministicNwa(nwa) | Self::EpsilonNwa(nwa) => nwa.visit_weights(visit),
         }
     }
 
-    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()> {
         match self {
-            Self::Dwa(dwa) => dwa.weight_refs_mut(),
-            Self::TokenDeterministicNwa(nwa) | Self::EpsilonNwa(nwa) => nwa.weight_refs_mut(),
+            Self::Dwa(dwa) => dwa.visit_weights_mut(visit),
+            Self::TokenDeterministicNwa(nwa) | Self::EpsilonNwa(nwa) => nwa.visit_weights_mut(visit),
         }
     }
 }
 
-impl<K: Ord> WeightRefs for BTreeMap<K, Weight> {
-    fn weight_refs(&self) -> Vec<&Weight> {
-        self.values().collect()
+impl<K: Ord, T: WeightRefs> WeightRefs for BTreeMap<K, T> {
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        for value in self.values() { value.visit_weights(visit)?; }
+        ControlFlow::Continue(())
     }
 
-    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
-        self.values_mut().collect()
-    }
-}
-
-impl<K: Ord> WeightRefs for BTreeMap<K, Vec<Weight>> {
-    fn weight_refs(&self) -> Vec<&Weight> {
-        self.values().flat_map(|weights| weights.iter()).collect()
-    }
-
-    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
-        self.values_mut()
-            .flat_map(|weights| weights.iter_mut())
-            .collect()
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        for value in self.values_mut() { value.visit_weights_mut(visit)?; }
+        ControlFlow::Continue(())
     }
 }
 
-impl<A, B> WeightRefs for (A, B)
-where
-    A: WeightRefs,
-    B: WeightRefs,
-{
-    fn weight_refs(&self) -> Vec<&Weight> {
-        let mut weights = self.0.weight_refs();
-        weights.extend(self.1.weight_refs());
-        weights
+impl<A: WeightRefs, B: WeightRefs> WeightRefs for (A, B) {
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.0.visit_weights(visit)?;
+        self.1.visit_weights(visit)
     }
 
-    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
-        let mut weights = self.0.weight_refs_mut();
-        weights.extend(self.1.weight_refs_mut());
-        weights
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.0.visit_weights_mut(visit)?;
+        self.1.visit_weights_mut(visit)
     }
 }
 
-impl<A, B, C> WeightRefs for (A, B, C)
-where
-    A: WeightRefs,
-    B: WeightRefs,
-    C: WeightRefs,
-{
-    fn weight_refs(&self) -> Vec<&Weight> {
-        let mut weights = self.0.weight_refs();
-        weights.extend(self.1.weight_refs());
-        weights.extend(self.2.weight_refs());
-        weights
+impl<A: WeightRefs, B: WeightRefs, C: WeightRefs> WeightRefs for (A, B, C) {
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.0.visit_weights(visit)?;
+        self.1.visit_weights(visit)?;
+        self.2.visit_weights(visit)
     }
 
-    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
-        let mut weights = self.0.weight_refs_mut();
-        weights.extend(self.1.weight_refs_mut());
-        weights.extend(self.2.weight_refs_mut());
-        weights
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.0.visit_weights_mut(visit)?;
+        self.1.visit_weights_mut(visit)?;
+        self.2.visit_weights_mut(visit)
     }
 }
 
-impl<T> WeightRefs for [T]
-where
-    T: WeightRefs,
-{
-    fn weight_refs(&self) -> Vec<&Weight> {
-        let mut weights = Vec::new();
-        for item in self.iter() {
-            weights.extend(item.weight_refs());
-        }
-        weights
+impl<T: WeightRefs> WeightRefs for [T] {
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        for value in self { value.visit_weights(visit)?; }
+        ControlFlow::Continue(())
     }
 
-    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
-        let mut weights = Vec::new();
-        for item in self.iter_mut() {
-            weights.extend(item.weight_refs_mut());
-        }
-        weights
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        for value in self { value.visit_weights_mut(visit)?; }
+        ControlFlow::Continue(())
     }
 }
 
-impl<T> WeightRefs for Vec<T>
-where
-    T: WeightRefs,
-{
-    fn weight_refs(&self) -> Vec<&Weight> {
-        self.as_slice().weight_refs()
+impl<T: WeightRefs> WeightRefs for Vec<T> {
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.as_slice().visit_weights(visit)
     }
 
-    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
-        self.as_mut_slice().weight_refs_mut()
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        self.as_mut_slice().visit_weights_mut(visit)
     }
 }
 
-impl<T> WeightRefs for &mut T
-where
-    T: WeightRefs + ?Sized,
-{
-    fn weight_refs(&self) -> Vec<&Weight> {
-        (**self).weight_refs()
+impl<T: WeightRefs + ?Sized> WeightRefs for &mut T {
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        (**self).visit_weights(visit)
     }
 
-    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
-        (**self).weight_refs_mut()
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        (**self).visit_weights_mut(visit)
     }
 }
 
-impl<T> WeightRefs for Box<T>
-where
-    T: WeightRefs + ?Sized,
-{
-    fn weight_refs(&self) -> Vec<&Weight> {
-        (**self).weight_refs()
+impl<T: WeightRefs + ?Sized> WeightRefs for Box<T> {
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        (**self).visit_weights(visit)
     }
 
-    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
-        (**self).weight_refs_mut()
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> ControlFlow<()>) -> ControlFlow<()> {
+        (**self).visit_weights_mut(visit)
     }
 }
 
@@ -388,7 +365,7 @@ where
             // distinguishing classes. Preserve the historical empty-map
             // fast path rather than refining on irrelevant coordinates.
             let mut maps = inputs.iter().filter(|input|
-                sparse || !input.artifact().weight_refs().is_empty())
+                sparse || input.artifact().has_weights())
                 .map(MappedArtifact::id_map).collect::<Vec<_>>();
             if maps.is_empty() {
                 maps.push(inputs[0].id_map());
@@ -423,4 +400,32 @@ pub fn count_interned_ranges_for_weights<'a>(
 ) -> InternedRangeCounts {
     let weight_refs: Vec<&Weight> = weights.into_iter().collect();
     compaction::count_interned_ranges_for_weight_refs(&weight_refs)
+}
+
+#[cfg(test)]
+mod weight_visit_tests {
+    use super::*;
+
+    #[test]
+    fn ordered_nested_weight_traversal_visits_each_leaf_once() {
+        let mut graph = NWA::new(1, 1);
+        graph.add_state();
+        let state = &mut graph.states_mut()[0];
+        state.final_weight = Some(Weight::all());
+        state.transitions.insert(7, vec![(0, Weight::empty()), (0, Weight::all())]);
+        state.epsilons.push((0, Weight::empty()));
+        let mut nested = (BTreeMap::from([(3, vec![Weight::empty(), Weight::all()])]), Box::new(graph));
+        let expected = [false, true, true, false, true, false];
+        assert_eq!(nested.weight_refs().iter().map(|w| w.is_full()).collect::<Vec<_>>(), expected);
+        let mut visited = 0;
+        assert!(nested.visit_weights(&mut |_| {
+            visited += 1;
+            ControlFlow::Break(())
+        }).is_break());
+        assert_eq!(visited, 1);
+        for (weight, full) in nested.weight_refs_mut().into_iter().zip(expected) {
+            *weight = if full { Weight::empty() } else { Weight::all() };
+        }
+        assert_eq!(nested.weight_refs().iter().map(|w| w.is_full()).collect::<Vec<_>>(), expected.map(|full| !full));
+    }
 }

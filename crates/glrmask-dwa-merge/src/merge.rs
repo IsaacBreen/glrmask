@@ -1614,12 +1614,7 @@ fn remap_nwa_states(
     tokens: TokenAxisMap<'_>,
     global: &InternalIdMap,
 ) {
-    let mut weights = Vec::new();
-    for state in states.iter_mut() {
-        weights.extend(state.final_weight.iter_mut());
-        weights.extend(state.transitions.values_mut().flatten().map(|(_, weight)| weight));
-        weights.extend(state.epsilons.iter_mut().map(|(_, weight)| weight));
-    }
+    let mut weights = states.weight_refs_mut();
     remap_weights_with_axes(
         &mut weights, tsids, tokens,
         global.num_tsids() as usize, global.num_internal_tokens() as usize,

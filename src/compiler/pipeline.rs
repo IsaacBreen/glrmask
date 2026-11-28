@@ -3104,18 +3104,16 @@ struct ParserTopAccept {
 }
 
 impl WeightRefs for ParserTopAccept {
-    fn weight_refs(&self) -> Vec<&Weight> {
-        let mut weights = self.combined.weight_refs();
-        weights.extend(self.parts.weight_refs());
-        weights.extend(self.direct_l1_complete_by_terminal.weight_refs());
-        weights
+    fn visit_weights<'a>(&'a self, visit: &mut impl FnMut(&'a Weight) -> std::ops::ControlFlow<()>) -> std::ops::ControlFlow<()> {
+        self.combined.visit_weights(visit)?;
+        self.parts.visit_weights(visit)?;
+        self.direct_l1_complete_by_terminal.visit_weights(visit)
     }
 
-    fn weight_refs_mut(&mut self) -> Vec<&mut Weight> {
-        let mut weights = self.combined.weight_refs_mut();
-        weights.extend(self.parts.weight_refs_mut());
-        weights.extend(self.direct_l1_complete_by_terminal.weight_refs_mut());
-        weights
+    fn visit_weights_mut<'a>(&'a mut self, visit: &mut impl FnMut(&'a mut Weight) -> std::ops::ControlFlow<()>) -> std::ops::ControlFlow<()> {
+        self.combined.visit_weights_mut(visit)?;
+        self.parts.visit_weights_mut(visit)?;
+        self.direct_l1_complete_by_terminal.visit_weights_mut(visit)
     }
 }
 
@@ -3136,10 +3134,10 @@ impl ParserFamilyInventory {
         let common = {
             // Empty weighted artifacts do not distinguish observations.
             let mut maps = self.primary.iter()
-                .filter(|input| !input.artifact().weight_refs().is_empty())
+                .filter(|input| input.artifact().has_weights())
                 .map(MappedArtifact::id_map)
                 .chain(self.direct.iter()
-                    .filter(|input| !input.artifact().weight_refs().is_empty())
+                    .filter(|input| input.artifact().has_weights())
                     .map(MappedArtifact::id_map))
                 .collect::<Vec<_>>();
             if !possible_matches.artifact().is_empty() {
