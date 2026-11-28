@@ -91,49 +91,7 @@ struct UniqueStorageCounts {
     token_ranges: usize,
 }
 
-struct DimensionCompaction {
-    tsid_perm: Vec<u32>,
-    ordered_num_tsids: usize,
-    token_perm: Vec<u32>,
-    ordered_num_tokens: usize,
-    precomputed_token_compaction: Arc<PrecomputedTokenCompaction>,
-}
-
-impl DimensionCompaction {
-    fn is_identity(&self, num_tsids: usize, num_tokens: usize) -> bool {
-        self.tsid_perm_is_identity(num_tsids) && self.token_perm_is_identity(num_tokens)
-    }
-
-    fn tsid_perm_is_identity(&self, num_tsids: usize) -> bool {
-        self.ordered_num_tsids == num_tsids
-            && self
-                .tsid_perm
-                .iter()
-                .enumerate()
-                .all(|(idx, &mapped)| mapped == idx as u32)
-    }
-
-    fn token_perm_is_identity(&self, num_tokens: usize) -> bool {
-        self.ordered_num_tokens == num_tokens
-            && self
-                .token_perm
-                .iter()
-                .enumerate()
-                .all(|(idx, &mapped)| mapped == idx as u32)
-    }
-}
-
 impl CompactPlan {
-    fn from_dimension_compaction(compaction: DimensionCompaction) -> Self {
-        Self {
-            tsid_perm: compaction.tsid_perm,
-            ordered_num_tsids: compaction.ordered_num_tsids,
-            token_perm: compaction.token_perm,
-            ordered_num_tokens: compaction.ordered_num_tokens,
-            precomputed_token_compaction: compaction.precomputed_token_compaction,
-        }
-    }
-
     fn is_identity(&self, num_tsids: usize, num_tokens: usize) -> bool {
         self.tsid_perm_is_identity(num_tsids) && self.token_perm_is_identity(num_tokens)
     }
@@ -390,7 +348,7 @@ pub(super) fn plan_compaction_for_weight_refs(
         );
     }
 
-    CompactPlan::from_dimension_compaction(compaction)
+    compaction
 }
 
 pub(super) fn apply_compaction_plan_to_weight_refs(
@@ -515,7 +473,7 @@ fn build_dimension_compaction(
     use_default_layout: bool,
     keep_unmerged_tsid_identity: bool,
     tsids_proven_irredundant: bool,
-) -> DimensionCompaction {
+) -> CompactPlan {
     if allow_expensive_layout
         && (globally_exact_compaction_enabled() || almost_optimal_compaction_enabled())
     {
@@ -545,7 +503,7 @@ fn build_default_dimension_compaction(
     adaptive_layout: bool,
     keep_unmerged_tsid_identity: bool,
     tsids_proven_irredundant: bool,
-) -> DimensionCompaction {
+) -> CompactPlan {
     let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
     let total_started_at = profile_compaction.then(Instant::now);
     let original_weight_refs = weight_refs(unique_weights);
@@ -554,20 +512,8 @@ fn build_default_dimension_compaction(
     let fused_token_compaction = tsids_proven_irredundant
         && keep_unmerged_tsid_identity
         && !use_default_layout;
-    let (token_merge_perm, merged_num_tokens, fused_token_remaps) = if fused_token_compaction {
-        if let Some((perm, merged, remaps)) =
-            build_exact_token_merge_permutation_with_remaps(&original_weight_refs, num_tokens)
-        {
-            (perm, merged, Some(remaps))
-        } else {
-            let (perm, merged) =
-                build_exact_token_merge_permutation(&original_weight_refs, num_tokens);
-            (perm, merged, None)
-        }
-    } else {
-        let (perm, merged) = build_exact_token_merge_permutation(&original_weight_refs, num_tokens);
-        (perm, merged, None)
-    };
+    let (token_merge_perm, merged_num_tokens, fused_token_remaps) =
+        build_exact_token_partition(&original_weight_refs, num_tokens, fused_token_compaction);
     let token_merge_ms = token_merge_started_at.map_or(0.0, elapsed_ms);
     let token_order_started_at = profile_compaction.then(Instant::now);
     let token_perm = if use_default_layout {
@@ -590,12 +536,7 @@ fn build_default_dimension_compaction(
     let (tsid_merge_perm, merged_num_tsids) = if tsids_proven_irredundant {
         (identity_perm(num_tsids), num_tsids)
     } else {
-        build_exact_tsid_merge_permutation_with_token_remaps(
-            &original_weight_refs,
-            num_tsids,
-            &token_context,
-            &token_remaps,
-        )
+        build_exact_tsid_merge_permutation(&original_weight_refs, num_tsids)
     };
     let tsid_merge_ms = tsid_merge_started_at.map_or(0.0, elapsed_ms);
 
@@ -663,7 +604,7 @@ fn build_default_dimension_compaction(
         );
     }
 
-    DimensionCompaction {
+    CompactPlan {
         tsid_perm,
         ordered_num_tsids: merged_num_tsids,
         token_perm,
@@ -676,7 +617,7 @@ fn build_global_objective_dimension_compaction(
     unique_weights: &[Weight],
     num_tsids: usize,
     num_tokens: usize,
-) -> DimensionCompaction {
+) -> CompactPlan {
     let original_weight_refs = weight_refs(unique_weights);
 
     let (token_merge_perm, merged_num_tokens) =
@@ -693,9 +634,8 @@ fn build_global_objective_dimension_compaction(
             &identity_perm(num_tsids),
             &token_perm,
         );
-    let token_compacted_refs = weight_refs(&token_compacted_weights);
     let (tsid_merge_perm, merged_num_tsids) =
-        build_exact_tsid_merge_permutation(&token_compacted_refs, num_tsids);
+        build_exact_tsid_merge_permutation(&original_weight_refs, num_tsids);
     let tsid_perm = order_tsid_groups_globally_exact(
         &token_compacted_weights,
         tsid_merge_perm,
@@ -703,7 +643,7 @@ fn build_global_objective_dimension_compaction(
         merged_num_tokens,
     );
 
-    DimensionCompaction {
+    CompactPlan {
         tsid_perm,
         ordered_num_tsids: merged_num_tsids,
         token_perm,
@@ -712,634 +652,276 @@ fn build_global_objective_dimension_compaction(
     }
 }
 
-fn build_exact_token_merge_permutation(weights: &[&Weight], num_tokens: usize) -> (Vec<u32>, usize) {
-    if num_tokens == 0 {
-        return (Vec::new(), 0);
-    }
+/// Two coordinates are equivalent precisely when they belong to the same
+/// observation contexts. A context is a union of disjoint inclusive runs.
+/// Membership therefore changes only at run boundaries; adjacent runs of
+/// the same context cancel at their common boundary.
+#[derive(Default)]
+struct ObservationEvents(Vec<u64>);
 
-    let mut seen_token_sets = HashSet::new();
-    let mut token_sets = Vec::new();
-    for weight in weights {
-        if weight.is_full() || weight.is_empty() {
-            continue;
+impl ObservationEvents {
+    fn push_range(&mut self, start: u32, end: u32, context: u32, size: usize) {
+        if start as usize >= size || start > end {
+            return;
         }
-        for (_tsid_range, token_set) in weight.raw_range_values() {
-            let ptr = Arc::as_ptr(token_set) as usize;
-            if seen_token_sets.insert(ptr) {
-                token_sets.push(Arc::clone(token_set));
-            }
-        }
-    }
-
-    if token_sets.is_empty() {
-        return (vec![0; num_tokens], 1);
-    }
-
-    let profile_words = token_sets.len().div_ceil(64);
-    if profile_words == 1 {
-        return build_exact_token_merge_permutation_one_word(&token_sets, num_tokens);
-    }
-    if exact_token_merge_sweep_enabled() {
-        build_exact_token_merge_permutation_multiword_sweep(&token_sets, num_tokens, profile_words)
-    } else {
-        build_exact_token_merge_permutation_multiword_dense(&token_sets, num_tokens, profile_words)
-    }
-}
-
-fn exact_token_merge_sweep_enabled() -> bool {
-    std::env::var("GLRMASK_EXACT_TOKEN_MERGE_SWEEP")
-        .map(|value| {
-            let trimmed = value.trim();
-            !trimmed.is_empty() && trimmed != "0" && !trimmed.eq_ignore_ascii_case("false")
-        })
-        .unwrap_or(true)
-}
-
-fn build_exact_token_merge_permutation_multiword_dense(
-    token_sets: &[Arc<RangeSetBlaze<u32>>],
-    num_tokens: usize,
-    profile_words: usize,
-) -> (Vec<u32>, usize) {
-    let mut profiles = vec![0u64; num_tokens * profile_words];
-    for (context, token_set) in token_sets.iter().enumerate() {
-        let word = context / 64;
-        let bit = 1u64 << (context % 64);
-        for token_range in token_set.ranges() {
-            let start = (*token_range.start() as usize).min(num_tokens);
-            let end = (*token_range.end() as usize).min(num_tokens.saturating_sub(1));
-            if start > end {
-                continue;
-            }
-            for token in start..=end {
-                profiles[token * profile_words + word] |= bit;
-            }
-        }
-    }
-
-    let mut profile_hash_to_groups = HashMap::<u64, Vec<(Vec<u64>, u32)>>::new();
-    let mut perm = vec![0u32; num_tokens];
-    let mut next_group = 0u32;
-    for (token, perm_slot) in perm.iter_mut().enumerate() {
-        let profile_start = token * profile_words;
-        let profile = &profiles[profile_start..profile_start + profile_words];
-        let profile_hash = hash_profile_words(profile);
-        let groups = profile_hash_to_groups.entry(profile_hash).or_default();
-        if let Some((_, group)) = groups
-            .iter()
-            .find(|(existing_profile, _)| existing_profile.as_slice() == profile)
+        self.0.push((u64::from(start) << 32) | u64::from(context));
+        if let Some(after) = end.checked_add(1)
+            && (after as usize) < size
         {
-            *perm_slot = *group;
-            continue;
+            self.0.push((u64::from(after) << 32) | u64::from(context));
         }
-
-        let group = next_group;
-        groups.push((profile.to_vec(), group));
-        *perm_slot = group;
-        next_group += 1;
     }
 
-    (perm, next_group as usize)
+    fn sort(&mut self, size: usize) {
+        if self.0.len() <= size.saturating_mul(2) {
+            self.0.sort_unstable();
+            return;
+        }
+        // Counting by coordinate keeps the dense-boundary case linear.
+        // All toggles at one boundary commute.
+        let mut offsets = vec![0usize; size];
+        for &event in &self.0 {
+            offsets[(event >> 32) as usize] += 1;
+        }
+        let mut next = 0;
+        for slot in &mut offsets {
+            let count = *slot;
+            *slot = next;
+            next += count;
+        }
+        let mut ordered = vec![0; self.0.len()];
+        for &event in &self.0 {
+            let slot = &mut offsets[(event >> 32) as usize];
+            ordered[*slot] = event;
+            *slot += 1;
+        }
+        self.0 = ordered;
+    }
+
+    fn partition<P: ActiveMembership>(
+        mut self,
+        size: usize,
+        mut active: P,
+    ) -> (Vec<u32>, Vec<P::Key>) {
+        self.sort(size);
+        let mut profiles = ProfileClasses::<P::Key>::default();
+        let mut perm = vec![0; size];
+        let mut cursor = 0;
+        let mut events = self.0.into_iter().peekable();
+        while let Some(&event) = events.peek() {
+            let pos = (event >> 32) as usize;
+            if cursor < pos {
+                perm[cursor..pos].fill(profiles.intern(&active));
+                cursor = pos;
+            }
+            while events.peek().is_some_and(|event| (*event >> 32) as usize == pos) {
+                active.toggle(events.next().unwrap() as u32);
+            }
+        }
+        if cursor < size {
+            perm[cursor..].fill(profiles.intern(&active));
+        }
+        (perm, profiles.keys)
+    }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct TokenProfileWordEvent {
-    pos: usize,
-    word: usize,
-    bit: u64,
-    fingerprint: u64,
-    add: bool,
-}
-
-#[inline]
-fn token_profile_context_fingerprint(word: usize, bit: u64) -> u64 {
-    let mut value = ((word as u64) << 6) | bit.trailing_zeros() as u64;
-    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+fn context_fingerprint(context: u32) -> u64 {
+    let mut value = u64::from(context).wrapping_add(0x9e37_79b9_7f4a_7c15);
     value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     value ^ (value >> 31)
 }
 
-fn intern_active_token_profile(
-    active_profile: &[u64],
-    profile_fingerprint: u64,
-    profile_groups: &mut HashMap<u64, Vec<(Vec<u64>, u32)>>,
-    next_group: &mut u32,
-) -> u32 {
-    let candidates = profile_groups.entry(profile_fingerprint).or_default();
-    if let Some((_, group)) = candidates
-        .iter()
-        .find(|(existing_profile, _)| existing_profile.as_slice() == active_profile)
-    {
-        return *group;
-    }
-
-    let group = *next_group;
-    *next_group += 1;
-    candidates.push((active_profile.to_vec(), group));
-    group
+/// The fingerprint only selects candidates. Complete active membership
+/// determines identity, even when adversarial fingerprints collide.
+trait ActiveMembership {
+    type Key;
+    fn toggle(&mut self, context: u32);
+    fn fingerprint(&self) -> u64;
+    fn equals(&self, key: &Self::Key) -> bool;
+    fn snapshot(&self) -> Self::Key;
 }
 
-fn intern_active_token_profile_recording(
-    active_profile: &[u64],
-    profile_fingerprint: u64,
-    profile_groups: &mut HashMap<u64, Vec<(Vec<u64>, u32)>>,
-    group_profiles: &mut Vec<Vec<u64>>,
-) -> u32 {
-    let candidates = profile_groups.entry(profile_fingerprint).or_default();
-    if let Some((_, group)) = candidates
-        .iter()
-        .find(|(existing_profile, _)| existing_profile.as_slice() == active_profile)
-    {
-        return *group;
-    }
-
-    let group = group_profiles.len() as u32;
-    let profile = active_profile.to_vec();
-    candidates.push((profile.clone(), group));
-    group_profiles.push(profile);
-    group
+struct ProfileClasses<K> {
+    heads: HashMap<u64, u32>,
+    links: Vec<Option<u32>>,
+    keys: Vec<K>,
 }
 
-fn sort_token_profile_word_events(
-    events: &mut Vec<TokenProfileWordEvent>,
-    num_tokens: usize,
-) {
-    // Counting by token position avoids comparison sorting for dense boundary
-    // sets. Event order within a position is intentionally irrelevant: the
-    // sweep processes all removals, then all additions, and bit operations
-    // commute within either phase.
-    let use_counting_sort = events.len() > num_tokens.saturating_mul(2);
-    if !use_counting_sort {
-        events.sort_unstable_by_key(|event| (event.pos, event.add, event.word, event.bit));
-        return;
+impl<K> Default for ProfileClasses<K> {
+    fn default() -> Self {
+        Self { heads: HashMap::new(), links: Vec::new(), keys: Vec::new() }
     }
-
-    let mut counts = vec![0usize; num_tokens];
-    for event in events.iter() {
-        counts[event.pos] += 1;
-    }
-    let mut offsets = vec![0usize; num_tokens + 1];
-    for position in 0..num_tokens {
-        offsets[position + 1] = offsets[position] + counts[position];
-    }
-    let mut next = offsets[..num_tokens].to_vec();
-    let mut ordered = vec![
-        TokenProfileWordEvent {
-            pos: 0,
-            word: 0,
-            bit: 0,
-            fingerprint: 0,
-            add: false,
-        };
-        events.len()
-    ];
-    for &event in events.iter() {
-        let slot = next[event.pos];
-        ordered[slot] = event;
-        next[event.pos] += 1;
-    }
-    *events = ordered;
 }
 
-fn build_exact_token_merge_permutation_multiword_sweep(
-    token_sets: &[Arc<RangeSetBlaze<u32>>],
-    num_tokens: usize,
-    profile_words: usize,
-) -> (Vec<u32>, usize) {
-    let mut events = Vec::<TokenProfileWordEvent>::new();
-    for (context, token_set) in token_sets.iter().enumerate() {
-        let word = context / 64;
-        let bit = 1u64 << (context % 64);
-        let fingerprint = token_profile_context_fingerprint(word, bit);
-        for token_range in token_set.ranges() {
-            let start = (*token_range.start() as usize).min(num_tokens);
-            let end = (*token_range.end() as usize).min(num_tokens.saturating_sub(1));
-            if start > end {
-                continue;
+impl<K> ProfileClasses<K> {
+    fn intern<P: ActiveMembership<Key = K>>(&mut self, profile: &P) -> u32 {
+        let hash = profile.fingerprint();
+        let mut candidate = self.heads.get(&hash).copied();
+        while let Some(id) = candidate {
+            if profile.equals(&self.keys[id as usize]) {
+                return id;
             }
-            events.push(TokenProfileWordEvent {
-                pos: start,
-                word,
-                bit,
-                fingerprint,
-                add: true,
-            });
-            let remove_pos = end + 1;
-            if remove_pos < num_tokens {
-                events.push(TokenProfileWordEvent {
-                    pos: remove_pos,
-                    word,
-                    bit,
-                    fingerprint,
-                    add: false,
-                });
-            }
+            candidate = self.links[id as usize];
         }
+        let group = u32::try_from(self.keys.len()).expect("observation class ID overflow");
+        self.keys.push(profile.snapshot());
+        self.links.push(self.heads.insert(hash, group));
+        group
     }
-
-    if events.is_empty() {
-        return (vec![0; num_tokens], 1);
-    }
-
-    // At a boundary, remove old membership before adding new membership. This
-    // also makes the behavior match the one-word sweep implementation.
-    sort_token_profile_word_events(&mut events, num_tokens);
-
-    let mut active_profile = vec![0u64; profile_words];
-    let mut active_profile_fingerprint = 0u64;
-    let mut profile_groups = HashMap::<u64, Vec<(Vec<u64>, u32)>>::new();
-    let mut perm = vec![0u32; num_tokens];
-    let mut next_group = 0u32;
-    let mut cursor = 0usize;
-    let mut idx = 0usize;
-
-    while idx < events.len() {
-        let pos = events[idx].pos;
-        if cursor < pos {
-            let group = intern_active_token_profile(
-                &active_profile,
-                active_profile_fingerprint,
-                &mut profile_groups,
-                &mut next_group,
-            );
-            perm[cursor..pos].fill(group);
-            cursor = pos;
-        }
-
-        let bucket_start = idx;
-        while idx < events.len() && events[idx].pos == pos {
-            idx += 1;
-        }
-        for event in &events[bucket_start..idx] {
-            if !event.add {
-                active_profile[event.word] &= !event.bit;
-                active_profile_fingerprint ^= event.fingerprint;
-            }
-        }
-        for event in &events[bucket_start..idx] {
-            if event.add {
-                active_profile[event.word] |= event.bit;
-                active_profile_fingerprint ^= event.fingerprint;
-            }
-        }
-    }
-
-    if cursor < num_tokens {
-        let group = intern_active_token_profile(
-            &active_profile,
-            active_profile_fingerprint,
-            &mut profile_groups,
-            &mut next_group,
-        );
-        perm[cursor..num_tokens].fill(group);
-    }
-
-    (perm, next_group as usize)
 }
 
-fn build_exact_token_merge_permutation_multiword_sweep_with_remaps(
-    token_sets: &[(usize, SharedTokenSet)],
-    num_tokens: usize,
-    profile_words: usize,
-) -> (Vec<u32>, usize, TokenRemapCache) {
-    let mut events = Vec::<TokenProfileWordEvent>::new();
-    for (context, (_, token_set)) in token_sets.iter().enumerate() {
-        let word = context / 64;
-        let bit = 1u64 << (context % 64);
-        let fingerprint = token_profile_context_fingerprint(word, bit);
-        for token_range in token_set.ranges() {
-            let start = (*token_range.start() as usize).min(num_tokens);
-            let end = (*token_range.end() as usize).min(num_tokens.saturating_sub(1));
-            if start > end {
-                continue;
-            }
-            events.push(TokenProfileWordEvent {
-                pos: start,
-                word,
-                bit,
-                fingerprint,
-                add: true,
-            });
-            let remove_pos = end + 1;
-            if remove_pos < num_tokens {
-                events.push(TokenProfileWordEvent {
-                    pos: remove_pos,
-                    word,
-                    bit,
-                    fingerprint,
-                    add: false,
-                });
-            }
-        }
-    }
+impl ActiveMembership for u64 {
+    type Key = u64;
 
-    if events.is_empty() {
-        return (vec![0; num_tokens], 1, TokenRemapCache::new());
-    }
-    sort_token_profile_word_events(&mut events, num_tokens);
-
-    let mut active_profile = vec![0u64; profile_words];
-    let mut active_profile_fingerprint = 0u64;
-    let mut profile_groups = HashMap::<u64, Vec<(Vec<u64>, u32)>>::new();
-    let mut group_profiles = Vec::<Vec<u64>>::new();
-    let mut perm = vec![0u32; num_tokens];
-    let mut cursor = 0usize;
-    let mut idx = 0usize;
-
-    while idx < events.len() {
-        let pos = events[idx].pos;
-        if cursor < pos {
-            let group = intern_active_token_profile_recording(
-                &active_profile,
-                active_profile_fingerprint,
-                &mut profile_groups,
-                &mut group_profiles,
-            );
-            perm[cursor..pos].fill(group);
-            cursor = pos;
-        }
-
-        let bucket_start = idx;
-        while idx < events.len() && events[idx].pos == pos {
-            idx += 1;
-        }
-        for event in &events[bucket_start..idx] {
-            if !event.add {
-                active_profile[event.word] &= !event.bit;
-                active_profile_fingerprint ^= event.fingerprint;
-            }
-        }
-        for event in &events[bucket_start..idx] {
-            if event.add {
-                active_profile[event.word] |= event.bit;
-                active_profile_fingerprint ^= event.fingerprint;
-            }
-        }
-    }
-
-    if cursor < num_tokens {
-        let group = intern_active_token_profile_recording(
-            &active_profile,
-            active_profile_fingerprint,
-            &mut profile_groups,
-            &mut group_profiles,
-        );
-        perm[cursor..num_tokens].fill(group);
-    }
-
-    // A class profile already says exactly which source token sets contain the
-    // class. Invert those compact profiles directly instead of scanning every
-    // source range against the token-permutation runs in a second pass.
-    let mut compact_tokens_by_context = vec![Vec::<u32>::new(); token_sets.len()];
-    for (group, profile) in group_profiles.iter().enumerate() {
-        for (word, &word_bits) in profile.iter().enumerate() {
-            let mut bits = word_bits;
-            while bits != 0 {
-                let bit = bits.trailing_zeros() as usize;
-                let context = word * 64 + bit;
-                if context < compact_tokens_by_context.len() {
-                    compact_tokens_by_context[context].push(group as u32);
-                }
-                bits &= bits - 1;
-            }
-        }
-    }
-    let token_remaps = token_sets
-        .iter()
-        .zip(compact_tokens_by_context)
-        .map(|((ptr, _), groups)| {
-            (
-                *ptr,
-                shared_rangeset(RangeSetBlaze::from_iter(
-                    groups.into_iter().map(|group| group..=group),
-                )),
-            )
-        })
-        .collect();
-
-    (perm, group_profiles.len(), token_remaps)
+    #[inline]
+    fn toggle(&mut self, context: u32) { *self ^= 1 << context; }
+    fn fingerprint(&self) -> u64 { *self }
+    fn equals(&self, key: &u64) -> bool { self == key }
+    fn snapshot(&self) -> u64 { *self }
 }
 
-fn build_exact_token_merge_permutation_with_remaps(
+struct DenseMembership {
+    words: Vec<u64>,
+    fingerprint: u64,
+}
+
+impl ActiveMembership for DenseMembership {
+    type Key = Box<[u64]>;
+
+    fn toggle(&mut self, context: u32) {
+        self.words[context as usize / 64] ^= 1 << (context % 64);
+        self.fingerprint ^= context_fingerprint(context);
+    }
+    fn fingerprint(&self) -> u64 { self.fingerprint }
+    fn equals(&self, key: &Self::Key) -> bool { self.words.as_slice() == key.as_ref() }
+    fn snapshot(&self) -> Self::Key { self.words.clone().into_boxed_slice() }
+}
+
+#[derive(Default)]
+struct SparseMembership {
+    contexts: std::collections::BTreeSet<u32>,
+    fingerprint: u64,
+}
+
+impl ActiveMembership for SparseMembership {
+    type Key = Box<[u32]>;
+
+    fn toggle(&mut self, context: u32) {
+        if !self.contexts.remove(&context) {
+            self.contexts.insert(context);
+        }
+        self.fingerprint ^= context_fingerprint(context);
+    }
+    fn fingerprint(&self) -> u64 { self.fingerprint }
+    fn equals(&self, key: &Self::Key) -> bool {
+        self.contexts.len() == key.len() && self.contexts.iter().eq(key.iter())
+    }
+    fn snapshot(&self) -> Self::Key { self.contexts.iter().copied().collect() }
+}
+
+fn build_exact_token_merge_permutation(weights: &[&Weight], num_tokens: usize) -> (Vec<u32>, usize) {
+    let (perm, count, _) = build_exact_token_partition(weights, num_tokens, false);
+    (perm, count)
+}
+
+fn build_exact_token_partition(
     weights: &[&Weight],
     num_tokens: usize,
-) -> Option<(Vec<u32>, usize, TokenRemapCache)> {
+    precompute_remaps: bool,
+) -> (Vec<u32>, usize, Option<TokenRemapCache>) {
     if num_tokens == 0 {
-        return Some((Vec::new(), 0, TokenRemapCache::new()));
+        return (Vec::new(), 0, None);
     }
 
     let mut seen = HashSet::new();
-    let mut token_sets = Vec::<(usize, SharedTokenSet)>::new();
+    let mut sets = Vec::new();
+    let mut events = ObservationEvents::default();
     for weight in weights {
         if weight.is_full() || weight.is_empty() {
             continue;
         }
-        for (_tsid_range, token_set) in weight.raw_range_values() {
-            let ptr = Arc::as_ptr(token_set) as usize;
-            if seen.insert(ptr) {
-                token_sets.push((ptr, Arc::clone(token_set)));
-            }
-        }
-    }
-    if token_sets.len() <= 64 || !exact_token_merge_sweep_enabled() {
-        return None;
-    }
-    let profile_words = token_sets.len().div_ceil(64);
-    Some(
-        build_exact_token_merge_permutation_multiword_sweep_with_remaps(
-            &token_sets,
-            num_tokens,
-            profile_words,
-        ),
-    )
-}
-
-#[derive(Clone, Copy, Debug)]
-struct TokenProfileEvent {
-    pos: usize,
-    bit: u64,
-    add: bool,
-}
-
-fn build_exact_token_merge_permutation_one_word(
-    token_sets: &[Arc<RangeSetBlaze<u32>>],
-    num_tokens: usize,
-) -> (Vec<u32>, usize) {
-    let mut events = Vec::new();
-    for (context, token_set) in token_sets.iter().enumerate() {
-        let bit = 1u64 << context;
-        for token_range in token_set.ranges() {
-            let start = (*token_range.start() as usize).min(num_tokens);
-            let end = (*token_range.end() as usize).min(num_tokens.saturating_sub(1));
-            if start > end {
+        for (_, tokens) in weight.raw_range_values() {
+            let ptr = Arc::as_ptr(tokens) as usize;
+            if !seen.insert(ptr) {
                 continue;
             }
-            events.push(TokenProfileEvent {
-                pos: start,
-                bit,
-                add: true,
-            });
-            let remove_pos = end + 1;
-            if remove_pos < num_tokens {
-                events.push(TokenProfileEvent {
-                    pos: remove_pos,
-                    bit,
-                    add: false,
-                });
+            let context = u32::try_from(sets.len()).expect("token observation context overflow");
+            sets.push(ptr);
+            for range in tokens.ranges() {
+                events.push_range(*range.start(), *range.end(), context, num_tokens);
             }
         }
     }
-
-    if events.is_empty() {
-        return (vec![0; num_tokens], 1);
+    if sets.len() <= 64 {
+        let (perm, profiles) = events.partition(num_tokens, 0u64);
+        return (perm, profiles.len(), None);
     }
 
-    events.sort_unstable_by_key(|event| (event.pos, event.add));
-
-    let mut profile_to_group = HashMap::<u64, u32>::new();
-    let mut perm = vec![0u32; num_tokens];
-    let mut next_group = 0u32;
-    let mut active_profile = 0u64;
-    let mut cursor = 0usize;
-    let mut idx = 0usize;
-
-    while idx < events.len() {
-        let pos = events[idx].pos;
-        if cursor < pos {
-            let group = *profile_to_group.entry(active_profile).or_insert_with(|| {
-                let group = next_group;
-                next_group += 1;
-                group
-            });
-            perm[cursor..pos].fill(group);
-            cursor = pos;
-        }
-
-        while idx < events.len() && events[idx].pos == pos && !events[idx].add {
-            active_profile &= !events[idx].bit;
-            idx += 1;
-        }
-        while idx < events.len() && events[idx].pos == pos && events[idx].add {
-            active_profile |= events[idx].bit;
-            idx += 1;
-        }
-    }
-
-    if cursor < num_tokens {
-        let group = *profile_to_group.entry(active_profile).or_insert_with(|| {
-            let group = next_group;
-            next_group += 1;
-            group
-        });
-        perm[cursor..num_tokens].fill(group);
-    }
-
-    (perm, next_group as usize)
-}
-
-fn hash_profile_words(profile: &[u64]) -> u64 {
-    let mut hash = 0x9e37_79b9_7f4a_7c15 ^ profile.len() as u64;
-    for &word in profile {
-        hash ^= mix_profile_word(word.wrapping_add(0x9e37_79b9_7f4a_7c15));
-        hash = hash.rotate_left(27).wrapping_mul(0x94d0_49bb_1331_11eb);
-    }
-    hash
-}
-
-fn mix_profile_word(mut value: u64) -> u64 {
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    value ^ (value >> 31)
-}
-
-/// Compute the exact TSID merge profile after a token permutation without
-/// first materializing a token-remapped copy of every weight. The materialized
-/// path below exists for TSID ordering; this path is sufficient for exact
-/// merging and preserves the same per-weight context numbering.
-fn build_exact_tsid_merge_permutation_with_token_remaps(
-    weights: &[&Weight],
-    num_tsids: usize,
-    token_context: &PermutationContext,
-    token_remaps: &TokenRemapCache,
-) -> (Vec<u32>, usize) {
-    if num_tsids == 0 {
-        return (Vec::new(), 0);
-    }
-
-    let mut profiles = vec![Vec::<u32>::new(); num_tsids];
-    let mut context = 0u32;
-    for weight in weights {
-        if weight.is_full() || weight.is_empty() {
-            continue;
-        }
-        let mut contexts_by_token_set = HashMap::<Vec<(u32, u32)>, u32>::new();
-        // Inner token-set rangesets are interned, so an identical `Arc` reached
-        // at several tsid ranges within this weight always denotes the same
-        // (remapped) token content. Cache the resolved context per source `Arc`
-        // pointer to skip recomputing the remap key for those repeats; this is
-        // exact and only avoids redundant `rangeset_key` allocations.
-        let mut context_by_source_ptr = HashMap::<usize, u32>::new();
-        for (tsid_range, token_set) in weight.raw_range_values() {
-            let token_set_ptr = Arc::as_ptr(token_set) as usize;
-            let token_set_context = match context_by_source_ptr.entry(token_set_ptr) {
-                std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    let remapped_tokens = if token_context.token_perm_is_identity {
-                        token_set.as_ref()
-                    } else {
-                        token_remaps
-                            .get(&token_set_ptr)
-                            .expect("token plan must remap every source token set")
-                    };
-                    let key = rangeset_key(remapped_tokens);
-                    let resolved = *contexts_by_token_set.entry(key).or_insert_with(|| {
-                        let current = context;
-                        context += 1;
-                        current
-                    });
-                    entry.insert(resolved);
-                    resolved
+    let (perm, profiles) = events.partition(num_tokens, DenseMembership {
+        words: vec![0; sets.len().div_ceil(64)],
+        fingerprint: 0,
+    });
+    let count = profiles.len();
+    let remaps = (precompute_remaps && count < num_tokens).then(|| {
+        // Invert the exact class profiles directly. Every profile has just
+        // one allocation, also used for collision resolution in the sweep.
+        let mut groups = vec![Vec::<u32>::new(); sets.len()];
+        for (group, profile) in profiles.iter().enumerate() {
+            for (word, &bits) in profile.iter().enumerate() {
+                let mut bits = bits;
+                while bits != 0 {
+                    groups[word * 64 + bits.trailing_zeros() as usize].push(group as u32);
+                    bits &= bits - 1;
                 }
-            };
-            let start = *tsid_range.start();
-            let end = (*tsid_range.end()).min(num_tsids.saturating_sub(1) as u32);
-            for tsid in start..=end {
-                profiles[tsid as usize].push(token_set_context);
             }
         }
-    }
-
-    build_profile_merge_permutation(&profiles)
+        sets.into_iter().zip(groups.into_iter().map(|ids| {
+            shared_rangeset(ids.into_iter().map(|id| id..=id).collect())
+        })).collect()
+    });
+    (perm, count, remaps)
 }
 
+/// Every observed token set is a union of exact token-equivalence classes.
+/// Passing to that quotient is injective on these sets, so it cannot change
+/// which TSIDs have equal rows. No token remap is needed to discover the
+/// exact state partition.
 fn build_exact_tsid_merge_permutation(weights: &[&Weight], num_tsids: usize) -> (Vec<u32>, usize) {
-    if num_tsids == 0 {
-        return (Vec::new(), 0);
-    }
-
-    let mut profiles = vec![Vec::<u32>::new(); num_tsids];
-    let mut context = 0u32;
+    let mut events = ObservationEvents::default();
+    let mut next_context = 0u32;
     for weight in weights {
         if weight.is_full() || weight.is_empty() {
             continue;
         }
-        let mut contexts_by_token_set = HashMap::<Vec<(u32, u32)>, u32>::new();
-        for (tsid_range, token_set) in weight.raw_range_values() {
-            let key = rangeset_key(token_set);
-            let token_set_context = *contexts_by_token_set.entry(key).or_insert_with(|| {
-                let current = context;
-                context += 1;
-                current
+        let mut by_contents = HashMap::<Vec<(u32, u32)>, u32>::new();
+        let mut by_pointer = HashMap::<usize, u32>::new();
+        for (range, tokens) in weight.raw_range_values() {
+            let ptr = Arc::as_ptr(tokens) as usize;
+            let context = *by_pointer.entry(ptr).or_insert_with(|| {
+                *by_contents.entry(rangeset_key(tokens)).or_insert_with(|| {
+                    let id = next_context;
+                    next_context = next_context.checked_add(1).expect("state observation context overflow");
+                    id
+                })
             });
-            let start = *tsid_range.start();
-            let end = (*tsid_range.end()).min(num_tsids.saturating_sub(1) as u32);
-            for tsid in start..=end {
-                profiles[tsid as usize].push(token_set_context);
-            }
+            events.push_range(*range.start(), *range.end(), context, num_tsids);
         }
     }
 
-    build_profile_merge_permutation(&profiles)
+    let (mut perm, profiles) = events.partition(num_tsids, SparseMembership::default());
+    // Preserve the established lexicographic ordering of state profiles,
+    // sorting unique classes instead of every raw coordinate.
+    let mut order = (0..profiles.len()).collect::<Vec<_>>();
+    order.sort_unstable_by(|&left, &right| profiles[left].cmp(&profiles[right]));
+    let mut class_to_order = vec![0; profiles.len()];
+    for (position, class) in order.into_iter().enumerate() {
+        class_to_order[class] = position as u32;
+    }
+    for class in &mut perm {
+        *class = class_to_order[*class as usize];
+    }
+    (perm, profiles.len())
 }
 
 fn compose_group_layout(initial_perm: Vec<u32>, layout: &[usize]) -> Vec<u32> {
@@ -1351,32 +933,6 @@ fn compose_group_layout(initial_perm: Vec<u32>, layout: &[usize]) -> Vec<u32> {
         .into_iter()
         .map(|group| group_to_position[group as usize])
         .collect()
-}
-
-fn group_for_profile(profile: Vec<u32>, profile_to_group: &mut HashMap<Vec<u32>, u32>) -> u32 {
-    let next_group = profile_to_group.len() as u32;
-    *profile_to_group.entry(profile).or_insert(next_group)
-}
-
-fn build_profile_merge_permutation<P: Ord>(profiles: &[P]) -> (Vec<u32>, usize) {
-    if profiles.is_empty() {
-        return (Vec::new(), 0);
-    }
-
-    let mut indices: Vec<usize> = (0..profiles.len()).collect();
-    indices.sort_by(|&left, &right| profiles[left].cmp(&profiles[right]));
-
-    let mut perm = vec![0u32; profiles.len()];
-    let mut group = 0u32;
-    perm[indices[0]] = group;
-    for pair in indices.windows(2) {
-        if profiles[pair[0]] != profiles[pair[1]] {
-            group += 1;
-        }
-        perm[pair[1]] = group;
-    }
-
-    (perm, group as usize + 1)
 }
 
 fn densify_used_group_ids(perm: Vec<u32>) -> (Vec<u32>, usize) {
@@ -2223,70 +1779,79 @@ mod tests {
     }
 
     #[test]
-    fn direct_tsid_profiles_match_materialized_token_compaction() {
-        let weights = vec![
+    fn exact_observation_partitions_match_literal_memberships() {
+        const TOKENS: usize = 257;
+        const STATES: usize = 29;
+        let weights: Vec<_> = (0..137u32).map(|context| {
+            let first = context.wrapping_mul(29) % TOKENS as u32;
+            let second = context.wrapping_mul(47).wrapping_add(11) % TOKENS as u32;
+            let tokens = token_set(&[
+                (first, (first + context % 19).min(TOKENS as u32 - 1)),
+                (second, (second + context % 7).min(TOKENS as u32 - 1)),
+            ]);
+            let states = context % (STATES as u32 - 1);
             Weight::from_per_tsid_token_sets([
-                (0, RangeSetBlaze::from_iter([0..=0])),
-                (1, RangeSetBlaze::from_iter([1..=1])),
-                (2, RangeSetBlaze::from_iter([2..=2])),
-                (3, RangeSetBlaze::from_iter([3..=3])),
-            ]),
-            Weight::from_per_tsid_token_sets([
-                (0, RangeSetBlaze::from_iter([0..=1])),
-                (1, RangeSetBlaze::from_iter([0..=1])),
-                (2, RangeSetBlaze::from_iter([2..=3])),
-                (3, RangeSetBlaze::from_iter([2..=3])),
-            ]),
-        ];
-        let tsid_perm = identity_perm(4);
-        let token_perm = vec![0, 0, 1, 1];
-        let token_context = PermutationContext::new(&tsid_perm, &token_perm);
-        let original_refs = weight_refs(&weights);
-        let token_remaps = build_global_permuted_token_cache(&weights, &token_context);
-        let direct = build_exact_tsid_merge_permutation_with_token_remaps(
-            &original_refs,
-            4,
-            &token_context,
-            &token_remaps,
-        );
+                (states, tokens.as_ref().clone()),
+                (states + 1, tokens.as_ref().clone()),
+            ])
+        }).chain([Weight::all(), Weight::empty()]).collect();
 
-        let (materialized, _) = apply_permutations_to_weight_set_with_cache(
-            &weights,
-            &tsid_perm,
-            &token_perm,
-        );
-        let materialized_refs = weight_refs(&materialized);
-        let expected = build_exact_tsid_merge_permutation(&materialized_refs, 4);
+        for count in [0, 1, 9, weights.len()] {
+            let refs = weight_refs(&weights[..count]);
+            let (token_perm, token_count, fused) = build_exact_token_partition(&refs, TOKENS, true);
+            let (tsid_perm, tsid_count) = build_exact_tsid_merge_permutation(&refs, STATES);
 
-        assert_eq!(direct, expected);
+            let token_signature = |token: usize| {
+                refs.iter().flat_map(|weight| {
+                    (0..STATES).map(move |state| {
+                        weight.is_full() || weight.tokens_for_tsid(state as u32).contains(token as u32)
+                    })
+                }).collect::<Vec<_>>()
+            };
+            let state_signature = |state: usize| {
+                refs.iter().filter(|weight| !weight.is_full())
+                    .map(|weight| weight.tokens_for_tsid(state as u32).clone())
+                    .collect::<Vec<_>>()
+            };
+            let token_profiles = (0..TOKENS).map(token_signature).collect::<Vec<_>>();
+            let state_profiles = (0..STATES).map(state_signature).collect::<Vec<_>>();
+            for left in 0..TOKENS {
+                for right in 0..TOKENS {
+                    assert_eq!(token_perm[left] == token_perm[right], token_profiles[left] == token_profiles[right]);
+                }
+            }
+            for left in 0..STATES {
+                for right in 0..STATES {
+                    assert_eq!(tsid_perm[left] == tsid_perm[right], state_profiles[left] == state_profiles[right]);
+                }
+            }
+            assert_eq!(token_perm.iter().copied().collect::<HashSet<_>>().len(), token_count);
+            assert_eq!(tsid_perm.iter().copied().collect::<HashSet<_>>().len(), tsid_count);
+            if let Some(fused) = fused {
+                let expected = build_global_permuted_token_cache(&weights[..count],
+                    &PermutationContext::new(&identity_perm(STATES), &token_perm));
+                assert_eq!(fused, expected);
+            }
+            let (materialized, _) = apply_permutations_to_weight_set_with_cache(
+                &weights[..count], &identity_perm(STATES), &token_perm,
+            );
+            let (remapped, _) = build_exact_tsid_merge_permutation(&weight_refs(&materialized), STATES);
+            for left in 0..STATES {
+                for right in 0..STATES {
+                    assert_eq!(tsid_perm[left] == tsid_perm[right], remapped[left] == remapped[right]);
+                }
+            }
+        }
     }
 
     #[test]
-    fn multiword_token_profile_sweep_matches_dense_permutation() {
-        const NUM_TOKENS: usize = 257;
-        let token_sets: Vec<Arc<RangeSetBlaze<u32>>> = (0..137u32)
-            .map(|context| {
-                let first = context.wrapping_mul(29) % NUM_TOKENS as u32;
-                let second = context.wrapping_mul(47).wrapping_add(11) % NUM_TOKENS as u32;
-                token_set(&[
-                    (first, (first + context % 19).min(NUM_TOKENS as u32 - 1)),
-                    (second, (second + context % 7).min(NUM_TOKENS as u32 - 1)),
-                ])
-            })
-            .collect();
-        let profile_words = token_sets.len().div_ceil(64);
-
-        let dense = build_exact_token_merge_permutation_multiword_dense(
-            &token_sets,
-            NUM_TOKENS,
-            profile_words,
-        );
-        let sweep = build_exact_token_merge_permutation_multiword_sweep(
-            &token_sets,
-            NUM_TOKENS,
-            profile_words,
-        );
-
-        assert_eq!(sweep, dense);
+    fn adjacent_observation_runs_toggle_once_at_their_outer_boundaries() {
+        let mut events = ObservationEvents::default();
+        events.push_range(1, 2, 0, 8);
+        events.push_range(3, 4, 0, 8);
+        events.push_range(2, 3, 1, 8);
+        events.push_range(6, u32::MAX, 0, 8);
+        let (perm, _) = events.partition(8, 0u64);
+        assert_eq!(perm, vec![0, 1, 2, 2, 1, 0, 1, 1]);
     }
 }
