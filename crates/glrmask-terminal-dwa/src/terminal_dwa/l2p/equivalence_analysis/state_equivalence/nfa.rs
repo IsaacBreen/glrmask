@@ -1,7 +1,8 @@
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use crate::vocab::vocab_prefix_tree::VocabPrefixTree;
 
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::observation::{ConfigInterner, EpsilonImageScratch};
@@ -165,7 +166,7 @@ impl PowersetTrajectory<'_> {
         for &state in starts {
             self.selected[state as usize] = true;
         }
-        traverse_frontiers(self, starts, trie, None, 0)
+        traverse_frontiers(self, starts, PrefixWalk::Bytes(trie), None, 0)
             .expect("unbounded powerset trajectory");
     }
 }
@@ -183,7 +184,7 @@ impl FrontierMachine for PowersetTrajectory<'_> {
     }
 
     fn route_root(
-        &mut self, source: u32, _children: &[(u8, usize)],
+        &mut self, source: u32, _children: &[u8],
         slots: &[usize; 256], frontiers: &mut [Vec<u32>],
     ) {
         let start = self.view.edge_offsets[source as usize] as usize;
@@ -776,23 +777,122 @@ fn build_byte_trie<'a>(sequences: impl IntoIterator<Item = &'a [u8]>) -> Vec<Byt
     nodes
 }
 
-/// Build the same trie as `build_byte_trie` when input sequences are already
-/// in lexicographic byte order. Consecutive sequences share exactly their LCP,
-/// so no edge hash table is needed: truncate the previous prefix path to the
-/// LCP and append the new suffix once.
+/// A virtual position in either the transient byte trie (reset suffixes and
+/// subset walks) or the shared lexical radix. Inside a compressed edge, a
+/// position advances one byte at a time: no lexical event may be skipped.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct PrefixPosition {
+    node: usize,
+    depth: usize,
+}
+
+#[derive(Clone, Copy)]
+enum PrefixWalk<'a> {
+    Bytes(&'a [ByteTrieNode]),
+    Radix(&'a VocabPrefixTree),
+}
+
+impl PrefixWalk<'_> {
+    fn root(self) -> PrefixPosition { PrefixPosition { node: 0, depth: 0 } }
+
+    fn child_at(self, position: PrefixPosition, slot: usize) -> Option<(u8, PrefixPosition)> {
+        match self {
+            Self::Bytes(nodes) => nodes[position.node].children.get(slot)
+                .map(|&(byte, node)| (byte, PrefixPosition { node, depth: 0 })),
+            Self::Radix(tree) => {
+                let node = tree.node(position.node as u32);
+                if position.depth < node.prefix_length() {
+                    return (slot == 0).then(|| (node.prefix()[position.depth],
+                        PrefixPosition { node: position.node, depth: position.depth + 1 }));
+                }
+                let child = tree.node(*node.children().get(slot)?);
+                Some((child.prefix()[position.depth],
+                    PrefixPosition { node: child.index() as usize, depth: position.depth + 1 }))
+            }
+        }
+    }
+
+    fn mark_relevant(self, relevant: &mut [bool; 256]) {
+        match self {
+            Self::Bytes(nodes) => {
+                for node in nodes {
+                    for &(byte, _) in &node.children { relevant[byte as usize] = true; }
+                }
+            }
+            Self::Radix(tree) => {
+                let words = tree.root().subtree_bytes();
+                for byte in 0..256 {
+                    relevant[byte] |= words[byte / 64] & (1u64 << (byte % 64)) != 0;
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PrefixEventDag {
+    children: Vec<Vec<(u8, usize)>>,
+    root: usize,
+}
+
+/// A vocabulary-pinned prefix walk and its lazily shared suffix quotient.
+/// The radix owns spelling and child topology; expanded positions are not
+/// retained. The suffix quotient is purely a vocabulary observation, so it
+/// is reusable across lexer event predicates and active terminal scopes.
 #[derive(Debug)]
 pub struct TokenBoundedAnalysisTrie {
-    nodes: Arc<[ByteTrieNode]>,
+    tree: Arc<VocabPrefixTree>,
+    byte_positions: usize,
+    event_dag: OnceLock<PrefixEventDag>,
 }
 
 impl TokenBoundedAnalysisTrie {
+    pub fn from_radix(tree: Arc<VocabPrefixTree>) -> Self {
+        let mut byte_positions = 1usize;
+        for index in 0..tree.len() {
+            for (edge, _) in tree.node(index as u32).iter_children() {
+                byte_positions = byte_positions.saturating_add(edge.len());
+            }
+        }
+        Self { tree, byte_positions, event_dag: OnceLock::new() }
+    }
+
     pub fn len(&self) -> usize {
-        self.nodes.len()
+        self.byte_positions
     }
 
     pub fn is_reasonable_superset_for(&self, token_count: usize) -> bool {
         const MAX_NODE_RATIO: usize = 8;
         self.len() <= token_count.saturating_mul(MAX_NODE_RATIO).max(256)
+    }
+
+    fn event_dag(&self) -> &PrefixEventDag {
+        self.event_dag.get_or_init(|| {
+            let mut classes = vec![0usize; self.tree.len()];
+            let mut dag = Vec::<Vec<(u8, usize)>>::new();
+            let mut intern = FxHashMap::<Vec<(u8, usize)>, usize>::default();
+            let mut intern_row = |signature: Vec<(u8, usize)>| {
+                if let Some(&id) = intern.get(&signature) { return id; }
+                let id = dag.len();
+                dag.push(signature.clone());
+                intern.insert(signature, id);
+                id
+            };
+            for index in (0..self.tree.len()).rev() {
+                let mut signature = Vec::new();
+                for (edge, child) in self.tree.node(index as u32).iter_children() {
+                    let mut target = classes[child.index() as usize];
+                    for &byte in edge[1..].iter().rev() {
+                        target = intern_row(vec![(byte, target)]);
+                    }
+                    signature.push((edge[0], target));
+                }
+                // Radix children are in byte order, exactly the canonical
+                // signature order of the uncompressed suffix quotient.
+                classes[index] = intern_row(signature);
+            }
+            PrefixEventDag { children: dag, root: classes[0] }
+        })
     }
 
     /// Raw states from which an event can be reached on a vocabulary prefix.
@@ -821,7 +921,7 @@ impl TokenBoundedAnalysisTrie {
         initial_events: Option<&[bool]>,
     ) -> Option<(Vec<bool>, usize)> {
         let states = events.len();
-        if flat_trans.len() != states.checked_mul(256)? || self.nodes.is_empty()
+        if flat_trans.len() != states.checked_mul(256)?
             || initial_events.is_some_and(|events| events.len() != states)
         {
             return None;
@@ -832,26 +932,10 @@ impl TokenBoundedAnalysisTrie {
             }
         }
 
-        // Reuse the ordinary sorted-vocabulary trie. Bottom-up suffix sharing
-        // avoids evaluating repeated observation tails for every token prefix.
-        let mut classes = vec![0usize; self.nodes.len()];
-        let mut dag = Vec::<Vec<(u8, usize)>>::new();
-        let mut intern = FxHashMap::<Vec<(u8, usize)>, usize>::default();
-        for node in (0..self.nodes.len()).rev() {
-            let mut signature = self.nodes[node].children.iter()
-                .map(|&(byte, child)| (byte, classes[child])).collect::<Vec<_>>();
-            signature.sort_unstable();
-            classes[node] = if let Some(&id) = intern.get(&signature) {
-                id
-            } else {
-                let id = dag.len();
-                dag.push(signature.clone());
-                intern.insert(signature, id);
-                id
-            };
-        }
+        let event_dag = self.event_dag();
+        let dag = &event_dag.children;
         let edges = dag.iter().map(Vec::len).sum::<usize>()
-            + initial_events.map_or(0, |_| dag[classes[0]].len());
+            + initial_events.map_or(0, |_| dag[event_dag.root].len());
         let epsilon_volume = epsilon_closures.iter().map(|(_, closure)| closure.len()).sum::<usize>();
         let words = states.div_ceil(64);
         if states.checked_mul(edges)?.checked_add(epsilon_volume.checked_mul(dag.len())?)? > 120_000_000
@@ -890,7 +974,7 @@ impl TokenBoundedAnalysisTrie {
         let mut interned_rows=FxHashMap::<Vec<u64>,usize>::default();
         let mut preimages=FxHashMap::<(u8,usize),Vec<(usize,u64)>>::default();
         let mut cache_words=0usize;
-        for children in &dag {
+        for children in dag {
             let mut live = event_words.clone();
             for &(byte, child) in children {
                 let target_live = &rows[child];
@@ -936,7 +1020,7 @@ impl TokenBoundedAnalysisTrie {
             for (q, &event) in initial_events.iter().enumerate() {
                 if event { live[q / 64] |= 1u64 << (q % 64); }
             }
-            for &(byte, child) in &dag[classes[0]] {
+            for &(byte, child) in &dag[event_dag.root] {
                 for &(source, target) in &columns[byte as usize] {
                     let source=source as usize;
                     if rows[child][target as usize / 64] & (1u64 << (target % 64)) != 0
@@ -950,7 +1034,7 @@ impl TokenBoundedAnalysisTrie {
             }
             initial_row = live;
             &initial_row
-        } else { &rows[classes[0]] };
+        } else { &rows[event_dag.root] };
         Some(((0..states).map(|q| root[q / 64] & (1u64 << (q % 64)) != 0).collect(), dag.len()))
     }
 }
@@ -1042,9 +1126,14 @@ fn prefix_event_sources_declines_unknown_targets_and_bad_domains() {
 pub fn build_token_bounded_analysis_trie_sorted(
     sequences: &[&[u8]],
 ) -> TokenBoundedAnalysisTrie {
-    TokenBoundedAnalysisTrie {
-        nodes: Arc::from(build_byte_trie_sorted(sequences)),
-    }
+    debug_assert!(sequences.windows(2).all(|pair| pair[0] <= pair[1]));
+    let mut words = sequences.to_vec();
+    words.dedup();
+    TokenBoundedAnalysisTrie::from_radix(Arc::new(
+        VocabPrefixTree::from_ordered_tokens(Arc::new(
+            words.into_iter().map(Arc::<[u8]>::from).collect()
+        ))
+    ))
 }
 
 fn build_byte_trie_sorted(sequences: &[&[u8]]) -> Vec<ByteTrieNode> {
@@ -1190,13 +1279,13 @@ trait FrontierMachine {
     fn step(&mut self, state: u32, byte: u8) -> u32;
     fn sparse_root(&self) -> bool;
     fn route_root(
-        &mut self, state: u32, children: &[(u8, usize)],
+        &mut self, state: u32, children: &[u8],
         slots: &[usize; 256], frontiers: &mut [Vec<u32>],
     );
 }
 
 struct FrontierFrame {
-    node: usize,
+    node: PrefixPosition,
     next_child: usize,
     states: Vec<u32>,
 }
@@ -1233,7 +1322,7 @@ struct FrontierScratch {
 impl FrontierScratch {
     fn walk(
         &mut self, machine: &mut impl FrontierMachine,
-        node: usize, states: Vec<u32>, trie: &[ByteTrieNode],
+        node: PrefixPosition, states: Vec<u32>, trie: PrefixWalk<'_>,
     ) -> Result<(), TokenBoundedAnalysisWork> {
         if states.is_empty() {
             self.spare.push(states);
@@ -1242,7 +1331,7 @@ impl FrontierScratch {
         charge_frontier(machine.state_count(), &mut self.visits, states.len(), self.budget)?;
         let mut stack = vec![FrontierFrame { node, next_child: 0, states }];
         while let Some(frame) = stack.last_mut() {
-            let Some(&(byte, child)) = trie[frame.node].children.get(frame.next_child) else {
+            let Some((byte, child)) = trie.child_at(frame.node, frame.next_child) else {
                 let mut finished = stack.pop().expect("current frontier frame").states;
                 finished.clear();
                 self.spare.push(finished);
@@ -1281,36 +1370,38 @@ impl FrontierScratch {
 }
 
 fn traverse_frontiers(
-    machine: &mut impl FrontierMachine, starts: &[u32], trie: &[ByteTrieNode],
+    machine: &mut impl FrontierMachine, starts: &[u32], trie: PrefixWalk<'_>,
     budget: Option<TokenBoundedAnalysisWorkBudget>, prior_visits: usize,
 ) -> Result<usize, TokenBoundedAnalysisWork> {
-    if trie.is_empty() || starts.is_empty() {
+    if starts.is_empty() {
         return Ok(0);
     }
     let mut scratch = FrontierScratch {
         visits: prior_visits, budget, marks: vec![0; machine.state_count()],
         generation: 0, spare: Vec::new(),
     };
-    if machine.sparse_root() && trie[0].children.len() > 1 {
-        // Route a broad root's sparse edges to matching first-byte frontiers
-        // once per source instead of probing every possible first byte.
+    let root = trie.root();
+    if machine.sparse_root() && trie.child_at(root, 1).is_some() {
+        // Route broad sparse roots once per source, retaining byte positions
+        // in a compressed edge rather than expanding its topology.
         charge_frontier(machine.state_count(), &mut scratch.visits, starts.len(), budget)?;
-        let children = &trie[0].children;
+        let children = (0..256).map_while(|slot| trie.child_at(root, slot)).collect::<Vec<_>>();
+        let bytes = children.iter().map(|&(byte, _)| byte).collect::<Vec<_>>();
         let mut slots = [usize::MAX; 256];
-        for (slot, &(byte, _)) in children.iter().enumerate() {
+        for (slot, &byte) in bytes.iter().enumerate() {
             slots[byte as usize] = slot;
         }
         let mut frontiers = vec![Vec::new(); children.len()];
         for &state in starts {
-            machine.route_root(state, children, &slots, &mut frontiers);
+            machine.route_root(state, &bytes, &slots, &mut frontiers);
         }
-        for ((_, child), mut frontier) in children.iter().zip(frontiers) {
+        for ((_, child), mut frontier) in children.into_iter().zip(frontiers) {
             frontier.sort_unstable();
             frontier.dedup();
-            scratch.walk(machine, *child, frontier, trie)?;
+            scratch.walk(machine, child, frontier, trie)?;
         }
     } else {
-        scratch.walk(machine, 0, starts.to_vec(), trie)?;
+        scratch.walk(machine, root, starts.to_vec(), trie)?;
     }
     charge_frontier(machine.state_count(), &mut scratch.visits, 0, budget)?;
     Ok(scratch.visits - prior_visits)
@@ -1330,7 +1421,7 @@ impl FrontierMachine for LazyTrajectory<'_, '_> {
     }
 
     fn route_root(
-        &mut self, state: u32, children: &[(u8, usize)],
+        &mut self, state: u32, children: &[u8],
         slots: &[usize; 256], frontiers: &mut [Vec<u32>],
     ) {
         let tokenizer = self.expansion.tokenizer;
@@ -1346,7 +1437,7 @@ impl FrontierMachine for LazyTrajectory<'_, '_> {
                 }
             }
         } else {
-            for (slot, &(byte, _)) in children.iter().enumerate() {
+            for (slot, &byte) in children.iter().enumerate() {
                 let target = self.step(state, byte);
                 if target != u32::MAX {
                     frontiers[slot].push(target);
@@ -1375,7 +1466,7 @@ impl BoundedExpansion<'_> {
     }
 
     fn expand(
-        &mut self, start_states: &[u32], trie: &[ByteTrieNode], preseeded: Option<&[u32]>,
+        &mut self, start_states: &[u32], trie: PrefixWalk<'_>, preseeded: Option<&[u32]>,
         budget: Option<TokenBoundedAnalysisWorkBudget>, prior_visits: usize,
     ) -> Result<usize, TokenBoundedAnalysisWork> {
         traverse_frontiers(&mut LazyTrajectory { expansion: self, preseeded },
@@ -1388,7 +1479,7 @@ impl BoundedExpansion<'_> {
     fn expand_reference(
         &mut self,
         start_states: &[u32],
-        trie: &[ByteTrieNode],
+        trie: PrefixWalk<'_>,
         preseeded: Option<&[u32]>,
         budget: Option<TokenBoundedAnalysisWorkBudget>,
         prior_visits: usize,
@@ -1397,13 +1488,13 @@ impl BoundedExpansion<'_> {
         let mut visits = prior_visits;
         let mut stack = Vec::new();
         for &start in start_states {
-            stack.push((start, 0usize));
+            stack.push((start, trie.root()));
             while let Some((state, node)) = stack.pop() {
                 if !visited.insert((state, node)) {
                     continue;
                 }
                 self.charge(&mut visits, 1, budget)?;
-                for &(byte, child) in &trie[node].children {
+                for (byte, child) in (0..256).map_while(|slot| trie.child_at(node, slot)) {
                     let target = self.step(state, byte, preseeded);
                     if target != u32::MAX {
                         stack.push((target, child));
@@ -1418,7 +1509,7 @@ impl BoundedExpansion<'_> {
     fn expand_selected(
         &mut self,
         start_states: &[u32],
-        trie: &[ByteTrieNode],
+        trie: PrefixWalk<'_>,
         preseeded: Option<&[u32]>,
         budget: Option<TokenBoundedAnalysisWorkBudget>,
         prior_visits: usize,
@@ -1715,10 +1806,10 @@ fn build_bounded_analysis_topology_impl_with_expansion(
         })
         .flatten();
     let owned_token_trie;
-    let token_trie: &[ByteTrieNode] = if common_first_byte.is_none()
+    let (token_trie, token_trie_len) = if common_first_byte.is_none()
         && let Some(prebuilt) = prebuilt_token_trie
     {
-        prebuilt.nodes.as_ref()
+        (PrefixWalk::Radix(&prebuilt.tree), prebuilt.len())
     } else {
         owned_token_trie = if common_first_byte.is_some() {
             if tokens_are_sorted {
@@ -1732,7 +1823,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
         } else {
             build_byte_trie(tokens.iter().copied())
         };
-        &owned_token_trie
+        (PrefixWalk::Bytes(&owned_token_trie), owned_token_trie.len())
     };
     let suffix_trie = include_reset_suffixes.then(|| {
         build_byte_trie(
@@ -1745,10 +1836,9 @@ fn build_bounded_analysis_topology_impl_with_expansion(
     // The shared prefix trie may be a superset of the requested tokens.
     // The alphabet is that of the actual walks, not just the local token list.
     let mut relevant = [false; 256];
-    for node in token_trie.iter().chain(suffix_trie.iter().flatten()) {
-        for &(byte, _) in &node.children {
-            relevant[byte as usize] = true;
-        }
+    token_trie.mark_relevant(&mut relevant);
+    if let Some(suffix) = &suffix_trie {
+        PrefixWalk::Bytes(suffix).mark_relevant(&mut relevant);
     }
     if let Some(byte) = common_first_byte {
         relevant[byte as usize] = true;
@@ -1795,7 +1885,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
     )?;
     let suffix_trie_visits = if let Some(suffix_trie) = suffix_trie.as_ref() {
         expansion.expand_selected(
-            std::slice::from_ref(&start_state), suffix_trie, None,
+            std::slice::from_ref(&start_state), PrefixWalk::Bytes(suffix_trie), None,
             budget, token_trie_visits, use_frontier_expansion,
         )?
     } else {
@@ -1815,7 +1905,7 @@ fn build_bounded_analysis_topology_impl_with_expansion(
             active_groups.is_some(),
             combine_start_states,
             common_first_byte.is_some(),
-            token_trie.len(),
+            token_trie_len,
             work.configurations,
             work.trie_visits,
             setup_ms,
@@ -3239,6 +3329,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn radix_virtual_positions_preserve_every_literal_prefix() {
+        let words: Vec<&[u8]> = vec![b"", b"abc", b"abcd", b"abef", b"z", b"zz"];
+        let radix = build_token_bounded_analysis_trie_sorted(&words);
+        let bytes = build_byte_trie_sorted(&words);
+        let walk = PrefixWalk::Radix(&radix.tree);
+        let mut pending = vec![(walk.root(), 0usize)];
+        let mut count = 0;
+        while let Some((position, literal)) = pending.pop() {
+            count += 1;
+            for (slot, &(byte, child)) in bytes[literal].children.iter().enumerate() {
+                let (observed, next) = walk.child_at(position, slot).unwrap();
+                assert_eq!(byte, observed);
+                pending.push((next, child));
+            }
+            assert!(walk.child_at(position, bytes[literal].children.len()).is_none());
+        }
+        assert_eq!(count, radix.len());
+        assert_eq!(count, bytes.len());
     }
 
     #[test]

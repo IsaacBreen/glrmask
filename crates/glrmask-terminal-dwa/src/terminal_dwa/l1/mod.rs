@@ -35,14 +35,9 @@ fn l1_token_bounded_analysis_trie(
         return Some(cached);
     }
     let order = l1_identity_vocab_order(vocab);
-    let tokens = order
-        .ordered_token_bytes
-        .iter()
-        .map(|bytes| bytes.as_ref())
-        .collect::<Vec<_>>();
     let trie = Arc::new(
-        super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_trie_sorted(
-            &tokens,
+        super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie::from_radix(
+            order.trie(),
         ),
     );
     vocab.vocab_derived_cache_set(Arc::clone(&trie));
