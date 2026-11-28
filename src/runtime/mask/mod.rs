@@ -4402,7 +4402,7 @@ impl ConstraintState {
     /// empty-spelled special ID only via its exact live action. Root end IDs
     /// are applied separately after this body-domain filter.
     fn enforce_empty_byte_token_domain(&self, buf: &mut [u32]) {
-        if self.constraint.empty_byte_token_ids.is_empty()
+        if self.constraint.token_bytes.entries().empty_byte_token_ids().is_empty()
             || !(self.constraint.has_template_parser()
                 || self.constraint.uses_dynamic_runtime()
                 || self.constraint.uses_compact_segmented_parser_runtime())
@@ -4411,7 +4411,7 @@ impl ConstraintState {
         // interval. In particular, an all-vocabulary empty-spelled binding must
         // not perform one parser advance per model ID. This inventory is sorted
         // and unique, whether prepared from Vocab or reconstructed during load.
-        let empty_ids = self.constraint.empty_byte_token_ids.as_ref();
+        let empty_ids = self.constraint.token_bytes.entries().empty_byte_token_ids();
         let mut live_ranges = smallvec::SmallVec::<[(u32, u32); 8]>::new();
         for special in &self.constraint.special_token_terminals {
             if self.constraint.is_late_grammar_placeholder_terminal(special.terminal_id) {

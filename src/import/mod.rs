@@ -599,7 +599,6 @@ fn compile_component_shell_using(
         }
     }
     if parent.sanitize_late_grammar_placeholder_token_domain(){parent.rebuild_runtime_caches();}
-    let _=parent.late_bind_vocab.set(vocab.clone());
     Ok(parent)
 }
 
@@ -624,9 +623,6 @@ pub(crate) fn compile_dynamic_glrm_fixture(
     }).collect::<crate::Result<Vec<_>>>()?;
     let mut constraint = DynamicConstraint::from_alternatives(compiled);
     constraint.attach_late_grammar_placeholders(&placeholders)?;
-    for body in constraint.constraints_mut() {
-        let _ = body.late_bind_vocab.set(vocab.clone());
-    }
     Ok(constraint)
 }
 

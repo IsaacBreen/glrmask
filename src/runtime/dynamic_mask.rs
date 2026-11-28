@@ -10312,7 +10312,7 @@ nt start = A;
         let bound = parent.bind_grammar_dynamic_boundary("child", child).unwrap();
         let loaded = Constraint::load(bound.save(), &vocab).unwrap();
         for constraint in [&bound, &loaded] {
-            assert_eq!(constraint.empty_byte_token_ids.as_ref(), &[0, 7, 31]);
+            assert_eq!(constraint.token_bytes.entries().empty_byte_token_ids(), &[0, 7, 31]);
             // Domain sanitization must not build a full model-vocabulary trie
             // just to find zero-byte spellings, including after artifact load.
             let was_lazy = constraint.lazy_dynamic_mask_vocab.get().is_some();

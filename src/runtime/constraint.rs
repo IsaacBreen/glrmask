@@ -1131,7 +1131,7 @@ impl Constraint {
         // the Unknown-summary fallback. Query it before materializing deferred
         // link metadata so linked artifacts keep their deferred wrapper.
         if self.boundary_candidate_summary.get().is_some()
-            && let Some(vocab) = self.late_bind_vocab.get()
+            && let Some(vocab) = self.token_bytes.vocab()
             && let Ok(Some(candidates)) =
                 crate::compiler::boundary_candidates::persisted_boundary_candidate_ids(self, vocab)
         {
@@ -1237,7 +1237,7 @@ impl Constraint {
         struct BoundaryPrefixTree(VocabPrefixTree);
         impl crate::vocab::VocabDerivedArtifact for BoundaryPrefixTree {}
 
-        let tree = if let Some(vocab) = self.late_bind_vocab.get() {
+        let tree = if let Some(vocab) = self.token_bytes.vocab() {
             if let Some(tree) = vocab.vocab_derived_cache_get::<BoundaryPrefixTree>() {
                 tree
             } else {
@@ -1420,7 +1420,7 @@ impl Constraint {
             // trigger cannot certify the whole recursive interface. A checked
             // component summary may prune; otherwise widen conservatively.
             crate::compiler::boundary_candidates::persisted_boundary_candidate_ids(self,
-                self.late_bind_vocab.get().ok_or("exact recursive trigger requires its vocabulary")?)?
+                self.token_bytes.vocab().ok_or("exact recursive trigger requires its vocabulary")?)?
                 .unwrap_or_else(|| self.token_bytes_iter().filter(|(_, bytes)| bytes.len() >= 2)
                     .map(|(id, _)| id).collect())
         } else {
@@ -1679,18 +1679,9 @@ impl Constraint {
     /// binding then lets repeated composition prove compatibility by `Arc` identity.
     #[doc(hidden)]
     pub(crate) fn bind_vocab_exact(&mut self, vocab: &crate::Vocab) -> Result<(), String> {
-        if let Some(existing) = self.late_bind_vocab.get()
-            && !existing.same_model_vocab(vocab)
-        {
-            return Err(
-                "constraint was not compiled for the supplied exact vocabulary".to_string(),
-            );
-        }
         if !self.token_bytes.bind_exact(vocab) {
             return Err("constraint was not compiled for the supplied vocabulary".to_string());
         }
-        // Preserve the caller's model metadata and derived-artifact cache.
-        self.late_bind_vocab = OnceLock::from(vocab.clone());
         if let Some(overlay) = self.static_dynamic_overlay.as_mut() {
             for component in &mut overlay.segmented_parser_components {
                 Arc::make_mut(&mut component.constraint).bind_vocab_exact(vocab)?;
@@ -3223,9 +3214,6 @@ impl Constraint {
         if vocab.is_initialized() {
             return vocab.max_token_byte_len();
         }
-        if let Some(bound_vocab) = self.late_bind_vocab.get() {
-            return bound_vocab.max_token_byte_len();
-        }
         self.max_token_byte_len()
     }
 
@@ -3264,7 +3252,7 @@ impl Constraint {
                     .tokenizer
                     .virtual_residuals_mask_tokenizer_with_vocab(
                         max_token_len,
-                        self.late_bind_vocab.get(),
+                        self.token_bytes.vocab(),
                     )
             {
                 vocab.set_virtual_residuals_mask_projection(mask_tokenizer, projections);
@@ -10768,11 +10756,10 @@ mod dense_internal_token_mask_tests {
         assert!(!Arc::ptr_eq(&constraint.token_bytes.entries_arc(), &vocab_b.entries_arc()));
         constraint.bind_vocab_exact(&vocab_b).unwrap();
         assert!(Arc::ptr_eq(&constraint.token_bytes.entries_arc(), &vocab_b.entries_arc()));
-        assert!(constraint.late_bind_vocab.get().is_some());
+        assert!(constraint.token_bytes.vocab().is_some());
         assert!(Arc::ptr_eq(
             &constraint
-                .late_bind_vocab
-                .get()
+                .token_bytes.vocab()
                 .expect("exact vocab bind should seed late-bind vocab")
                 .entries_arc(),
             &vocab_b.entries_arc(),
@@ -11358,7 +11345,6 @@ mod boundary_token_trie_tests {
                 }
             };
             let compile_ms = started.elapsed().as_secs_f64() * 1000.0;
-            let _ = constraint.late_bind_vocab.set(vocab.clone());
             constraint.materialize_composition_metadata_for_compilation().unwrap();
             let relevant = constraint.boundary_relevant_terminals();
             let started = std::time::Instant::now();

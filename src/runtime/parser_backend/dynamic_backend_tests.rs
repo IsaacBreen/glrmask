@@ -534,13 +534,13 @@ fn focused_empty_special_token_is_live_after_prefix_across_reload() {
 }
 
 #[test]
-fn focused_empty_byte_summary_is_shared_by_compilers_and_rebuilt_by_loaders() {
+fn focused_empty_byte_summary_is_shared_by_compilers_and_loaders() {
     let vocab = Vocab::from_entries_unchecked(vec![
         (0, b"a".to_vec()), (2, b"b".to_vec()), (7, Vec::new()),
         (31, Vec::new()), (42, vec![0]), (512, Vec::new()),
     ]);
     let source = r#"start ::= "a""#;
-    let expected = crate::compiler::compile::vocab_empty_byte_token_ids(&vocab);
+    let expected = vocab.entries_map().empty_byte_token_ids();
     let mut compiled = vec![crate::DynamicConstraint::from_ebnf(source, &vocab)
         .unwrap().into_constraint()];
     for mode in MaskMode::ALL {
@@ -548,13 +548,13 @@ fn focused_empty_byte_summary_is_shared_by_compilers_and_rebuilt_by_loaders() {
             mode.build_options()).unwrap());
     }
     for constraint in &compiled {
-        assert!(std::sync::Arc::ptr_eq(&constraint.empty_byte_token_ids, &expected));
+        assert!(std::ptr::eq(constraint.token_bytes.entries().empty_byte_token_ids(), expected));
         let self_loaded = Constraint::load(constraint.save(), &vocab).unwrap();
         let external_loaded = Constraint::load(
             constraint.save(), &vocab,
         ).unwrap();
         for current in [constraint, &self_loaded, &external_loaded] {
-            assert_eq!(current.empty_byte_token_ids.as_ref(), &[7, 31, 512]);
+            assert_eq!(current.token_bytes.entries().empty_byte_token_ids(), &[7, 31, 512]);
             let mut state = current.start();
             for _ in 0..2 {
                 let mask = state.mask();

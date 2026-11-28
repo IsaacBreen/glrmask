@@ -2268,10 +2268,10 @@ impl Constraint {
     /// Fingerprint of the vocabulary this constraint is bound to. Covers the
     /// ID-to-bytes mapping and the special (exact-only) ID set.
     pub(crate) fn vocab_fingerprint(&self) -> [u8; 32] {
-        if let Some(fingerprint) = self.pending_vocab_fingerprint {
-            return fingerprint;
+        if let crate::runtime::TokenByteDomain::Deferred(fingerprint) = &self.token_bytes {
+            return *fingerprint;
         }
-        if let Some(vocab) = self.late_bind_vocab.get() {
+        if let Some(vocab) = self.token_bytes.vocab() {
             return crate::compiler::compile::vocab_fingerprint(vocab);
         }
         let mut digest = blake3::Hasher::new();
@@ -2295,7 +2295,7 @@ impl Constraint {
     }
 
     pub(crate) fn artifact_vocab_digest(&self) -> [u8; 32] {
-        if let Some(vocab) = self.late_bind_vocab.get() {
+        if let Some(vocab) = self.token_bytes.vocab() {
             return crate::compiler::compile::vocab_content_digest(vocab);
         }
         let mut digest = blake3::Hasher::new();
@@ -2985,7 +2985,7 @@ impl Constraint {
             } else {
                 Self::load_body_with_vocab_policy(body, None)?
             };
-            constraint.pending_vocab_fingerprint = Some(recorded);
+            constraint.token_bytes = crate::runtime::TokenByteDomain::Deferred(recorded);
             Ok((constraint, recorded))
         })
     }
@@ -3049,7 +3049,7 @@ impl Constraint {
         {
             return Err(crate::Error::Serialization("noncanonical root vocabulary policy".to_owned()));
         }
-        let mut body = match bytes {
+        let body = match bytes {
             Cow::Owned(mut bytes) => Self::load_body_with_vocab_policy(Cow::Owned(bytes.split_off(start)), supplied_vocab)?,
             Cow::Borrowed(bytes) => Self::load_body_with_vocab_policy(Cow::Borrowed(&bytes[start..]), supplied_vocab)?,
         };
@@ -3060,15 +3060,6 @@ impl Constraint {
             return Err(crate::Error::Serialization(
                 "root exact-only token domain overlaps byte vocabulary".to_owned(),
             ));
-        }
-        if supplied_vocab.is_some() && !exact_ids.is_empty() {
-            let vocab = crate::Vocab::from_entries_unchecked(body.token_bytes_iter()
-                    .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
-                    .collect());
-            body.bind_vocab_exact(&vocab)
-                .map_err(crate::Error::Serialization)?;
-        } else if supplied_vocab.is_none() {
-            body.pending_special_token_ids = Some(exact_ids);
         }
         body.with_end_tokens(&end_ids)
             .map_err(|error| crate::Error::Serialization(error.to_string()))
@@ -3908,20 +3899,6 @@ impl Constraint {
                     )));
                 }
             }
-        }
-        // Rebuild this tiny token-domain summary from the authoritative
-        // packed/materialized inventory after all external sections load.
-        // No vocabulary trie is built and it is not serialized a second time.
-        if !deferred {
-            let mut empty_byte_token_ids = constraint.token_bytes_iter()
-                .filter_map(|(id, bytes)| bytes.is_empty().then_some(id))
-                .collect::<Vec<u32>>();
-            // The mask's interval filter needs a sorted unique index even when an
-            // indexed packed artifact supplied its token-byte rows out of order.
-            // Normalize once at load, never once per generated-token mask.
-            empty_byte_token_ids.sort_unstable();
-            empty_byte_token_ids.dedup();
-            constraint.empty_byte_token_ids = empty_byte_token_ids.into();
         }
         let rebuild_started = profile.then(std::time::Instant::now);
         let skip_runtime_rebuild_for_profile = deferred

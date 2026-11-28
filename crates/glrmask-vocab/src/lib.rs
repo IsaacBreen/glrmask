@@ -97,6 +97,7 @@ use range_set_blaze::RangeSetBlaze;
 pub struct VocabEntries {
     ids: Box<[u32]>,
     spans: Box<[(usize, usize)]>,
+    empty_ids: Box<[u32]>,
     data: Arc<Vec<u8>>,
     dense: bool,
 }
@@ -118,8 +119,12 @@ impl VocabEntries {
 
     fn from_parts(ids: Vec<u32>, spans: Vec<(usize, usize)>, data: Arc<Vec<u8>>) -> Self {
         let dense = ids.last().is_none_or(|&id| u64::from(id) + 1 == ids.len() as u64);
-        Self { ids: ids.into_boxed_slice(), spans: spans.into_boxed_slice(), data, dense }
+        let empty_ids = ids.iter().zip(&spans).filter_map(|(&id, &(start, end))|
+            (start == end).then_some(id)).collect();
+        Self { ids: ids.into_boxed_slice(), spans: spans.into_boxed_slice(), empty_ids, data, dense }
     }
+
+    pub fn empty_byte_token_ids(&self) -> &[u32] { &self.empty_ids }
 
     pub fn len(&self) -> usize { self.ids.len() }
     pub fn is_empty(&self) -> bool { self.ids.is_empty() }

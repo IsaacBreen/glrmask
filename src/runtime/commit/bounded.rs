@@ -373,7 +373,7 @@ fn probe_owner(view:View<'_>,w:&mut Witnesses,scratch:Option<&mut CommitBuffers>
         c.lazy_dynamic_mask_vocab.get().filter(|v|v.is_initialized()&&!v.is_grammar_quotiented())
     };
     if let Some(vocab)=dynamic{return probe_dynamic_trie(view,vocab,buffers,w);}
-    if let Some(ordered)=c.late_bind_vocab.get().and_then(crate::compiler::constraint_possible_matches::prepared_ordered_tokens) {
+    if let Some(ordered)=c.token_bytes.vocab().and_then(crate::compiler::constraint_possible_matches::prepared_ordered_tokens) {
         return probe_ordered(view,&ordered,buffers,w);
     }
     // No setup/index work is charged to a cold query. Enumerate real original

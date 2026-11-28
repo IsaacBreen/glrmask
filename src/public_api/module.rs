@@ -511,7 +511,7 @@ impl Module {
                 // A vocabulary-free retained body has no token bytes yet; its
                 // vocabulary is checked in `validate_retained_vocab` at
                 // compile/precompile time.
-                if p.inner.pending_vocab_fingerprint.is_none() {
+                if p.inner.token_bytes.vocab().is_some() {
                     c.target(&constraint_vocab(&p.inner))?;
                 }
             }
@@ -867,7 +867,6 @@ impl Module {
                 let mut p = source.prepare_unlinked(vocab, BuildOptions::default())?;
                 let inner = Arc::make_mut(&mut p.inner);
                 crate::compiler::boundary_candidates::persist_boundary_candidate_summary(inner, vocab);
-                let _ = inner.late_bind_vocab.set(vocab.clone());
                 inner.install_template_parser()?;
                 if build_boundary {
                     inner.build_boundary_trigger(target_b).map_err(Error::Compilation)?;
@@ -878,8 +877,6 @@ impl Module {
                 return Ok(p);
             }
         };
-
-        let _ = inner.late_bind_vocab.set(vocab.clone());
         if build_boundary {
             inner.build_boundary_trigger(target_b).map_err(Error::Compilation)?;
         }

@@ -420,7 +420,6 @@ mod tests {
             false,
             crate::runtime::parser_backend::DynamicParserBackend::LrTable,
         ).unwrap();
-        let _ = inner.late_bind_vocab.set(v.clone());
         let non_native = PreparedGrammar {
             inner: Arc::new(inner),
             bindings: OrdMap::new(),

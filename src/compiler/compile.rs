@@ -8,36 +8,6 @@ pub(crate) use super::pipeline::{
     emit_compile_profile_summary,
 };
 
-/// Sorted byte-backed zero-length spellings in one immutable model vocabulary.
-/// Exact-only control IDs are not byte entries and must not be added here.
-#[derive(Debug)]
-struct VocabEmptyByteTokenIds {
-    ids: std::sync::Arc<[u32]>,
-}
-
-impl glrmask_vocab::__private::VocabDerivedArtifact for VocabEmptyByteTokenIds {}
-
-/// Share the exact token-domain summary across constraints and Vocab clones.
-/// The first consumer still pays the scan; this does not alter any compile
-/// timer or require a full vocabulary trie. Grammar-specific liveness (EOS and
-/// exact-token bindings) remains the mask runtime's responsibility.
-pub(crate) fn vocab_empty_byte_token_ids(vocab: &crate::Vocab) -> std::sync::Arc<[u32]> {
-    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabEmptyByteTokenIds>() {
-        return std::sync::Arc::clone(&cached.ids);
-    }
-    let ids: std::sync::Arc<[u32]> = vocab.iter()
-        .filter_map(|(id, bytes)| bytes.is_empty().then_some(id))
-        .collect::<Vec<_>>().into();
-    vocab.vocab_derived_cache_set(std::sync::Arc::new(VocabEmptyByteTokenIds {
-        ids: std::sync::Arc::clone(&ids),
-    }));
-    // Concurrent cold consumers may both compute the same exact summary. Use
-    // the canonical installed Arc, without retaining a second shared cache or
-    // treating cache/lock availability as a semantic requirement.
-    vocab.vocab_derived_cache_get::<VocabEmptyByteTokenIds>()
-        .map_or(ids, |cached| std::sync::Arc::clone(&cached.ids))
-}
-
 #[derive(Debug)]
 struct VocabContentDigest {
     digest: [u8; 32],
@@ -251,9 +221,8 @@ mod fingerprint_tests {
 
 #[cfg(test)]
 mod empty_byte_summary_tests {
-    use super::vocab_empty_byte_token_ids;
     use crate::Vocab;
-    use std::sync::{Arc, Barrier};
+    use std::sync::Barrier;
 
     #[test]
     fn empty_byte_summary_is_exact_shared_and_vocab_local() {
@@ -263,24 +232,24 @@ mod empty_byte_summary_tests {
             (0, vec![0]), (2, b"a".to_vec()), (90, b"a".to_vec()),
         ]);
         assert_eq!(vocab.compiler_cache_entry_count(), 0);
-        let first = vocab_empty_byte_token_ids(&vocab);
-        assert_eq!(first.as_ref(), &[3, 31, 512]);
+        let first = vocab.entries_map().empty_byte_token_ids();
+        assert_eq!(first, &[3, 31, 512]);
         // No grammar, tokenizer or vocabulary trie is prepared by this helper.
-        assert_eq!(vocab.compiler_cache_entry_count(), 1);
+        assert_eq!(vocab.compiler_cache_entry_count(), 0);
         let cloned = vocab.clone();
-        assert!(Arc::ptr_eq(&first, &vocab_empty_byte_token_ids(&cloned)));
-        assert!(Arc::ptr_eq(&first, &vocab_empty_byte_token_ids(&vocab)));
+        assert!(std::ptr::eq(first, cloned.entries_map().empty_byte_token_ids()));
+        assert!(std::ptr::eq(first, vocab.entries_map().empty_byte_token_ids()));
         let other = Vocab::from_entries_unchecked(vec![
             (512, vec![0]), (31, b"a".to_vec()), (7, b"last spelling wins".to_vec()),
             (3, b"b".to_vec()), (0, Vec::new()), (2, b"a".to_vec()), (90, Vec::new()),
         ]);
-        assert_eq!(vocab_empty_byte_token_ids(&other).as_ref(), &[0, 90]);
-        assert_eq!(vocab_empty_byte_token_ids(&vocab).as_ref(), &[3, 31, 512]);
-        assert!(vocab_empty_byte_token_ids(&Vocab::from_entries_unchecked(Vec::new())).is_empty());
+        assert_eq!(other.entries_map().empty_byte_token_ids(), &[0, 90]);
+        assert_eq!(vocab.entries_map().empty_byte_token_ids(), &[3, 31, 512]);
+        assert!(Vocab::from_entries_unchecked(Vec::new()).entries_map().empty_byte_token_ids().is_empty());
     }
 
     #[test]
-    fn empty_byte_summary_concurrent_cold_clones_share_canonical_arc() {
+    fn empty_byte_summary_concurrent_clones_share_storage() {
         let vocab = Vocab::from_entries_unchecked((0..4096u32)
             .map(|id| (id * 3, if id % 19 == 0 { Vec::new() } else { vec![id as u8] }))
             .collect());
@@ -294,15 +263,15 @@ mod empty_byte_summary_tests {
                 let barrier = &barrier;
                 handles.push(scope.spawn(move || {
                     barrier.wait();
-                    vocab_empty_byte_token_ids(&cloned)
+                    cloned
                 }));
             }
             let ids = handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>();
             for result in &ids {
-                assert_eq!(result.as_ref(), expected.as_slice());
-                assert!(Arc::ptr_eq(&ids[0], result));
+                assert_eq!(result.entries_map().empty_byte_token_ids(), expected.as_slice());
+                assert!(std::ptr::eq(ids[0].entries_map().empty_byte_token_ids(), result.entries_map().empty_byte_token_ids()));
             }
         });
-        assert_eq!(vocab.compiler_cache_entry_count(), 1);
+        assert_eq!(vocab.compiler_cache_entry_count(), 0);
     }
 }

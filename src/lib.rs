@@ -402,14 +402,7 @@ pub mod __private {
         // callers that precompile a child before binding it. Preserve the same
         // component-local boundary certificate as the public compiler does,
         // before physical table/rule removal makes recomputation impossible.
-        let vocab = constraint.late_bind_vocab.get().cloned().unwrap_or_else(|| {
-            Vocab::from_entries_unchecked(
-                constraint
-                    .token_bytes_iter()
-                    .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
-                    .collect(),
-            )
-        });
+        let vocab = crate::public_api::constraint_vocab(&constraint);
         crate::compiler::boundary_candidates::persist_boundary_candidate_summary(
             &mut constraint,
             &vocab,

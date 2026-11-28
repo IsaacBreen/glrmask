@@ -940,7 +940,6 @@ impl Grammar {
                         );
                         constraint.install_template_parser()?;
                     }
-                    let _ = constraint.late_bind_vocab.set(vocab.clone());
                     apply_final_boundary_trigger(&mut constraint, detail)?;
                     constraint.with_end_tokens(attempt_options.end_token_ids())
                 })
@@ -1156,7 +1155,6 @@ impl Grammar {
             matches!(self.source, GrammarSource::JsonSchema(_)),
             backend,
         )?;
-        let _ = constraint.late_bind_vocab.set(vocab.clone());
         ensure_runnable_constraint(&constraint)?;
         apply_final_boundary_trigger(&mut constraint, boundary)?;
         Ok(constraint)
@@ -1719,10 +1717,6 @@ impl<'a> ConstraintSpec<'a> {
     fn compile_dynamic_boxed(&self) -> Result<Box<DynamicConstraint>> {
         let mut constraint = self.compile_dynamic_uncached()?;
         for component in constraint.constraints_mut() {
-            // Retain the supplied shared vocabulary, just as static compilation
-            // does. Reconstructing it from every token's bytes on the first bind
-            // costs more than compiling many small dynamic components.
-            let _ = component.late_bind_vocab.set(self.vocab.clone());
             component
                 .build_boundary_trigger(self.boundary_trigger_detail)
                 .map_err(Error::Compilation)?;
@@ -1967,13 +1961,7 @@ impl CompiledChild<'_> {
 }
 
 fn static_constraint_targets(constraint: &RuntimeConstraint, vocab: &Vocab) -> bool {
-    constraint
-        .late_bind_vocab
-        .get()
-        .map_or_else(
-            || constraint.token_bytes_match_vocab(vocab),
-            |compiled_vocab| compiled_vocab.same_model_vocab(vocab),
-        )
+    constraint.token_bytes_match_vocab(vocab)
 }
 
 impl SpecGrammarBinding<'_> {
@@ -2457,17 +2445,8 @@ impl DynamicConstraint {
 }
 
 pub(crate) fn constraint_vocab(constraint: &RuntimeConstraint) -> Vocab {
-    constraint
-        .late_bind_vocab
-        .get_or_init(|| {
-            Vocab::from_entries_unchecked(
-                constraint
-                    .token_bytes_iter()
-                    .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
-                    .collect(),
-            )
-        })
-        .clone()
+    constraint.token_bytes.vocab().cloned()
+        .unwrap_or_else(|| Vocab::from_entries_unchecked(Vec::new()))
 }
 
 // Native precompiled components are immutable across this materialization.
@@ -3120,7 +3099,6 @@ impl ConstraintSpec<'_> {
             *compose_boxed_dynamic_parents(Box::new(parents), &children, self.vocab)?
         };
         for body in constraint.constraints_mut() {
-            let _ = body.late_bind_vocab.set(self.vocab.clone());
             body.build_boundary_trigger(self.boundary_trigger_detail).map_err(Error::Compilation)?;
         }
         Ok(constraint)
@@ -4090,7 +4068,7 @@ mod tests {
         let open = RuntimeConstraint::compile(two_slots, &vocab).unwrap();
         let partially_bound = open.bind_grammar("left", &static_child).unwrap();
         assert!(
-            partially_bound.late_bind_vocab.get().is_some(),
+            partially_bound.token_bytes.vocab().is_some(),
             "partially bound constraints should carry the shared vocabulary cache into the next bind",
         );
         assert!(partially_bound
@@ -5979,25 +5957,25 @@ mod tests {
             &vocab,
         ).unwrap();
         let child = native_dynamic_fixture(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
-        let retained = parent.inner.late_bind_vocab.get().expect("retain supplied vocabulary");
+        let retained = parent.inner.token_bytes.vocab().expect("retain supplied vocabulary");
         assert!(Arc::ptr_eq(&retained.entries_arc(), &vocab.entries_arc()));
 
         let loaded = DynamicConstraint::from_constraints(vec![
             RuntimeConstraint::load_body_external_artifact(parent.inner.save(), &vocab).unwrap(),
         ]);
-        assert!(loaded.inner.late_bind_vocab.get().is_some());
+        assert!(loaded.inner.token_bytes.vocab().is_some());
         let first = loaded.bind_grammar_dynamic_boundary("child", &child).unwrap();
-        let first_backing = loaded.inner.late_bind_vocab.get()
+        let first_backing = loaded.inner.token_bytes.vocab()
             .expect("prime retained loaded parent, not a throwaway clone").entries_arc();
         let second = loaded.bind_grammar_dynamic_boundary("child", &child).unwrap();
         assert!(Arc::ptr_eq(
-            &first_backing, &loaded.inner.late_bind_vocab.get().unwrap().entries_arc(),
+            &first_backing, &loaded.inner.token_bytes.vocab().unwrap().entries_arc(),
         ));
         assert_eq!(first.start().mask(), second.start().mask());
         let reloaded = DynamicConstraint::from_constraints(vec![
             RuntimeConstraint::load_body_external_artifact(loaded.inner.save(), &vocab).unwrap(),
         ]);
-        assert!(reloaded.inner.late_bind_vocab.get().is_some(), "loaded vocab is runtime-only, never serialized");
+        assert!(reloaded.inner.token_bytes.vocab().is_some(), "loaded vocab is runtime-only, never serialized");
         let rebound = reloaded.bind_grammar_dynamic_boundary("child", &child).unwrap();
         assert_eq!(first.start().mask(), rebound.start().mask());
     }
@@ -6020,19 +5998,19 @@ mod tests {
             native_dynamic_fixture(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
 
         assert!(
-            parent.late_bind_vocab.get().is_some(),
+            parent.token_bytes.vocab().is_some(),
             "fresh compilation should retain the supplied vocabulary for later binds",
         );
 
         let loaded_parent = RuntimeConstraint::load_body_external_artifact(parent.save(), &vocab).unwrap();
         assert!(
-            loaded_parent.late_bind_vocab.get().is_some(),
+            loaded_parent.token_bytes.vocab().is_some(),
             "the loader supplies the vocabulary; it is runtime-only and never serialized",
         );
         let first = loaded_parent
             .bind_grammar_dynamic_boundary("child", &child)
             .unwrap();
-        assert!(loaded_parent.late_bind_vocab.get().is_some());
+        assert!(loaded_parent.token_bytes.vocab().is_some());
         let second = loaded_parent
             .bind_grammar_dynamic_boundary("child", &child)
             .unwrap();
@@ -6040,7 +6018,7 @@ mod tests {
 
         let loaded = RuntimeConstraint::load_body_external_artifact(loaded_parent.save(), &vocab).unwrap();
         assert!(
-            loaded.late_bind_vocab.get().is_some(),
+            loaded.token_bytes.vocab().is_some(),
             "the loader supplies the vocabulary; it is runtime-only and never serialized",
         );
         let rebound = loaded

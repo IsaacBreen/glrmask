@@ -8315,51 +8315,70 @@ impl Default for DynamicMaskVocab {
     }
 }
 
-/// Runtime ownership of the exact model vocabulary coordinate. The same
-/// byte slab and lookup table are used by compilation and all bound
-/// constraints; no secondary packed index or rebinding cache is needed.
+/// One authoritative bound vocabulary. Deferred prepared bodies have no
+/// vocabulary until their external artifact is reloaded with a supplied
+/// model vocabulary. Bound empty vocabularies remain distinguishable.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct TokenByteDomain(Arc<crate::vocab::VocabEntries>);
+pub(crate) enum TokenByteDomain {
+    #[default]
+    Unbound,
+    Deferred([u8; 32]),
+    Bound(crate::Vocab),
+}
 
 impl TokenByteDomain {
     pub(crate) fn from_vocab(vocab: &crate::Vocab) -> Self {
-        Self(vocab.entries_arc())
+        Self::Bound(vocab.clone())
     }
 
-    pub(crate) fn entries(&self) -> &crate::vocab::VocabEntries { &self.0 }
+    pub(crate) fn vocab(&self) -> Option<&crate::Vocab> {
+        match self {
+            Self::Bound(vocab) => Some(vocab),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn entries(&self) -> &crate::vocab::VocabEntries {
+        static EMPTY: OnceLock<crate::vocab::VocabEntries> = OnceLock::new();
+        match self.vocab() {
+            Some(vocab) => vocab.entries_map(),
+            None => EMPTY.get_or_init(Default::default),
+        }
+    }
 
     #[cfg(test)]
     pub(crate) fn entries_arc(&self) -> Arc<crate::vocab::VocabEntries> {
-        Arc::clone(&self.0)
+        self.vocab().expect("bound runtime vocabulary").entries_arc()
     }
 
     pub(crate) fn matches_vocab(&self, vocab: &crate::Vocab) -> bool {
-        let entries = vocab.entries_arc();
-        Arc::ptr_eq(&self.0, &entries) || self.0 == entries
+        self.vocab().is_some_and(|bound| bound.same_model_vocab(vocab))
     }
 
     pub(crate) fn bind_exact(&mut self, vocab: &crate::Vocab) -> bool {
         if !self.matches_vocab(vocab) { return false; }
-        self.0 = vocab.entries_arc();
+        *self = Self::from_vocab(vocab);
         true
     }
 
     #[inline]
-    pub(crate) fn get(&self, id: u32) -> Option<&[u8]> { self.0.get(&id) }
+    pub(crate) fn get(&self, id: u32) -> Option<&[u8]> {
+        self.vocab()?.get(id)
+    }
 
-    pub(crate) fn len(&self) -> usize { self.0.len() }
-    pub(crate) fn is_empty(&self) -> bool { self.0.is_empty() }
+    pub(crate) fn len(&self) -> usize { self.vocab().map_or(0, crate::Vocab::len) }
+    pub(crate) fn is_empty(&self) -> bool { self.len() == 0 }
 
     pub(crate) fn max_token_id(&self) -> Option<u32> {
-        self.0.keys().next_back().copied()
+        self.vocab()?.max_event_token_id()
     }
 
     pub(crate) fn max_byte_len(&self) -> usize {
-        self.0.values().map(<[u8]>::len).max().unwrap_or(0)
+        self.vocab().map_or(0, crate::Vocab::max_token_byte_len)
     }
 
     pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = (u32, &[u8])> + '_ {
-        self.0.iter().map(|(&id, bytes)| (id, bytes))
+        self.entries().iter().map(|(&id, bytes)| (id, bytes))
     }
 }
 
@@ -8792,7 +8811,7 @@ impl Constraint {
     ) -> Self {
         use super::parser_backend::ParserExecutable;
         let (runtime_backend, parser_dwa, non_dwa_weights, possible_matches_complete,
-            tokenizer_tsids, token_classes, composition_grammar_summary, token_bytes,
+            tokenizer_tsids, token_classes, composition_grammar_summary,
             tokenizer_has_epsilon_transitions) = match mask {
             CompiledMask::Weighted {
                 parser_dwa, non_dwa_weights, possible_matches_complete,
@@ -8802,20 +8821,19 @@ impl Constraint {
                 (ConstraintRuntimeBackend::Static, ParserDwaStorage::Owned(parser_dwa),
                     NonDwaWeightStorage::Materialized(non_dwa_weights), possible_matches_complete,
                     tokenizer_tsids, token_classes, composition_grammar_summary,
-                    TokenByteDomain::from_vocab(vocab), false)
+                    false)
             }
             CompiledMask::Dynamic => {
                 assert!(matches!(&language.table, ParserExecutable::Native(_) | ParserExecutable::ExplicitLr(_)));
                 (ConstraintRuntimeBackend::Dynamic, ParserDwaStorage::Absent, Default::default(),
                     false, Default::default(), Default::default(), None,
-                    TokenByteDomain::from_vocab(vocab), false)
+                    false)
             }
             CompiledMask::Linked => {
                 assert!(matches!(&language.table, ParserExecutable::LinkedLr(_)));
                 (ConstraintRuntimeBackend::Static, ParserDwaStorage::Absent, Default::default(),
                     true, super::TokenizerTsidMap::partition(vec![0], vec![vec![0]]),
                     super::TokenClasses::mapped(Vec::new(), Vec::new()), None,
-                    TokenByteDomain::from_vocab(vocab),
                     language.tokenizer.has_epsilon_transitions())
             }
         };
@@ -8827,9 +8845,6 @@ impl Constraint {
             boundary_trigger: BoundaryTrigger::None,
             boundary_candidate_summary: OnceLock::new(),
             late_grammar_slots: Vec::new(),
-            late_bind_vocab: OnceLock::from(vocab.clone()),
-            pending_vocab_fingerprint: None,
-            pending_special_token_ids: None,
             parser_dwa,
             non_dwa_weights,
             direct_regular_wide_frontier_acceptance: Vec::new(),
@@ -8844,12 +8859,11 @@ impl Constraint {
             special_token_terminals: language.special_token_terminals,
             dynamic_mask_vocab,
             lazy_dynamic_mask_vocab: OnceLock::new(),
-            empty_byte_token_ids: crate::compiler::compile::vocab_empty_byte_token_ids(vocab),
             possible_matches_complete,
             tokenizer_tsids,
             composition_grammar_summary,
             token_classes,
-            token_bytes,
+            token_bytes: TokenByteDomain::from_vocab(vocab),
             token_projection: Default::default(),
             internal_token_dense_words: 0,
             weight_token_masks: Default::default(),
@@ -8962,20 +8976,6 @@ constraint_data_schema! {
     /// address slots only by `name` through the late-binding API.
     @serde(skip, default)
     pub(crate) late_grammar_slots: Vec<LateGrammarSlot>,
-    /// Runtime-only public vocabulary reconstructed from this immutable
-    /// constraint for late subgrammar binding. Keeping it here lets repeated
-    /// binds share `Vocab`'s pure derived-artifact cache (adjacent-byte index,
-    /// tries, etc.) instead of rebuilding those structures for every child.
-    @serde(skip, default)
-    pub(crate) late_bind_vocab: OnceLock<crate::Vocab>,
-    /// Fingerprint recorded by a vocabulary-free artifact that has not yet
-    /// been rehydrated with its vocabulary. Runtime-only.
-    @serde(skip, default)
-    pub(crate) pending_vocab_fingerprint: Option<[u8; 32]>,
-    /// Exact-only token IDs recorded by a pending artifact's root policy.
-    /// Runtime-only.
-    @serde(skip, default)
-    pub(crate) pending_special_token_ids: Option<Vec<u32>>,
     /// Exact parser DWA; serialized independently in the native DWA section.
     @serde(skip, default)
     pub(crate) parser_dwa: ParserDwaStorage,
@@ -9028,12 +9028,6 @@ constraint_data_schema! {
     /// possible-matches table encounters a token-start exclusion.
     @serde(skip, default)
     pub(crate) lazy_dynamic_mask_vocab: OnceLock<DynamicMaskVocab>,
-    /// Original IDs with an empty byte spelling. Derived at compile/load,
-    /// never by constructing the full vocabulary trie on a mask call. Shared
-    /// with clones; special-token admission is checked against the live state.
-    @serde(skip, default)
-    pub(crate) empty_byte_token_ids: Arc<[u32]>,
-
     /// Whether `possible_matches` is a complete table. New static constraints
     /// must set this to true. False exists only for legacy dynamic/deferred
     /// construction and is not permitted as a fallback strategy for new

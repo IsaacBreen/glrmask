@@ -739,7 +739,7 @@ impl DynamicConstraint {
 
     /// Load a vocabulary-free transfer artifact with its exact vocabulary.
     pub(crate) fn load_with_vocab(bytes: &[u8], vocab: &Vocab) -> crate::Result<Self> {
-        let mut loaded = Self::load_with_vocab_inner(bytes, vocab)?;
+        let loaded = Self::load_with_vocab_inner(bytes, vocab)?;
         if std::iter::once(&loaded.inner)
             .chain(&loaded.alternatives)
             .any(|constraint| !constraint.late_grammar_slots.is_empty())
@@ -748,16 +748,7 @@ impl DynamicConstraint {
                 "dynamic constraint artifact has unresolved slots".to_owned(),
             ));
         }
-        loaded.seed_late_bind_vocab(vocab);
         Ok(loaded)
-    }
-
-    fn seed_late_bind_vocab(&mut self, vocab: &Vocab) {
-        for constraint in std::iter::once(&mut self.inner).chain(&mut self.alternatives) {
-            if constraint.late_bind_vocab.get().is_none() {
-                constraint.late_bind_vocab = std::sync::OnceLock::from(vocab.clone());
-            }
-        }
     }
 
     fn load_with_vocab_inner(bytes: &[u8], vocab: &Vocab) -> crate::Result<Self> {
@@ -4691,8 +4682,7 @@ nt start = A;
         assert!(std::sync::Arc::ptr_eq(
             &loaded
                 .inner
-                .late_bind_vocab
-                .get()
+                .token_bytes.vocab()
                 .expect("dynamic load_with_vocab should seed late-bind vocab")
                 .entries_arc(),
             &vocab.entries_arc(),
