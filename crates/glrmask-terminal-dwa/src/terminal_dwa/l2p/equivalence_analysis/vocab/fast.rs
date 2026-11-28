@@ -2985,6 +2985,7 @@ fn active_indices_in_lexical_order(
 
 /// Process a sorted chunk of tokens using DFS trie walk with prefix sharing.
 /// Tokens must be sorted by byte content. Returns (token_idx, signature) pairs.
+#[cfg(test)]
 fn trie_walk_chunk_signatures<S: AsRef<[u8]> + Sync>(
     dfa: &Dfa,
     strings: &[S],
@@ -3279,6 +3280,81 @@ fn trie_walk_chunk_signatures_from_prefix<S: AsRef<[u8]> + Sync>(
     (results, stats)
 }
 
+/// Evaluate one rectangle of the observation matrix. The caller decides
+/// which state slab and unresolved tokens it needs; traversal and worker
+/// ownership are independent of factorization and refinement.
+#[derive(Clone, Copy)]
+enum BatchTraversal {
+    Direct,
+    Prefix { consumed: usize },
+}
+
+struct ObservationBatch<'a, S> {
+    dfa: &'a Dfa,
+    strings: &'a [S],
+    states: &'a [usize],
+    traversal: BatchTraversal,
+    profile: bool,
+}
+
+impl<S: AsRef<[u8]> + Sync> ObservationBatch<'_, S> {
+    fn chunk(
+        &self,
+        indices: &[usize],
+        worker: &mut ScratchWorker,
+    ) -> (Vec<(usize, u64)>, TrieWalkChunkStats) {
+        let group_size = vocab_state_group_size(self.states.len(), self.dfa.num_groups);
+        match self.traversal {
+            BatchTraversal::Prefix { consumed } => trie_walk_chunk_signatures_from_prefix(
+                self.dfa, self.strings, indices, self.states, group_size, consumed,
+                &mut worker.scratch, &mut worker.trie_state, self.profile,
+            ),
+            BatchTraversal::Direct => {
+                let signatures = indices.iter().map(|&index| {
+                    (index, token_signature(self.dfa, self.strings[index].as_ref(),
+                        self.states, group_size, &mut worker.scratch, false))
+                }).collect();
+                (signatures, TrieWalkChunkStats::default())
+            }
+        }
+    }
+
+    fn evaluate(
+        &self,
+        indices: &[usize],
+        pool: &ScratchPool,
+        parallel_tokens: bool,
+    ) -> (Vec<(usize, u64)>, TrieWalkChunkStats) {
+        let checkout = || pool.checkout(self.states.len(), self.dfa.num_groups);
+        if !parallel_tokens {
+            let mut lease = checkout();
+            return self.chunk(indices, lease.worker_mut());
+        }
+        match self.traversal {
+            BatchTraversal::Direct => {
+                let group_size = vocab_state_group_size(self.states.len(), self.dfa.num_groups);
+                let signatures = indices.par_iter().map_init(checkout, |lease, &index| {
+                    (index, token_signature(self.dfa, self.strings[index].as_ref(),
+                        self.states, group_size, &mut lease.worker_mut().scratch, false))
+                }).collect();
+                (signatures, TrieWalkChunkStats::default())
+            }
+            BatchTraversal::Prefix { .. } => {
+                let chunks: Vec<_> = indices.par_chunks(TRIE_CHUNK_SIZE)
+                    .map_init(checkout, |lease, chunk| self.chunk(chunk, lease.worker_mut()))
+                    .collect();
+                let mut signatures = Vec::with_capacity(indices.len());
+                let mut stats = TrieWalkChunkStats::default();
+                for (chunk, chunk_stats) in chunks {
+                    signatures.extend(chunk);
+                    stats.add_assign(chunk_stats);
+                }
+                (signatures, stats)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct FirstTransitionFactorStats {
     semantic_buckets: usize,
@@ -3344,7 +3420,7 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
     strings: &[S],
     initial_states: &[usize],
     lexical_order: &[usize],
-    scratch_pool: &Arc<ScratchPool>,
+    scratch_pool: &ScratchPool,
     profiling: bool,
     enforce_work_ratio: bool,
 ) -> Option<FirstTransitionFactorPlan> {
@@ -3567,20 +3643,10 @@ fn try_first_transition_factor_plan<S: AsRef<[u8]> + Sync>(
 
     let process_token_chunk = |bucket: &FirstTransitionBucket, token_indices: &[usize]| {
         let signature_started_at = Instant::now();
-        let mut lease = scratch_pool.checkout(bucket.initial_outcomes.len(), dfa.num_groups);
-        let worker = lease.worker_mut();
-        let state_group_size = vocab_state_group_size(bucket.initial_outcomes.len(), dfa.num_groups);
-        let (active_sigs, trie_walk) = trie_walk_chunk_signatures_from_prefix(
-            dfa,
-            strings,
-            token_indices,
-            &bucket.initial_outcomes,
-            state_group_size,
-            1,
-            &mut worker.scratch,
-            &mut worker.trie_state,
-            profiling,
-        );
+        let (active_sigs, trie_walk) = ObservationBatch {
+            dfa, strings, states: &bucket.initial_outcomes,
+            traversal: BatchTraversal::Prefix { consumed: 1 }, profile: profiling,
+        }.evaluate(token_indices, scratch_pool, false);
         (
             active_sigs,
             trie_walk,
@@ -4423,7 +4489,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         || factor_enabled;
     let lexical_order = lexical_order_needed.then(|| token_indices_in_lexical_order(strings));
     let mut sort_tokens_ms = elapsed_ms(lexical_order_started_at);
-    let scratch_pool = Arc::new(ScratchPool::default());
+    let scratch_pool = ScratchPool::default();
 
     let preliminary_factor_started_at = profiling.then(Instant::now);
     let factor_plan = factor_enabled.then(|| {
@@ -4638,20 +4704,10 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         let batch_results = state_ranges
             .par_iter()
             .map(|range| {
-                let batch = &ordered_states[range.clone()];
-                let state_group_size = vocab_state_group_size(batch.len(), num_groups);
-                let mut scratch = Scratch::new(batch.len(), num_groups);
-                let mut trie_state = TrieWalkState::new();
-                trie_walk_chunk_signatures(
-                    dfa_ref,
-                    strings,
-                    sorted_indices,
-                    batch,
-                    state_group_size,
-                    &mut scratch,
-                    &mut trie_state,
-                    profiling,
-                )
+                ObservationBatch {
+                    dfa: dfa_ref, strings, states: &ordered_states[range.clone()],
+                    traversal: BatchTraversal::Prefix { consumed: 0 }, profile: profiling,
+                }.evaluate(sorted_indices, &scratch_pool, false)
             })
             .collect::<Vec<_>>();
         let parallel_signature_wall_ms = signature_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -4690,13 +4746,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         }
     }
 
-    // A single Rayon worker previously rebuilt the full scratch arena for every
-    // state batch. The arena is deliberately reset by the signature routines,
-    // so one owner can safely reuse it across all batches without altering the
-    // parallel path or the refinement semantics.
     let single_threaded = rayon::current_num_threads() == 1;
-    let mut single_thread_scratch = single_threaded.then(|| Scratch::new(batch_size, num_groups));
-    let mut single_thread_trie = single_threaded.then(TrieWalkState::new);
 
     // Small vocabularies often become provably singleton after observing only a
     // handful of high-diversity states. Start with a tiny witness batch, then
@@ -4722,7 +4772,6 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         };
         let batch_end = (batch_start + current_batch_size).min(num_authority_states);
         let batch = &ordered_states[batch_start..batch_end];
-        let state_group_size = vocab_state_group_size(batch.len(), num_groups);
         let use_trie_walk = active_indices.len() >= TRIE_WALK_MIN_TOKENS
             && !*TRIE_WALK_DISABLED;
         let use_sequential_trie = use_trie_walk
@@ -4734,160 +4783,32 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
                 <= vocab_sequential_trie_work_max();
         sequential_trie_batches += usize::from(use_sequential_trie);
         used_trie_walk |= use_trie_walk;
-        let active_sigs: Vec<(usize, u64)> = if use_trie_walk {
+        let sorted_indices;
+        let (indices, traversal, parallel_tokens) = if use_trie_walk {
             let sort_started_at = profiling.then(Instant::now);
-            let sorted_indices = active_indices_in_lexical_order(
-                lexical_order
-                    .as_deref()
-                    .expect("trie walk must precompute lexical token order"),
+            sorted_indices = active_indices_in_lexical_order(
+                lexical_order.as_deref().expect("trie walk requires lexical order"),
                 &active_tokens,
             );
             sort_tokens_ms += elapsed_ms(sort_started_at);
             debug_assert_eq!(sorted_indices.len(), active_indices.len());
-            let signature_started_at = profiling.then(Instant::now);
-            let mut flat_results = Vec::with_capacity(sorted_indices.len());
-            if let (Some(scratch), Some(trie_state)) = (
-                single_thread_scratch.as_mut(),
-                single_thread_trie.as_mut(),
-            ) {
-                let (chunk_result, chunk_stats) = trie_walk_chunk_signatures(
-                    dfa_ref,
-                    strings,
-                    &sorted_indices,
-                    batch,
-                    state_group_size,
-                    scratch,
-                    trie_state,
-                    profiling,
-                );
-                flat_results.extend(chunk_result);
-                if profiling {
-                    trie_walk_stats.add_assign(chunk_stats);
-                }
-            } else if use_sequential_trie {
-                let mut lease = scratch_pool.checkout(batch.len(), num_groups);
-                let worker = lease.worker_mut();
-                let (chunk_result, chunk_stats) = trie_walk_chunk_signatures(
-                    dfa_ref,
-                    strings,
-                    &sorted_indices,
-                    batch,
-                    state_group_size,
-                    &mut worker.scratch,
-                    &mut worker.trie_state,
-                    profiling,
-                );
-                flat_results.extend(chunk_result);
-                if profiling {
-                    trie_walk_stats.add_assign(chunk_stats);
-                }
-            } else {
-                let scratch_pool = Arc::clone(&scratch_pool);
-                let chunk_results: Vec<(Vec<(usize, u64)>, TrieWalkChunkStats)> = sorted_indices
-                    .par_chunks(TRIE_CHUNK_SIZE)
-                    .map_init(
-                        || scratch_pool.checkout(batch.len(), num_groups),
-                        |lease, chunk| {
-                            let worker = lease.worker_mut();
-                            trie_walk_chunk_signatures(
-                                dfa_ref,
-                                strings,
-                                chunk,
-                                batch,
-                                state_group_size,
-                                &mut worker.scratch,
-                                &mut worker.trie_state,
-                                profiling,
-                            )
-                        },
-                    )
-                    .collect();
-                for (chunk_result, chunk_stats) in chunk_results {
-                    flat_results.extend(chunk_result);
-                    if profiling {
-                        trie_walk_stats.add_assign(chunk_stats);
-                    }
-                }
-            }
-            signature_ms += elapsed_ms(signature_started_at);
-            flat_results
+            (sorted_indices.as_slice(), BatchTraversal::Prefix { consumed: 0 },
+                !single_threaded && !use_sequential_trie)
         } else {
-            let signature_started_at = profiling.then(Instant::now);
-            // Dispatching one Rayon job per token is substantially more
-            // expensive than the exact scan itself when both axes are tiny
-            // (for example 58 tokens x 4 quotient states).  Select serial
-            // execution from the actual state-token work, independent of
-            // partition or grammar shape.  Larger matrices retain the
-            // parallel path.
+            // Tiny rectangles cost less to evaluate than to schedule.
             const SEQUENTIAL_DIRECT_SIGNATURE_MAX_PAIRS: usize = 256;
-            let use_sequential_direct = active_indices
-                .len()
-                .saturating_mul(batch.len())
-                <= SEQUENTIAL_DIRECT_SIGNATURE_MAX_PAIRS;
-            let result = if let Some(scratch) = single_thread_scratch.as_mut() {
-                active_indices
-                    .iter()
-                    .map(|&token_idx| {
-                        let token = strings[token_idx].as_ref();
-                        (
-                            token_idx,
-                            token_signature(
-                                dfa_ref,
-                                token,
-                                batch,
-                                state_group_size,
-                                scratch,
-                                false,
-                            ),
-                        )
-                    })
-                    .collect()
-            } else if use_sequential_direct {
-                let mut scratch = Scratch::new(batch.len(), num_groups);
-                active_indices
-                    .iter()
-                    .map(|&token_idx| {
-                        let token = strings[token_idx].as_ref();
-                        (
-                            token_idx,
-                            token_signature(
-                                dfa_ref,
-                                token,
-                                batch,
-                                state_group_size,
-                                &mut scratch,
-                                false,
-                            ),
-                        )
-                    })
-                    .collect()
-            } else {
-                let scratch_pool = Arc::clone(&scratch_pool);
-                active_indices
-                    .par_iter()
-                    .map_init(
-                        || scratch_pool.checkout(batch.len(), num_groups),
-                        |lease, &token_idx| {
-                            let token = strings[token_idx].as_ref();
-                            let worker = lease.worker_mut();
-                            (
-                                token_idx,
-                                token_signature(
-                                    dfa_ref,
-                                    token,
-                                    batch,
-                                    state_group_size,
-                                    &mut worker.scratch,
-                                    false,
-                                ),
-                            )
-                        },
-                    )
-                    .collect()
-            };
-            signature_ms += elapsed_ms(signature_started_at);
-            result
+            let parallel = !single_threaded && active_indices.len().saturating_mul(batch.len())
+                > SEQUENTIAL_DIRECT_SIGNATURE_MAX_PAIRS;
+            (active_indices.as_slice(), BatchTraversal::Direct, parallel)
         };
+        let signature_started_at = profiling.then(Instant::now);
+        let (active_sigs, stats) = ObservationBatch {
+            dfa: dfa_ref, strings, states: batch, traversal, profile: profiling,
+        }.evaluate(indices, &scratch_pool, parallel_tokens);
+        signature_ms += elapsed_ms(signature_started_at);
+        if profiling {
+            trie_walk_stats.add_assign(stats);
+        }
 
         let refinement_started_at = profiling.then(Instant::now);
         refine_token_partition(
@@ -5905,6 +5826,27 @@ mod shared_base_tests {
         }
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn observation_batch_reuses_arena_across_traversal_and_state_domains() {
+        let view = sample_dfa();
+        let dfa = build_dfa(&view, &BTreeMap::new(), None);
+        let pool = ScratchPool::default();
+        let words: Vec<&[u8]> = vec![b"", b"a", b"aa", b"ab", b"aba", b"b", b"ba", b"c"];
+        let indices = (0..words.len()).collect::<Vec<_>>();
+        for (states, traversal, parallel) in [
+            (&[0usize, 1, 2][..], BatchTraversal::Prefix { consumed: 0 }, false),
+            (&[1usize][..], BatchTraversal::Direct, false),
+            (&[2usize, 0][..], BatchTraversal::Prefix { consumed: 0 }, true),
+            (&[0usize, 2, 1][..], BatchTraversal::Direct, true),
+        ] {
+            let expected = token_signatures_for_states(&dfa, &words, states);
+            let (actual, _) = ObservationBatch {
+                dfa: &dfa, strings: &words, states, traversal, profile: true,
+            }.evaluate(&indices, &pool, parallel);
+            assert_eq!(actual, indices.iter().copied().zip(expected).collect::<Vec<_>>());
+        }
     }
 
     #[test]
