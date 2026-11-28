@@ -5,7 +5,6 @@
 //! It accepts no externally asserted equivalence certificate. The expensive
 //! equivalence/TI machinery is optional compression, not required for exactness.
 //! The ordinary L2P, follow, crossing and final ignore passes remain unchanged.
-use glrmask_vocab::__private::VocabExt as _;
 use super::*;
 use crate::ds::weight::Weight;
 
