@@ -83,7 +83,49 @@ def markdown(data, js):
     return '\n'.join(sections)+"\n#### Dynamic mode\n\n{{dynamic}}\n\n{{json-dynamic-plot}}\n\n[Explore Dynamic JSON results](https://glrmask.com/?dataset=json&mode=dynamic#benchmarks).\n\nThere was no CPU pinning or SMT sibling reservation, and checkpoint publication overlapped the benchmark. Saved telemetry cannot isolate scheduling effects; latency stabilization is not certified. Successful builds do not establish semantic correctness. All 9,558 JSON schemas were attempted: build errors are Dynamic 232, Static 233 and llguidance 1,226. Incorrect examples are 460 for each GLRMask mode and 100 for llguidance; runtime-error examples are 0 and 6 respectively. JavaScript attempts all 55 fixtures: all builds succeed, with 1 incorrect example per GLRMask mode and 4 for llguidance. Headline TBM excludes incomplete or nonaccepted valid trajectories; all outcomes remain in the raw records. This finite corpus does not establish full-language equivalence or whole-corpus dominance.\n\n[Native AWS benchmark details](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-aws-2026-10-14.md). Historical [October 8 Mac JSON](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-cfa-2026-10-08.md) and [October 9 Mac JavaScript](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-javascript-2026-10-09.md) reports are retained with their original measurement protocols. These are source builds, not measurements of the published packages.\n"
 
 
-def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dynamic=False):
+def website_measurements():
+    records = []
+    for dataset in ('json', 'js'):
+        path = ROOT / f'docs/benchmarks/website-aws-{dataset}-2026-10-19.json'
+        record = json.loads(path.read_text(encoding='utf-8'))
+        expected = {'json': '555d5a3119df3173309af24ba1cd342df21085ac91392db12c71488614ab69c6',
+                    'js': 'c4dcaecc6bf5c4ce1f8e40ae155f1ae1a7d48d60bb3b8b7938adf9527404a9d2'}
+        assert digest(record) == expected[dataset], 'Website campaign evidence changed; review both consumers'
+        assert record['engine_order'] == ['static', 'dynamic', 'llguidance', 'xgrammar']
+        records.append(record)
+    return records
+
+
+def website_markdown(data, js):
+    names = ('GLRMask', 'GLRMask dynamic', 'llguidance', 'XGrammar')
+    def fmt(v):
+        return '<0.1' if 0 < v < 0.1 else f'{v:,.1f}'
+    def render(rows):
+        return '\n'.join(['| Statistic | ' + ' | '.join(names) + ' |', '|---|' + '---:|' * len(names)] +
+                         ['| ' + r['label'] + ' | ' + ' | '.join(map(fmt, r['values'])) + ' |' for r in rows])
+    sections = []
+    for record, label, slug in [(data, 'JSON Schema', 'json'), (js, 'JavaScript', 'javascript')]:
+        tbm = [r for r in record['tables']['tbm'] if r['label'].lower() != 'p99.5']
+        ttfm = [r for r in record['tables']['ttfm'] if r['label'].lower() not in ('p99.5', 'p99.9', 'p99.99')]
+        if slug == 'javascript':
+            ttfm = [dict(r, label='JavaScript') for r in ttfm if r['label'] == 'mean']
+        sections.append(f'### {label}\n\nTime between masks. Lower is better.\n\n{{{{{slug}-plot}}}}\n\n**Time between masks (µs)**\n\n' + render(tbm) + '\n\n**Time to first mask (ms)**\n\n' + render(ttfm))
+    return '\n\n'.join(sections) + '\n\n{{dynamic}}\n\n19 October 2026 campaign · AWS c7i.16xlarge, Llama 3.1 8B Instruct vocabulary; GLRMask 3d65c7a, llguidance 1.9.1, XGrammar 0.2.8; matched valid trajectories (JSON: 1,570,228 positions; JavaScript: 2,370); JavaScript TTFM is a single cold observation. [Measurement details](https://glrmask.com/#benchmarks).\n'
+
+
+def website_svg(record, spec, dark, label):
+    # New figures show the same three series as the interactive front page.
+    import copy
+    spec = copy.deepcopy(spec)
+    spec['display_modes'] = ['static', 'llguidance', 'xgrammar']
+    for palette in spec['palette'].values():
+        palette['xgrammar'] = '#267b56' if not dark else '#72c39a'
+    if label == 'JavaScript':
+        spec['latency_us']['max'] = 1000000
+    return svg(record['tail'], spec, dark, label, 'javascript' if label == 'JavaScript' else 'json', website=True)
+
+
+def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dynamic=False, website=False):
     w,h=spec['width'],spec['height']; g=spec['grid']
     left,right,top,bottom=g['left'],w-g['right'],g['top'],h-g['bottom']
     xmin=max(spec['exceedance']['min'],tail['exceedance_pct'][0]); xmax=spec['exceedance']['max']
@@ -94,6 +136,7 @@ def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dyn
     curve_description='Straight segments join observed tail samples; no smoothing or extrapolation.'
     series_description=('Measured GLRMask, GLRMask dynamic and llguidance curves. GLRMask is faded for context.'
                         if include_dynamic else 'Measured GLRMask Static and llguidance 1.8.0 curves.')
+    if website: series_description = 'Measured GLRMask, llguidance 1.9.1 and XGrammar 0.2.8 curves.'
     x=lambda v:left+(math.log10(xmax)-math.log10(v))/(math.log10(xmax)-math.log10(xmin))*(right-left)
     y=lambda v:bottom-(math.log10(v)-math.log10(ymin))/(math.log10(ymax)-math.log10(ymin))*(bottom-top)
     out=[f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" role="img" aria-labelledby="title description">',
@@ -102,7 +145,9 @@ def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dyn
          f'<defs><clipPath id="plot"><rect x="{left}" y="{top}" width="{right-left}" height="{bottom-top}"/></clipPath></defs>',
          f'<g font-family="{html.escape(spec["font_family"])}" font-size="14" fill="{text}">',
          f'<path d="M{left},{top} V{bottom} H{right}" fill="none" stroke="{rule}"/>']
-    for value,label_y in [(1,'1 µs'),(10,'10 µs'),(100,'100 µs'),(1000,'1 ms'),(10000,'10 ms')]:
+    ticks_y = [(1,'1 µs'),(10,'10 µs'),(100,'100 µs'),(1000,'1 ms'),(10000,'10 ms')]
+    if website and ymax >= 1000000: ticks_y += [(100000,'100 ms'),(1000000,'1 s')]
+    for value,label_y in ticks_y:
         yy=y(value)
         out += [f'<path d="M{left-4},{yy:.2f} H{left}" stroke="{rule}"/>',f'<text x="{left-9}" y="{yy+4:.2f}" text-anchor="end">{label_y}</text>']
     out.append(f'<text x="{left-9}" y="{top-10}" text-anchor="end" font-size="13">TBM</text>')
@@ -117,7 +162,7 @@ def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dyn
         out += [f'<path d="M{xx:.2f},{bottom} v4" stroke="{rule}"/>',f'<text x="{xx:.2f}" y="{bottom+23}" text-anchor="{anchor}">{value:.2g}%</text>']
     out.append(f'<text x="{(left+right)/2}" y="{h-14}" text-anchor="middle">Exceedance probability · log scale</text>')
     curves=[]
-    for mode,name in MODES:
+    for mode,name in MODES + ([('xgrammar','XGrammar')] if website else []):
         display_modes=spec['dynamic_preview']['display_modes'] if include_dynamic else spec['display_modes']
         if mode not in display_modes:continue
         points=[(x(ex),y(us)) for ex,us in zip(tail['exceedance_pct'],tail[mode+'_us'])]
@@ -179,9 +224,16 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check',action='store_true');parser.add_argument('--render-png',action='store_true');parser.add_argument('--website-root',type=Path)
     args=parser.parse_args();data,js=load()
-    if args.website_root:check_website(data,js,args.website_root)
+    if args.website_root:
+        for dataset, record in zip(('json','js'), website_measurements()):
+            assert record == json.loads((args.website_root/f'src/data/glrmask-aws-{dataset}-five-frameworks.json').read_text(encoding='utf-8'))
     spec=json.loads((CONTENT/'tail-chart.json').read_text(encoding="utf-8"))
-    files={CONTENT/'benchmarks.md':markdown(data,js)}
+    web_data, web_js = website_measurements()
+    files={CONTENT/'benchmarks.md':website_markdown(web_data,web_js)}
+    for slug, record, label in [('json',web_data,'JSON Schema'),('javascript',web_js,'JavaScript')]:
+        stem=ROOT/f'docs/assets/benchmark-tbm-{slug}-2026-10-19'
+        for dark in [False, True]:
+            files[Path(str(stem)+('-dark' if dark else '')+'.svg')]=website_svg(record,spec,dark,label)
     for dataset,measured,tail,label in [('json','2026-10-14',data['tail'],'JSON Schema'),('json-dynamic','2026-10-14',data['tail'],'JSON Schema · Dynamic'),('javascript','2026-10-14',js['tail'],'JavaScript')]:
         stem=ROOT/f'docs/assets/benchmark-tbm-{dataset}-{measured}'
         for dark in [False,True]:files=files|{Path(str(stem)+('-dark' if dark else '')+'.svg'):svg(tail,spec,dark,label,'json' if dataset=='json-dynamic' else dataset,dataset=='json-dynamic')}
@@ -190,7 +242,7 @@ def main():
         for p,body in files.items():p.parent.mkdir(parents=True,exist_ok=True);p.write_text(body, encoding="utf-8")
         stale=[]
     for path,body in files.items():
-        if path.suffix!='.svg' or path.stem.endswith('-dark'):continue
+        if path.suffix!='.svg' or path.stem.endswith('-dark') or path.stem.endswith('2026-10-19'):continue
         png=path.with_suffix('.png')
         if args.render_png and not args.check:render_png(body,png,spec)
         expected=b'SourceSVG_SHA256\0'+hashlib.sha256(body.encode()).hexdigest().encode()

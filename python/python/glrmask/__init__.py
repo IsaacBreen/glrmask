@@ -14,7 +14,7 @@ For the release candidate: `pip install --pre glrmask` or `pip install glrmask==
 
 GLRMask has four core types:
 
-- `Grammar`
+- `Grammar`: a grammar, written as source text or built from an expression.
 - `Module`: a partially compiled grammar.
 - `Constraint`: a compiled grammar, ready to use.
 - `ConstraintState`: the state of one generated sequence.

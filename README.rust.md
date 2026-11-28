@@ -22,7 +22,7 @@ GLRMask needs Rust 1.89 or later. A minor release may raise the minimum Rust ver
 
 GLRMask has four core types:
 
-- `Grammar`
+- `Grammar`: a grammar, written as source text or built from an expression.
 - `Module`: a partially compiled grammar.
 - `Constraint`: a compiled grammar, ready to use.
 - `ConstraintState`: the state of one generated sequence.

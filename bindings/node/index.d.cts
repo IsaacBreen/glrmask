@@ -67,7 +67,7 @@ export declare class Expr implements Disposable {
 /** A range of token IDs from `start` up to, but not including, `end`. */
 export interface TokenRange {
   readonly start: number;
-  /** The ID just past the range, at most 16777216. */
+  /** The ID just past the range. */
   readonly end: number;
 }
 

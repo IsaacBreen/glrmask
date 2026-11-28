@@ -4,31 +4,27 @@ Time between masks. Lower is better.
 
 {{json-plot}}
 
-**TBM (µs)**
+**Time between masks (µs)**
 
-| Statistic | Static | Dynamic | llguidance |
-|---|---:|---:|---:|
-| Mean | 3.0 | 31.5 | 25.9 |
-| p50 | 2.6 | 9.1 | 10.6 |
-| p90 | 5.1 | 86.4 | 40.7 |
-| p99 | 12.2 | 239.5 | 289.9 |
-| p99.9 | 24.9 | 754.2 | 1,092.6 |
-| Max | 283.1 | 3,647.8 | 6,931.5 |
+| Statistic | GLRMask | GLRMask dynamic | llguidance | XGrammar |
+|---|---:|---:|---:|---:|
+| mean | 3.2 | 30.9 | 25.3 | 35.9 |
+| p50 | 2.9 | 9.0 | 11.4 | 9.1 |
+| p90 | 5.1 | 87.5 | 40.6 | 38.2 |
+| p99 | 10.1 | 212.0 | 267.8 | 534.0 |
+| p99.9 | 17.0 | 657.4 | 1,070.7 | 2,736.8 |
+| p99.99 | 25.2 | 1,825.9 | 3,627.2 | 7,901.3 |
+| max | 43.8 | 4,731.5 | 8,276.3 | 12,660.3 |
 
 **Time to first mask (ms)**
 
-| Statistic | Static | Dynamic | llguidance |
-|---|---:|---:|---:|
-| Mean | 33.7 | 3.9 | 1.2 |
-| p50 | 12.6 | 2.3 | 0.8 |
-| p90 | 78.9 | 6.5 | 1.8 |
-| p99 | 302.3 | 35.9 | 11.1 |
-| p99.9 | 854.3 | 88.8 | 17.9 |
-| Max | 1,293.4 | 274.6 | 231.0 |
-
-Static measured the parser DWA implementation; Dynamic measured token-trie traversal. These are historical engine measurements, not performance guarantees for the current presets.
-
-14 October 2026 · 11,277 complete valid trajectories accepted by all measured engines · 1,734,930 TBM positions per engine · 8,326 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
+| Statistic | GLRMask | GLRMask dynamic | llguidance | XGrammar |
+|---|---:|---:|---:|---:|
+| mean | 37.3 | 5.8 | 1.3 | 84.5 |
+| p50 | 16.8 | 4.1 | 0.9 | 44.3 |
+| p90 | 75.0 | 9.5 | 2.1 | 203.2 |
+| p99 | 306.4 | 43.4 | 13.3 | 834.3 |
+| max | 1,350.1 | 138.0 | 48.6 | 4,066.2 |
 
 ### JavaScript
 
@@ -36,40 +32,24 @@ Time between masks. Lower is better.
 
 {{javascript-plot}}
 
-**TBM (µs)**
+**Time between masks (µs)**
 
-| Statistic | Static | Dynamic | llguidance |
-|---|---:|---:|---:|
-| Mean | 16.9 | 1,392.4 | 1,052.2 |
-| p50 | 18.2 | 145.5 | 856.6 |
-| p90 | 30.4 | 3,626.1 | 2,521.7 |
-| p99 | 47.9 | 4,091.7 | 3,097.0 |
-| p99.9 | 71.1 | 4,656.9 | 3,597.1 |
-| Max | 77.4 | 5,517.4 | 3,867.9 |
+| Statistic | GLRMask | GLRMask dynamic | llguidance | XGrammar |
+|---|---:|---:|---:|---:|
+| mean | 17.2 | 1,126.5 | 1,152.4 | 116,561.8 |
+| p50 | 18.4 | 26.5 | 938.6 | 47,894.1 |
+| p90 | 30.1 | 3,582.2 | 2,661.0 | 621,935.7 |
+| p99 | 46.7 | 4,100.1 | 3,389.5 | 679,617.9 |
+| p99.9 | 63.6 | 4,617.6 | 3,761.8 | 805,342.2 |
+| p99.99 | 69.3 | 4,814.8 | 3,819.2 | 825,890.1 |
+| max | 69.6 | 4,849.1 | 3,825.7 | 826,881.4 |
 
 **Time to first mask (ms)**
 
-| Statistic | Static | Dynamic | llguidance |
-|---|---:|---:|---:|
-| Mean | 5,089.4 | 113.3 | 8.0 |
-| p50 | 5,099.6 | 113.0 | 8.0 |
-| p90 | 5,152.7 | 116.9 | 8.1 |
-| p99 | 5,223.0 | 120.7 | 8.2 |
-| p99.9 | 5,225.9 | 121.7 | 8.2 |
-| Max | 5,226.2 | 121.8 | 8.2 |
-
-Static measured the parser DWA implementation; Dynamic measured token-trie traversal. These are historical engine measurements, not performance guarantees for the current presets.
-
-14 October 2026 · 28 complete valid trajectories accepted by all measured engines · 3,805 TBM positions per engine · 55 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
-
-#### Dynamic mode
+| Statistic | GLRMask | GLRMask dynamic | llguidance | XGrammar |
+|---|---:|---:|---:|---:|
+| JavaScript | 5,593.7 | 109.0 | 8.9 | 4,175.5 |
 
 {{dynamic}}
 
-{{json-dynamic-plot}}
-
-[Explore Dynamic JSON results](https://glrmask.com/?dataset=json&mode=dynamic#benchmarks).
-
-There was no CPU pinning or SMT sibling reservation, and checkpoint publication overlapped the benchmark. Saved telemetry cannot isolate scheduling effects; latency stabilization is not certified. Successful builds do not establish semantic correctness. All 9,558 JSON schemas were attempted: build errors are Dynamic 232, Static 233 and llguidance 1,226. Incorrect examples are 460 for each GLRMask mode and 100 for llguidance; runtime-error examples are 0 and 6 respectively. JavaScript attempts all 55 fixtures: all builds succeed, with 1 incorrect example per GLRMask mode and 4 for llguidance. Headline TBM excludes incomplete or nonaccepted valid trajectories; all outcomes remain in the raw records. This finite corpus does not establish full-language equivalence or whole-corpus dominance.
-
-[Native AWS benchmark details](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-aws-2026-10-14.md). Historical [October 8 Mac JSON](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-cfa-2026-10-08.md) and [October 9 Mac JavaScript](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-javascript-2026-10-09.md) reports are retained with their original measurement protocols. These are source builds, not measurements of the published packages.
+19 October 2026 campaign · AWS c7i.16xlarge, Llama 3.1 8B Instruct vocabulary; GLRMask 3d65c7a, llguidance 1.9.1, XGrammar 0.2.8; matched valid trajectories (JSON: 1,570,228 positions; JavaScript: 2,370); JavaScript TTFM is a single cold observation. [Measurement details](https://glrmask.com/#benchmarks).
