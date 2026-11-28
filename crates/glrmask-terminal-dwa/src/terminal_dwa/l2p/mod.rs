@@ -30,6 +30,7 @@ pub use terminal_interchangeability::warm_ti_pool;
 #[cfg(feature = "internal-api")]
 pub use terminal_interchangeability::with_ti_pool;
 pub use terminal_interchangeability::SharedTiTokenizerOutputCache;
+pub(crate) use terminal_interchangeability::{FrozenOutputAlphabet, FrozenOutputBuilder};
 
 use std::cell::Cell;
 use std::collections::BTreeMap;

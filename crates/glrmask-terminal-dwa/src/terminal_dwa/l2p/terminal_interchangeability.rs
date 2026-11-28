@@ -178,7 +178,6 @@ struct RestrictedTopology {
     bytes: Vec<u8>,
     edge_offsets: Vec<u32>,
     edges: Vec<(u8, u32)>,
-    reverse_predecessors: Arc<[Vec<u32>]>,
     observed_destinations: Arc<[bool]>,
     /// Number of raw tokenizer states. Transport witnesses must retain this
     /// external scanner coordinate even when discovery runs on a quotient.
@@ -195,17 +194,13 @@ struct RestrictedTopology {
     state_for_raw: Option<Arc<[u32]>>,
     /// Exact frozen output rows for a powerset discovery domain. Ordinary raw
     /// and quotient topologies derive these from raw-state metadata instead.
-    nfa_output_rows: Option<(
-        Arc<[Box<[TerminalID]>]>,
-        Arc<[Box<[TerminalID]>]>,
-    )>,
+    nfa_outputs: Option<Arc<FrozenOutputAlphabet>>,
     /// Exact members of each powerset configuration. Only raw-coordinate NFA
     /// configurations may be reused by raw-state equivalence refinement.
     nfa_configurations: Option<Arc<[Box<[u32]>]>>,
     nfa_configurations_use_raw_states: bool,
     real_state_count: usize,
     initial_state: usize,
-    max_outdegree: usize,
 }
 
 impl RestrictedTopology {
@@ -311,12 +306,9 @@ impl RestrictedTopology {
             .map_or(raw_state_count, |representatives| representatives.len());
         let mut edge_offsets = Vec::with_capacity(real_state_count + 2);
         let mut edges = Vec::new();
-        let mut reverse_predecessors = vec![Vec::<u32>::new(); real_state_count];
         let mut observed_destinations = vec![false; real_state_count + 1];
-        let mut max_outdegree = 0usize;
         edge_offsets.push(0);
         for state in 0..real_state_count {
-            let start = edges.len();
             let raw_state = raw_representative_by_state
                 .as_ref()
                 .map_or(state as u32, |representatives| representatives[state]);
@@ -326,11 +318,9 @@ impl RestrictedTopology {
                         .as_ref()
                         .map_or(target, |classes| classes[target as usize]);
                     edges.push((byte, target));
-                    reverse_predecessors[target as usize].push(state as u32);
                     observed_destinations[target as usize] = true;
                 }
             }
-            max_outdegree = max_outdegree.max(edges.len() - start);
             edge_offsets.push(edges.len() as u32);
         }
         // Synthetic dead has no real edges: every enabled byte loops to itself.
@@ -365,18 +355,16 @@ impl RestrictedTopology {
             bytes,
             edge_offsets,
             edges,
-            reverse_predecessors: reverse_predecessors.into(),
             observed_destinations: observed_destinations.into(),
             raw_state_count,
             raw_representative_by_state,
             transport_representative_by_state,
             state_for_raw,
-            nfa_output_rows: None,
+            nfa_outputs: None,
             nfa_configurations: None,
             nfa_configurations_use_raw_states: false,
             real_state_count,
             initial_state,
-            max_outdegree,
         }
     }
 
@@ -423,17 +411,13 @@ impl RestrictedTopology {
         let real_state_count = view.states.len();
         let nfa_configurations = Arc::clone(&view.configurations);
         let mut edge_offsets = view.edge_offsets;
-        let mut reverse_predecessors = vec![Vec::<u32>::new(); real_state_count];
         let mut observed_destinations = vec![false; real_state_count + 1];
-        let mut max_outdegree = 0usize;
         for state in 0..real_state_count {
             let start = edge_offsets[state] as usize;
             let end = edge_offsets[state + 1] as usize;
             for &(_, target) in &view.edges[start..end] {
-                reverse_predecessors[target as usize].push(state as u32);
                 observed_destinations[target as usize] = true;
             }
-            max_outdegree = max_outdegree.max(end - start);
         }
         edge_offsets.push(view.edges.len() as u32);
 
@@ -444,30 +428,13 @@ impl RestrictedTopology {
                 *representative = raw_state as u32;
             }
         }
-        let finalizers = view
-            .states
-            .iter()
-            .map(|state| {
-                state
-                    .finalizers
-                    .iter()
-                    .map(|&terminal| terminal as TerminalID)
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice()
-            })
-            .collect::<Vec<_>>();
-        let future = view
-            .states
-            .iter()
-            .map(|state| {
-                state
-                    .possible_future_group_ids
-                    .iter()
-                    .map(|&terminal| terminal as TerminalID)
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice()
-            })
-            .collect::<Vec<_>>();
+        let mut outputs = FrozenOutputBuilder::new(real_state_count);
+        for state in &view.states {
+            outputs.push(
+                state.finalizers.iter().map(|&terminal| terminal as TerminalID),
+                state.possible_future_group_ids.iter().map(|&terminal| terminal as TerminalID),
+            );
+        }
 
         let raw_representative_by_state: Arc<[u32]> = raw_representative_by_state.into();
         let fallback = raw_representative_by_state
@@ -498,18 +465,16 @@ impl RestrictedTopology {
             bytes: view.bytes,
             edge_offsets,
             edges: view.edges,
-            reverse_predecessors: reverse_predecessors.into(),
             observed_destinations: observed_destinations.into(),
             raw_state_count,
             raw_representative_by_state: Some(raw_representative_by_state),
             transport_representative_by_state: Some(transport_representative_by_state),
             state_for_raw: Some(Arc::clone(&view.raw_start_to_view)),
-            nfa_output_rows: Some((finalizers.into(), future.into())),
+            nfa_outputs: Some(Arc::new(outputs.finish())),
             nfa_configurations: Some(nfa_configurations),
             nfa_configurations_use_raw_states: configurations_use_raw_states,
             real_state_count,
             initial_state: view.start_state,
-            max_outdegree,
         }
     }
 
@@ -540,10 +505,6 @@ impl RestrictedTopology {
 
     fn observed_destinations(&self) -> Arc<[bool]> {
         Arc::clone(&self.observed_destinations)
-    }
-
-    fn reverse_predecessors(&self) -> Arc<[Vec<u32>]> {
-        Arc::clone(&self.reverse_predecessors)
     }
 
     #[inline]
@@ -660,266 +621,109 @@ impl RestrictedTopology {
 /// uses the original DFA and its original metadata.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct RootOutputSignature {
-    finalizer_states: Box<[u32]>,
-    future_finalizer_states: Box<[u32]>,
+    finalizer_outputs: Box<[u32]>,
+    future_finalizer_outputs: Box<[u32]>,
 }
 
-/// Tokenizer output columns independent of vocabulary partition and enabled
-/// bytes. Every L2P partition uses the same frozen lexer metadata, so build
-/// these raw-state indexes once and share them across partition contexts.
-struct TiTokenizerOutputData {
-    finalizer_terminals_by_raw_state: Arc<[Box<[TerminalID]>]>,
-    future_finalizer_terminals_by_raw_state: Arc<[Box<[TerminalID]>]>,
-    finalizer_raw_states_by_terminal: Arc<[Vec<u32>]>,
-    future_finalizer_raw_states_by_terminal: Arc<[Vec<u32>]>,
-    full_output_projection: OnceLock<(Arc<[OutputPair]>, Arc<[u32]>)>,
+/// Interned, frozen finalizer/future-finalizer alphabet in one lexical
+/// coordinate. Only this relation, not a second copy of its rows or inverse
+/// terminal columns, is needed to project TI's active masks.
+#[derive(Debug)]
+pub(crate) struct FrozenOutputAlphabet {
+    pairs: Arc<[OutputPair]>,
+    by_state: Arc<[u32]>,
 }
 
-impl TiTokenizerOutputData {
-    fn from_state_rows(
-        finalizer_terminals_by_state: Arc<[Box<[TerminalID]>]>,
-        future_finalizer_terminals_by_state: Arc<[Box<[TerminalID]>]>,
-        terminal_count: usize,
-    ) -> Self {
-        assert_eq!(
-            finalizer_terminals_by_state.len(),
-            future_finalizer_terminals_by_state.len(),
-            "TI output rows must cover the same state domain",
-        );
-        let mut finalizer_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
-        let mut future_finalizer_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
-        for (state, terminals) in finalizer_terminals_by_state.iter().enumerate() {
-            for &terminal in terminals.iter() {
-                finalizer_states_by_terminal[terminal as usize].push(state as u32);
-            }
-        }
-        for (state, terminals) in future_finalizer_terminals_by_state.iter().enumerate() {
-            for &terminal in terminals.iter() {
-                future_finalizer_states_by_terminal[terminal as usize].push(state as u32);
-            }
-        }
-        Self {
-            finalizer_terminals_by_raw_state: finalizer_terminals_by_state,
-            future_finalizer_terminals_by_raw_state: future_finalizer_terminals_by_state,
-            finalizer_raw_states_by_terminal: finalizer_states_by_terminal.into(),
-            future_finalizer_raw_states_by_terminal: future_finalizer_states_by_terminal.into(),
-            full_output_projection: OnceLock::new(),
-        }
-    }
+pub(crate) struct FrozenOutputBuilder {
+    pairs: Vec<OutputPair>,
+    by_state: Vec<u32>,
+    buckets: FxHashMap<u64, SmallVec<[u32; 1]>>,
+}
 
-    fn from_classify_bytesets(
-        bytesets: &super::super::classify::SharedClassifyBytesets,
-    ) -> Option<Self> {
-        let (
-            finalizer_terminals_by_raw_state,
-            future_finalizer_terminals_by_raw_state,
-            finalizer_raw_states_by_terminal,
-            future_finalizer_raw_states_by_terminal,
-        ) = bytesets.ti_output_index()?;
-        Some(Self {
-            finalizer_terminals_by_raw_state,
-            future_finalizer_terminals_by_raw_state,
-            finalizer_raw_states_by_terminal,
-            future_finalizer_raw_states_by_terminal,
-            full_output_projection: OnceLock::new(),
-        })
-    }
-
-    fn full_output_pair_hash(
-        finalizers: &[TerminalID],
-        future_finalizers: &[TerminalID],
-    ) -> u64 {
-        let mut hasher = FxHasher::default();
-        finalizers.hash(&mut hasher);
-        future_finalizers.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn full_output_projection(&self) -> (Arc<[OutputPair]>, Arc<[u32]>) {
-        let (pairs, by_state) = self.full_output_projection.get_or_init(|| {
-            let empty = OutputPair {
-                finalizers: OutputBits::new(0),
-                future_finalizers: OutputBits::new(0),
-            };
-            let mut pairs = vec![empty];
-            let mut buckets = FxHashMap::<u64, SmallVec<[u32; 1]>>::default();
-            buckets
-                .entry(Self::full_output_pair_hash(&[], &[]))
-                .or_default()
-                .push(0);
-            let mut by_state = Vec::with_capacity(self.finalizer_terminals_by_raw_state.len());
-            for (finalizers, future_finalizers) in self
-                .finalizer_terminals_by_raw_state
-                .iter()
-                .zip(self.future_finalizer_terminals_by_raw_state.iter())
-            {
-                let hash = Self::full_output_pair_hash(finalizers, future_finalizers);
-                let existing = buckets.get(&hash).and_then(|candidates| {
-                    candidates.iter().copied().find(|&id| {
-                        let pair = &pairs[id as usize];
-                        pair.finalizers.0.as_slice() == finalizers.as_ref()
-                            && pair.future_finalizers.0.as_slice()
-                                == future_finalizers.as_ref()
-                    })
-                });
-                let id = existing.unwrap_or_else(|| {
-                    let id = pairs.len() as u32;
-                    pairs.push(OutputPair {
-                        finalizers: OutputBits(finalizers.iter().copied().collect()),
-                        future_finalizers: OutputBits(
-                            future_finalizers.iter().copied().collect(),
-                        ),
-                    });
-                    buckets.entry(hash).or_default().push(id);
-                    id
-                });
-                by_state.push(id);
-            }
-            (Arc::from(pairs), Arc::from(by_state))
+impl FrozenOutputBuilder {
+    pub(crate) fn new(state_count: usize) -> Self {
+        let mut builder = Self {
+            pairs: Vec::new(),
+            by_state: Vec::with_capacity(state_count),
+            buckets: FxHashMap::default(),
+        };
+        builder.intern(OutputPair {
+            finalizers: OutputBits::new(0),
+            future_finalizers: OutputBits::new(0),
         });
-        (Arc::clone(pairs), Arc::clone(by_state))
+        builder
     }
 
-    fn new(tokenizer: &Tokenizer) -> Self {
-        let state_count = tokenizer.num_states() as usize;
-        let terminal_count = tokenizer.num_terminals() as usize;
-        let parallel_output_min_states = std::env::var(
-            "GLRMASK_TI_PARALLEL_OUTPUT_INDEX_MIN_STATES",
-        )
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(4096);
-        if state_count >= parallel_output_min_states
-            && let Some(pool) = ti_certification_pool() {
-                let chunk_count = pool.current_num_threads().min(state_count).max(1);
-                let build_chunks = || {
-                    (0..chunk_count)
-                        .into_par_iter()
-                        .map(|chunk| {
-                            let start = state_count * chunk / chunk_count;
-                            let end = state_count * (chunk + 1) / chunk_count;
-                            let mut finalizer_rows = Vec::with_capacity(end - start);
-                            let mut future_rows = Vec::with_capacity(end - start);
-                            let mut finalizer_states =
-                                vec![Vec::<u32>::new(); terminal_count];
-                            let mut future_states = vec![Vec::<u32>::new(); terminal_count];
-                            for raw_state in start as u32..end as u32 {
-                                let finalizers = tokenizer
-                                    .matched_terminals_iter(raw_state)
-                                    .collect::<Vec<_>>();
-                                for &terminal in &finalizers {
-                                    finalizer_states[terminal as usize].push(raw_state);
-                                }
-                                finalizer_rows.push(finalizers.into_boxed_slice());
-
-                                let future_finalizers = tokenizer
-                                    .possible_future_terminals_iter(raw_state)
-                                    .collect::<Vec<_>>();
-                                for &terminal in &future_finalizers {
-                                    future_states[terminal as usize].push(raw_state);
-                                }
-                                future_rows.push(future_finalizers.into_boxed_slice());
-                            }
-                            (
-                                finalizer_rows,
-                                future_rows,
-                                finalizer_states,
-                                future_states,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                };
-                let chunks = if pool.current_thread_index().is_some() {
-                    build_chunks()
-                } else {
-                    pool.install(build_chunks)
-                };
-                let merge_terminal_columns = || {
-                    rayon::join(
-                        || {
-                            (0..terminal_count)
-                                .into_par_iter()
-                                .map(|terminal| {
-                                    let len = chunks
-                                        .iter()
-                                        .map(|chunk| chunk.2[terminal].len())
-                                        .sum();
-                                    let mut states = Vec::with_capacity(len);
-                                    for chunk in &chunks {
-                                        states.extend_from_slice(&chunk.2[terminal]);
-                                    }
-                                    states
-                                })
-                                .collect::<Vec<_>>()
-                        },
-                        || {
-                            (0..terminal_count)
-                                .into_par_iter()
-                                .map(|terminal| {
-                                    let len = chunks
-                                        .iter()
-                                        .map(|chunk| chunk.3[terminal].len())
-                                        .sum();
-                                    let mut states = Vec::with_capacity(len);
-                                    for chunk in &chunks {
-                                        states.extend_from_slice(&chunk.3[terminal]);
-                                    }
-                                    states
-                                })
-                                .collect::<Vec<_>>()
-                        },
-                    )
-                };
-                let (finalizer_raw_states_by_terminal, future_finalizer_raw_states_by_terminal) =
-                    if pool.current_thread_index().is_some() {
-                        merge_terminal_columns()
-                    } else {
-                        pool.install(merge_terminal_columns)
-                    };
-                let mut finalizer_terminals_by_raw_state = Vec::with_capacity(state_count);
-                let mut future_finalizer_terminals_by_raw_state =
-                    Vec::with_capacity(state_count);
-                for (finalizer_rows, future_rows, _, _) in chunks {
-                    finalizer_terminals_by_raw_state.extend(finalizer_rows);
-                    future_finalizer_terminals_by_raw_state.extend(future_rows);
-                }
-                return Self {
-                    finalizer_terminals_by_raw_state: finalizer_terminals_by_raw_state.into(),
-                    future_finalizer_terminals_by_raw_state:
-                        future_finalizer_terminals_by_raw_state.into(),
-                    finalizer_raw_states_by_terminal: finalizer_raw_states_by_terminal.into(),
-                    future_finalizer_raw_states_by_terminal:
-                        future_finalizer_raw_states_by_terminal.into(),
-                    full_output_projection: OnceLock::new(),
-                };
-            }
-        let mut finalizer_terminals_by_raw_state = Vec::with_capacity(state_count);
-        let mut future_finalizer_terminals_by_raw_state = Vec::with_capacity(state_count);
-        let mut finalizer_raw_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
-        let mut future_finalizer_raw_states_by_terminal = vec![Vec::<u32>::new(); terminal_count];
-        for raw_state in 0..state_count as u32 {
-            let finalizers = tokenizer
-                .matched_terminals_iter(raw_state)
-                .collect::<Vec<_>>();
-            for &terminal in &finalizers {
-                finalizer_raw_states_by_terminal[terminal as usize].push(raw_state);
-            }
-            finalizer_terminals_by_raw_state.push(finalizers.into_boxed_slice());
-
-            let future_finalizers = tokenizer
-                .possible_future_terminals_iter(raw_state)
-                .collect::<Vec<_>>();
-            for &terminal in &future_finalizers {
-                future_finalizer_raw_states_by_terminal[terminal as usize].push(raw_state);
-            }
-            future_finalizer_terminals_by_raw_state.push(future_finalizers.into_boxed_slice());
+    fn intern(&mut self, pair: OutputPair) -> u32 {
+        let mut hasher = FxHasher::default();
+        pair.hash(&mut hasher);
+        let bucket = self.buckets.entry(hasher.finish()).or_default();
+        if let Some(id) = bucket.iter().copied().find(|&id| self.pairs[id as usize] == pair) {
+            return id;
         }
-        Self {
-            finalizer_terminals_by_raw_state: finalizer_terminals_by_raw_state.into(),
-            future_finalizer_terminals_by_raw_state: future_finalizer_terminals_by_raw_state.into(),
-            finalizer_raw_states_by_terminal: finalizer_raw_states_by_terminal.into(),
-            future_finalizer_raw_states_by_terminal: future_finalizer_raw_states_by_terminal.into(),
-            full_output_projection: OnceLock::new(),
+        let id = u32::try_from(self.pairs.len()).expect("TI output alphabet overflow");
+        self.pairs.push(pair);
+        bucket.push(id);
+        id
+    }
+
+    pub(crate) fn push(
+        &mut self,
+        finalizers: impl IntoIterator<Item = TerminalID>,
+        future: impl IntoIterator<Item = TerminalID>,
+    ) {
+        let id = self.intern(OutputPair {
+            finalizers: OutputBits(finalizers.into_iter().collect()),
+            future_finalizers: OutputBits(future.into_iter().collect()),
+        });
+        self.by_state.push(id);
+    }
+
+    fn extend(&mut self, other: FrozenOutputAlphabet) {
+        let ids: Vec<u32> = other.pairs.iter().map(|pair| self.intern(pair.clone())).collect();
+        self.by_state.extend(other.by_state.iter().map(|&id| ids[id as usize]));
+    }
+
+    pub(crate) fn finish(self) -> FrozenOutputAlphabet {
+        FrozenOutputAlphabet {
+            pairs: self.pairs.into(),
+            by_state: self.by_state.into(),
+        }
+    }
+}
+
+impl FrozenOutputAlphabet {
+    fn from_tokenizer(tokenizer: &Tokenizer) -> Self {
+        let state_count = tokenizer.num_states() as usize;
+        let build = |start: usize, end: usize| {
+            let mut builder = FrozenOutputBuilder::new(end - start);
+            for raw in start as u32..end as u32 {
+                builder.push(
+                    tokenizer.matched_terminals_iter(raw),
+                    tokenizer.possible_future_terminals_iter(raw),
+                );
+            }
+            builder.finish()
+        };
+        let parallel_min = std::env::var("GLRMASK_TI_PARALLEL_OUTPUT_INDEX_MIN_STATES")
+            .ok().and_then(|value| value.trim().parse::<usize>().ok()).unwrap_or(4096);
+        if state_count >= parallel_min && let Some(pool) = ti_certification_pool() {
+            let chunk_count = pool.current_num_threads().min(state_count).max(1);
+            let build_chunks = || (0..chunk_count).into_par_iter().map(|chunk| {
+                build(state_count * chunk / chunk_count, state_count * (chunk + 1) / chunk_count)
+            }).collect::<Vec<_>>();
+            let chunks = if pool.current_thread_index().is_some() {
+                build_chunks()
+            } else {
+                pool.install(build_chunks)
+            };
+            let mut builder = FrozenOutputBuilder::new(state_count);
+            for chunk in chunks {
+                builder.extend(chunk);
+            }
+            builder.finish()
+        } else {
+            build(0, state_count)
         }
     }
 }
@@ -927,7 +731,7 @@ impl TiTokenizerOutputData {
 /// Thread-safe compile-local cache shared by all vocabulary partitions.
 #[derive(Default)]
 pub struct SharedTiTokenizerOutputCache {
-    data: OnceLock<Arc<TiTokenizerOutputData>>,
+    data: OnceLock<Arc<FrozenOutputAlphabet>>,
 }
 
 impl SharedTiTokenizerOutputCache {
@@ -938,130 +742,38 @@ impl SharedTiTokenizerOutputCache {
     pub fn new_with_classify_bytesets(
         bytesets: &super::super::classify::SharedClassifyBytesets,
     ) -> Option<Self> {
-        let data = TiTokenizerOutputData::from_classify_bytesets(bytesets)?;
-        let cache = Self::new();
-        assert!(
-            cache.data.set(Arc::new(data)).is_ok(),
-            "new TI output cache must be empty",
-        );
-        Some(cache)
+        Some(Self { data: OnceLock::from(bytesets.ti_output_index()?) })
     }
 
-    fn get(&self, tokenizer: &Tokenizer) -> Arc<TiTokenizerOutputData> {
-        Arc::clone(
-            self.data
-                .get_or_init(|| Arc::new(TiTokenizerOutputData::new(tokenizer))),
-        )
+    fn get(&self, tokenizer: &Tokenizer) -> Arc<FrozenOutputAlphabet> {
+        Arc::clone(self.data.get_or_init(|| Arc::new(FrozenOutputAlphabet::from_tokenizer(tokenizer))))
     }
 }
 
-/// Immutable raw lexer evidence that is independent of a historical TI round's
-/// active-terminal mask.  The projected `OutputBits` remain round-local, but
-/// their source columns and the reverse restricted topology are reusable.
-struct TiRawDiscoveryData {
-    finalizer_terminals_by_state: Arc<[Box<[TerminalID]>]>,
-    future_finalizer_terminals_by_state: Arc<[Box<[TerminalID]>]>,
-    finalizer_states_by_terminal: Arc<[Vec<u32>]>,
-    future_finalizer_states_by_terminal: Arc<[Vec<u32>]>,
-    reverse_predecessors: Arc<[Vec<u32>]>,
-    observed_destinations: Arc<[bool]>,
-    full_output_projection_seed: OutputProjectionSeed,
-}
-
-impl TiRawDiscoveryData {
-    fn new(
-        tokenizer: &Tokenizer,
-        topology: &RestrictedTopology,
-        shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
-    ) -> Self {
-        let topology_outputs = topology.nfa_output_rows.as_ref().map(|(finalizers, future)| {
-            Arc::new(TiTokenizerOutputData::from_state_rows(
-                Arc::clone(finalizers),
-                Arc::clone(future),
-                tokenizer.num_terminals() as usize,
-            ))
-        });
-        let outputs = topology_outputs.unwrap_or_else(|| {
-            shared_output_cache
-                .map(|cache| cache.get(tokenizer))
-                .unwrap_or_else(|| Arc::new(TiTokenizerOutputData::new(tokenizer)))
-        });
-        let outputs_are_discovery_domain = topology.nfa_output_rows.is_some();
-
-        let (
-            finalizer_terminals_by_state,
-            future_finalizer_terminals_by_state,
-            finalizer_states_by_terminal,
-            future_finalizer_states_by_terminal,
-        ) = if outputs_are_discovery_domain || topology.raw_representative_by_state.is_none() {
-            (
-                Arc::clone(&outputs.finalizer_terminals_by_raw_state),
-                Arc::clone(&outputs.future_finalizer_terminals_by_raw_state),
-                Arc::clone(&outputs.finalizer_raw_states_by_terminal),
-                Arc::clone(&outputs.future_finalizer_raw_states_by_terminal),
-            )
-        } else {
-            let terminal_count = tokenizer.num_terminals() as usize;
-            let mut finalizers_by_state = Vec::with_capacity(topology.real_state_count);
-            let mut future_by_state = Vec::with_capacity(topology.real_state_count);
-            let mut finalizer_states = vec![Vec::<u32>::new(); terminal_count];
-            let mut future_states = vec![Vec::<u32>::new(); terminal_count];
-            for state in 0..topology.real_state_count {
-                let raw_state = topology.raw_state_for_state(state) as usize;
-                let finalizers = outputs.finalizer_terminals_by_raw_state[raw_state].clone();
-                for &terminal in finalizers.iter() {
-                    finalizer_states[terminal as usize].push(state as u32);
-                }
-                finalizers_by_state.push(finalizers);
-                let future = outputs.future_finalizer_terminals_by_raw_state[raw_state].clone();
-                for &terminal in future.iter() {
-                    future_states[terminal as usize].push(state as u32);
-                }
-                future_by_state.push(future);
-            }
-            (
-                Arc::from(finalizers_by_state),
-                Arc::from(future_by_state),
-                Arc::from(finalizer_states),
-                Arc::from(future_states),
-            )
-        };
-
-        let reverse_predecessors = topology.reverse_predecessors();
-        let (full_output_pairs, full_output_pair_by_raw_state) =
-            outputs.full_output_projection();
-        let mut full_output_pair_by_state = if outputs_are_discovery_domain {
-            assert_eq!(
-                full_output_pair_by_raw_state.len(),
-                topology.real_state_count,
-                "NFA TI output rows must align with powerset states",
-            );
-            full_output_pair_by_raw_state.to_vec()
-        } else {
-            let mut by_state = Vec::with_capacity(topology.real_state_count);
-            for state in 0..topology.real_state_count {
-                let raw_state = topology.raw_state_for_state(state) as usize;
-                by_state.push(full_output_pair_by_raw_state[raw_state]);
-            }
-            by_state
-        };
-        full_output_pair_by_state.push(0);
-        let full_output_projection_seed = OutputProjectionSeed {
-            active_terminals: Arc::from(vec![true; tokenizer.num_terminals() as usize]),
-            output_pairs: full_output_pairs,
-            output_pair_by_state: Arc::from(full_output_pair_by_state),
-            quotient: None,
-        };
-
-        Self {
-            finalizer_terminals_by_state,
-            future_finalizer_terminals_by_state,
-            finalizer_states_by_terminal,
-            future_finalizer_states_by_terminal,
-            reverse_predecessors,
-            observed_destinations: topology.observed_destinations(),
-            full_output_projection_seed,
-        }
+fn full_output_projection_seed(
+    tokenizer: &Tokenizer,
+    topology: &RestrictedTopology,
+    shared_output_cache: Option<&SharedTiTokenizerOutputCache>,
+) -> OutputProjectionSeed {
+    let outputs = topology.nfa_outputs.as_ref().cloned().unwrap_or_else(|| {
+        shared_output_cache.map(|cache| cache.get(tokenizer))
+            .unwrap_or_else(|| Arc::new(FrozenOutputAlphabet::from_tokenizer(tokenizer)))
+    });
+    let mut by_state = if topology.nfa_outputs.is_some() {
+        assert_eq!(outputs.by_state.len(), topology.real_state_count,
+            "NFA TI output rows must align with powerset states");
+        outputs.by_state.to_vec()
+    } else {
+        (0..topology.real_state_count)
+            .map(|state| outputs.by_state[topology.raw_state_for_state(state) as usize])
+            .collect()
+    };
+    by_state.push(0); // synthetic dead output
+    OutputProjectionSeed {
+        active_terminals: Arc::from(vec![true; tokenizer.num_terminals() as usize]),
+        output_pairs: Arc::clone(&outputs.pairs),
+        output_pair_by_state: by_state.into(),
+        quotient: None,
     }
 }
 
@@ -1074,7 +786,7 @@ pub struct TiDiscoveryContext {
     /// topology may internally compress equivalent bytes, so its stored edge
     /// labels are not a lossless reconstruction of this semantic input.
     relevant_bytes: [bool; 256],
-    raw: Arc<TiRawDiscoveryData>,
+    full_output_projection_seed: OutputProjectionSeed,
     root_output_signatures: Vec<RootOutputSignature>,
     root_observed_states: usize,
     output_projection_seed: std::cell::RefCell<Option<OutputProjectionSeed>>,
@@ -1131,14 +843,11 @@ impl TiDiscoveryContext {
     ) -> Self {
         let profile = std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some();
         let topology = Arc::new(topology);
-        let raw = Arc::new(TiRawDiscoveryData::new(
-            tokenizer,
-            &topology,
-            shared_output_cache,
-        ));
+        let full_output_projection_seed =
+            full_output_projection_seed(tokenizer, &topology, shared_output_cache);
         let raw_finished_at = Instant::now();
         let (root_output_signatures, root_observed_states) =
-            root_output_signatures(&topology, &raw);
+            root_output_signatures(&topology, &full_output_projection_seed);
         let finished_at = Instant::now();
         if profile {
             eprintln!(
@@ -1156,7 +865,7 @@ impl TiDiscoveryContext {
         Self {
             topology,
             relevant_bytes: *relevant_bytes,
-            raw,
+            full_output_projection_seed,
             root_output_signatures,
             root_observed_states,
             output_projection_seed: std::cell::RefCell::new(None),
@@ -1364,7 +1073,7 @@ impl TiDiscoveryContext {
         initial_state_map: Option<&ManyToOneIdMap>,
     ) -> Option<TiRestrictedObservationSeed> {
         self.reusable_nfa_observation_state_map_from_seed(
-            tokenizer, initial_state_map, &self.raw.full_output_projection_seed,
+            tokenizer, initial_state_map, &self.full_output_projection_seed,
         )
     }
 
@@ -1416,10 +1125,13 @@ impl TiDiscoveryContext {
 /// membership over every state in `D`.
 fn root_output_signatures(
     topology: &RestrictedTopology,
-    raw: &TiRawDiscoveryData,
+    seed: &OutputProjectionSeed,
 ) -> (Vec<RootOutputSignature>, usize) {
     let state_count = topology.real_state_count;
     let mut reachable = vec![false; state_count];
+    let mut observed = vec![false; state_count];
+    let mut observed_outputs = vec![false; seed.output_pairs.len()];
+    let mut observed_state_count = 0;
     reachable[topology.initial_state] = true;
     let mut worklist = vec![topology.initial_state];
     while let Some(state) = worklist.pop() {
@@ -1429,46 +1141,39 @@ fn root_output_signatures(
                 reachable[destination] = true;
                 worklist.push(destination);
             }
-        }
-    }
-
-    // `characterize` observes outputs on destinations, not current states.
-    let mut observed = vec![false; state_count];
-    for (state, &is_reachable) in reachable.iter().enumerate() {
-        if is_reachable {
-            for &(_, destination) in topology.edges_from(state) {
-                observed[destination as usize] = true;
+            // Outputs at the initial state itself do not count unless some
+            // nonempty enabled word reaches it.
+            if !observed[destination] {
+                observed[destination] = true;
+                observed_state_count += 1;
+                observed_outputs[seed.output_pair_by_state[destination] as usize] = true;
             }
         }
     }
 
-    let terminal_count = raw.finalizer_states_by_terminal.len();
-    let mut finalizer_states = vec![Vec::<u32>::new(); terminal_count];
-    let mut future_finalizer_states = vec![Vec::<u32>::new(); terminal_count];
-    for (state, &is_observed) in observed.iter().enumerate() {
-        if !is_observed {
+    // Two terminals have the same membership over all observed states iff
+    // they have the same membership over the distinct observed output pairs.
+    // Keep this smaller exact incidence relation, not repeated state columns.
+    let terminal_count = seed.active_terminals.len();
+    let mut finalizer_outputs = vec![Vec::<u32>::new(); terminal_count];
+    let mut future_outputs = vec![Vec::<u32>::new(); terminal_count];
+    for (id, pair) in seed.output_pairs.iter().enumerate() {
+        if !observed_outputs[id] {
             continue;
         }
-        for &terminal in raw.finalizer_terminals_by_state[state].iter() {
-            finalizer_states[terminal as usize].push(state as u32);
+        for &terminal in &pair.finalizers.0 {
+            finalizer_outputs[terminal as usize].push(id as u32);
         }
-        for &terminal in raw.future_finalizer_terminals_by_state[state].iter() {
-            future_finalizer_states[terminal as usize].push(state as u32);
+        for &terminal in &pair.future_finalizers.0 {
+            future_outputs[terminal as usize].push(id as u32);
         }
     }
-
-    let signatures = finalizer_states
-        .into_iter()
-        .zip(future_finalizer_states)
-        .map(|(finalizer_states, future_finalizer_states)| RootOutputSignature {
-            finalizer_states: finalizer_states.into_boxed_slice(),
-            future_finalizer_states: future_finalizer_states.into_boxed_slice(),
-        })
-        .collect::<Vec<_>>();
-    (
-        signatures,
-        observed.into_iter().filter(|&value| value).count(),
-    )
+    let signatures = finalizer_outputs.into_iter().zip(future_outputs)
+        .map(|(finalizers, future)| RootOutputSignature {
+            finalizer_outputs: finalizers.into_boxed_slice(),
+            future_finalizer_outputs: future.into_boxed_slice(),
+        }).collect();
+    (signatures, observed_state_count)
 }
 
 fn rooted_candidate_groups_from_signatures(
@@ -1489,13 +1194,15 @@ fn rooted_candidate_groups_from_signatures(
     groups.into_values().collect()
 }
 
+
+#[cfg(test)]
 fn rooted_candidate_groups(
     tokenizer: &Tokenizer,
     candidates: &[TerminalID],
     topology: &RestrictedTopology,
 ) -> (Vec<Vec<TerminalID>>, usize) {
-    let raw = TiRawDiscoveryData::new(tokenizer, topology, None);
-    let (signatures, observed_states) = root_output_signatures(topology, &raw);
+    let seed = full_output_projection_seed(tokenizer, topology, None);
+    let (signatures, observed_states) = root_output_signatures(topology, &seed);
     (
         rooted_candidate_groups_from_signatures(candidates, &signatures),
         observed_states,
@@ -1504,6 +1211,7 @@ fn rooted_candidate_groups(
 
 /// A terminal's support across a terminal-name-independent structural
 /// partition. It is only a rejection invariant; the full checker decides.
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct StructuralOutputSignature {
     finalizer_support: Box<[u64]>,
@@ -1521,12 +1229,14 @@ struct SupportTrackShape {
     both: u32,
 }
 
+#[cfg(test)]
 const STRUCTURAL_REFINEMENT_ROUNDS: usize = 2;
 
 /// Mix one invariant structural component into a deterministic 64-bit
 /// fingerprint. Equal tuples always have equal fingerprints. A collision only
 /// coarsens the prefilter and therefore cannot reject a valid pair.
 #[inline]
+#[cfg(test)]
 fn mix_structural_fingerprint(mut state: u64, component: u64) -> u64 {
     state ^= component.wrapping_add(0x9e37_79b9_7f4a_7c15).rotate_left(17);
     state = state.wrapping_mul(0x517c_c1b7_2722_0a95);
@@ -1538,6 +1248,7 @@ fn mix_structural_fingerprint(mut state: u64, component: u64) -> u64 {
 /// component `(hash(dead), 0, 0)`. The full tuple is therefore determined by
 /// the enabled-byte keys whose component differs from that default. Omitting
 /// default entries preserves tuple equality exactly.
+#[cfg(test)]
 fn structural_candidate_signatures(
     tokenizer: &Tokenizer,
     active_terminals: &[bool],
@@ -1643,6 +1354,7 @@ fn structural_candidate_signatures(
 
 /// Refine root candidates by the global structural invariant. Singletons need
 /// no direct terminal-pair check.
+#[cfg(test)]
 fn refine_candidate_groups_by_structure(
     root_groups: Vec<Vec<TerminalID>>,
     candidates: &[TerminalID],
@@ -2103,7 +1815,7 @@ impl TiQuotient {
         let class_for_state: Arc<[u32]> = classes.into();
         let (scanner_state_count, scanner_class_for_original, mut scanner_representative_for_class) =
             topology.scanner_projection_from_internal_quotient(Arc::clone(&class_for_state), representatives.into());
-        let explicit_raw_transport = topology.nfa_output_rows.is_some();
+        let explicit_raw_transport = topology.nfa_outputs.is_some();
         if explicit_raw_transport {
             // Powerset discovery IDs are not ordered by raw scanner ID.
             // Preserve the historical first-raw representative convention.
@@ -2263,13 +1975,12 @@ impl InterchangeabilityDfa {
 
     fn from_context(observed_terminals: &[bool], context: &TiDiscoveryContext) -> Self {
         let topology = Arc::clone(&context.topology);
-        let raw = &context.raw;
         let previous = context.output_projection_seed.borrow();
         let seed = previous.as_ref().filter(|seed| {
             seed.active_terminals.len() == observed_terminals.len()
                 && observed_terminals.iter().zip(seed.active_terminals.iter())
                     .all(|(&current, &old)| !current || old)
-        }).unwrap_or(&raw.full_output_projection_seed);
+        }).unwrap_or(&context.full_output_projection_seed);
         let empty = OutputPair { finalizers: OutputBits::new(0), future_finalizers: OutputBits::new(0) };
         let mut output_pairs = vec![empty.clone()];
         let mut output_pair_lookup = FxHashMap::default();
@@ -2290,7 +2001,7 @@ impl InterchangeabilityDfa {
 
         let mut observed_output_pair_is_observed = vec![false; output_pairs.len()];
         for state in 0..topology.real_state_count {
-            if raw.observed_destinations[state] {
+            if topology.observed_destinations[state] {
                 observed_output_pair_is_observed[output_pair_by_state[state] as usize] = true;
             }
         }
@@ -2412,7 +2123,7 @@ impl InterchangeabilityDfa {
         if sources.len() != targets.len() || sources.iter().any(|c| !targets.contains_key(c)) {
             return None;
         }
-        if self.topology.nfa_output_rows.is_some() {
+        if self.topology.nfa_outputs.is_some() {
             let raw_to_state = self.topology.state_for_raw.as_ref()?;
             let mut first_raw = BTreeMap::<u32, u32>::new();
             for (raw, &state) in raw_to_state.iter().enumerate() {
@@ -4961,6 +4672,69 @@ mod tests {
     }
 
     #[test]
+    fn frozen_output_alphabet_chunk_merge_and_root_incidence_are_exact() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"ab".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+        ]);
+        let count = tokenizer.num_states() as usize;
+        let build = |start: usize, end: usize| {
+            let mut builder = FrozenOutputBuilder::new(end - start);
+            for raw in start as u32..end as u32 {
+                builder.push(
+                    tokenizer.matched_terminals_iter(raw),
+                    tokenizer.possible_future_terminals_iter(raw),
+                );
+            }
+            builder.finish()
+        };
+        let sequential = build(0, count);
+        let mut merged = FrozenOutputBuilder::new(count);
+        merged.extend(build(0, count / 2));
+        merged.extend(build(count / 2, count));
+        let merged = merged.finish();
+        assert_eq!(merged.by_state, sequential.by_state);
+        assert_eq!(merged.pairs, sequential.pairs);
+        for raw in 0..count as u32 {
+            let pair = &merged.pairs[merged.by_state[raw as usize] as usize];
+            assert_eq!(pair.finalizers.0.as_slice(),
+                tokenizer.matched_terminals_iter(raw).collect::<Vec<_>>().as_slice());
+            assert_eq!(pair.future_finalizers.0.as_slice(),
+                tokenizer.possible_future_terminals_iter(raw).collect::<Vec<_>>().as_slice());
+        }
+
+        // Literal enabled-word closure over destination states. Compare
+        // terminal equality partitions, not their incidental ID numbering.
+        let mut relevant = [false; 256];
+        relevant[b'a' as usize] = true;
+        let topology = RestrictedTopology::new(&tokenizer, &relevant);
+        let seed = full_output_projection_seed(&tokenizer, &topology, None);
+        let (signatures, observed_count) = root_output_signatures(&topology, &seed);
+        let mut reached = BTreeSet::new();
+        let mut state = topology.initial_state;
+        loop {
+            state = topology.destination_for_byte(state, b'a');
+            if state == topology.dead_state() || !reached.insert(state) {
+                break;
+            }
+        }
+        assert_eq!(observed_count, reached.len());
+        let literal = |terminal: usize| {
+            reached.iter().map(|&state| {
+                let raw = topology.raw_state_for_state(state);
+                (tokenizer.matched_terminal_bitset(raw).contains(terminal),
+                    tokenizer.possible_future_terminals(raw).contains(terminal))
+            }).collect::<Vec<_>>()
+        };
+        for left in 0..3 {
+            for right in 0..3 {
+                assert_eq!(signatures[left] == signatures[right], literal(left) == literal(right));
+            }
+        }
+    }
+
+    #[test]
     fn permitted_candidate_groups_still_require_and_retain_exact_witnesses() {
         let tokenizer = tokenizer(vec![
             Expr::U8Seq(b"a".to_vec()),
@@ -5435,18 +5209,16 @@ mod tests {
             bytes: Vec::new(),
             edge_offsets: vec![0, 0, 0, 0],
             edges: Vec::new(),
-            reverse_predecessors: Arc::from([Vec::new(), Vec::new()]),
             observed_destinations: Arc::from([false, false, false]),
             raw_state_count: 1,
             raw_representative_by_state: Some(Arc::from([0, u32::MAX])),
             transport_representative_by_state: Some(Arc::from([0, 0])),
             state_for_raw: Some(Arc::from([0])),
-            nfa_output_rows: None,
+            nfa_outputs: None,
             nfa_configurations: None,
             nfa_configurations_use_raw_states: false,
             real_state_count: 2,
             initial_state: 0,
-            max_outdegree: 0,
         };
 
         let (_, _, representatives) = topology.scanner_projection_from_internal_quotient(
