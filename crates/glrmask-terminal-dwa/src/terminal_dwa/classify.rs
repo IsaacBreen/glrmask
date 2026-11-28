@@ -3981,6 +3981,104 @@ fn merge_mask_continuation(
     }
 }
 
+/// The reset continuation action may use an exact prepared DFA or lazily
+/// interned NFA configurations. Both expose the same matched/future event
+/// relation. A suffix observation remembers every completion before death,
+/// plus future terminals only when the whole suffix has been consumed.
+#[derive(Clone, Copy)]
+struct DenseCandidateAction<'a> {
+    transitions: &'a [u32],
+    matched: &'a [u64],
+    future: &'a [u64],
+    width: usize,
+}
+
+impl DenseCandidateAction<'_> {
+    #[inline]
+    fn step(&self, state: u32, byte: u8) -> u32 {
+        self.transitions[state as usize * 256 + byte as usize]
+    }
+
+    #[inline]
+    fn matched(&self, state: u32) -> &[u64] {
+        let base = state as usize * self.width;
+        &self.matched[base..base + self.width]
+    }
+
+    #[inline]
+    fn future(&self, state: u32) -> &[u64] {
+        let base = state as usize * self.width;
+        &self.future[base..base + self.width]
+    }
+}
+
+enum ResetAction<'a, 'b> {
+    Original(&'a mut CandidatePrefixPowerset<'b>),
+    Dense(DenseCandidateAction<'a>),
+}
+
+impl ResetAction<'_, '_> {
+    #[inline]
+    fn step(&mut self, state: u32, byte: u8) -> u32 {
+        match self {
+            Self::Original(scanner) => scanner.step(state, byte),
+            Self::Dense(action) => action.step(state, byte),
+        }
+    }
+
+    #[inline]
+    fn matched(&self, state: u32) -> &[u64] {
+        match self {
+            Self::Original(scanner) => scanner.matched_mask(state),
+            Self::Dense(action) => action.matched(state),
+        }
+    }
+
+    #[inline]
+    fn future(&self, state: u32) -> &[u64] {
+        match self {
+            Self::Original(scanner) => scanner.future_mask(state),
+            Self::Dense(action) => action.future(state),
+        }
+    }
+
+    fn suffix(&mut self, mut state: u32, bytes: &[u8], output: &mut [u64]) {
+        output.fill(0);
+        for &byte in bytes {
+            if state == PREFIX_DEAD_STATE || self.future(state).iter().all(|&word| word == 0) {
+                return;
+            }
+            state = self.step(state, byte);
+            if state == PREFIX_DEAD_STATE { return; }
+            for (out, &word) in output.iter_mut().zip(self.matched(state)) {
+                *out |= word;
+            }
+        }
+        if state != PREFIX_DEAD_STATE {
+            for (out, &word) in output.iter_mut().zip(self.future(state)) {
+                *out |= word;
+            }
+        }
+    }
+
+    #[inline]
+    fn suffix_word(&mut self, reset: u32, bytes: &[u8]) -> u64 {
+        let mut word = [0];
+        self.suffix(reset, bytes, &mut word);
+        word[0]
+    }
+}
+
+fn reset_action<'a, 'b>(
+    scanner: &'a mut CandidatePrefixPowerset<'b>,
+    dense: Option<DenseCandidateAction<'a>>,
+) -> ResetAction<'a, 'b> {
+    match dense {
+        Some(action) => ResetAction::Dense(action),
+        None => ResetAction::Original(scanner),
+    }
+}
+
 fn execute_prepared_dense_suffix_trie(
     trie: &VocabSuffixTrie,
     continuation_reset_state: u32,
@@ -4269,6 +4367,12 @@ fn exact_terminal_path_two_plus_candidate_dfa(
         }
         candidate_tokenizer.initial_state_id()
     };
+    let dense_action = (!uses_original_tokenizer).then_some(DenseCandidateAction {
+        transitions: &dense_flat_trans,
+        matched: &dense_finalizer_masks,
+        future: &dense_future_masks,
+        width: words_per_mask,
+    });
     // Before materializing suffix viability for every feasible split, try a
     // small exact witness probe.  Terminal-path classification asks only whether
     // each candidate has *some* two-terminal witness.  A witness found here is
@@ -4330,42 +4434,8 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                             continue;
                         }
 
-                        let mut suffix_state = continuation_reset_state;
-                        let mut suffix_matched = 0u64;
-                        let mut consumed_suffix = true;
-                        for &byte in &bytes[split_after + 1..] {
-                            if uses_original_tokenizer {
-                                if prefix_scanner.future_mask(suffix_state)[0] == 0 {
-                                    consumed_suffix = false;
-                                    break;
-                                }
-                                suffix_state = prefix_scanner.step(suffix_state, byte);
-                                if suffix_state == PREFIX_DEAD_STATE {
-                                    consumed_suffix = false;
-                                    break;
-                                }
-                                suffix_matched |= prefix_scanner.matched_mask(suffix_state)[0];
-                            } else {
-                                if dense_future_masks[suffix_state as usize] == 0 {
-                                    consumed_suffix = false;
-                                    break;
-                                }
-                                suffix_state = dense_flat_trans
-                                    [suffix_state as usize * 256 + byte as usize];
-                                if suffix_state == u32::MAX {
-                                    consumed_suffix = false;
-                                    break;
-                                }
-                                suffix_matched |= dense_finalizer_masks[suffix_state as usize];
-                            }
-                        }
-                        if consumed_suffix {
-                            suffix_matched |= if uses_original_tokenizer {
-                                prefix_scanner.future_mask(suffix_state)[0]
-                            } else {
-                                dense_future_masks[suffix_state as usize]
-                            };
-                        }
+                        let suffix_matched = reset_action(&mut prefix_scanner, dense_action)
+                            .suffix_word(continuation_reset_state, &bytes[split_after + 1..]);
                         if suffix_matched == 0 {
                             continue;
                         }
@@ -4479,24 +4549,8 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                             .expect("non-indexed sparse probe requires entry view")[entry_index]
                             .as_slice()
                     };
-                    let mut state = continuation_reset_state;
-                    let mut matched = 0u64;
-                    let mut consumed_suffix = true;
-                    for &byte in &bytes[split_after + 1..] {
-                        if prefix_scanner.future_mask(state)[0] == 0 {
-                            consumed_suffix = false;
-                            break;
-                        }
-                        state = prefix_scanner.step(state, byte);
-                        if state == PREFIX_DEAD_STATE {
-                            consumed_suffix = false;
-                            break;
-                        }
-                        matched |= prefix_scanner.matched_mask(state)[0];
-                    }
-                    if consumed_suffix {
-                        matched |= prefix_scanner.future_mask(state)[0];
-                    }
+                    let matched = reset_action(&mut prefix_scanner, dense_action)
+                        .suffix_word(continuation_reset_state, &bytes[split_after + 1..]);
                     if matched != 0 {
                         any_viable = true;
                         break 'pairs;
@@ -4569,41 +4623,8 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     let split_after = packed as u32 as usize;
                     let (&_token_id, bytes) = vocab_entries[entry_index];
                     candidate_splits += 1;
-                    let mut state = continuation_reset_state;
-                    let mut matched = 0u64;
-                    let mut consumed_suffix = true;
-                    for &byte in &bytes[split_after + 1..] {
-                        if uses_original_tokenizer {
-                            if prefix_scanner.future_mask(state)[0] == 0 {
-                                consumed_suffix = false;
-                                break;
-                            }
-                            state = prefix_scanner.step(state, byte);
-                            if state == PREFIX_DEAD_STATE {
-                                consumed_suffix = false;
-                                break;
-                            }
-                            matched |= prefix_scanner.matched_mask(state)[0];
-                        } else {
-                            if dense_future_masks[state as usize] == 0 {
-                                consumed_suffix = false;
-                                break;
-                            }
-                            state = dense_flat_trans[state as usize * 256 + byte as usize];
-                            if state == u32::MAX {
-                                consumed_suffix = false;
-                                break;
-                            }
-                            matched |= dense_finalizer_masks[state as usize];
-                        }
-                    }
-                    if consumed_suffix {
-                        matched |= if uses_original_tokenizer {
-                            prefix_scanner.future_mask(state)[0]
-                        } else {
-                            dense_future_masks[state as usize]
-                        };
-                    }
+                    let matched = reset_action(&mut prefix_scanner, dense_action)
+                        .suffix_word(continuation_reset_state, &bytes[split_after + 1..]);
                     if matched != 0 {
                         any_viable_suffix = true;
                         splits.push((entry_index, split_after, matched));
@@ -4705,24 +4726,8 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                             continue;
                         }
                         local_candidate_splits += 1;
-                        let mut state = continuation_reset_state;
-                        let mut matched = 0u64;
-                        let mut consumed_suffix = true;
-                        for &byte in &bytes[split_after + 1..] {
-                            if dense_future_masks[state as usize] == 0 {
-                                consumed_suffix = false;
-                                break;
-                            }
-                            state = dense_flat_trans[state as usize * 256 + byte as usize];
-                            if state == u32::MAX {
-                                consumed_suffix = false;
-                                break;
-                            }
-                            matched |= dense_finalizer_masks[state as usize];
-                        }
-                        if consumed_suffix {
-                            matched |= dense_future_masks[state as usize];
-                        }
+                        let matched = ResetAction::Dense(dense_action.expect("dense suffix action"))
+                            .suffix_word(continuation_reset_state, &bytes[split_after + 1..]);
                         local_any_viable_suffix |= matched != 0;
                         local_masks[token_split_start - split_base + split_after] = matched;
                     }
@@ -4751,41 +4756,8 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     let split_after = packed as u32 as usize;
                     let (&_token_id, bytes) = vocab_entries[entry_index];
                     candidate_splits += 1;
-                    let mut state = continuation_reset_state;
-                    let mut matched = 0u64;
-                    let mut consumed_suffix = true;
-                    for &byte in &bytes[split_after + 1..] {
-                        if uses_original_tokenizer {
-                            if prefix_scanner.future_mask(state)[0] == 0 {
-                                consumed_suffix = false;
-                                break;
-                            }
-                            state = prefix_scanner.step(state, byte);
-                            if state == PREFIX_DEAD_STATE {
-                                consumed_suffix = false;
-                                break;
-                            }
-                            matched |= prefix_scanner.matched_mask(state)[0];
-                        } else {
-                            if dense_future_masks[state as usize] == 0 {
-                                consumed_suffix = false;
-                                break;
-                            }
-                            state = dense_flat_trans[state as usize * 256 + byte as usize];
-                            if state == u32::MAX {
-                                consumed_suffix = false;
-                                break;
-                            }
-                            matched |= dense_finalizer_masks[state as usize];
-                        }
-                    }
-                    if consumed_suffix {
-                        matched |= if uses_original_tokenizer {
-                            prefix_scanner.future_mask(state)[0]
-                        } else {
-                            dense_future_masks[state as usize]
-                        };
-                    }
+                    let matched = reset_action(&mut prefix_scanner, dense_action)
+                        .suffix_word(continuation_reset_state, &bytes[split_after + 1..]);
                     any_viable_suffix |= matched != 0;
                     let split_index = index.entry_split_offsets[entry_index] + split_after;
                     suffix_viable_masks[split_index] = matched;
@@ -4800,41 +4772,8 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     continue;
                 }
                 candidate_splits += 1;
-                let mut state = continuation_reset_state;
-                let mut matched = 0u64;
-                let mut consumed_suffix = true;
-                for &byte in &bytes[split_after + 1..] {
-                    if uses_original_tokenizer {
-                        if prefix_scanner.future_mask(state)[0] == 0 {
-                            consumed_suffix = false;
-                            break;
-                        }
-                        state = prefix_scanner.step(state, byte);
-                        if state == PREFIX_DEAD_STATE {
-                            consumed_suffix = false;
-                            break;
-                        }
-                        matched |= prefix_scanner.matched_mask(state)[0];
-                    } else {
-                        if dense_future_masks[state as usize] == 0 {
-                            consumed_suffix = false;
-                            break;
-                        }
-                        state = dense_flat_trans[state as usize * 256 + byte as usize];
-                        if state == u32::MAX {
-                            consumed_suffix = false;
-                            break;
-                        }
-                        matched |= dense_finalizer_masks[state as usize];
-                    }
-                }
-                if consumed_suffix {
-                    matched |= if uses_original_tokenizer {
-                        prefix_scanner.future_mask(state)[0]
-                    } else {
-                        dense_future_masks[state as usize]
-                    };
-                }
+                let matched = reset_action(&mut prefix_scanner, dense_action)
+                    .suffix_word(continuation_reset_state, &bytes[split_after + 1..]);
                 any_viable_suffix |= matched != 0;
                 suffix_viable_masks[split_start + split_after] = matched;
             }
@@ -4848,59 +4787,8 @@ fn exact_terminal_path_two_plus_candidate_dfa(
                     continue;
                 }
                 candidate_splits += 1;
-                matched.fill(0);
-                let mut state = continuation_reset_state;
-                let mut consumed_suffix = true;
-                for &byte in &bytes[split_after + 1..] {
-                    if uses_original_tokenizer {
-                        if prefix_scanner
-                            .future_mask(state)
-                            .iter()
-                            .all(|&word| word == 0)
-                        {
-                            consumed_suffix = false;
-                            break;
-                        }
-                        state = prefix_scanner.step(state, byte);
-                        if state == PREFIX_DEAD_STATE {
-                            consumed_suffix = false;
-                            break;
-                        }
-                        for word_index in 0..words_per_mask {
-                            matched[word_index] |= prefix_scanner.matched_mask(state)[word_index];
-                        }
-                    } else {
-                        let state_base = state as usize * words_per_mask;
-                        if dense_future_masks[state_base..state_base + words_per_mask]
-                            .iter()
-                            .all(|&word| word == 0)
-                        {
-                            consumed_suffix = false;
-                            break;
-                        }
-                        state = dense_flat_trans[state as usize * 256 + byte as usize];
-                        if state == u32::MAX {
-                            consumed_suffix = false;
-                            break;
-                        }
-                        let state_base = state as usize * words_per_mask;
-                        for word_index in 0..words_per_mask {
-                            matched[word_index] |= dense_finalizer_masks[state_base + word_index];
-                        }
-                    }
-                }
-                if consumed_suffix {
-                    if uses_original_tokenizer {
-                        for word_index in 0..words_per_mask {
-                            matched[word_index] |= prefix_scanner.future_mask(state)[word_index];
-                        }
-                    } else {
-                        let state_base = state as usize * words_per_mask;
-                        for word_index in 0..words_per_mask {
-                            matched[word_index] |= dense_future_masks[state_base + word_index];
-                        }
-                    }
-                }
+                reset_action(&mut prefix_scanner, dense_action)
+                    .suffix(continuation_reset_state, &bytes[split_after + 1..], &mut matched);
                 any_viable_suffix |= matched.iter().any(|&word| word != 0);
                 let suffix_base = (split_start + split_after) * words_per_mask;
                 suffix_viable_masks[suffix_base..suffix_base + words_per_mask]
