@@ -11,7 +11,6 @@ on:
       - 'examples/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'scripts/hf-vocab-fixtures.py'
       - '.github/workflows/rust.yml'
   pull_request:
     paths:
@@ -22,7 +21,6 @@ on:
       - 'examples/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'scripts/hf-vocab-fixtures.py'
       - '.github/workflows/rust.yml'
   workflow_dispatch:
 
@@ -53,7 +51,7 @@ jobs:
           rustup default 1.89.0
       - name: Check library and published helper crates
         run: >-
-          cargo check --locked -p glrmask --features hf
+          cargo check --locked -p glrmask
           -p glrmask-artifact -p glrmask-dwa-merge -p glrmask-finite-automata
           -p glrmask-glr -p glrmask-grammar -p glrmask-invariant -p glrmask-json-schema
           -p glrmask-lexer -p glrmask-parser-dwa -p glrmask-terminal-dwa -p glrmask-vocab
@@ -69,21 +67,8 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - uses: actions/cache@v4
-        with:
-          path: target/hf-fixtures
-          key: hf-vocab-${{ hashFiles('scripts/hf-vocab-fixtures.py') }}
-      - name: Prepare tokenizer reference cases
-        run: |
-          python -m pip install tokenizers==0.21.4
-          python scripts/hf-vocab-fixtures.py target/hf-fixtures
       - name: Test with internal API
-        env:
-          GLRMASK_HF_FIXTURES: target/hf-fixtures
-        run: cargo test --locked --profile fasttest -p glrmask -p glrmask-grammar --features internal-api,hf
+        run: cargo test --locked --profile fasttest -p glrmask -p glrmask-grammar --features internal-api
 
   clippy:
     name: Clippy

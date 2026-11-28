@@ -9,7 +9,7 @@
   ],
   "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark and [GLRM](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md).",
   "links": "[GitHub](https://github.com/IsaacBreen/glrmask) · [Paper](https://doi.org/10.5281/zenodo.23273556)",
-  "usage": "GLRMask has four core types:\n\n- `Grammar`: a grammar, written as source text or built from an expression.\n- `Constraint`: a compiled grammar, ready to use.\n- `ConstraintState`: the state of one generated sequence.\n- `Module`: a partially compiled grammar ([see below](#composing-grammars)).\n\nFor Hugging Face tokenizers, use `Vocab.from_huggingface(tokenizer)` in Python, or `Vocab::from_tokenizer_file(path, None)` in Rust (enable `hf` and import `VocabFromTokenizer`). Pass the model vocabulary size to include padded IDs. For other tokenizers, supply their exact token bytes. The quickstart also needs the model's EOS ID. The model produces logits; the sampling routine must apply the packed mask and permit EOS only when the state is accepting.",
+  "usage": "GLRMask has four core types:\n\n- `Grammar`: a grammar, written as source text or built from an expression.\n- `Constraint`: a compiled grammar, ready to use.\n- `ConstraintState`: the state of one generated sequence.\n- `Module`: a partially compiled grammar ([see below](#composing-grammars)).\n\nIn the quickstart, supply the tokenizer's exact token bytes and the model's EOS ID. The model produces logits; the sampling routine must apply the packed mask and permit EOS only when the state is accepting.",
   "installation": {
     "python": "python -m pip install glrmask",
     "rust": "cargo add glrmask"
@@ -87,5 +87,5 @@
     "json": "docs/benchmarks/website-aws-json-2026-10-19.json",
     "javascript": "docs/benchmarks/website-aws-js-2026-10-19.json"
   },
-  "content_sha256": "343fc40cdef8b3a6d8bd0fde65c4f078ef2eef711c53d0bf870153badce047f1"
+  "content_sha256": "f574661005afa64eb42d6a5809999a9f127d25c7764b9427a1285a933b73db61"
 }

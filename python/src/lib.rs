@@ -509,29 +509,6 @@ pub struct PyVocab {
 
 #[pymethods]
 impl PyVocab {
-    /// Loads the token bytes from a Hugging Face tokenizer JSON string.
-    #[staticmethod]
-    #[pyo3(signature = (source, vocab_size=None))]
-    fn from_tokenizer_json(source: &str, vocab_size: Option<usize>) -> PyResult<Self> {
-        use glrmask::VocabFromTokenizer;
-        let inner = glrmask::Vocab::from_tokenizer_json(source, vocab_size)
-            .map_err(|error| glrmask_error(kind_name(error.kind()), error.to_string()))?;
-        Ok(Self { inner })
-    }
-
-    /// Accepts a fast Transformers tokenizer or a tokenizers.Tokenizer.
-    #[staticmethod]
-    #[pyo3(signature = (tokenizer, vocab_size=None))]
-    fn from_huggingface(tokenizer: &Bound<'_, PyAny>, vocab_size: Option<usize>) -> PyResult<Self> {
-        let backend = match tokenizer.getattr("backend_tokenizer") {
-            Ok(backend) => backend,
-            Err(error) if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(tokenizer.py()) => tokenizer.clone(),
-            Err(error) => return Err(error),
-        };
-        let source: String = backend.call_method0("to_str")?.extract()?;
-        Self::from_tokenizer_json(&source, vocab_size)
-    }
-
     fn __repr__(&self) -> String {
         let tokens = self.inner.len();
         if tokens == 1 {
