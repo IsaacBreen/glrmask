@@ -1232,32 +1232,11 @@ impl Constraint {
     /// down shared prefixes. A subtree is skipped as soon as it is empty or a
     /// relevant terminal has matched at a proper prefix of every token below.
     fn boundary_token_candidates_from_trie(&self, relevant: &BitSet) -> Vec<u32> {
-        use crate::vocab::vocab_prefix_tree::{VocabPrefixTreeNode, VocabPrefixTree};
+        use crate::vocab::vocab_prefix_tree::VocabPrefixTreeNode;
 
-        struct BoundaryPrefixTree(VocabPrefixTree);
-        impl crate::vocab::VocabDerivedArtifact for BoundaryPrefixTree {}
-
-        let tree = if let Some(vocab) = self.token_bytes.vocab() {
-            if let Some(tree) = vocab.vocab_derived_cache_get::<BoundaryPrefixTree>() {
-                tree
-            } else {
-                let tree = Arc::new(BoundaryPrefixTree(VocabPrefixTree::build_owned(
-                    vocab
-                        .entries_map()
-                        .iter()
-                        .map(|(&id, bytes)| (id as usize, bytes.to_vec()))
-                        .collect(),
-                )));
-                vocab.vocab_derived_cache_set(tree.clone());
-                tree
-            }
-        } else {
-            Arc::new(BoundaryPrefixTree(VocabPrefixTree::build_owned(
-                self.token_bytes_iter()
-                    .map(|(id, bytes)| (id as usize, bytes.to_vec()))
-                    .collect(),
-            )))
-        };
+        let Some(vocab) = self.token_bytes.vocab() else { return Vec::new(); };
+        let lexical = vocab.lexical_vocabulary();
+        let tree = lexical.trie();
         let all_states = TokenizerStateSet::from_iter(0..self.tokenizer.num_states());
         let matched_flags = (0..self.tokenizer.num_states())
             .map(|state| {
@@ -1270,14 +1249,13 @@ impl Constraint {
             tokenizer: &Tokenizer,
             reset: u32,
             mut states: TokenizerStateSet,
-            mut depth: usize,
             edge: &[u8],
             child: VocabPrefixTreeNode<'_>,
             matched_flags: &[(bool, bool)],
+            aliases: &[Vec<u32>],
             out: &mut Vec<u32>,
-        ) -> Option<(TokenizerStateSet, usize)> {
+        ) -> Option<TokenizerStateSet> {
             for (edge_index, &byte) in edge.iter().enumerate() {
-                depth += 1;
                 states = tokenizer.step_all(states.as_slice(), byte);
                 if states.is_empty() {
                     return None;
@@ -1297,11 +1275,12 @@ impl Constraint {
                 }
                 if matched_relevant {
                     let at_child_end = edge_index + 1 == edge.len();
-                    for id in child.reachable_token_ids().iter() {
-                        if at_child_end && child.has_token() && id == child.token_id() {
-                            continue;
-                        }
-                        out.push(id as u32);
+                    let (first, end) = child.lexical_interval();
+                    // At an exact token endpoint, only longer spellings have
+                    // a proper-prefix match. Exclude every alias of that endpoint.
+                    let first = first + u32::from(at_child_end && child.has_token());
+                    for ids in &aliases[first as usize..end as usize] {
+                        out.extend_from_slice(ids);
                     }
                     return None;
                 }
@@ -1310,41 +1289,41 @@ impl Constraint {
                     states.sort_unstable();
                 }
             }
-            Some((states, depth))
+            Some(states)
         }
 
         let reset = self.runtime_commit_initial_state();
-        let root_children = tree.0.root().iter_children().collect::<Vec<_>>();
+        let root_children = tree.root().iter_children().collect::<Vec<_>>();
         let mut candidates = root_children
             .par_iter()
             .flat_map_iter(|(edge, child)| {
                 let mut out = Vec::new();
-                let mut pending: Vec<(VocabPrefixTreeNode<'_>, TokenizerStateSet, usize)> = Vec::new();
-                if let Some((states, depth)) = advance_edge(
+                let mut pending: Vec<(VocabPrefixTreeNode<'_>, TokenizerStateSet)> = Vec::new();
+                if let Some(states) = advance_edge(
                     &self.tokenizer,
                     reset,
                     all_states.clone(),
-                    0,
                     edge,
                     *child,
                     matched_flags.as_slice(),
+                    &lexical.ordered_to_originals,
                     &mut out,
                 ) {
-                    pending.push((*child, states, depth));
+                    pending.push((*child, states));
                 }
-                while let Some((node, states, depth)) = pending.pop() {
+                while let Some((node, states)) = pending.pop() {
                     for (edge, child) in node.iter_children() {
-                        if let Some((states, depth)) = advance_edge(
+                        if let Some(states) = advance_edge(
                             &self.tokenizer,
                             reset,
                             states.clone(),
-                            depth,
                             edge,
                             child,
                             matched_flags.as_slice(),
+                            &lexical.ordered_to_originals,
                             &mut out,
                         ) {
-                            pending.push((child, states, depth));
+                            pending.push((child, states));
                         }
                     }
                 }
@@ -11359,6 +11338,22 @@ mod boundary_token_trie_tests {
                 trie.len()
             );
         }
+    }
+
+    #[test]
+    fn trie_trigger_expands_aliases_but_excludes_exact_endpoints() {
+        let vocab = Vocab::from_entries_unchecked(vec![
+            (0, b"a".to_vec()), (8, b"a".to_vec()),
+            (4, b"ab".to_vec()), (91, b"ab".to_vec()),
+            (2, b"b".to_vec()), (17, b"".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            "start start;\nt A = \"a\";\nnt start = A;\n", &vocab,
+        ).unwrap();
+        let relevant = constraint.boundary_relevant_terminals();
+        let expected = constraint.boundary_token_candidates_from_scan(&relevant);
+        assert_eq!(expected, vec![4, 91]);
+        assert_eq!(constraint.boundary_token_candidates_from_trie(&relevant), expected);
     }
 
     #[test]
