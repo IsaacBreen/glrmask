@@ -811,355 +811,6 @@ fn build_local_to_common_token_map_from_common_classes(
     local_to_refined_classes(&local.vocab_tokens, &common.vocab_tokens)
 }
 
-#[derive(Debug)]
-struct InjectiveLocalMap {
-    destination_by_local: Vec<u32>,
-    destination_order_is_monotone: bool,
-}
-
-#[derive(Debug)]
-struct DisjointRunLocalMap {
-    runs_by_local: Vec<Vec<(u32, u32)>>,
-    destination_order_is_monotone: bool,
-    /// When all non-empty local classes occupy adjacent destination spans in
-    /// local-ID order, any inclusive local interval maps to at most one
-    /// destination interval.  These prefix/suffix lookups make that mapping
-    /// constant-time.
-    contiguous_interval_lookup: Option<ContiguousIntervalLookup>,
-}
-
-#[derive(Debug)]
-struct ContiguousIntervalLookup {
-    first_destination_at_or_after: Vec<u32>,
-    last_destination_at_or_before: Vec<u32>,
-}
-
-impl ContiguousIntervalLookup {
-    #[inline]
-    fn remap(&self, local_start: u32, local_end: u32) -> Option<(u32, u32)> {
-        let start = *self
-            .first_destination_at_or_after
-            .get(local_start as usize)?;
-        let end = *self
-            .last_destination_at_or_before
-            .get(local_end as usize)?;
-        (start != u32::MAX && end != u32::MAX && start <= end).then_some((start, end))
-    }
-}
-
-impl DisjointRunLocalMap {
-    fn from_local_to_common(local_to_common: &[Vec<u32>], common_count: usize) -> Option<Self> {
-        let mut seen = vec![false; common_count];
-        let mut runs_by_local = Vec::with_capacity(local_to_common.len());
-        let mut previous_destination = None;
-        let mut destination_order_is_monotone = true;
-
-        for destinations in local_to_common {
-            let mut runs = Vec::new();
-            let mut run_start = None;
-            let mut run_end = 0u32;
-            for &destination in destinations {
-                let index = destination as usize;
-                if index >= common_count || std::mem::replace(&mut seen[index], true) {
-                    return None;
-                }
-                if let Some(previous) = previous_destination
-                    && destination <= previous
-                {
-                    destination_order_is_monotone = false;
-                }
-                previous_destination = Some(destination);
-
-                match run_start {
-                    Some(_) if run_end.checked_add(1) == Some(destination) => {
-                        run_end = destination;
-                    }
-                    Some(start) => {
-                        runs.push((start, run_end));
-                        run_start = Some(destination);
-                        run_end = destination;
-                    }
-                    None => {
-                        run_start = Some(destination);
-                        run_end = destination;
-                    }
-                }
-            }
-            if let Some(start) = run_start {
-                runs.push((start, run_end));
-            }
-            runs_by_local.push(runs);
-        }
-
-        let contiguous_interval_lookup = if destination_order_is_monotone
-            && runs_by_local.iter().all(|runs| runs.len() <= 1)
-        {
-            let mut expected_next = None;
-            let mut adjacent = true;
-            for runs in &runs_by_local {
-                let Some(&(start, end)) = runs.first() else {
-                    continue;
-                };
-                if let Some(expected) = expected_next
-                    && start != expected
-                {
-                    adjacent = false;
-                    break;
-                }
-                expected_next = end.checked_add(1);
-            }
-            adjacent.then(|| {
-                let mut first_destination_at_or_after = vec![u32::MAX; runs_by_local.len()];
-                let mut next = u32::MAX;
-                for (local, runs) in runs_by_local.iter().enumerate().rev() {
-                    if let Some(&(start, _)) = runs.first() {
-                        next = start;
-                    }
-                    first_destination_at_or_after[local] = next;
-                }
-                let mut last_destination_at_or_before = vec![u32::MAX; runs_by_local.len()];
-                let mut previous = u32::MAX;
-                for (local, runs) in runs_by_local.iter().enumerate() {
-                    if let Some(&(_, end)) = runs.first() {
-                        previous = end;
-                    }
-                    last_destination_at_or_before[local] = previous;
-                }
-                ContiguousIntervalLookup {
-                    first_destination_at_or_after,
-                    last_destination_at_or_before,
-                }
-            })
-        } else {
-            None
-        };
-
-        Some(Self {
-            runs_by_local,
-            destination_order_is_monotone,
-            contiguous_interval_lookup,
-        })
-    }
-}
-
-impl InjectiveLocalMap {
-    fn from_local_to_common(local_to_common: &[Vec<u32>], common_count: usize) -> Option<Self> {
-        let mut destination_by_local = vec![u32::MAX; local_to_common.len()];
-        let mut seen_destinations = vec![false; common_count];
-        let mut previous_destination = None;
-        let mut destination_order_is_monotone = true;
-
-        for (local, destinations) in local_to_common.iter().enumerate() {
-            let &destination = match destinations.as_slice() {
-                [] => continue,
-                [destination] => destination,
-                _ => return None,
-            };
-            let destination_index = destination as usize;
-            if destination_index >= common_count || std::mem::replace(&mut seen_destinations[destination_index], true) {
-                return None;
-            }
-            if let Some(previous) = previous_destination
-                && destination <= previous
-            {
-                destination_order_is_monotone = false;
-            }
-            previous_destination = Some(destination);
-            destination_by_local[local] = destination;
-        }
-
-        Some(Self {
-            destination_by_local,
-            destination_order_is_monotone,
-        })
-    }
-
-    #[inline]
-    fn destination(&self, local: u32) -> Option<u32> {
-        self.destination_by_local
-            .get(local as usize)
-            .copied()
-            .filter(|&destination| destination != u32::MAX)
-    }
-}
-
-fn remap_token_set_with_injective_map(
-    tokens: &SharedTokenSet,
-    token_map: &InjectiveLocalMap,
-    cache: &mut HashMap<usize, SharedTokenSet>,
-) -> SharedTokenSet {
-    let key = Arc::as_ptr(tokens) as usize;
-    if let Some(cached) = cache.get(&key) {
-        return Arc::clone(cached);
-    }
-
-    let mut mapped = RangeSetBlaze::new();
-    for local_token in tokens.iter() {
-        if let Some(common_token) = token_map.destination(local_token) {
-            mapped.insert(common_token);
-        }
-    }
-    // The injective path is already cheap, so retain its local cache and avoid
-    // paying for a global prepass on small one-to-one maps.
-    let mapped = Arc::new(mapped);
-    cache.insert(key, Arc::clone(&mapped));
-    mapped
-}
-
-fn remap_token_set_with_general_map(
-    tokens: &SharedTokenSet,
-    local_to_common_tokens: &[Vec<u32>],
-    cache: &mut HashMap<usize, SharedTokenSet>,
-) -> SharedTokenSet {
-    let key = Arc::as_ptr(tokens) as usize;
-    if let Some(mapped) = cache.get(&key) {
-        return Arc::clone(mapped);
-    }
-    let mut mapped = RangeSetBlaze::new();
-    for local_token in tokens.iter() {
-        if let Some(common_tokens) = local_to_common_tokens.get(local_token as usize) {
-            for &common_token in common_tokens {
-                mapped.insert(common_token);
-            }
-        }
-    }
-    let mapped = Arc::new(mapped);
-    cache.insert(key, Arc::clone(&mapped));
-    mapped
-}
-
-fn remap_token_set_with_disjoint_runs(
-    tokens: &SharedTokenSet,
-    token_map: &DisjointRunLocalMap,
-    cache: &mut HashMap<usize, SharedTokenSet>,
-) -> SharedTokenSet {
-    let key = Arc::as_ptr(tokens) as usize;
-    if let Some(mapped) = cache.get(&key) {
-        return Arc::clone(mapped);
-    }
-
-    let mapped = remap_token_set_with_disjoint_runs_uncached(tokens, token_map);
-    cache.insert(key, Arc::clone(&mapped));
-    mapped
-}
-
-fn remap_token_set_with_disjoint_runs_uncached(
-    tokens: &SharedTokenSet,
-    token_map: &DisjointRunLocalMap,
-) -> SharedTokenSet {
-    // Parent-major common coordinates make the dominant map interval-preserving:
-    // a whole local range becomes one global range.  Fall back to exact local
-    // class expansion for child/non-monotone maps.
-    if let Some(lookup) = token_map.contiguous_interval_lookup.as_ref() {
-        // `tokens.ranges()` is sorted/disjoint, and an interval-preserving
-        // monotone map keeps the images sorted/disjoint.  Let RangeSetBlaze
-        // consume that ordered stream directly instead of paying one balanced
-        // tree insertion per source range (millions of ranges in large parser
-        // artifacts).
-        Arc::new(RangeSetBlaze::from_iter(tokens.ranges().filter_map(
-            |local_range| {
-                lookup
-                    .remap(*local_range.start(), *local_range.end())
-                    .map(|(start, end)| start..=end)
-            },
-        )))
-    } else {
-        let mut mapped = RangeSetBlaze::new();
-        for local_token in tokens.iter() {
-            if let Some(runs) = token_map.runs_by_local.get(local_token as usize) {
-                for &(start, end) in runs {
-                    mapped.ranges_insert(start..=end);
-                }
-            }
-        }
-        Arc::new(mapped)
-    }
-}
-
-fn remap_local_token_range_with_disjoint_runs(
-    local_start: u32,
-    local_end: u32,
-    token_map: &DisjointRunLocalMap,
-) -> SharedTokenSet {
-    let mut mapped = RangeSetBlaze::new();
-    if let Some(lookup) = token_map.contiguous_interval_lookup.as_ref() {
-        if let Some((start, end)) = lookup.remap(local_start, local_end) {
-            mapped.ranges_insert(start..=end);
-        }
-    } else {
-        for local_token in local_start..=local_end {
-            if let Some(runs) = token_map.runs_by_local.get(local_token as usize) {
-                for &(start, end) in runs {
-                    mapped.ranges_insert(start..=end);
-                }
-            }
-        }
-    }
-    Arc::new(mapped)
-}
-
-fn remap_token_set_with_precomputed_local_ranges(
-    tokens: &SharedTokenSet,
-    remapped_ranges: &FxHashMap<(u32, u32), SharedTokenSet>,
-) -> SharedTokenSet {
-    let mut mapped = RangeSetBlaze::new();
-    for local_range in tokens.ranges() {
-        let key = (*local_range.start(), *local_range.end());
-        let remapped = remapped_ranges
-            .get(&key)
-            .expect("precomputed token-range remap must cover every source range");
-        for destination in remapped.ranges() {
-            mapped.ranges_insert(*destination.start()..=*destination.end());
-        }
-    }
-    Arc::new(mapped)
-}
-
-fn remap_weight_with_injective_maps(
-    weight: &Weight,
-    tsid_map: &InjectiveLocalMap,
-    token_map: &InjectiveLocalMap,
-    precomputed_token_sets: Option<&FxHashMap<usize, SharedTokenSet>>,
-    token_cache: &mut HashMap<usize, SharedTokenSet>,
-) -> Weight {
-    // Preserve the generic path for the special universal representation. It
-    // is rare and has different "all mapped IDs" semantics.
-    if weight.is_empty() || weight.is_full() {
-        return weight.clone();
-    }
-
-    let mut entries = Vec::<(u32, SharedTokenSet)>::new();
-    for (local_range, tokens) in weight.raw_range_values() {
-        let mapped_tokens = if let Some(precomputed) = precomputed_token_sets {
-            precomputed
-                .get(&(Arc::as_ptr(tokens) as usize))
-                .cloned()
-                .expect("precomputed token remap must cover every source token set")
-        } else {
-            remap_token_set_with_injective_map(tokens, token_map, token_cache)
-        };
-        if mapped_tokens.is_empty() {
-            continue;
-        }
-        for local_tsid in *local_range.start()..=*local_range.end() {
-            if let Some(common_tsid) = tsid_map.destination(local_tsid) {
-                entries.push((common_tsid, Arc::clone(&mapped_tokens)));
-            }
-        }
-    }
-
-    if entries.is_empty() {
-        return Weight::empty();
-    }
-    if !tsid_map.destination_order_is_monotone {
-        entries.sort_unstable_by_key(|(common_tsid, _)| *common_tsid);
-    }
-
-    weight_from_sorted_disjoint_runs(
-        entries.into_iter().map(|(tsid, tokens)| (tsid, tsid, tokens)),
-    )
-}
-
 /// The maps used by the fast remappers are injective or disjoint expansions,
 /// so sorted destination runs cannot overlap. Coalesce the same adjacent runs
 /// as CompactRangeBuilder, then build the tree from the ordered stream once.
@@ -1194,91 +845,280 @@ fn weight_from_sorted_disjoint_runs(
     finalize_weight_map(map)
 }
 
-fn remap_weight_with_disjoint_tsid_runs(
-    weight: &Weight,
-    tsid_map: &DisjointRunLocalMap,
-    token_map: Option<&InjectiveLocalMap>,
-    token_run_map: Option<&DisjointRunLocalMap>,
-    precomputed_token_sets: Option<&FxHashMap<usize, SharedTokenSet>>,
-    local_to_common_tokens: &[Vec<u32>],
-    token_cache: &mut HashMap<usize, SharedTokenSet>,
-) -> Option<Weight> {
-    if weight.is_empty() {
-        return Some(weight.clone());
-    }
-    if weight.is_full() {
-        return None;
-    }
+/// A token-coordinate image can be supplied without allocating one vector
+/// per token for the common disjoint-partition offset case.
+#[derive(Clone, Copy)]
+pub enum TokenAxisMap<'a> {
+    Explicit(&'a [Vec<u32>]),
+    Offset { offset: u32, local_token_count: u32 },
+}
 
-    let mut entries = Vec::new();
-    for (local_start, local_end, tokens) in weight.range_entries() {
-        let mapped_tokens = if let Some(precomputed_token_sets) = precomputed_token_sets {
-            let key = Arc::as_ptr(tokens) as usize;
-            precomputed_token_sets
-                .get(&key)
-                .cloned()
-                .expect("precomputed token remap must cover every source token set")
-        } else if let Some(token_map) = token_map {
-            remap_token_set_with_injective_map(tokens, token_map, token_cache)
-        } else if let Some(token_run_map) = token_run_map {
-            remap_token_set_with_disjoint_runs(tokens, token_run_map, token_cache)
+/// One prepared image of a local coordinate. Disjoint images allow a weight
+/// to be built directly from runs; overlapping images require token union.
+enum AxisImage<'a> {
+    Affine { offset: u32, count: usize },
+    Contiguous { first: Vec<u32>, last: Vec<u32> },
+    Singleton { destinations: Vec<u32>, monotone: bool },
+    Disjoint { offsets: Vec<usize>, runs: Vec<(u32, u32)>, monotone: bool },
+    Overlapping { fanout: &'a [Vec<u32>], destination_count: usize },
+}
+
+impl<'a> AxisImage<'a> {
+    fn explicit(fanout: &'a [Vec<u32>], destination_count: usize) -> Self {
+        if let Some(offset) = fanout.first().and_then(|row| row.first()).copied() {
+            if fanout.iter().enumerate().all(|(local, row)| {
+                offset.checked_add(local as u32).is_some_and(|target| {
+                    (target as usize) < destination_count && row.as_slice() == [target]
+                })
+            }) {
+                return Self::Affine { offset, count: fanout.len() };
+            }
+        }
+
+        let mut seen = vec![false; destination_count];
+        let mut offsets = Vec::with_capacity(fanout.len() + 1);
+        let mut runs = Vec::<(u32, u32)>::new();
+        let mut monotone = true;
+        let mut adjacent = true;
+        let mut singleton = true;
+        let mut previous = None;
+        for row in fanout {
+            offsets.push(runs.len());
+            singleton &= row.len() <= 1;
+            let row_start = runs.len();
+            for &target in row {
+                if target as usize >= destination_count
+                    || std::mem::replace(&mut seen[target as usize], true)
+                {
+                    return Self::Overlapping { fanout, destination_count };
+                }
+                if let Some(prev) = previous {
+                    monotone &= prev < target;
+                    adjacent &= prev.checked_add(1) == Some(target);
+                }
+                previous = Some(target);
+                if runs.len() > row_start {
+                    let (_, end) = runs.last_mut().unwrap();
+                    if end.checked_add(1) == Some(target) {
+                        *end = target;
+                        continue;
+                    }
+                }
+                runs.push((target, target));
+            }
+        }
+        offsets.push(runs.len());
+        if adjacent && monotone {
+            let mut first = vec![u32::MAX; fanout.len()];
+            let mut last = vec![u32::MAX; fanout.len()];
+            let mut next = u32::MAX;
+            for local in (0..fanout.len()).rev() {
+                if offsets[local] != offsets[local + 1] {
+                    next = runs[offsets[local]].0;
+                }
+                first[local] = next;
+            }
+            let mut prev = u32::MAX;
+            for local in 0..fanout.len() {
+                if offsets[local] != offsets[local + 1] {
+                    prev = runs[offsets[local + 1] - 1].1;
+                }
+                last[local] = prev;
+            }
+            Self::Contiguous { first, last }
+        } else if singleton {
+            Self::Singleton {
+                destinations: fanout.iter().map(|row| {
+                    row.first().copied().unwrap_or(u32::MAX)
+                }).collect(),
+                monotone,
+            }
         } else {
-            remap_token_set_with_general_map(tokens, local_to_common_tokens, token_cache)
-        };
-        if mapped_tokens.is_empty() {
-            continue;
+            Self::Disjoint { offsets, runs, monotone }
         }
-        if let Some(lookup) = tsid_map.contiguous_interval_lookup.as_ref() {
-            if let Some((start, end)) = lookup.remap(local_start, local_end) {
-                entries.push((start, end, Arc::clone(&mapped_tokens)));
-            }
-            continue;
-        }
-        for local_tsid in local_start..=local_end {
-            for &(start, end) in tsid_map.runs_by_local.get(local_tsid as usize)? {
-                entries.push((start, end, Arc::clone(&mapped_tokens)));
+    }
+
+    fn tokens(map: TokenAxisMap<'a>, destination_count: usize) -> Self {
+        match map {
+            TokenAxisMap::Explicit(fanout) => Self::explicit(fanout, destination_count),
+            TokenAxisMap::Offset { offset, local_token_count } => {
+                let count = (local_token_count as usize)
+                    .min(destination_count.saturating_sub(offset as usize));
+                Self::Affine { offset, count }
             }
         }
     }
-    if !tsid_map.destination_order_is_monotone {
-        entries.sort_unstable_by_key(|(start, _, _)| *start);
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Affine { count, .. } => *count,
+            Self::Contiguous { first, .. } => first.len(),
+            Self::Singleton { destinations, .. } => destinations.len(),
+            Self::Disjoint { offsets, .. } => offsets.len() - 1,
+            Self::Overlapping { fanout, .. } => fanout.len(),
+        }
     }
-    Some(weight_from_sorted_disjoint_runs(entries))
+
+    fn identity(&self, destination_count: usize) -> bool {
+        matches!(self, Self::Affine { offset: 0, count } if *count == destination_count)
+    }
+
+    fn monotone(&self) -> bool {
+        match self {
+            Self::Affine { .. } | Self::Contiguous { .. } => true,
+            Self::Singleton { monotone, .. } | Self::Disjoint { monotone, .. } => *monotone,
+            Self::Overlapping { .. } => false,
+        }
+    }
+
+    fn is_disjoint(&self) -> bool {
+        !matches!(self, Self::Overlapping { .. })
+    }
+
+    #[inline]
+    fn visit_runs(&self, start: u32, end: u32, mut visit: impl FnMut(u32, u32)) {
+        let start = start as usize;
+        let end = (end as usize).min(self.len().saturating_sub(1));
+        if self.len() == 0 || start > end {
+            return;
+        }
+        match self {
+            Self::Affine { offset, .. } => visit(*offset + start as u32, *offset + end as u32),
+            Self::Contiguous { first, last } => {
+                let (a, b) = (first[start], last[end]);
+                if a != u32::MAX && b != u32::MAX && a <= b {
+                    visit(a, b);
+                }
+            }
+            Self::Singleton { destinations, .. } => {
+                for &target in &destinations[start..=end] {
+                    if target != u32::MAX {
+                        visit(target, target);
+                    }
+                }
+            }
+            Self::Disjoint { offsets, runs, .. } => {
+                for &(a, b) in &runs[offsets[start]..offsets[end + 1]] {
+                    visit(a, b);
+                }
+            }
+            Self::Overlapping { fanout, destination_count } => {
+                for row in &fanout[start..=end] {
+                    for &target in row {
+                        if (target as usize) < *destination_count {
+                            visit(target, target);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn image(&self, ranges: impl IntoIterator<Item = (u32, u32)>) -> RangeSetBlaze<u32> {
+        let mut mapped = Vec::new();
+        for (start, end) in ranges {
+            self.visit_runs(start, end, |a, b| mapped.push(a..=b));
+        }
+        RangeSetBlaze::from_iter(mapped)
+    }
+
+    fn full_image(&self) -> RangeSetBlaze<u32> {
+        self.image(std::iter::once((0, u32::MAX)))
+    }
 }
 
-fn local_to_common_is_identity(map: &[Vec<u32>], common_count: usize) -> bool {
-    map.len() == common_count
-        && map
-            .iter()
-            .enumerate()
-            .all(|(local, targets)| targets.as_slice() == [local as u32])
+fn remap_token_set(
+    tokens: &SharedTokenSet,
+    image: &AxisImage<'_>,
+    range_cache: Option<&FxHashMap<(u32, u32), RangeSetBlaze<u32>>>,
+) -> SharedTokenSet {
+    let result = if let Some(cache) = range_cache {
+        RangeSetBlaze::from_iter(tokens.ranges().flat_map(|r| {
+            cache[&(*r.start(), *r.end())].ranges()
+        }))
+    } else {
+        image.image(tokens.ranges().map(|r| (*r.start(), *r.end())))
+    };
+    shared_rangeset(result)
 }
 
-fn remap_weight_with_identity_tsids(
+const PARALLEL_UNIQUE_WEIGHT_THRESHOLD: usize = 128;
+
+fn map_batch<T: Sync, R: Send>(values: &[T], f: impl Fn(&T) -> R + Sync + Send) -> Vec<R> {
+    if values.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD && rayon::current_num_threads() > 1 {
+        values.par_iter().map(f).collect()
+    } else {
+        values.iter().map(f).collect()
+    }
+}
+
+/// Lift a single rectangular relation through both coordinate images.
+/// Nonoverlapping state images need no union scratch. For overlap, collect
+/// the exact union at each destination before building the sorted runs.
+fn remap_relation(
     weight: &Weight,
-    token_map: Option<&InjectiveLocalMap>,
-    token_run_map: Option<&DisjointRunLocalMap>,
-    precomputed_token_sets: Option<&FxHashMap<usize, SharedTokenSet>>,
-    local_to_common_tokens: &[Vec<u32>],
+    states: &AxisImage<'_>,
+    tokens: &AxisImage<'_>,
+    common_tsid_count: usize,
+    identity_states: bool,
+    mapped_sets: Option<&FxHashMap<usize, SharedTokenSet>>,
 ) -> Weight {
-    if weight.is_empty() || weight.is_full() {
+    if weight.is_empty() {
         return weight.clone();
     }
-    let mut token_cache = HashMap::<usize, SharedTokenSet>::new();
-    weight.remap_token_sets_preserving_tsid_ranges(|tokens| {
-        if let Some(precomputed_token_sets) = precomputed_token_sets {
-            precomputed_token_sets
-                .get(&(Arc::as_ptr(tokens) as usize))
-                .cloned()
-                .expect("precomputed token remap must cover every source token set")
-        } else if let Some(token_map) = token_map {
-            remap_token_set_with_injective_map(tokens, token_map, &mut token_cache)
-        } else if let Some(token_run_map) = token_run_map {
-            remap_token_set_with_disjoint_runs(tokens, token_run_map, &mut token_cache)
-        } else {
-            remap_token_set_with_general_map(tokens, local_to_common_tokens, &mut token_cache)
+    if weight.is_full() {
+        let all_tokens = shared_rangeset(tokens.full_image());
+        if all_tokens.is_empty() {
+            return Weight::empty();
         }
-    })
+        return weight_from_sorted_disjoint_runs(states.full_image().ranges().map(|r| {
+            (*r.start(), *r.end(), Arc::clone(&all_tokens))
+        }));
+    }
+
+    let mapped = |source: &SharedTokenSet| {
+        mapped_sets.map_or_else(|| remap_token_set(source, tokens, None), |sets| {
+            Arc::clone(&sets[&(Arc::as_ptr(source) as usize)])
+        })
+    };
+    if identity_states {
+        return weight.remap_token_sets_preserving_tsid_ranges(mapped);
+    }
+    if states.is_disjoint() {
+        let mut runs = Vec::new();
+        for (start, end, source) in weight.range_entries() {
+            let set = mapped(source);
+            if !set.is_empty() {
+                states.visit_runs(start, end, |a, b| runs.push((a, b, Arc::clone(&set))));
+            }
+        }
+        if !states.monotone() {
+            runs.sort_unstable_by_key(|(start, _, _)| *start);
+        }
+        return weight_from_sorted_disjoint_runs(runs);
+    }
+
+    let mut rows = vec![None::<SharedTokenSet>; common_tsid_count];
+    for (start, end, source) in weight.range_entries() {
+        let set = mapped(source);
+        if set.is_empty() {
+            continue;
+        }
+        states.visit_runs(start, end, |a, b| {
+            for row in &mut rows[a as usize..=b as usize] {
+                match row {
+                    Some(existing) if !Arc::ptr_eq(existing, &set) && **existing != *set => {
+                        *existing = shared_rangeset(existing.as_ref() | set.as_ref());
+                    }
+                    None => *row = Some(Arc::clone(&set)),
+                    _ => {}
+                }
+            }
+        });
+    }
+    weight_from_sorted_disjoint_runs(rows.into_iter().enumerate().filter_map(|(q, set)| {
+        set.map(|set| (q as u32, q as u32, set))
+    }))
 }
 
 pub fn remap_weights_with_maps(
@@ -1288,356 +1128,100 @@ pub fn remap_weights_with_maps(
     common_tsid_count: usize,
     common_token_count: usize,
 ) {
-    let profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
-    let total_started_at = profiling.then(Instant::now);
-    let tsid_map = InjectiveLocalMap::from_local_to_common(local_to_common_tsids, common_tsid_count);
-    let tsid_run_map =
-        DisjointRunLocalMap::from_local_to_common(local_to_common_tsids, common_tsid_count);
-    let token_map = InjectiveLocalMap::from_local_to_common(
-        local_to_common_tokens,
-        common_token_count,
+    remap_weights_with_token_axis(
+        weights, local_to_common_tsids, TokenAxisMap::Explicit(local_to_common_tokens),
+        common_tsid_count, common_token_count,
     );
-    let token_run_map =
-        DisjointRunLocalMap::from_local_to_common(local_to_common_tokens, common_token_count);
-    let identity_tsids = local_to_common_is_identity(local_to_common_tsids, common_tsid_count);
-    let identity_tokens = local_to_common_is_identity(local_to_common_tokens, common_token_count);
-    // Reconciliation is literally the identity when both coordinates are already
-    // published in the common numbering. Avoid walking/interning every weight and
-    // token set only to reconstruct the same artifact.
-    if identity_tsids && identity_tokens {
-        if let Some(total_started_at) = total_started_at {
-            eprintln!(
-                "[glrmask/profile][token_run_reconcile] weights={} identity_tsids=true identity_tokens=true action=skip total_ms={:.3}",
-                weights.len(),
-                total_started_at.elapsed().as_secs_f64() * 1000.0,
-            );
-        }
+}
+
+pub fn remap_weights_with_token_axis(
+    weights: &mut [&mut Weight],
+    local_to_common_tsids: &[Vec<u32>],
+    local_to_common_tokens: TokenAxisMap<'_>,
+    common_tsid_count: usize,
+    common_token_count: usize,
+) {
+    if weights.is_empty() {
         return;
     }
-    let mut unique_by_ptr = FxHashMap::<usize, usize>::default();
-    let mut unique_weights = Vec::<Weight>::new();
-    let mut weight_to_unique = Vec::with_capacity(weights.len());
-    for weight in weights.iter() {
-        let ptr = weight.ptr_key();
-        let unique = *unique_by_ptr.entry(ptr).or_insert_with(|| {
-            let index = unique_weights.len();
-            unique_weights.push((**weight).clone());
-            index
-        });
-        weight_to_unique.push(unique);
+    let profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
+    let started = profiling.then(Instant::now);
+    let states = AxisImage::explicit(local_to_common_tsids, common_tsid_count);
+    let tokens = AxisImage::tokens(local_to_common_tokens, common_token_count);
+    let identity_states = states.identity(common_tsid_count);
+    let identity_tokens = tokens.identity(common_token_count);
+    if identity_states && identity_tokens {
+        return;
     }
 
-    let precompute_started_at = profiling.then(Instant::now);
-    let precomputed_token_sets = if tsid_run_map.is_some()
-        && let Some(token_run_map) = token_run_map.as_ref()
-    {
-        let mut source_by_ptr = FxHashMap::<usize, SharedTokenSet>::default();
-        for weight in &unique_weights {
-            for (_, _, tokens) in weight.range_entries() {
-                source_by_ptr
-                    .entry(Arc::as_ptr(tokens) as usize)
-                    .or_insert_with(|| Arc::clone(tokens));
-            }
+    // Both source objects stay alive until publication, so pointer keys are
+    // exact identities. Deduplicate the work across the entire artifact.
+    let mut by_weight = FxHashMap::<usize, usize>::default();
+    let mut unique = Vec::<Weight>::new();
+    let indices = weights.iter().map(|weight| {
+        *by_weight.entry(weight.ptr_key()).or_insert_with(|| {
+            let index = unique.len();
+            unique.push((**weight).clone());
+            index
+        })
+    }).collect::<Vec<_>>();
+    let mut by_set = FxHashMap::<usize, SharedTokenSet>::default();
+    for weight in &unique {
+        for (_, _, set) in weight.range_entries() {
+            by_set.entry(Arc::as_ptr(set) as usize).or_insert_with(|| Arc::clone(set));
         }
-        let sources = source_by_ptr.into_iter().collect::<Vec<_>>();
-        let total_source_tokens = sources
-            .iter()
-            .map(|(_, tokens)| tokens.len() as usize)
-            .sum::<usize>();
-        let total_source_ranges = sources
-            .iter()
-            .map(|(_, tokens)| tokens.ranges().count())
-            .sum::<usize>();
-        // Building a global range cache pays a hash/interning cost before any
-        // source set is remapped. With only a few dozen distinct source token
-        // sets, direct disjoint-run remapping is cheaper even for fairly dense
-        // sets; reserve the shared range cache for workloads with enough
-        // independent sets to amortize that setup cost.
-        let use_range_cache = sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
-            && total_source_tokens >= 8_192
-            && total_source_ranges.saturating_mul(4) < total_source_tokens;
-        let remapped = if use_range_cache {
-            let mut unique_ranges = FxHashSet::<(u32, u32)>::default();
-            for (_, tokens) in &sources {
-                unique_ranges.extend(
-                    tokens
-                        .ranges()
-                        .map(|range| (*range.start(), *range.end())),
-                );
-            }
-            let unique_ranges = unique_ranges.into_iter().collect::<Vec<_>>();
-            let remapped_ranges = if unique_ranges.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
-                && rayon::current_num_threads() > 1
-            {
-                unique_ranges
-                    .par_iter()
-                    .map(|&(start, end)| {
-                        (
-                            (start, end),
-                            remap_local_token_range_with_disjoint_runs(
-                                start,
-                                end,
-                                token_run_map,
-                            ),
-                        )
-                    })
-                    .collect::<FxHashMap<_, _>>()
-            } else {
-                unique_ranges
-                    .iter()
-                    .map(|&(start, end)| {
-                        (
-                            (start, end),
-                            remap_local_token_range_with_disjoint_runs(
-                                start,
-                                end,
-                                token_run_map,
-                            ),
-                        )
-                    })
-                    .collect::<FxHashMap<_, _>>()
-            };
-            if sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
-                && rayon::current_num_threads() > 1
-            {
-                sources
-                    .par_iter()
-                    .map(|(key, tokens)| {
-                        (
-                            *key,
-                            remap_token_set_with_precomputed_local_ranges(
-                                tokens,
-                                &remapped_ranges,
-                            ),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                sources
-                    .iter()
-                    .map(|(key, tokens)| {
-                        (
-                            *key,
-                            remap_token_set_with_precomputed_local_ranges(
-                                tokens,
-                                &remapped_ranges,
-                            ),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            }
-        } else if sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
-            && rayon::current_num_threads() > 1
-        {
-            sources
-                .par_iter()
-                .map(|(key, tokens)| {
-                    (
-                        *key,
-                        remap_token_set_with_disjoint_runs_uncached(tokens, token_run_map),
-                    )
-                })
-                .collect::<Vec<_>>()
+    }
+    let sources = by_set.into_iter().collect::<Vec<_>>();
+    let range_cache = if matches!(tokens, AxisImage::Disjoint { .. } | AxisImage::Singleton { .. })
+        && sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+    {
+        let total_tokens = sources.iter().map(|(_, set)| set.len() as usize).sum::<usize>();
+        let total_ranges = sources.iter().map(|(_, set)| set.ranges().count()).sum::<usize>();
+        if total_tokens >= 8192 && total_ranges.saturating_mul(4) < total_tokens {
+            let ranges = sources.iter().flat_map(|(_, set)| {
+                set.ranges().map(|r| (*r.start(), *r.end()))
+            }).collect::<FxHashSet<_>>().into_iter().collect::<Vec<_>>();
+            Some(map_batch(&ranges, |&(a, b)| {
+                ((a, b), tokens.image(std::iter::once((a, b))))
+            }).into_iter().collect::<FxHashMap<_, _>>())
         } else {
-            sources
-                .iter()
-                .map(|(key, tokens)| {
-                    (
-                        *key,
-                        remap_token_set_with_disjoint_runs_uncached(tokens, token_run_map),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        Some(remapped.into_iter().collect::<FxHashMap<_, _>>())
+            None
+        }
     } else {
         None
     };
-    let precompute_ms = precompute_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-
-    let token_set_profile = profiling.then(|| {
-        let mut seen = BTreeSet::new();
-        let mut total_refs = 0usize;
-        let mut unique_local_tokens = 0usize;
-        let mut unique_local_ranges = 0usize;
-        for weight in &unique_weights {
-            for (_, _, tokens) in weight.range_entries() {
-                total_refs += 1;
-                let key = Arc::as_ptr(tokens) as usize;
-                if seen.insert(key) {
-                    unique_local_tokens += tokens.len() as usize;
-                    unique_local_ranges += tokens.ranges().count();
-                }
-            }
-        }
-        (
-            total_refs,
-            seen.len(),
-            unique_local_tokens,
-            unique_local_ranges,
-        )
+    let mapped_sets = map_batch(&sources, |(key, set)| {
+        let image = if identity_tokens {
+            Arc::clone(set)
+        } else {
+            remap_token_set(set, &tokens, range_cache.as_ref())
+        };
+        (*key, image)
+    }).into_iter().collect::<FxHashMap<_, _>>();
+    let remapped = map_batch(&unique, |weight| {
+        remap_relation(weight, &states, &tokens, common_tsid_count, identity_states, Some(&mapped_sets))
     });
 
-    let remap_one =
-        |weight: &Weight,
-         precomputed_token_sets: Option<&FxHashMap<usize, SharedTokenSet>>| {
-            if identity_tsids && !weight.is_full() {
-                return remap_weight_with_identity_tsids(
-                    weight,
-                    token_map.as_ref(),
-                    token_run_map.as_ref(),
-                    precomputed_token_sets,
-                    local_to_common_tokens,
-                );
-            }
-            match (&tsid_map, &token_map) {
-        (Some(tsid_map), Some(token_map)) if !weight.is_full() => {
-            let mut token_cache = HashMap::<usize, SharedTokenSet>::new();
-            remap_weight_with_injective_maps(
-                weight, tsid_map, token_map, precomputed_token_sets, &mut token_cache,
-            )
+    if std::env::var_os("GLRMASK_VALIDATE_GLOBAL_TOKEN_REMAP_CACHE").is_some() {
+        for (source, result) in unique.iter().zip(&remapped) {
+            assert_eq!(*result, remap_relation(
+                source, &states, &tokens, common_tsid_count, identity_states, None,
+            ), "global token remap cache changed a weight");
         }
-        _ if !weight.is_full() && tsid_run_map.is_some() => {
-            let mut token_cache = HashMap::<usize, SharedTokenSet>::new();
-            tsid_run_map
-                .as_ref()
-                .and_then(|tsid_run_map| {
-                    remap_weight_with_disjoint_tsid_runs(
-                        weight,
-                        tsid_run_map,
-                        token_map.as_ref(),
-                        token_run_map.as_ref(),
-                        precomputed_token_sets,
-                        local_to_common_tokens,
-                        &mut token_cache,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    remap_weight_general(
-                        weight,
-                        local_to_common_tsids,
-                        local_to_common_tokens,
-                        common_tsid_count,
-                    )
-                })
-        }
-        _ => remap_weight_general(
-            weight,
-            local_to_common_tsids,
-            local_to_common_tokens,
-            common_tsid_count,
-        ),
-            }
-        };
-
-    // The shared token-set precompute removes the per-weight token-remap cache
-    // dependency, so the remaining unique weight remaps are independent work.
-    // Once there is at least one such weight per worker, let Rayon schedule them;
-    // otherwise retain the higher generic cutoff to avoid parallel overhead on
-    // cheap remaps that do not use the shared precompute.
-    const PARALLEL_UNIQUE_WEIGHT_THRESHOLD: usize = 128;
-    let compile_threads = rayon::current_num_threads();
-    let parallel_unique_remap = compile_threads > 1
-        && (unique_weights.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
-            || (precomputed_token_sets.is_some()
-                && unique_weights.len() >= compile_threads));
-    let unique_remap_started_at = profiling.then(Instant::now);
-    let remapped_unique: Vec<Weight> = if parallel_unique_remap {
-        unique_weights
-            .par_iter()
-            .map(|weight| remap_one(weight, precomputed_token_sets.as_ref()))
-            .collect()
-    } else {
-        unique_weights
-            .iter()
-            .map(|weight| remap_one(weight, precomputed_token_sets.as_ref()))
-            .collect()
-    };
-    let unique_remap_ms = unique_remap_started_at
-        .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
-
-    if std::env::var_os("GLRMASK_VALIDATE_GLOBAL_TOKEN_REMAP_CACHE").is_some()
-        && precomputed_token_sets.is_some()
-    {
-        let reference: Vec<Weight> = if unique_weights.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
-            && rayon::current_num_threads() > 1
-        {
-            unique_weights
-                .par_iter()
-                .map(|weight| remap_one(weight, None))
-                .collect()
-        } else {
-            unique_weights
-                .iter()
-                .map(|weight| remap_one(weight, None))
-                .collect()
-        };
-        for (index, (candidate, reference)) in
-            remapped_unique.iter().zip(reference.iter()).enumerate()
-        {
-            assert_eq!(
-                candidate, reference,
-                "global token remap cache changed unique weight {index}"
-            );
-        }
-        eprintln!(
-            "[glrmask/validate][global_token_remap_cache] unique_weights={} token_sets={} exact=true",
-            unique_weights.len(),
-            precomputed_token_sets.as_ref().map_or(0, FxHashMap::len),
-        );
     }
-
-    for (weight, unique) in weights.iter_mut().zip(weight_to_unique) {
-        **weight = remapped_unique[unique].clone();
+    for (weight, index) in weights.iter_mut().zip(indices) {
+        **weight = remapped[index].clone();
     }
-    if let Some(total_started_at) = total_started_at {
-        let (token_set_refs, unique_token_sets, unique_local_tokens, unique_local_ranges) =
-            token_set_profile.unwrap_or_default();
+    if let Some(started) = started {
         eprintln!(
-            "[glrmask/profile][token_run_reconcile] weights={} unique_weights={} token_set_refs={} unique_token_sets={} unique_local_tokens={} unique_local_ranges={} identity_tsids={} tsid_map={} tsid_run_map={} token_map={} token_run_map={} precomputed_token_sets={} precompute_ms={precompute_ms:.3} unique_remap_ms={unique_remap_ms:.3} total_ms={:.3}",
-            weights.len(),
-            unique_weights.len(),
-            token_set_refs,
-            unique_token_sets,
-            unique_local_tokens,
-            unique_local_ranges,
-            identity_tsids,
-            tsid_map.is_some(),
-            tsid_run_map.is_some(),
-            token_map.is_some(),
-            token_run_map.is_some(),
-            precomputed_token_sets.as_ref().map_or(0, FxHashMap::len),
-            total_started_at.elapsed().as_secs_f64() * 1000.0,
+            "[glrmask/profile][token_run_reconcile] weights={} unique_weights={} unique_token_sets={} identity_tsids={} identity_tokens={} total_ms={:.3}",
+            weights.len(), unique.len(), mapped_sets.len(), identity_states, identity_tokens,
+            started.elapsed().as_secs_f64() * 1000.0,
         );
     }
 }
-
-fn remap_weight_cached_general(
-    weight: &Weight,
-    local_to_common_tsids: &[Vec<u32>],
-    local_to_common_tokens: &[Vec<u32>],
-    common_tsid_count: usize,
-    cache: &mut HashMap<usize, Weight>,
-) -> Weight {
-    let ptr = weight.ptr_key();
-    if let Some(cached) = cache.get(&ptr) {
-        return cached.clone();
-    }
-
-    let remapped = remap_weight_general(
-        weight,
-        local_to_common_tsids,
-        local_to_common_tokens,
-        common_tsid_count,
-    );
-    cache.insert(ptr, remapped.clone());
-    remapped
-}
-
+#[cfg(test)]
 fn remap_weight_general(
     weight: &Weight,
     local_to_common_tsids: &[Vec<u32>],
@@ -1902,13 +1486,8 @@ mod tests {
         let token_map = vec![vec![3], vec![1], vec![0], vec![2]];
 
         let general = remap_weight_general(&weight, &tsid_map, &token_map, 4);
-        let fast = remap_weight_with_injective_maps(
-            &weight,
-            &InjectiveLocalMap::from_local_to_common(&tsid_map, 4).expect("injective tsids"),
-            &InjectiveLocalMap::from_local_to_common(&token_map, 4).expect("injective tokens"),
-            None,
-            &mut HashMap::new(),
-        );
+        let mut fast = weight.clone();
+        remap_weights_with_maps(&mut [&mut fast], &tsid_map, &token_map, 4, 4);
 
         assert_eq!(entries_key(&fast), entries_key(&general));
     }
@@ -1948,36 +1527,22 @@ mod tests {
     }
 
     #[test]
-    fn injective_token_remaps_use_global_precomputation() {
+    fn shared_token_precomputation_matches_uncached_projection() {
         let weight = Weight::from_tsid_ranges_shared([
             (0, 1, Arc::new(RangeSetBlaze::from_iter([0..=1]))),
             (2, 3, Arc::new(RangeSetBlaze::from_iter([1..=1, 3..=3]))),
         ]);
         let tokens = vec![vec![3], vec![1], vec![0], vec![2]];
-        let token_map = InjectiveLocalMap::from_local_to_common(&tokens, 4).unwrap();
-        let token_runs = DisjointRunLocalMap::from_local_to_common(&tokens, 4).unwrap();
-        let precomputed = weight.range_entries().map(|(_, _, source)| {
-            (Arc::as_ptr(source) as usize,
-             remap_token_set_with_disjoint_runs_uncached(source, &token_runs))
-        }).collect::<FxHashMap<_, _>>();
-
-        let tsids = vec![vec![2], vec![0], vec![3], vec![1]];
-        let tsid_map = InjectiveLocalMap::from_local_to_common(&tsids, 4).unwrap();
-        let mut local_cache = HashMap::new();
-        let mapped = remap_weight_with_injective_maps(
-            &weight, &tsid_map, &token_map, Some(&precomputed), &mut local_cache,
-        );
-        assert_eq!(mapped, remap_weight_general(&weight, &tsids, &tokens, 4));
-        assert!(local_cache.is_empty(), "do not recompute globally mapped token sets");
-
-        let tsids = vec![vec![3, 4], vec![], vec![0, 1, 2], vec![5]];
-        let tsid_runs = DisjointRunLocalMap::from_local_to_common(&tsids, 6).unwrap();
-        let mapped = remap_weight_with_disjoint_tsid_runs(
-            &weight, &tsid_runs, Some(&token_map), Some(&token_runs),
-            Some(&precomputed), &tokens, &mut local_cache,
-        ).unwrap();
-        assert_eq!(mapped, remap_weight_general(&weight, &tsids, &tokens, 6));
-        assert!(local_cache.is_empty(), "disjoint TSID expansions must also use the cache");
+        for tsids in [
+            vec![vec![2], vec![0], vec![3], vec![1]],
+            vec![vec![3, 4], vec![], vec![0, 1, 2], vec![5]],
+            vec![vec![0], vec![0], vec![1], vec![2]],
+        ] {
+            let count = tsids.iter().flatten().copied().max().unwrap() as usize + 1;
+            let mut actual = weight.clone();
+            remap_weights_with_maps(&mut [&mut actual], &tsids, &tokens, count, 4);
+            assert_eq!(actual, remap_weight_general(&weight, &tsids, &tokens, count));
+        }
     }
 
     #[test]
@@ -1990,21 +1555,10 @@ mod tests {
         ]);
         let tsid_map = vec![vec![0, 1], vec![2, 3], vec![], vec![4, 5]];
         let token_map = (0..4).map(|token| vec![token]).collect::<Vec<_>>();
-        let run_map =
-            DisjointRunLocalMap::from_local_to_common(&tsid_map, 6).expect("disjoint TSID runs");
-        assert!(run_map.contiguous_interval_lookup.is_some());
-
+        assert!(matches!(AxisImage::explicit(&tsid_map, 6), AxisImage::Contiguous { .. }));
         let general = remap_weight_general(&weight, &tsid_map, &token_map, 6);
-        let fast = remap_weight_with_disjoint_tsid_runs(
-            &weight,
-            &run_map,
-            None,
-            DisjointRunLocalMap::from_local_to_common(&token_map, 4).as_ref(),
-            None,
-            &token_map,
-            &mut HashMap::new(),
-        )
-        .expect("disjoint TSID run remap");
+        let mut fast = weight.clone();
+        remap_weights_with_maps(&mut [&mut fast], &tsid_map, &token_map, 6, 4);
 
         assert_eq!(entries_key(&fast), entries_key(&general));
         assert_eq!(
@@ -2028,18 +1582,10 @@ mod tests {
         ]);
         let tsid_map = (0..10).map(|tsid| vec![tsid]).collect::<Vec<_>>();
         let token_map = vec![vec![0], vec![1, 2, 3], vec![4], vec![5]];
-        assert!(local_to_common_is_identity(&tsid_map, 10));
-
+        assert!(AxisImage::explicit(&tsid_map, 10).identity(10));
         let general = remap_weight_general(&weight, &tsid_map, &token_map, 10);
-        let token_run_map =
-            DisjointRunLocalMap::from_local_to_common(&token_map, 6).expect("disjoint token runs");
-        let fast = remap_weight_with_identity_tsids(
-            &weight,
-            None,
-            Some(&token_run_map),
-            None,
-            &token_map,
-        );
+        let mut fast = weight.clone();
+        remap_weights_with_maps(&mut [&mut fast], &tsid_map, &token_map, 10, 6);
 
         assert_eq!(entries_key(&fast), entries_key(&general));
         assert_eq!(
@@ -2056,12 +1602,11 @@ mod tests {
     fn disjoint_run_token_remap_matches_general_for_split_reordered_ids() {
         let tokens = Arc::new(RangeSetBlaze::from_iter([0..=2, 4..=4]));
         let token_map = vec![vec![4, 5], vec![0, 1], vec![2, 3], vec![], vec![7, 8, 9]];
-        let run_map =
-            DisjointRunLocalMap::from_local_to_common(&token_map, 10).expect("disjoint runs");
+        let run_map = AxisImage::explicit(&token_map, 10);
         assert!(!run_map.destination_order_is_monotone);
 
-        let fast = remap_token_set_with_disjoint_runs(&tokens, &run_map, &mut HashMap::new());
-        let general = remap_token_set_with_general_map(&tokens, &token_map, &mut HashMap::new());
+        let fast = remap_token_set(&tokens, &run_map, None);
+        let general = shared_rangeset(RangeSetBlaze::from_iter(tokens.iter().flat_map(|id| token_map[id as usize].iter().copied())));
 
         assert_eq!(fast.as_ref(), general.as_ref());
         assert_eq!(
