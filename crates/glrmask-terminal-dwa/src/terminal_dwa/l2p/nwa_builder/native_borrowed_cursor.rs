@@ -50,53 +50,27 @@ impl<'a> BorrowedScalarCache<'a> {
     }
 }
 
+impl CursorSource for BorrowedScalarCache<'_> {
+    fn has_epsilon(&self, state: u32) -> bool { self.has_epsilon(state) }
+    fn step(&self, state: u32, byte: u8) -> Option<u32> { self.step(state, byte) }
+    fn check_config(&self, states: &[u32]) -> bool { self.check_config(states) }
+    fn visit_finalizers(&self, state: u32, mut visit: impl FnMut(TerminalID)) -> bool {
+        let Some(finalizers) = self.finalizers(state) else { return false; };
+        for terminal in finalizers.iter() {
+            visit(terminal as TerminalID);
+        }
+        true
+    }
+}
+
 impl NfaTrieScanCache<'_> {
     pub(super) fn execute_native_borrowed_into(
-        &mut self,input:&[u8],start:u32,matches:&mut Vec<TokenizerMatch>,
-        prepared:&BorrowedScalarCache<'_>,validate:bool,
-    )->SmallVec<[u32;1]>{
-        self.match_stamp=self.match_stamp.wrapping_add(1);
-        if self.match_stamp==0 {self.match_seen_stamp.fill(0);self.match_stamp=1;}
-        let stamp=self.match_stamp;self.touched_terminals.clear();matches.clear();
-        let mut scalar=(!prepared.has_epsilon(start)).then_some(start);
-        let mut config=if scalar.is_none(){self.config_for_raw_start(start)}else{NFA_CONFIG_UNKNOWN};
-        if scalar.is_none()&&!prepared.check_config(&self.configs[config as usize]){return SmallVec::new();}
-        let mut alive=true;
-        for(index,&byte)in input.iter().enumerate(){
-            if let Some(state)=scalar {
-                let Some(target)=prepared.step(state,byte)else{alive=false;break;};
-                if prepared.has_epsilon(target){scalar=None;config=self.config_for_raw_start(target);}
-                else{scalar=Some(target);}
-            }else{
-                let Some(next)=self.step_config(config,byte)else{alive=false;break;};config=next;
-                let closure=&self.configs[config as usize];
-                if !prepared.check_config(closure){alive=false;break;}
-                if closure.len()==1&&!prepared.has_epsilon(closure[0]){scalar=Some(closure[0]);}
-            }
-            let width=index+1;
-            if let Some(state)=scalar {
-                let Some(finalizers)=prepared.finalizers(state)else{alive=false;break;};
-                for t in finalizers.iter(){let terminal=t as TerminalID;
-                    if self.active_terminals.as_ref().is_none_or(|active|active.get(t).copied().unwrap_or(false)){
-                        self.record_native_match(terminal,state,width,stamp);
-                    }
-                }
-            }else{
-                if !prepared.check_config(&self.configs[config as usize]){alive=false;break;}
-                self.ensure_observations(config);
-                let n=self.observations[config as usize].as_ref().unwrap().len();
-                for i in 0..n{let(terminal,state)=self.observations[config as usize].as_ref().unwrap()[i];self.record_native_match(terminal,state,width,stamp);}
-            }
-        }
-        for &terminal in &self.touched_terminals{
-            let t=terminal as usize;let width=self.match_width[t];
-            matches.extend(self.match_end_states[t].iter().copied().map(|end_state|TokenizerMatch{id:terminal,width,end_state}));
-        }
-        let ends=if !alive{SmallVec::new()}else if let Some(raw)=scalar{SmallVec::from_buf([raw])}else{SmallVec::from_slice(&self.configs[config as usize])};
-        if !prepared.failed.get()&&(validate||self.strict_reference){
-            let mut reference=Vec::new();let expected=self.execute_into(input,start,&mut reference);
-            assert_eq!(ends,expected,"borrowed compact scalar cursor changed end states");
-            assert_eq!(*matches,reference,"borrowed compact scalar cursor changed longest matches");
+        &mut self, input: &[u8], start: u32, matches: &mut Vec<TokenizerMatch>,
+        prepared: &BorrowedScalarCache<'_>, validate: bool,
+    ) -> SmallVec<[u32; 1]> {
+        let ends = self.execute_cursor::<true, _>(prepared, input, start, matches);
+        if !prepared.failed.get() && (validate || self.strict_reference) {
+            self.verify_scalar_reference(input, start, matches, &ends);
         }
         ends
     }

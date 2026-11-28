@@ -39,6 +39,45 @@ type FutureTerminalColorGroups = SmallVec<[(ColorId, SmallVec<[TerminalID; 4]>);
 const NFA_CONFIG_UNKNOWN: u32 = u32::MAX;
 const NFA_CONFIG_DEAD: u32 = u32::MAX - 1;
 
+/// Scalar access is an acceleration of the same epsilon-closed byte action.
+/// A borrowed induced view must additionally prove that every observed raw
+/// state belongs to its coordinate; failure prevents artifact publication.
+trait CursorSource {
+    fn has_epsilon(&self, state: u32) -> bool;
+    fn step(&self, state: u32, byte: u8) -> Option<u32>;
+    fn visit_finalizers(&self, state: u32, visit: impl FnMut(TerminalID)) -> bool;
+    fn check_config(&self, _states: &[u32]) -> bool { true }
+}
+
+struct RawCursorSource<'a> {
+    tokenizer: &'a Tokenizer,
+    flat: Option<&'a [u32]>,
+}
+
+impl CursorSource for RawCursorSource<'_> {
+    #[inline]
+    fn has_epsilon(&self, state: u32) -> bool {
+        self.tokenizer.state_has_epsilon_transitions(state)
+    }
+
+    #[inline]
+    fn step(&self, state: u32, byte: u8) -> Option<u32> {
+        match self.flat {
+            Some(table) => {
+                let target = table[state as usize * 256 + byte as usize];
+                (target != u32::MAX).then_some(target)
+            }
+            None => self.tokenizer.step(state, byte),
+        }
+    }
+
+    #[inline]
+    fn visit_finalizers(&self, state: u32, visit: impl FnMut(TerminalID)) -> bool {
+        self.tokenizer.matched_terminals_iter(state).for_each(visit);
+        true
+    }
+}
+
 /// On-demand powerset scanner used only by the trie walker for epsilon-NFA
 /// tokenizers. Configurations are canonical epsilon-closed raw-state sets.
 ///
@@ -178,11 +217,28 @@ impl<'tok> NfaTrieScanCache<'tok> {
         self.observations[config_index] = Some(observations.into_boxed_slice());
     }
 
-    fn execute_into(
-        &mut self,
-        input: &[u8],
-        start: u32,
-        matches: &mut Vec<TokenizerMatch>,
+    #[inline]
+    fn record_match(&mut self, terminal: TerminalID, state: u32, width: usize, stamp: u32) {
+        let t = terminal as usize;
+        if self.match_seen_stamp[t] != stamp {
+            self.match_seen_stamp[t] = stamp;
+            self.match_width[t] = width;
+            self.match_end_states[t].clear();
+            self.match_end_states[t].push(state);
+            self.touched_terminals.push(terminal);
+        } else if width > self.match_width[t] {
+            self.match_width[t] = width;
+            self.match_end_states[t].clear();
+            self.match_end_states[t].push(state);
+        } else if width == self.match_width[t] && !self.match_end_states[t].contains(&state) {
+            self.match_end_states[t].push(state);
+        }
+    }
+
+    /// One ordered longest-match observation recurrence. Scalar mode merely
+    /// represents a singleton epsilon-free configuration without interning it.
+    fn execute_cursor<const SCALAR: bool, S: CursorSource>(
+        &mut self, source: &S, input: &[u8], start: u32, matches: &mut Vec<TokenizerMatch>,
     ) -> SmallVec<[u32; 1]> {
         self.match_stamp = self.match_stamp.wrapping_add(1);
         if self.match_stamp == 0 {
@@ -193,91 +249,123 @@ impl<'tok> NfaTrieScanCache<'tok> {
         self.touched_terminals.clear();
         matches.clear();
 
-        let mut config = self.config_for_raw_start(start);
+        let mut scalar = (SCALAR && !source.has_epsilon(start)).then_some(start);
+        let mut config = if scalar.is_none() {
+            self.config_for_raw_start(start)
+        } else {
+            NFA_CONFIG_UNKNOWN
+        };
+        if scalar.is_none() && !source.check_config(&self.configs[config as usize]) {
+            return SmallVec::new();
+        }
+
         let mut alive = true;
         for (index, &byte) in input.iter().enumerate() {
-            let Some(next) = self.step_config(config, byte) else {
-                alive = false;
-                break;
-            };
-            config = next;
-            self.ensure_observations(config);
-            let width = index + 1;
-
-            let observations = self.observations[config as usize]
-                .as_deref()
-                .expect("NFA configuration observations must be initialized");
-            for &(terminal, end_state) in observations {
-                let terminal_index = terminal as usize;
-                if self.match_seen_stamp[terminal_index] != stamp {
-                    self.match_seen_stamp[terminal_index] = stamp;
-                    self.match_width[terminal_index] = width;
-                    self.match_end_states[terminal_index].clear();
-                    self.match_end_states[terminal_index].push(end_state);
-                    self.touched_terminals.push(terminal);
-                    continue;
+            if let Some(state) = scalar {
+                let Some(target) = source.step(state, byte) else {
+                    alive = false;
+                    break;
+                };
+                if source.has_epsilon(target) {
+                    scalar = None;
+                    config = self.config_for_raw_start(target);
+                } else {
+                    scalar = Some(target);
                 }
-                if width > self.match_width[terminal_index] {
-                    self.match_width[terminal_index] = width;
-                    self.match_end_states[terminal_index].clear();
-                    self.match_end_states[terminal_index].push(end_state);
-                } else if width == self.match_width[terminal_index]
-                    && !self.match_end_states[terminal_index].contains(&end_state)
-                {
-                    self.match_end_states[terminal_index].push(end_state);
+            } else {
+                let Some(next) = self.step_config(config, byte) else {
+                    alive = false;
+                    break;
+                };
+                config = next;
+                let states = &self.configs[config as usize];
+                if !source.check_config(states) {
+                    alive = false;
+                    break;
+                }
+                if SCALAR && states.len() == 1 && !source.has_epsilon(states[0]) {
+                    scalar = Some(states[0]);
+                }
+            }
+            let width = index + 1;
+            if let Some(state) = scalar {
+                if !source.visit_finalizers(state, |terminal| {
+                    if self.active_terminals.as_ref().is_none_or(|active|
+                        active.get(terminal as usize).copied().unwrap_or(false))
+                    {
+                        self.record_match(terminal, state, width, stamp);
+                    }
+                }) {
+                    alive = false;
+                    break;
+                }
+            } else {
+                if !source.check_config(&self.configs[config as usize]) {
+                    alive = false;
+                    break;
+                }
+                self.ensure_observations(config);
+                let observations = self.observations[config as usize]
+                    .as_ref().expect("configuration observations initialized").len();
+                for i in 0..observations {
+                    let (terminal, state) = self.observations[config as usize].as_ref().unwrap()[i];
+                    self.record_match(terminal, state, width, stamp);
                 }
             }
         }
 
         for &terminal in &self.touched_terminals {
-            let terminal_index = terminal as usize;
-            let width = self.match_width[terminal_index];
-            matches.extend(
-                self.match_end_states[terminal_index]
-                    .iter()
-                    .copied()
-                    .map(|end_state| TokenizerMatch {
-                        id: terminal,
-                        width,
-                        end_state,
-                    }),
-            );
+            let index = terminal as usize;
+            let width = self.match_width[index];
+            matches.extend(self.match_end_states[index].iter().copied().map(|end_state|
+                TokenizerMatch { id: terminal, width, end_state }
+            ));
         }
-
-        let end_states = if alive {
-            SmallVec::from_slice(&self.configs[config as usize])
-        } else {
+        if !alive {
             SmallVec::new()
-        };
-
-        if self.strict_reference {
-            let mut reference = self.tokenizer.execute_from_state(input, start);
-            reference.matches.retain(|matched| {
-                self.active_terminals.as_ref().is_none_or(|active| {
-                    active
-                        .get(matched.id as usize)
-                        .copied()
-                        .unwrap_or(false)
-                })
-            });
-            let mut actual_matches = matches.clone();
-            actual_matches.sort_unstable_by_key(|matched| {
-                (matched.id, matched.width, matched.end_state)
-            });
-            reference.matches.sort_unstable_by_key(|matched| {
-                (matched.id, matched.width, matched.end_state)
-            });
-            assert_eq!(
-                end_states, reference.end_state,
-                "cached NFA trie scanner end-state mismatch"
-            );
-            assert_eq!(
-                actual_matches, reference.matches,
-                "cached NFA trie scanner longest-match mismatch"
-            );
+        } else if let Some(state) = scalar {
+            SmallVec::from_buf([state])
+        } else {
+            SmallVec::from_slice(&self.configs[config as usize])
         }
+    }
 
-        end_states
+    fn verify_reference(
+        &self, input: &[u8], start: u32, matches: &[TokenizerMatch], ends: &[u32],
+    ) {
+        let mut reference = self.tokenizer.execute_from_state(input, start);
+        reference.matches.retain(|matched| {
+            self.active_terminals.as_ref().is_none_or(|active|
+                active.get(matched.id as usize).copied().unwrap_or(false))
+        });
+        let mut actual = matches.to_vec();
+        actual.sort_unstable_by_key(|m| (m.id, m.width, m.end_state));
+        reference.matches.sort_unstable_by_key(|m| (m.id, m.width, m.end_state));
+        assert_eq!(ends, reference.end_state.as_slice(), "cached NFA scanner end-state mismatch");
+        assert_eq!(actual, reference.matches, "cached NFA scanner longest-match mismatch");
+    }
+
+    fn verify_scalar_reference(
+        &mut self, input: &[u8], start: u32, matches: &[TokenizerMatch], ends: &[u32],
+    ) {
+        let mut reference = Vec::new();
+        let reference_ends = self.execute_into(input, start, &mut reference);
+        assert_eq!(ends, reference_ends.as_slice(), "scalar cursor changed ordered end states");
+        assert_eq!(matches, reference.as_slice(), "scalar cursor changed ordered longest matches");
+        if !self.strict_reference {
+            self.verify_reference(input, start, matches, ends);
+        }
+    }
+
+    fn execute_into(
+        &mut self, input: &[u8], start: u32, matches: &mut Vec<TokenizerMatch>,
+    ) -> SmallVec<[u32; 1]> {
+        let source = RawCursorSource { tokenizer: self.tokenizer, flat: None };
+        let ends = self.execute_cursor::<false, _>(&source, input, start, matches);
+        if self.strict_reference {
+            self.verify_reference(input, start, matches, &ends);
+        }
+        ends
     }
 }
 
