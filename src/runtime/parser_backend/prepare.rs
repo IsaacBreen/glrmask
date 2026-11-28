@@ -14,14 +14,14 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use glrmask_parser_dwa::__private::templates::native::{
-    CompiledGroup, NativeCompileError, NativeTableIndex, ProgramCompiler,
+    CompiledGroup, NativeTableIndex, ProgramCompiler,
 };
 use glrmask_parser_dwa::__private::templates::admissibility::{
     TemplateDomain, TopAdmission,
 };
 
 use crate::automata::unweighted_u32::dfa::DFA;
-use glrmask_parser_dwa::__private::templates::compile_dfa::Templates;
+use glrmask_parser_dwa::__private::templates::compile_dfa::{Templates, compile_signed_template};
 use crate::compiler::glr::table::GLRTable;
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{DirectRegularAutomaton, TerminalID};
@@ -531,13 +531,13 @@ fn metadata(
     Ok(Metadata { embedding, grammar })
 }
 
-pub(super) fn from_compiler_parts(
+pub(super) fn compile_from_table(
     table: &GLRTable,
     direct_regular: Option<&DirectRegularAutomaton>,
-    compiler_templates: Option<&Templates>,
     ignore: Option<u32>,
     preserve_coordinate: bool,
-) -> crate::Result<PreparedTemplateParser> {
+    build_static_index: bool,
+) -> crate::Result<(PreparedTemplateParser, Templates)> {
     let profile = crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
     let started = profile.then(Instant::now);
     let sparse_regular =
@@ -571,90 +571,42 @@ pub(super) fn from_compiler_parts(
                 ).ok();
             Arc::make_mut(grammar).set_stack_effects(effects);
         }
-        return Ok(PreparedTemplateParser {
+        return Ok((PreparedTemplateParser {
             source_state_count: table.num_states,
             source_terminal_count: table.num_terminals,
             parser,
-        });
+        }, Templates::default()));
     }
 
-    // The static weighted index and native preparation borrow the same
-    // immutable signed graphs. Prepare each exact source identity only once.
-    let mut groups_by_source = FxHashMap::<usize, usize>::default();
-    let mut compiled_inputs = Vec::<(Vec<u32>, &Arc<DFA>)>::new();
-    let mut selected = vec![true; table.num_terminals as usize];
-    if let Some(templates) = compiler_templates {
-        for (&terminal, source) in &templates.by_terminal {
-            let Some(missing) = selected.get_mut(terminal as usize) else {
-                return Err(crate::Error::Compilation(format!("template terminal {terminal} outside compiler domain")));
-            };
-            *missing = false;
-            let id = Arc::as_ptr(source) as usize;
-            let group = *groups_by_source.entry(id).or_insert_with(|| {
-                compiled_inputs.push((Vec::new(), source));
-                compiled_inputs.len() - 1
-            });
-            compiled_inputs[group].0.push(terminal);
-        }
-    }
-
+    // Regular-family weighted indices are built directly from the regular
+    // automaton. All other static compilation needs the signed projection.
+    let signed = build_static_index && direct_regular.is_none();
     let index_started = profile.then(Instant::now);
-    let index = NativeTableIndex::new(table, &selected)
+    let index = NativeTableIndex::new(table, &vec![true; table.num_terminals as usize])
         .map_err(crate::Error::Compilation)?;
     let index_ms = index_started.map_or(0.0, |time| time.elapsed().as_secs_f64() * 1000.0);
     let compiler = ProgramCompiler::new();
 
+    struct TerminalProduct {
+        relation: Arc<PreparedRelation>,
+        signed: Option<Arc<DFA>>,
+    }
+
     let work = || {
         let (ordinary, (completion, metadata)) = joined(
             || {
-                let (selected_result, retained_results) = joined(
-                    || index.compile_selected(|characterization| {
-                        let source = Arc::new(compiler.compile(characterization)?);
-                        PreparedRelation::prepare(source, table.num_states, true)
-                    }),
-                    || {
-                        let build = |(terminals, raw): &(Vec<u32>, &Arc<DFA>)| {
-                            compiler.compile_raw(raw)
-                                .and_then(|source| {
-                                    PreparedRelation::prepare(Arc::new(source), table.num_states, true)
-                                })
-                                .map(|program| CompiledGroup {
-                                    terminals: terminals.clone(),
-                                    program: Arc::new(program),
-                                })
-                                .map_err(|message| NativeCompileError { terminal: terminals[0], message })
-                        };
-                        if parallel() {
-                            compiled_inputs.par_iter().map(build).collect::<Vec<_>>()
-                        } else {
-                            compiled_inputs.iter().map(build).collect::<Vec<_>>()
-                        }
-                    },
-                );
-
-                let mut failure = selected_result.as_ref().err().cloned();
-                for result in &retained_results {
-                    if let Err(error) = result
-                        && failure.as_ref().is_none_or(|old| error.terminal < old.terminal)
-                    {
-                        failure = Some(error.clone());
-                    }
-                }
-                if let Some(error) = failure {
-                    return Err(crate::Error::classify_template_compile_message(
-                        error.to_string(),
-                    ));
-                }
-                let selected_result =
-                    selected_result.unwrap_or_else(|_| unreachable!("checked failures"));
-                let signature_groups = selected_result.action_signature_groups;
-                let exact_groups = selected_result.exact_characterization_groups;
-                let mut groups = selected_result.groups;
-                for result in retained_results {
-                    groups.push(result.unwrap_or_else(|_| unreachable!("checked failures")));
-                }
-                let ready = inventory(groups, table.num_terminals as usize)?;
-                Ok((ready, signature_groups, exact_groups))
+                index.compile_selected(|characterization| {
+                    let (source, raw) = if signed {
+                        let raw = Arc::new(compile_signed_template(characterization)?);
+                        let source = compiler.compile_raw(&raw)?;
+                        (source, Some(raw))
+                    } else {
+                        (compiler.compile(characterization)?, None)
+                    };
+                    let relation = PreparedRelation::prepare(Arc::new(source), table.num_states, true)?;
+                    Ok(TerminalProduct { relation: Arc::new(relation), signed: raw })
+                })
+                .map_err(|error| crate::Error::classify_template_compile_message(error.to_string()))
             },
             || joined(
                 || {
@@ -668,21 +620,37 @@ pub(super) fn from_compiler_parts(
 
         // Explicit precedence: terminal errors, completion errors, metadata
         // errors. Within terminal errors choose the smallest terminal ID.
-        let (ordinary, signature_groups, exact_groups) = ordinary?;
+        let ordinary = ordinary?;
         let completion = completion.map_err(crate::Error::classify_template_compile_message)?;
         let metadata = metadata?;
+        let signature_groups = ordinary.action_signature_groups;
+        let exact_groups = ordinary.exact_characterization_groups;
+        let mut templates = Templates::default();
+        let mut groups = Vec::with_capacity(ordinary.groups.len());
+        for group in ordinary.groups {
+            if let Some(raw) = &group.program.signed {
+                for &terminal in &group.terminals {
+                    templates.by_terminal.insert(terminal, Arc::clone(raw));
+                }
+            }
+            groups.push(CompiledGroup {
+                terminals: group.terminals,
+                program: Arc::clone(&group.program.relation),
+            });
+        }
+        let ordinary = inventory(groups, table.num_terminals as usize)?;
         let mut parser = assemble(
             table.num_states, table.num_terminals, table.skip_terminals.clone(),
             ordinary, completion,
         );
         parser.embedding = metadata.embedding;
         parser.link_grammar = metadata.grammar;
-        Ok::<_, crate::Error>((parser, signature_groups, exact_groups))
+        Ok::<_, crate::Error>((parser, templates, signature_groups, exact_groups))
     };
 
     let use_pool = !crate::compiler::macro_parallelism_disabled()
         && (table.num_terminals > 16 || table.num_states > 256);
-    let (parser, signature_groups, exact_groups) = if use_pool {
+    let (parser, templates, signature_groups, exact_groups) = if use_pool {
         crate::compiler::pipeline::run_with_compile_thread_pool(work)
     } else {
         work()
@@ -690,21 +658,21 @@ pub(super) fn from_compiler_parts(
 
     if let Some(started) = started {
         eprintln!(
-            "[glrmask/profile][native_template_pipeline] terminals={} logical_actions={} unique_actions={} action_groups={} exact_missing_groups={} retained={} index_ms={index_ms:.3} total_ms={:.3}",
+            "[glrmask/profile][native_template_pipeline] terminals={} logical_actions={} unique_actions={} action_groups={} exact_groups={} signed_projection={} index_ms={index_ms:.3} total_ms={:.3}",
             table.num_terminals,
             index.logical_action_count(),
             index.unique_action_count(),
             signature_groups,
             exact_groups,
-            compiler_templates.map_or(0, |templates| templates.by_terminal.len()),
+            signed,
             started.elapsed().as_secs_f64() * 1000.0,
         );
     }
-    Ok(PreparedTemplateParser {
+    Ok((PreparedTemplateParser {
         source_state_count: table.num_states,
         source_terminal_count: table.num_terminals,
         parser,
-    })
+    }, templates))
 }
 
 #[cfg(test)]
@@ -727,7 +695,7 @@ mod tests {
             ],
             &[&[], &[]],
         );
-        let built = from_compiler_parts(&table, None, None, None, false).unwrap();
+        let (built, _) = compile_from_table(&table, None, None, false, false).unwrap();
         for terminal in [1usize, 2] {
             assert!(Arc::ptr_eq(
                 built.parser.terminal_source(0).unwrap(),
@@ -754,24 +722,16 @@ mod tests {
     }
 
     #[test]
-    fn actual_retained_raw_static_input_bypasses_missing_characterization() {
-        use glrmask_parser_dwa::__private::templates::{
-            characterize::try_characterize_selected_terminals_for_terminal_count,
-            compile_dfa::Templates,
-        };
+    fn static_signed_projection_and_native_only_compilation_agree() {
         let table = build_test_table(
             2, 2,
             &[&[(0, Action::Shift(1, false)), (1, Action::Skip)],
               &[(EOF, Action::Accept)]],
             &[&[], &[]],
         );
-        let chars = try_characterize_selected_terminals_for_terminal_count(
-            &table, 2, &[true, true],
-        ).unwrap();
-        let mut raw = Templates::try_from_characterizations(&chars).unwrap();
-        raw.by_terminal.remove(&1);
-        let rebuilt = from_compiler_parts(&table, None, None, None, true).unwrap();
-        let reused = from_compiler_parts(&table, None, Some(&raw), None, true).unwrap();
+        let (rebuilt, _) = compile_from_table(&table, None, None, true, false).unwrap();
+        let (reused, templates) = compile_from_table(&table, None, None, true, true).unwrap();
+        assert_eq!(templates.by_terminal.len(), 2);
         for terminal in 0..2 {
             assert_eq!(
                 rebuilt.parser.local_domain(terminal).unwrap().to_bytes().unwrap(),

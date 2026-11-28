@@ -247,7 +247,7 @@ impl DynamicConstraint {
         match backend {
             crate::runtime::parser_backend::DynamicParserBackend::Native => {
                 let prepared = crate::runtime::parser_backend::PreparedTemplateParser::from_compiler_parts(
-                    &table, direct_regular_automaton.as_ref(), None, ignore_terminal, false,
+                    &table, direct_regular_automaton.as_ref(), ignore_terminal, false,
                 )?;
                 drop(table);
                 let mut inner = Self::from_template_runtime_parts_unfinalized(

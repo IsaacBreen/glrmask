@@ -82,9 +82,6 @@ use crate::compiler::stages::parser_dwa::{
     try_build_immediate_terminal_completion_weights,
 };
 use crate::compiler::stages::templates::Templates;
-use crate::compiler::stages::templates::characterize::{
-    try_characterize_terminals_profiled,
-};
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
 use crate::ds::u8set::U8Set;
@@ -3265,66 +3262,6 @@ impl WeightRefs for ParserTopAccept {
 
 type MappedParserDwa = MappedArtifact<(DWA, ParserTopAccept)>;
 
-fn build_templates_for_compile(
-    table: &GLRTable,
-    analyzed_grammar: &AnalyzedGrammar,
-    _ignore_terminal: Option<u32>,
-) -> Result<(
-    Templates,
-    f64,
-), String> {
-    let templates_started_at = Instant::now();
-    if analyzed_grammar.direct_regular_automaton.is_some() {
-        return Ok((Templates::default(), elapsed_ms(templates_started_at)));
-    }
-
-    let (characterizations, characterization_profile) =
-        try_characterize_terminals_profiled(table, analyzed_grammar)
-            .map_err(|error| error.to_string())?;
-    let (templates, template_profile) =
-        Templates::try_from_characterizations_profiled(&characterizations)?;
-    drop(characterizations);
-    if compile_profile_enabled() {
-        eprintln!(
-            "[glrmask/profile][templates] terminals={} action_signature_classes={} action_quotient_hits={} max_action_signature_multiplicity={} characterization_signature_ms={:.3} characterization_ms={:.3} characterization_fanout_ms={:.3} characterization_validation_ms={:.3} characterization_total_ms={:.3} characterization_quotient_disabled={} unique_characterizations={} compiled_characterizations={} template_quotient_hits={} max_characterization_multiplicity={} build_nfa_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} template_fanout_ms={:.3} template_validation_ms={:.3} template_total_ms={:.3} template_wall_ms={:.3} template_minimize_skipped={} avg_nfa_states={:.2} avg_nfa_transitions={:.2} avg_premin_dfa_states={:.2} avg_premin_dfa_transitions={:.2} avg_dfa_states={:.2} avg_dfa_transitions={:.2} max_dfa_states={} max_dfa_transitions={}",
-            characterization_profile.terminals,
-            characterization_profile.unique_action_signatures,
-            characterization_profile.quotient_hits,
-            characterization_profile.max_action_signature_multiplicity,
-            characterization_profile.signature_ms,
-            characterization_profile.characterize_ms,
-            characterization_profile.fanout_ms,
-            characterization_profile.validation_ms,
-            characterization_profile.total_ms,
-            characterization_profile.quotient_disabled,
-            template_profile.unique_characterizations,
-            template_profile.compiled_characterizations,
-            template_profile.quotient_hits,
-            template_profile.max_characterization_multiplicity,
-            template_profile.build_nfa_ms,
-            template_profile.determinize_ms,
-            template_profile.minimize_ms,
-            template_profile.fanout_ms,
-            template_profile.validation_ms,
-            template_profile.total_ms,
-            template_profile.wall_ms,
-            template_profile.minimize_skipped,
-            template_profile.avg_nfa_states(),
-            template_profile.avg_nfa_transitions(),
-            template_profile.avg_premin_dfa_states(),
-            template_profile.avg_premin_dfa_transitions(),
-            template_profile.avg_dfa_states(),
-            template_profile.avg_dfa_transitions(),
-            template_profile.max_dfa_states,
-            template_profile.max_dfa_transitions,
-        );
-    }
-    Ok((
-        templates,
-        elapsed_ms(templates_started_at),
-    ))
-}
-
 struct TokenizerDagLane {
     tokenizer: Arc<Tokenizer>,
     initial_state_map: Option<ManyToOneIdMap>,
@@ -3405,6 +3342,7 @@ struct TerminalDagResult {
 
 struct TemplatesDagResult {
     templates: Templates,
+    prepared_parser: crate::runtime::parser_backend::PreparedTemplateParser,
         templates_ms: f64,
     templates_started_ms: f64,
     templates_finished_ms: f64,
@@ -4466,11 +4404,14 @@ impl TableStage {
 
     fn templates(&self, grammar: &GrammarDef, analysis: &AnalysisDagLane, compile_started_at: Instant) -> crate::Result<TemplatesDagResult> {
         let templates_started_ms = elapsed_ms(compile_started_at);
-        let (templates, templates_ms) =
-            build_templates_for_compile(&self.table, &analysis.analyzed_grammar, grammar.ignore_terminal)
-                .map_err(crate::Error::classify_template_compile_message)?;
+        let started = Instant::now();
+        let (prepared_parser, templates) =
+            crate::runtime::parser_backend::PreparedTemplateParser::compile_static(
+                &self.table, analysis.analyzed_grammar.direct_regular_automaton.as_ref(), grammar.ignore_terminal,
+            )?;
+        let templates_ms = elapsed_ms(started);
         Ok(TemplatesDagResult {
-            templates,
+            templates, prepared_parser,
             templates_ms, templates_started_ms, templates_finished_ms: elapsed_ms(compile_started_at),
         })
     }
@@ -4642,7 +4583,7 @@ fn compile_prepared_with_profile_and_table_construction(
             classify_finished_ms, terminal_dwa_started_ms, terminal_dwa_finished_ms,
         } = terminal;
         let TemplatesDagResult {
-            templates,
+            templates, prepared_parser,
             templates_ms, templates_started_ms, templates_finished_ms,
         } = templates;
         let ParserDagResult {
@@ -4915,10 +4856,6 @@ fn compile_prepared_with_profile_and_table_construction(
         if !crate::automata::lexer::tokenizer::artifact_serde::compact_large_runtime(&mut tokenizer) {
             crate::automata::lexer::tokenizer::artifact_serde::compact_large_fast_runtime(&mut tokenizer);
         }
-        let prepared_parser = crate::runtime::parser_backend::PreparedTemplateParser::from_compiler_parts(
-            &table, analyzed_grammar.direct_regular_automaton.as_ref(), Some(&templates),
-            prepared_grammar.ignore_terminal, true,
-        ).expect("source compiler must produce a finite template parser before Constraint materialization");
         drop(templates);
         drop(table);
         let mut constraint = Constraint::from_data(crate::runtime::ConstraintData {
