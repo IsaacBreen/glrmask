@@ -29,7 +29,7 @@ pub fn joint_observation_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
                 || reconcile::internal_id_map_refines(candidate, other)
         })
     }) {
-        finer.clone()
+        finer.clone().into_dense()
     } else {
         reconcile::build_common_internal_id_map(inputs)
     }
@@ -432,6 +432,7 @@ impl<T: WeightRefs> MappedArtifact<T> {
     /// stage has already certified it.
     pub fn remap_into_existing_common(mut self, common_id_map: &InternalIdMap) -> Self {
         if same_internal_id_maps(self.id_map(), common_id_map) {
+            self.id_map = common_id_map.clone();
             return self;
         }
         debug_assert!(
@@ -458,7 +459,7 @@ impl<T: WeightRefs> MappedArtifact<T> {
     {
         if same_internal_id_maps(self.id_map(), other.id_map()) {
             let (left_artifact, id_map) = self.into_parts();
-            return MappedArtifact::new((left_artifact, other.into_artifact()), id_map);
+            return MappedArtifact::new((left_artifact, other.into_artifact()), id_map.into_dense());
         }
         let common_id_map = {
             let (left_artifact, left_id_map) = self.parts_mut();
@@ -486,7 +487,7 @@ where
         if same_internal_id_maps(left.id_map(), right.id_map()) {
             let (left_artifact, id_map) = left.into_parts();
             let right_artifact = right.into_artifact();
-            return MappedArtifact::new((left_artifact, right_artifact), id_map);
+            return MappedArtifact::new((left_artifact, right_artifact), id_map.into_dense());
         }
 
         let common_id_map = {
@@ -506,8 +507,8 @@ where
 }
 
 fn same_internal_id_maps(left: &InternalIdMap, right: &InternalIdMap) -> bool {
-    left.tokenizer_states.original_to_internal == right.tokenizer_states.original_to_internal
-        && left.vocab_tokens.original_to_internal == right.vocab_tokens.original_to_internal
+    left.tokenizer_states.same_coordinate(&right.tokenizer_states)
+        && left.vocab_tokens.same_coordinate(&right.vocab_tokens)
 }
 
 impl<A, B> MappedArtifact<(A, B)>
@@ -547,7 +548,7 @@ where
         assert!(!inputs.is_empty(), "cannot reconcile an empty artifact inventory");
         if inputs.len() == 1 {
             let (artifact, id_map) = inputs.into_iter().next().unwrap().into_parts();
-            return MappedArtifact::new(vec![artifact], id_map);
+            return MappedArtifact::new(vec![artifact], id_map.into_dense());
         }
 
         let common = {

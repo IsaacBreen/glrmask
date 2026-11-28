@@ -16,15 +16,9 @@ pub(super) fn reconcile_weight_id_maps(
     right_weights: &mut [&mut Weight],
     right_id_map: &mut InternalIdMap,
 ) {
-    if try_reconcile_refinement_fast_path(left_weights, left_id_map, right_weights, right_id_map) {
-        return;
-    }
-
-    let common_id_map = build_common_internal_id_map(&[left_id_map, right_id_map]);
-
-    remap_weights_into_existing_common(left_weights, left_id_map, &common_id_map);
-    remap_weights_into_existing_common(right_weights, right_id_map, &common_id_map);
-
+    let common_id_map = reconcile_weight_id_maps_into_common(
+        left_weights, left_id_map, right_weights, right_id_map,
+    );
     *left_id_map = common_id_map.clone();
     *right_id_map = common_id_map;
 }
@@ -36,18 +30,18 @@ pub(super) fn reconcile_weight_id_maps_into_common(
     right_id_map: &InternalIdMap,
 ) -> InternalIdMap {
     if right_weights.is_empty() {
-        return left_id_map.clone();
+        return left_id_map.clone().into_dense();
     }
     if left_weights.is_empty() {
-        return right_id_map.clone();
+        return right_id_map.clone().into_dense();
     }
     if internal_id_map_refines(left_id_map, right_id_map) {
         remap_weights_into_existing_common(right_weights, right_id_map, left_id_map);
-        return left_id_map.clone();
+        return left_id_map.clone().into_dense();
     }
     if internal_id_map_refines(right_id_map, left_id_map) {
         remap_weights_into_existing_common(left_weights, left_id_map, right_id_map);
-        return right_id_map.clone();
+        return right_id_map.clone().into_dense();
     }
 
     reconcile_weight_id_maps_into_forced_common(
@@ -79,41 +73,15 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
             value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
         })
         .unwrap_or(true);
-    let ((left_ms, ()), (right_ms, ())) = if parallel_remap {
-        rayon::join(
-            || {
-                let started = profiling.then(Instant::now);
-                remap_weights_into_existing_common(left_weights, left_id_map, &common_id_map);
-                (
-                    started
-                        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
-                        .unwrap_or(0.0),
-                    (),
-                )
-            },
-            || {
-                let started = profiling.then(Instant::now);
-                remap_weights_into_existing_common(right_weights, right_id_map, &common_id_map);
-                (
-                    started
-                        .map(|started| started.elapsed().as_secs_f64() * 1000.0)
-                        .unwrap_or(0.0),
-                    (),
-                )
-            },
-        )
+    let remap = |weights: &mut [&mut Weight], local: &InternalIdMap| {
+        let started = profiling.then(Instant::now);
+        remap_weights_into_existing_common(weights, local, &common_id_map);
+        started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0)
+    };
+    let (left_ms, right_ms) = if parallel_remap {
+        rayon::join(|| remap(left_weights, left_id_map), || remap(right_weights, right_id_map))
     } else {
-        let left_started = profiling.then(Instant::now);
-        remap_weights_into_existing_common(left_weights, left_id_map, &common_id_map);
-        let left_ms = left_started
-            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
-        let right_started = profiling.then(Instant::now);
-        remap_weights_into_existing_common(right_weights, right_id_map, &common_id_map);
-        let right_ms = right_started
-            .map(|started| started.elapsed().as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
-        ((left_ms, ()), (right_ms, ()))
+        (remap(left_weights, left_id_map), remap(right_weights, right_id_map))
     };
 
     if let Some(total_started_at) = total_started_at {
@@ -135,33 +103,6 @@ pub(super) fn reconcile_weight_id_maps_into_forced_common(
     }
 
     common_id_map
-}
-
-fn try_reconcile_refinement_fast_path(
-    left_weights: &mut [&mut Weight],
-    left_id_map: &mut InternalIdMap,
-    right_weights: &mut [&mut Weight],
-    right_id_map: &mut InternalIdMap,
-) -> bool {
-    if right_weights.is_empty() {
-        *right_id_map = left_id_map.clone();
-        return true;
-    }
-    if left_weights.is_empty() {
-        *left_id_map = right_id_map.clone();
-        return true;
-    }
-    if internal_id_map_refines(left_id_map, right_id_map) {
-        remap_weights_into_existing_common(right_weights, right_id_map, left_id_map);
-        *right_id_map = left_id_map.clone();
-        return true;
-    }
-    if internal_id_map_refines(right_id_map, left_id_map) {
-        remap_weights_into_existing_common(left_weights, left_id_map, right_id_map);
-        *left_id_map = right_id_map.clone();
-        return true;
-    }
-    false
 }
 
 pub(super) fn remap_weights_into_existing_common(
@@ -186,45 +127,57 @@ pub(super) fn internal_id_map_refines(finer: &InternalIdMap, coarser: &InternalI
         && many_to_one_id_map_refines(&finer.vocab_tokens, &coarser.vocab_tokens, true)
 }
 
+/// A source-pinned membership index. Dense coordinates borrow their table;
+/// group-only coordinates index exactly the observed original IDs.
+enum MembershipView<'a> {
+    Dense(&'a [u32]),
+    Sparse(FxHashMap<u32, u32>),
+}
+
+impl<'a> MembershipView<'a> {
+    fn new(map: &'a ManyToOneIdMap) -> Self {
+        if !map.original_to_internal.is_empty() {
+            Self::Dense(&map.original_to_internal)
+        } else {
+            Self::Sparse(map.internal_to_originals.iter().enumerate()
+                .flat_map(|(class, members)| members.iter().map(move |&id| (id, class as u32)))
+                .collect())
+        }
+    }
+
+    fn class(&self, original: u32) -> u32 {
+        match self {
+            Self::Dense(table) => table.get(original as usize).copied(),
+            Self::Sparse(index) => index.get(&original).copied(),
+        }.unwrap_or(u32::MAX)
+    }
+}
+
 fn many_to_one_id_map_refines(
     finer: &ManyToOneIdMap,
     coarser: &ManyToOneIdMap,
     allow_unmapped: bool,
 ) -> bool {
-    if finer.original_to_internal.len() < coarser.original_to_internal.len() {
-        // Vocabulary maps are partial: an omitted trailing ID and an explicit
-        // UNMAPPED entry have identical meaning. A prepared common partition
-        // may trim such padding while a later artifact retains vocabulary size.
-        // Do not accept the omission of any mapped ID, or of tokenizer states.
-        if !allow_unmapped || coarser.original_to_internal[finer.original_to_internal.len()..]
-            .iter().any(|&internal| internal != u32::MAX)
-        {
+    let coarse = MembershipView::new(coarser);
+    let coarse_count = coarser.internal_to_originals.iter().map(Vec::len).sum::<usize>();
+    let mut covered = 0usize;
+    let mut fine_count = 0usize;
+    for members in &finer.internal_to_originals {
+        let Some(&first) = members.first() else { continue };
+        let class = coarse.class(first);
+        if members.iter().any(|&id| coarse.class(id) != class) {
             return false;
         }
-    }
-
-    let mut coarser_by_finer = vec![None; finer.internal_to_originals.len()];
-    for original in 0..finer.original_to_internal.len() {
-        let finer_internal = finer.original_to_internal[original];
-        let coarser_internal = coarser
-            .original_to_internal
-            .get(original)
-            .copied()
-            .unwrap_or(u32::MAX);
-        if allow_unmapped && finer_internal == u32::MAX && coarser_internal == u32::MAX {
-            continue;
-        }
-        let Some(slot) = coarser_by_finer.get_mut(finer_internal as usize) else {
-            return false;
-        };
-        match slot {
-            Some(previous) if *previous != coarser_internal => return false,
-            Some(_) => {}
-            None => *slot = Some(coarser_internal),
+        fine_count += members.len();
+        if class != u32::MAX {
+            covered += members.len();
         }
     }
-
-    true
+    // No observed coarse original may disappear, and a tokenizer coordinate
+    // cannot omit any state in its requested domain (even trailing absences).
+    covered == coarse_count && (allow_unmapped
+        || (fine_count == finer.original_extent()
+            && fine_count >= coarser.original_extent()))
 }
 
 pub(super) fn build_common_internal_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
@@ -243,12 +196,12 @@ fn build_common_internal_id_map_impl(
 ) -> InternalIdMap {
     let num_tokenizer_states = inputs
         .iter()
-        .map(|input| input.tokenizer_states.original_to_internal.len())
+        .map(|input| input.tokenizer_states.original_extent())
         .max()
         .unwrap_or(0);
     let num_original_tokens = inputs
         .iter()
-        .map(|input| input.vocab_tokens.original_to_internal.len())
+        .map(|input| input.vocab_tokens.original_extent())
         .max()
         .unwrap_or(0);
 
@@ -258,40 +211,16 @@ fn build_common_internal_id_map_impl(
             value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
         })
         .unwrap_or(true);
+    let states = || build_common_many_to_one_id_map(
+        inputs, num_tokenizer_states, |input| &input.tokenizer_states, allow_unmapped_tokenizer,
+    );
+    let tokens = || build_common_many_to_one_id_map(
+        inputs, num_original_tokens, |input| &input.vocab_tokens, true,
+    );
     let (tokenizer_states, vocab_tokens) = if parallel_dimensions {
-        rayon::join(
-            || {
-                build_common_many_to_one_id_map(
-                    inputs,
-                    num_tokenizer_states,
-                    |input| &input.tokenizer_states,
-                    allow_unmapped_tokenizer,
-                )
-            },
-            || {
-                build_common_many_to_one_id_map(
-                    inputs,
-                    num_original_tokens,
-                    |input| &input.vocab_tokens,
-                    true,
-                )
-            },
-        )
+        rayon::join(states, tokens)
     } else {
-        (
-            build_common_many_to_one_id_map(
-                inputs,
-                num_tokenizer_states,
-                |input| &input.tokenizer_states,
-                allow_unmapped_tokenizer,
-            ),
-            build_common_many_to_one_id_map(
-                inputs,
-                num_original_tokens,
-                |input| &input.vocab_tokens,
-                true,
-            ),
-        )
+        (states(), tokens())
     };
 
     InternalIdMap {
@@ -328,12 +257,12 @@ pub fn refine_observation_classes(
         return refine_sparse_memberships(inputs, num_originals, true, false).0;
     }
 
+    let views = inputs.iter().map(|map| MembershipView::new(map)).collect::<Vec<_>>();
     let (mut result, signatures) = partition_observation_domain(
         (0..num_originals).map(|original| original as u32), inputs.len(),
         |original, key| {
-            for (value, input) in key.iter_mut().zip(inputs) {
-                *value = input.original_to_internal.get(original as usize)
-                    .copied().unwrap_or(u32::MAX);
+            for (value, view) in key.iter_mut().zip(&views) {
+                *value = view.class(original);
             }
         },
         Some(num_originals),
@@ -404,25 +333,12 @@ pub fn refine_vocab_observations(
     dense_len: Option<usize>,
     merge_unobserved: bool,
 ) -> ManyToOneIdMap {
-    let sparse = inputs.iter().map(|input| {
-        (merge_unobserved || input.original_to_internal.is_empty()).then(|| {
-            let mut membership = FxHashMap::default();
-            for (class, members) in input.internal_to_originals.iter().enumerate() {
-                for &original in members {
-                    membership.insert(original, class as u32);
-                }
-            }
-            membership
-        })
-    }).collect::<Vec<_>>();
+    let views = inputs.iter().map(MembershipView::new).collect::<Vec<_>>();
     partition_observation_domain(
         originals, inputs.len(),
         |original, key| {
-            for ((value, input), sparse) in key.iter_mut().zip(inputs).zip(&sparse) {
-                *value = match sparse {
-                    Some(membership) => membership.get(&original).copied(),
-                    None => input.original_to_internal.get(original as usize).copied(),
-                }.unwrap_or(u32::MAX);
+            for (value, view) in key.iter_mut().zip(&views) {
+                *value = view.class(original);
             }
         },
         dense_len,
@@ -503,12 +419,13 @@ pub fn refine_sparse_memberships(
         let mut order = nodes.iter().enumerate()
             .filter_map(|(id, node)| (node.size != 0).then_some(id as u32))
             .collect::<Vec<_>>();
+        let views = inputs.iter().map(|map| MembershipView::new(map)).collect::<Vec<_>>();
         order.sort_unstable_by(|&left, &right| {
-            let left = nodes[left as usize].representative as usize;
-            let right = nodes[right as usize].representative as usize;
-            for input in inputs {
-                let left = input.original_to_internal.get(left).copied().unwrap_or(ABSENT);
-                let right = input.original_to_internal.get(right).copied().unwrap_or(ABSENT);
+            let left = nodes[left as usize].representative;
+            let right = nodes[right as usize].representative;
+            for view in &views {
+                let left = view.class(left);
+                let right = view.class(right);
                 let order = left.cmp(&right);
                 if !order.is_eq() { return order }
             }
@@ -589,6 +506,8 @@ fn build_common_many_to_one_id_map_pair_direct_sparse(
     right: &ManyToOneIdMap,
     num_originals: usize,
 ) -> ManyToOneIdMap {
+    let left_view = MembershipView::new(left);
+    let right_view = MembershipView::new(right);
     let right_classes = right.internal_to_originals.len();
     let mut original_to_internal = vec![u32::MAX; num_originals];
     let mut internal_to_originals = Vec::<Vec<u32>>::new();
@@ -626,11 +545,7 @@ fn build_common_many_to_one_id_map_pair_direct_sparse(
         touched_right.clear();
         left_only.clear();
         for &original in left_originals {
-            let right_internal = right
-                .original_to_internal
-                .get(original as usize)
-                .copied()
-                .unwrap_or(u32::MAX);
+            let right_internal = right_view.class(original);
             if right_internal == u32::MAX {
                 left_only.push(original);
             } else {
@@ -652,11 +567,7 @@ fn build_common_many_to_one_id_map_pair_direct_sparse(
     for right_originals in &right.internal_to_originals {
         let mut right_only = Vec::new();
         for &original in right_originals {
-            let left_internal = left
-                .original_to_internal
-                .get(original as usize)
-                .copied()
-                .unwrap_or(u32::MAX);
+            let left_internal = left_view.class(original);
             if left_internal == u32::MAX {
                 right_only.push(original);
             }
@@ -677,22 +588,16 @@ fn build_common_many_to_one_id_map_pair_hashed(
     num_originals: usize,
     allow_unmapped: bool,
 ) -> ManyToOneIdMap {
+    let left_view = MembershipView::new(left);
+    let right_view = MembershipView::new(right);
     let mut composite_to_class: FxHashMap<(u32, u32), u32> = FxHashMap::default();
     let mut original_to_internal = vec![u32::MAX; num_originals];
     let mut internal_to_originals: Vec<Vec<u32>> = Vec::new();
     let mut representatives: Vec<u32> = Vec::new();
 
     for (original, slot) in original_to_internal.iter_mut().enumerate() {
-        let left_internal = left
-            .original_to_internal
-            .get(original)
-            .copied()
-            .unwrap_or(u32::MAX);
-        let right_internal = right
-            .original_to_internal
-            .get(original)
-            .copied()
-            .unwrap_or(u32::MAX);
+        let left_internal = left_view.class(original as u32);
+        let right_internal = right_view.class(original as u32);
         if allow_unmapped && left_internal == u32::MAX && right_internal == u32::MAX {
             continue;
         }
@@ -741,15 +646,14 @@ pub fn local_to_refined_classes(
     local: &ManyToOneIdMap,
     common: &ManyToOneIdMap,
 ) -> Vec<Vec<u32>> {
+    let view = MembershipView::new(local);
     let mut fanout = vec![Vec::new(); local.internal_to_originals.len()];
     for (destination, originals) in common.internal_to_originals.iter().enumerate() {
         let Some(&representative) = originals.first() else { continue };
-        let local_class = local.original_to_internal.get(representative as usize)
-            .copied().unwrap_or(u32::MAX);
+        let local_class = view.class(representative);
         #[cfg(debug_assertions)]
         for &original in originals {
-            debug_assert_eq!(local.original_to_internal.get(original as usize)
-                .copied().unwrap_or(u32::MAX), local_class,
+            debug_assert_eq!(view.class(original), local_class,
                 "destination must refine the local observation classes");
         }
         if local_class != u32::MAX {
@@ -911,24 +815,13 @@ impl<'a> AxisImage<'a> {
     /// IDs in order, counting maximal runs rather than expanding memberships.
     fn refinement(local: &ManyToOneIdMap, common: &ManyToOneIdMap) -> Self {
         let n = local.internal_to_originals.len();
-        let sparse = local.original_to_internal.is_empty().then(|| {
-            local.internal_to_originals.iter().enumerate().flat_map(|(class, originals)|
-                originals.iter().map(move |&original| (original, class as u32))
-            ).collect::<FxHashMap<_, _>>()
-        });
-        let local_class = |original: u32| {
-            if let Some(sparse) = &sparse {
-                sparse.get(&original).copied().unwrap_or(u32::MAX)
-            } else {
-                local.original_to_internal.get(original as usize).copied().unwrap_or(u32::MAX)
-            }
-        };
+        let view = MembershipView::new(local);
         let membership = |originals: &[u32]| {
             let Some(&representative) = originals.first() else { return u32::MAX };
-            let class = local_class(representative);
+            let class = view.class(representative);
             #[cfg(debug_assertions)]
             for &original in originals {
-                debug_assert_eq!(local_class(original), class,
+                debug_assert_eq!(view.class(original), class,
                     "destination must refine the local observation classes");
             }
             class
@@ -1494,6 +1387,33 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn group_only_sources_reconcile_by_actual_original_membership() {
+        let u = u32::MAX;
+        let mut left = id_map(vec![0], 1, vec![u, 0, 0, u, 1, u, u, 1], 2);
+        let mut right = id_map(vec![0], 1, vec![u, 0, u, 0, 1, u, u, 0], 2);
+        left.vocab_tokens.original_to_internal.clear();
+        right.vocab_tokens.original_to_internal.clear();
+        assert!(!left.vocab_tokens.same_coordinate(&right.vocab_tokens));
+        assert!(!internal_id_map_refines(&left, &right));
+        assert!(!internal_id_map_refines(&right, &left));
+        let common = build_common_internal_id_map(&[&left, &right]);
+        // Lexicographic order of actual (left,right) pairs; MAX is absence.
+        assert_eq!(common.vocab_tokens.internal_to_originals,
+            vec![vec![1], vec![2], vec![7], vec![4], vec![3]]);
+        assert_eq!(common.vocab_tokens.original_to_internal, vec![u, 0, 1, 4, 3, u, u, 2]);
+        assert!(internal_id_map_refines(&common, &left));
+        assert!(internal_id_map_refines(&common, &right));
+        assert_eq!(local_to_refined_classes(&left.vocab_tokens, &common.vocab_tokens),
+            vec![vec![0, 1], vec![2, 3]]);
+        let refined = refine_sparse_memberships(
+            &[&left.vocab_tokens, &right.vocab_tokens], 8, true, true,
+        ).0;
+        assert_eq!(refined.original_to_internal, common.vocab_tokens.original_to_internal);
+        let common = crate::mapped_artifact::joint_observation_id_map(&[&left]);
+        assert_eq!(common.vocab_tokens.original_to_internal, vec![u, 0, 0, u, 1, u, u, 1]);
     }
 
     #[test]

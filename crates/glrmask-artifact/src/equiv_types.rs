@@ -85,6 +85,37 @@ impl ManyToOneIdMap {
         }
     }
 
+    /// The dense forward table is optional for group-only vocabulary maps.
+    /// Its absence does not mean that the original domain is empty.
+    pub(crate) fn original_extent(&self) -> usize {
+        if self.original_to_internal.is_empty() {
+            self.internal_to_originals.iter().flatten().copied().max()
+                .map_or(0, |id| id as usize + 1)
+        } else {
+            self.original_to_internal.len()
+        }
+    }
+
+    pub(crate) fn materialize_forward(&mut self) {
+        if self.original_to_internal.is_empty() {
+            self.original_to_internal = vec![u32::MAX; self.original_extent()];
+            for (class, members) in self.internal_to_originals.iter().enumerate() {
+                for &id in members {
+                    self.original_to_internal[id as usize] = class as u32;
+                }
+            }
+        }
+    }
+
+    pub(crate) fn same_coordinate(&self, other: &Self) -> bool {
+        self.num_internal_ids() == other.num_internal_ids()
+            && if self.original_to_internal.is_empty() || other.original_to_internal.is_empty() {
+                self.internal_to_originals == other.internal_to_originals
+            } else {
+                self.original_to_internal == other.original_to_internal
+            }
+    }
+
     pub fn num_internal_ids(&self) -> u32 {
         self.internal_to_originals.len() as u32
     }
@@ -309,6 +340,13 @@ pub struct InternalIdMap {
 pub use super::mapped_artifact::MappedArtifact;
 
 impl InternalIdMap {
+    /// Common weighted coordinates are consumed by dense runtime publication.
+    pub(crate) fn into_dense(mut self) -> Self {
+        self.tokenizer_states.materialize_forward();
+        self.vocab_tokens.materialize_forward();
+        self
+    }
+
     pub fn num_tsids(&self) -> u32 {
         self.tokenizer_states.num_internal_ids()
     }
@@ -322,6 +360,10 @@ impl InternalIdMap {
     }
 
     pub fn internal_token_for_original(&self, original: u32) -> Option<u32> {
+        if self.vocab_tokens.original_to_internal.is_empty() {
+            return self.vocab_tokens.internal_to_originals.iter()
+                .position(|members| members.contains(&original)).map(|id| id as u32);
+        }
         self.vocab_tokens
             .original_to_internal
             .get(original as usize)
