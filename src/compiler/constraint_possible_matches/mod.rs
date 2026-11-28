@@ -1875,17 +1875,16 @@ fn collect_sparse_root_possible_matches(
     }
 }
 
-struct BatchedDemandView {
-    raw_state_to_index: Vec<u32>,
-    byte_transitions: Vec<Vec<u32>>,
+struct BatchedDemandView<'a> {
+    byte_transitions: &'a [Vec<u32>],
     matched_masks: Vec<u128>,
     /// Conservative demanded-terminal reachability over byte transitions and
     /// optional token-boundary projection edges. `None` keeps the reference
     /// traversal unchanged.
     future_matched_masks: Option<Vec<u128>>,
-    is_end: Vec<bool>,
-    self_loop_bytes: Vec<U8Set>,
-    boundary_state: Option<Vec<u32>>,
+    is_end: &'a [bool],
+    self_loop_bytes: &'a [U8Set],
+    boundary_state: Option<&'a [u32]>,
 }
 
 struct BatchedDemandGroup {
@@ -1909,7 +1908,12 @@ impl BatchedGroupIndex {
         } else {
             0
         };
-        let slots = state_count.saturating_mul(mask_stride);
+        let mask_stride = if state_count.saturating_mul(mask_stride) <= 4_194_304 {
+            mask_stride
+        } else {
+            0
+        };
+        let slots = state_count * mask_stride;
         Self {
             mask_stride,
             generation: 0,
@@ -2051,7 +2055,7 @@ fn batched_future_matched_masks(
 }
 
 #[inline]
-fn batched_group_has_future_demand(view: &BatchedDemandView, state: u32, remaining: u128) -> bool {
+fn batched_group_has_future_demand(view: &BatchedDemandView<'_>, state: u32, remaining: u128) -> bool {
     view.future_matched_masks
         .as_ref()
         .is_none_or(|future| future[state as usize] & remaining != 0)
@@ -2060,7 +2064,7 @@ fn batched_group_has_future_demand(view: &BatchedDemandView, state: u32, remaini
 fn collect_batched_demand_node(
     node: &VocabPrefixTreeNode,
     groups: Vec<BatchedDemandGroup>,
-    view: &BatchedDemandView,
+    view: &BatchedDemandView<'_>,
     demanded_terminals: &[TerminalID],
     outputs: &mut [Vec<(u32, u32)>],
     profile: &mut BatchedDemandProfile,
@@ -2193,120 +2197,62 @@ fn interval_map_from_batched_ranges(
     map
 }
 
-fn collect_batched_demand_possible_matches(
-    tokenizer: &Tokenizer,
+fn demanded_terminal_bits(demand: &DelayedTerminalDemand, terminal_count: usize) -> (Vec<TerminalID>, Vec<u128>) {
+    let terminals = demand.terminals.iter().map(|terminal| terminal as TerminalID).collect::<Vec<_>>();
+    assert!(!terminals.is_empty() && terminals.len() <= 128);
+    let mut bits = vec![0u128; terminal_count];
+    for (index, &terminal) in terminals.iter().enumerate() {
+        bits[terminal as usize] = 1u128 << index;
+    }
+    (terminals, bits)
+}
+
+/// Exact existential prefix observation over either scalar or subset states.
+/// Query entries retain their raw IDs; the walk uses the view's indices.
+fn collect_batched_demand_view(
     root: &VocabPrefixTreeNode,
     entries: &[u32],
-    demand: &DelayedTerminalDemand,
+    origin_state_count: usize,
+    raw_to_index: Option<&[u32]>,
+    view: &BatchedDemandView<'_>,
+    demanded_terminals: &[TerminalID],
 ) -> TrieClassBuildResult {
-    let demanded_terminals = demand
-        .terminals
-        .iter()
-        .map(|terminal| terminal as TerminalID)
-        .collect::<Vec<_>>();
-    assert!(!demanded_terminals.is_empty() && demanded_terminals.len() <= 128);
-    let full_mask = if demanded_terminals.len() == 128 {
-        u128::MAX
-    } else {
-        (1u128 << demanded_terminals.len()) - 1
-    };
-    let mut terminal_to_bit = vec![0u128; tokenizer.num_terminals() as usize];
-    for (bit, &terminal) in demanded_terminals.iter().enumerate() {
-        terminal_to_bit[terminal as usize] = 1u128 << bit;
-    }
-
-    let relevant_states = demand
-        .raw_state_relevant
-        .iter()
-        .enumerate()
-        .filter_map(|(state, &relevant)| relevant.then_some(state as u32))
-        .collect::<Vec<_>>();
-    let mut raw_state_to_index = vec![u32::MAX; tokenizer.num_states() as usize];
-    for (index, &state) in relevant_states.iter().enumerate() {
-        raw_state_to_index[state as usize] = index as u32;
-    }
-    let mut byte_transitions = vec![vec![u32::MAX; relevant_states.len()]; 256];
-    let mut matched_masks = Vec::with_capacity(relevant_states.len());
-    let mut is_end = Vec::with_capacity(relevant_states.len());
-    for (state_index, &state) in relevant_states.iter().enumerate() {
-        for (byte, target) in tokenizer.transitions_from(state) {
-            let target_index = raw_state_to_index[target as usize];
-            if target_index != u32::MAX {
-                byte_transitions[byte as usize][state_index] = target_index;
-            }
-        }
-        matched_masks.push(
-            tokenizer
-                .matched_terminals_iter(state)
-                .fold(0u128, |mask, terminal| {
-                    mask | terminal_to_bit[terminal as usize]
-                }),
-        );
-        is_end.push(tokenizer.is_end(state));
-    }
-    let self_loop_bytes = relevant_states
-        .iter()
-        .map(|&state| tokenizer.self_loop_bytes(state))
-        .collect();
-    let view = BatchedDemandView {
-        raw_state_to_index,
-        byte_transitions,
-        matched_masks,
-        future_matched_masks: None,
-        is_end,
-        self_loop_bytes,
-        boundary_state: None,
-    };
-
-    let mut outputs = (0..entries.len() * demanded_terminals.len())
-        .map(|_| Vec::new())
-        .collect::<Vec<_>>();
+    let terminal_count = demanded_terminals.len();
+    let full_mask = if terminal_count == 128 { u128::MAX } else { (1u128 << terminal_count) - 1 };
+    let index_of = |state: u32| raw_to_index.map_or(state, |map| map[state as usize]);
+    let mut outputs = (0..entries.len() * terminal_count)
+        .map(|_| Vec::new()).collect::<Vec<_>>();
     if root.has_token() {
         let token_id = root.token_id() as u32;
         for (origin, &state) in entries.iter().enumerate() {
-            let state_index = view.raw_state_to_index[state as usize] as usize;
-            let matched = view.matched_masks[state_index];
-            for bit in 0..demanded_terminals.len() {
-                if matched & (1u128 << bit) != 0 {
-                    outputs[origin * demanded_terminals.len() + bit].push((token_id, token_id));
-                }
+            let mut matched = view.matched_masks[index_of(state) as usize];
+            while matched != 0 {
+                let bit = matched.trailing_zeros() as usize;
+                matched &= matched - 1;
+                outputs[origin * terminal_count + bit].push((token_id, token_id));
             }
         }
     }
-    let groups = entries
-        .iter()
-        .enumerate()
-        .map(|(origin, &state)| BatchedDemandGroup {
-            state_index: view.raw_state_to_index[state as usize],
-            remaining: full_mask,
-            origins: SmallVec::from_slice(&[origin as u32]),
-        })
-        .collect::<Vec<_>>();
+    let groups = entries.iter().enumerate().map(|(origin, &state)| BatchedDemandGroup {
+        state_index: index_of(state),
+        remaining: full_mask,
+        origins: SmallVec::from_slice(&[origin as u32]),
+    }).collect();
     let mut profile = BatchedDemandProfile::default();
-    let mut group_index =
-        BatchedGroupIndex::new(view.matched_masks.len(), demanded_terminals.len());
+    let mut group_index = BatchedGroupIndex::new(view.matched_masks.len(), terminal_count);
     let walk_started_at = Instant::now();
     collect_batched_demand_node(
-        root,
-        groups,
-        &view,
-        &demanded_terminals,
-        &mut outputs,
-        &mut profile,
-        &mut group_index,
+        root, groups, view, demanded_terminals, &mut outputs, &mut profile, &mut group_index,
     );
     let walk_ms = elapsed_ms(walk_started_at);
-
     let class_started_at = Instant::now();
-    let mut state_classes = vec![u32::MAX; tokenizer.num_states() as usize];
+    let mut state_classes = vec![u32::MAX; origin_state_count];
     let mut class_maps = Vec::<Arc<IntervalPossibleMatchMap>>::new();
     let mut map_to_class = FxHashMap::<IntervalPossibleMatchMap, u32>::default();
     for (origin, &state) in entries.iter().enumerate() {
-        let start = origin * demanded_terminals.len();
-        let end = start + demanded_terminals.len();
+        let start = origin * terminal_count;
         let interval_map = interval_map_from_batched_ranges(
-            &mut outputs[start..end],
-            &demanded_terminals,
+            &mut outputs[start..start + terminal_count], demanded_terminals,
         );
         let class_id = if let Some(&class_id) = map_to_class.get(&interval_map) {
             class_id
@@ -2324,32 +2270,53 @@ fn collect_batched_demand_possible_matches(
     {
         eprintln!(
             "[glrmask/profile][batched_demand_detail] nodes={} child_edges={} input_groups={} output_groups={} group_merges={} transition_steps={} matched_events={} origin_updates={} range_inserts={} future_prunes={} future_pruned_origins={} append_ms={:.3} walk_ms={:.3} class_ms={:.3}",
-            profile.nodes,
-            profile.child_edges,
-            profile.input_groups,
-            profile.output_groups,
-            profile.group_merges,
-            profile.transition_steps,
-            profile.matched_events,
-            profile.origin_updates,
-            profile.range_inserts,
-            profile.future_prunes,
-            profile.future_pruned_origins,
-            profile.append_ms,
-            walk_ms,
-            class_ms,
+            profile.nodes, profile.child_edges, profile.input_groups, profile.output_groups,
+            profile.group_merges, profile.transition_steps, profile.matched_events, profile.origin_updates,
+            profile.range_inserts, profile.future_prunes, profile.future_pruned_origins,
+            profile.append_ms, walk_ms, class_ms,
         );
     }
-    TrieClassBuildResult {
-        state_classes,
-        class_maps,
-    }
+    TrieClassBuildResult { state_classes, class_maps }
 }
 
-/// Batched delayed-terminal collection over an already deterministic powerset
-/// view. This is the same exact existential-prefix computation as
-/// `collect_batched_demand_possible_matches`, but it avoids requiring the raw
-/// epsilon-NFA tokenizer itself to be deterministic.
+fn collect_batched_demand_possible_matches(
+    tokenizer: &Tokenizer,
+    root: &VocabPrefixTreeNode,
+    entries: &[u32],
+    demand: &DelayedTerminalDemand,
+) -> TrieClassBuildResult {
+    let (demanded_terminals, terminal_to_bit) = demanded_terminal_bits(demand, tokenizer.num_terminals() as usize);
+    let relevant_states = demand.raw_state_relevant.iter().enumerate()
+        .filter_map(|(state, &relevant)| relevant.then_some(state as u32)).collect::<Vec<_>>();
+    let mut raw_state_to_index = vec![u32::MAX; tokenizer.num_states() as usize];
+    for (index, &state) in relevant_states.iter().enumerate() {
+        raw_state_to_index[state as usize] = index as u32;
+    }
+    let mut byte_transitions = vec![vec![u32::MAX; relevant_states.len()]; 256];
+    let mut matched_masks = Vec::with_capacity(relevant_states.len());
+    let mut is_end = Vec::with_capacity(relevant_states.len());
+    for (state_index, &state) in relevant_states.iter().enumerate() {
+        for (byte, target) in tokenizer.transitions_from(state) {
+            byte_transitions[byte as usize][state_index] = raw_state_to_index[target as usize];
+        }
+        matched_masks.push(tokenizer.matched_terminals_iter(state)
+            .fold(0u128, |mask, terminal| mask | terminal_to_bit[terminal as usize]));
+        is_end.push(tokenizer.is_end(state));
+    }
+    let self_loop_bytes = relevant_states.iter()
+        .map(|&state| tokenizer.self_loop_bytes(state)).collect::<Vec<_>>();
+    let view = BatchedDemandView {
+        byte_transitions: &byte_transitions,
+        matched_masks,
+        future_matched_masks: None,
+        is_end: &is_end,
+        self_loop_bytes: &self_loop_bytes,
+        boundary_state: None,
+    };
+    collect_batched_demand_view(root, entries, tokenizer.num_states() as usize,
+        Some(&raw_state_to_index), &view, &demanded_terminals)
+}
+
 fn collect_batched_demand_possible_matches_precomputed(
     root: &VocabPrefixTreeNode,
     entries: &[u32],
@@ -2362,135 +2329,26 @@ fn collect_batched_demand_possible_matches_precomputed(
     boundary_state: &[u32],
     demand: &DelayedTerminalDemand,
 ) -> TrieClassBuildResult {
-    let demanded_terminals = demand
-        .terminals
-        .iter()
-        .map(|terminal| terminal as TerminalID)
-        .collect::<Vec<_>>();
-    assert!(!demanded_terminals.is_empty() && demanded_terminals.len() <= 128);
-    let full_mask = if demanded_terminals.len() == 128 {
-        u128::MAX
-    } else {
-        (1u128 << demanded_terminals.len()) - 1
-    };
-    let mut terminal_to_bit = vec![0u128; num_terminals];
-    for (bit, &terminal) in demanded_terminals.iter().enumerate() {
-        terminal_to_bit[terminal as usize] = 1u128 << bit;
-    }
-    let matched_masks = matched_terminals
-        .iter()
-        .map(|terminals| {
-            terminals.iter().fold(0u128, |mask, &terminal| {
-                mask | terminal_to_bit[terminal as usize]
-            })
-        })
-        .collect::<Vec<_>>();
+    let (demanded_terminals, terminal_to_bit) = demanded_terminal_bits(demand, num_terminals);
+    let matched_masks = matched_terminals.iter().map(|terminals| {
+        terminals.iter().fold(0u128, |mask, &terminal| mask | terminal_to_bit[terminal as usize])
+    }).collect::<Vec<_>>();
     let use_future_prune = crate::env::var("GLRMASK_PM_POWERSET_FUTURE_DEMAND_PRUNE")
         .map(|value| {
             let value = value.trim();
             value.is_empty() || value == "1" || value.eq_ignore_ascii_case("true")
-        })
-        .unwrap_or(true);
-    let future_mask_started_at = Instant::now();
-    let future_matched_masks = use_future_prune.then(|| {
-        batched_future_matched_masks(&matched_masks, byte_transitions, Some(boundary_state))
-    });
-    let future_mask_ms = elapsed_ms(future_mask_started_at);
+        }).unwrap_or(true);
+    let future_matched_masks = use_future_prune.then(||
+        batched_future_matched_masks(&matched_masks, byte_transitions, Some(boundary_state)));
     let view = BatchedDemandView {
-        raw_state_to_index: (0..num_states as u32).collect(),
-        byte_transitions: byte_transitions.to_vec(),
+        byte_transitions,
         matched_masks,
         future_matched_masks,
-        is_end: is_end.to_vec(),
-        self_loop_bytes: self_loop_bytes.to_vec(),
-        boundary_state: Some(boundary_state.to_vec()),
+        is_end,
+        self_loop_bytes,
+        boundary_state: Some(boundary_state),
     };
-
-    let mut outputs = (0..entries.len() * demanded_terminals.len())
-        .map(|_| Vec::new())
-        .collect::<Vec<_>>();
-    if root.has_token() {
-        let token_id = root.token_id() as u32;
-        for (origin, &state) in entries.iter().enumerate() {
-            let matched = view.matched_masks[state as usize];
-            for bit in 0..demanded_terminals.len() {
-                if matched & (1u128 << bit) != 0 {
-                    outputs[origin * demanded_terminals.len() + bit].push((token_id, token_id));
-                }
-            }
-        }
-    }
-    let groups = entries
-        .iter()
-        .enumerate()
-        .map(|(origin, &state)| BatchedDemandGroup {
-            state_index: state,
-            remaining: full_mask,
-            origins: SmallVec::from_slice(&[origin as u32]),
-        })
-        .collect::<Vec<_>>();
-    let mut profile = BatchedDemandProfile::default();
-    let mut group_index = BatchedGroupIndex::new(num_states, demanded_terminals.len());
-    let walk_started_at = Instant::now();
-    collect_batched_demand_node(
-        root,
-        groups,
-        &view,
-        &demanded_terminals,
-        &mut outputs,
-        &mut profile,
-        &mut group_index,
-    );
-    let walk_ms = elapsed_ms(walk_started_at);
-
-    let class_started_at = Instant::now();
-    let mut state_classes = vec![u32::MAX; num_states];
-    let mut class_maps = Vec::<Arc<IntervalPossibleMatchMap>>::new();
-    let mut map_to_class = FxHashMap::<IntervalPossibleMatchMap, u32>::default();
-    for (origin, &state) in entries.iter().enumerate() {
-        let start = origin * demanded_terminals.len();
-        let end = start + demanded_terminals.len();
-        let interval_map = interval_map_from_batched_ranges(
-            &mut outputs[start..end],
-            &demanded_terminals,
-        );
-        let class_id = if let Some(&class_id) = map_to_class.get(&interval_map) {
-            class_id
-        } else {
-            let class_id = class_maps.len() as u32;
-            map_to_class.insert(interval_map.clone(), class_id);
-            class_maps.push(Arc::new(interval_map));
-            class_id
-        };
-        state_classes[state as usize] = class_id;
-    }
-    let class_ms = elapsed_ms(class_started_at);
-    if crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-        || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
-    {
-        eprintln!(
-            "[glrmask/profile][batched_demand_powerset_detail] nodes={} child_edges={} input_groups={} output_groups={} group_merges={} transition_steps={} matched_events={} origin_updates={} range_inserts={} future_prunes={} future_pruned_origins={} future_mask_ms={:.3} append_ms={:.3} walk_ms={:.3} class_ms={:.3}",
-            profile.nodes,
-            profile.child_edges,
-            profile.input_groups,
-            profile.output_groups,
-            profile.group_merges,
-            profile.transition_steps,
-            profile.matched_events,
-            profile.origin_updates,
-            profile.range_inserts,
-            profile.future_prunes,
-            profile.future_pruned_origins,
-            future_mask_ms,
-            profile.append_ms,
-            walk_ms,
-            class_ms,
-        );
-    }
-    TrieClassBuildResult {
-        state_classes,
-        class_maps,
-    }
+    collect_batched_demand_view(root, entries, num_states, None, &view, &demanded_terminals)
 }
 
 fn attach_structured_dispatch_possible_matches(
@@ -3092,6 +2950,7 @@ fn compute_constraint_possible_matches_with_artifacts(
     original_token_count: usize,
     artifacts_and_profile: (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile),
     raw_byte_to_class: Option<&[u8; 256]>,
+    demand: DelayedTerminalDemand,
 ) -> ConstraintPossibleMatchesComputation {
     let pm_started_at = Instant::now();
 
@@ -3100,16 +2959,6 @@ fn compute_constraint_possible_matches_with_artifacts(
     let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&artifacts);
     let ordered_vocab = artifacts.ordered_vocab;
     let trie = artifacts.trie;
-
-    let demand = delayed_terminal_demand(tokenizer);
-    if demand.terminals.is_zero() {
-        return complete_empty_possible_matches_computation(
-            tokenizer,
-            original_token_count,
-            runtime_dynamic_vocab,
-            elapsed_ms(pm_started_at),
-        );
-    }
 
     let structured_dispatch = tokenizer.has_deterministic_dispatch();
     let scalar_dispatch = tokenizer.has_scalar_deterministic_dispatch();
@@ -3472,7 +3321,8 @@ fn compute_constraint_possible_matches_for_vocab_impl(
     // `{}`), there is no delayed terminal whose possible-token relation needs
     // collecting, so a full Llama-sized trie build and dynamic-mask template
     // are pure first-use overhead.
-    if delayed_terminal_demand(tokenizer).terminals.is_zero() {
+    let demand = delayed_terminal_demand(tokenizer);
+    if demand.terminals.is_zero() {
         return complete_empty_possible_matches_computation(
             tokenizer,
             vocab.entries_map().len(),
@@ -3486,6 +3336,7 @@ fn compute_constraint_possible_matches_for_vocab_impl(
         vocab.entries_map().len(),
         get_ordered_vocab_trie_artifacts_for_vocab(vocab),
         raw_byte_to_class,
+        demand,
     )
 }
 
