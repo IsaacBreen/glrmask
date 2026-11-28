@@ -20,23 +20,13 @@ use range_set_blaze::{RangeMapBlaze, RangeSetBlaze};
 use crate::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::{SharedTokenSet, Weight, finalize_weight_map, shared_rangeset};
 
-mod almost_optimal_layout;
 mod default_layout;
-mod exact_layout;
 
 use default_layout::{
     order_token_groups_exact_profile, order_token_groups_sketch,
     order_tsid_groups_exact_profile, order_tsid_groups_sketch,
 };
-use exact_layout::{order_token_groups_globally_exact, order_tsid_groups_globally_exact};
 
-const EXACT_LAYOUT_MAX_GROUPS: usize = 20;
-const GLOBALLY_EXACT_COMPONENT_MAX_GROUPS_DEFAULT: usize = EXACT_LAYOUT_MAX_GROUPS;
-const LARGE_ALMOST_OPTIMAL_COMPONENT_GROUPS: usize = 512;
-const LARGE_ALMOST_OPTIMAL_GREEDY_STARTS: usize = 64;
-const LARGE_ALMOST_OPTIMAL_NEIGHBORS: usize = 384;
-const LARGE_ALMOST_OPTIMAL_RANDOM_WINDOW: usize = 16;
-const LARGE_ALMOST_OPTIMAL_2OPT_WINDOW: usize = 64;
 const DEFAULT_LAYOUT_SKETCH_WORDS: usize = 4;
 const MIN_UNIQUE_WEIGHTS_FOR_COMPACTION_POOL: usize = 1024;
 
@@ -170,53 +160,6 @@ impl PermutationContext {
     }
 }
 
-
-fn legacy_exact_adjacency_proxy_enabled() -> bool {
-    // Historical name retained for compatibility.  This is *not* globally
-    // exact compaction; it only solves the old adjacency-proxy layout when the
-    // number of groups is tiny enough for Held-Karp DP.
-    env_flag("GLRMASK_EXACT_COMPACTION")
-}
-
-fn globally_exact_compaction_enabled() -> bool {
-    env_flag("GLRMASK_GLOBALLY_EXACT_COMPACTION")
-}
-
-fn almost_optimal_compaction_enabled() -> bool {
-    env_flag("GLRMASK_ALMOST_OPTIMAL_COMPACTION")
-}
-
-fn globally_exact_component_max_groups() -> usize {
-    static MAX_GROUPS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *MAX_GROUPS.get_or_init(|| {
-        std::env::var("GLRMASK_GLOBALLY_EXACT_MAX_COMPONENT_GROUPS")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|&value| value > 0)
-            .unwrap_or(GLOBALLY_EXACT_COMPONENT_MAX_GROUPS_DEFAULT)
-    })
-}
-
-fn almost_optimal_passes() -> usize {
-    static PASSES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *PASSES.get_or_init(|| {
-        std::env::var("GLRMASK_ALMOST_OPTIMAL_COMPACTION_PASSES")
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|&value| value > 0)
-            .unwrap_or(16)
-    })
-}
-
-fn almost_optimal_seed() -> u64 {
-    static SEED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *SEED.get_or_init(|| {
-        std::env::var("GLRMASK_ALMOST_OPTIMAL_COMPACTION_SEED")
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(0x9e37_79b9_7f4a_7c15)
-    })
-}
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
@@ -474,16 +417,9 @@ fn build_dimension_compaction(
     keep_unmerged_tsid_identity: bool,
     tsids_proven_irredundant: bool,
 ) -> CompactPlan {
-    if allow_expensive_layout
-        && (globally_exact_compaction_enabled() || almost_optimal_compaction_enabled())
-    {
-        return build_global_objective_dimension_compaction(unique_weights, num_tsids, num_tokens);
-    }
-
     let use_exact_profile_layout = use_default_layout
         && allow_expensive_layout
-        && (weight_ref_count > unique_weights.len().saturating_mul(4)
-            || env_flag("GLRMASK_FORCE_EXACT_PROFILE_LAYOUT"));
+        && weight_ref_count > unique_weights.len().saturating_mul(4);
     build_default_dimension_compaction(
         unique_weights,
         num_tsids,
@@ -603,45 +539,6 @@ fn build_default_dimension_compaction(
             elapsed_ms(total_started_at),
         );
     }
-
-    CompactPlan {
-        tsid_perm,
-        ordered_num_tsids: merged_num_tsids,
-        token_perm,
-        ordered_num_tokens: merged_num_tokens,
-        precomputed_token_compaction: Arc::new(precomputed_token_compaction),
-    }
-}
-
-fn build_global_objective_dimension_compaction(
-    unique_weights: &[Weight],
-    num_tsids: usize,
-    num_tokens: usize,
-) -> CompactPlan {
-    let original_weight_refs = weight_refs(unique_weights);
-
-    let (token_merge_perm, merged_num_tokens) =
-        build_exact_token_merge_permutation(&original_weight_refs, num_tokens);
-    let token_perm = order_token_groups_globally_exact(
-        unique_weights,
-        token_merge_perm,
-        merged_num_tokens,
-    );
-
-    let (token_compacted_weights, precomputed_token_compaction) =
-        apply_permutations_to_weight_set_with_cache(
-            unique_weights,
-            &identity_perm(num_tsids),
-            &token_perm,
-        );
-    let (tsid_merge_perm, merged_num_tsids) =
-        build_exact_tsid_merge_permutation(&original_weight_refs, num_tsids);
-    let tsid_perm = order_tsid_groups_globally_exact(
-        &token_compacted_weights,
-        tsid_merge_perm,
-        merged_num_tsids,
-        merged_num_tokens,
-    );
 
     CompactPlan {
         tsid_perm,
@@ -818,11 +715,6 @@ impl ActiveMembership for SparseMembership {
         self.contexts.len() == key.len() && self.contexts.iter().eq(key.iter())
     }
     fn snapshot(&self) -> Self::Key { self.contexts.iter().copied().collect() }
-}
-
-fn build_exact_token_merge_permutation(weights: &[&Weight], num_tokens: usize) -> (Vec<u32>, usize) {
-    let (perm, count, _) = build_exact_token_partition(weights, num_tokens, false);
-    (perm, count)
 }
 
 fn build_exact_token_partition(
@@ -1441,11 +1333,6 @@ fn build_weight_map_from_tsid_tokens(
     map
 }
 
-fn permute_rangeset(set: &RangeSetBlaze<u32>, perm: &[u32]) -> RangeSetBlaze<u32> {
-    let runs = permutation_runs(perm);
-    permute_rangeset_with_runs(set, &runs)
-}
-
 fn permute_rangeset_with_runs(set: &RangeSetBlaze<u32>, runs: &[PermRun]) -> RangeSetBlaze<u32> {
     let mut mapped: Vec<u32> = set
         .ranges()
@@ -1613,32 +1500,6 @@ fn apply_perm_to_deferred_vocab_singletons(
         internal_to_originals,
         representative_original_ids,
     };
-}
-
-fn collect_token_sets_after_permutation(
-    weights: &[Weight],
-    token_perm: &[u32],
-) -> Vec<RangeSetBlaze<u32>> {
-    let mut cache = HashMap::<usize, RangeSetBlaze<u32>>::new();
-    let mut seen = HashSet::<Vec<(u32, u32)>>::new();
-    let mut unique_sets = Vec::new();
-
-    for weight in weights {
-        if weight.is_full() || weight.is_empty() {
-            continue;
-        }
-        for (_tsid_range, token_set) in weight.raw_range_values() {
-            let ptr = Arc::as_ptr(token_set) as usize;
-            let mapped = cache
-                .entry(ptr)
-                .or_insert_with(|| permute_rangeset(token_set, token_perm));
-            if seen.insert(rangeset_key(mapped)) {
-                unique_sets.push(mapped.clone());
-            }
-        }
-    }
-
-    unique_sets
 }
 
 fn collect_unique_weights_from_refs(weights: &[&mut Weight]) -> Vec<Weight> {

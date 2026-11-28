@@ -1,28 +1,4 @@
 use super::*;
-pub(super) fn order_token_groups(
-    weights: &[Weight],
-    initial_perm: Vec<u32>,
-    num_groups: usize,
-) -> Vec<u32> {
-    if num_groups < 2 {
-        return initial_perm;
-    }
-
-    let sketch_layout =
-        sketch_layout_from_mapped_weight_token_sets(weights, &initial_perm, num_groups);
-    let exact_profile_layout =
-        exact_profile_layout_from_mapped_weight_token_sets(weights, &initial_perm, num_groups);
-    let layout = best_token_layout_by_range_count(
-        weights,
-        &initial_perm,
-        [sketch_layout, exact_profile_layout],
-    );
-    if layout.is_empty() {
-        return initial_perm;
-    }
-    compose_group_layout(initial_perm, &layout)
-}
-
 pub(super) fn order_token_groups_exact_profile(
     weights: &[Weight],
     initial_perm: Vec<u32>,
@@ -49,44 +25,10 @@ pub(super) fn order_token_groups_sketch(
         return initial_perm;
     }
 
-    let mut layout = sketch_layout_from_mapped_weight_token_sets(weights, &initial_perm, num_groups);
+    let layout = sketch_layout_from_mapped_weight_token_sets(weights, &initial_perm, num_groups);
     if layout.is_empty() {
         return initial_perm;
     }
-    if env_flag("GLRMASK_LOCAL_PROFILE_2OPT") {
-        let profiles = mapped_weight_token_group_profiles(weights, &initial_perm, num_groups);
-        refine_layout_2opt_sparse_profiles(&mut layout, &profiles);
-    }
-    compose_group_layout(initial_perm, &layout)
-}
-
-pub(super) fn order_tsid_groups(
-    token_compacted_weights: &[Weight],
-    initial_perm: Vec<u32>,
-    num_groups: usize,
-    num_tokens: usize,
-) -> Vec<u32> {
-    if num_groups < 2 {
-        return initial_perm;
-    }
-
-    let quotient_weights = apply_permutations_to_weight_set(
-        token_compacted_weights,
-        &initial_perm,
-        &identity_perm(num_tokens),
-    );
-    if quotient_weights.is_empty() {
-        return initial_perm;
-    }
-
-    let sketch_layout = sketch_layout_from_tsid_equal_values(&quotient_weights, num_groups);
-    let exact_profile_layout = exact_profile_layout_from_tsid_equal_values(&quotient_weights, num_groups);
-    let layout = best_tsid_layout_by_range_count(
-        &quotient_weights,
-        &initial_perm,
-        num_tokens,
-        [sketch_layout, exact_profile_layout],
-    );
     compose_group_layout(initial_perm, &layout)
 }
 
@@ -136,69 +78,6 @@ pub(super) fn order_tsid_groups_sketch(
     compose_group_layout(initial_perm, &layout)
 }
 
-fn best_token_layout_by_range_count(
-    weights: &[Weight],
-    initial_perm: &[u32],
-    layouts: [Vec<usize>; 2],
-) -> Vec<usize> {
-    layouts
-        .into_iter()
-        .filter(|layout| !layout.is_empty())
-        .min_by_key(|layout| {
-            let perm = compose_group_layout(initial_perm.to_vec(), layout);
-            token_ranges_after_perm(weights, &perm)
-        })
-        .unwrap_or_default()
-}
-
-fn best_tsid_layout_by_range_count(
-    quotient_weights: &[Weight],
-    initial_perm: &[u32],
-    num_tokens: usize,
-    layouts: [Vec<usize>; 2],
-) -> Vec<usize> {
-    layouts
-        .into_iter()
-        .filter(|layout| !layout.is_empty())
-        .min_by_key(|layout| {
-            let perm = compose_group_layout(initial_perm.to_vec(), layout);
-            apply_permutations_to_weight_set(
-                quotient_weights,
-                &perm,
-                &identity_perm(num_tokens),
-            )
-            .iter()
-            .map(Weight::num_ranges)
-            .sum::<usize>()
-        })
-        .unwrap_or_default()
-}
-
-fn token_ranges_after_perm(weights: &[Weight], token_perm: &[u32]) -> usize {
-    let token_runs = permutation_runs(token_perm);
-    let mut seen_ptrs = HashSet::new();
-    let mut seen_mapped_sets = HashSet::<Vec<(u32, u32)>>::new();
-    let mut ranges = 0usize;
-
-    for weight in weights {
-        if weight.is_full() || weight.is_empty() {
-            continue;
-        }
-        for (_tsid_range, token_set) in weight.raw_range_values() {
-            let ptr = Arc::as_ptr(token_set) as usize;
-            if !seen_ptrs.insert(ptr) {
-                continue;
-            }
-            let mapped_ranges = mapped_rangeset_key_with_runs(token_set, &token_runs);
-            if seen_mapped_sets.insert(mapped_ranges.clone()) {
-                ranges += mapped_ranges.len();
-            }
-        }
-    }
-
-    ranges
-}
-
 fn sketch_layout_from_mapped_weight_token_sets(
     weights: &[Weight],
     token_perm: &[u32],
@@ -245,132 +124,6 @@ fn sketch_layout_from_mapped_weight_token_sets(
         Vec::new()
     } else {
         sketch_layout_from_group_sketches(sketches, degrees)
-    }
-}
-
-fn mapped_weight_token_group_profiles(
-    weights: &[Weight],
-    token_perm: &[u32],
-    num_groups: usize,
-) -> Vec<Vec<u32>> {
-    let token_runs = permutation_runs(token_perm);
-    let mut seen_ptrs = HashSet::new();
-    let mut seen_mapped_sets = HashSet::<Vec<(u32, u32)>>::new();
-    let mut profiles = vec![Vec::<u32>::new(); num_groups];
-    let mut context = 0u32;
-
-    for weight in weights {
-        if weight.is_full() || weight.is_empty() {
-            continue;
-        }
-        for (_tsid_range, token_set) in weight.raw_range_values() {
-            let ptr = Arc::as_ptr(token_set) as usize;
-            if !seen_ptrs.insert(ptr) {
-                continue;
-            }
-            let mapped_ranges = mapped_rangeset_key_with_runs(token_set, &token_runs);
-            if mapped_ranges.is_empty() || !seen_mapped_sets.insert(mapped_ranges.clone()) {
-                continue;
-            }
-            for &(start, end) in &mapped_ranges {
-                let start = (start as usize).min(num_groups);
-                let end = (end as usize).min(num_groups.saturating_sub(1));
-                if start <= end {
-                    for profile in &mut profiles[start..=end] {
-                        profile.push(context);
-                    }
-                }
-            }
-            context += 1;
-        }
-    }
-    profiles
-}
-
-#[inline]
-fn sparse_profile_overlap(left: &[u32], right: &[u32]) -> usize {
-    let mut i = 0usize;
-    let mut j = 0usize;
-    let mut overlap = 0usize;
-    while i < left.len() && j < right.len() {
-        match left[i].cmp(&right[j]) {
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
-            std::cmp::Ordering::Equal => {
-                overlap += 1;
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    overlap
-}
-
-fn refine_layout_2opt_sparse_profiles(layout: &mut [usize], profiles: &[Vec<u32>]) {
-    if layout.len() < 4 {
-        return;
-    }
-    let window = std::env::var("GLRMASK_LOCAL_PROFILE_2OPT_WINDOW")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value >= 2)
-        .unwrap_or(32);
-    let passes = std::env::var("GLRMASK_LOCAL_PROFILE_2OPT_PASSES")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(2);
-    let profile = env_flag("GLRMASK_PROFILE_COMPILE");
-    let started = profile.then(Instant::now);
-    let mut reversals = 0usize;
-    let mut score_gain = 0usize;
-
-    for _ in 0..passes {
-        let mut changed = false;
-        let mut left_edge = 0usize;
-        while left_edge + 2 < layout.len() {
-            let a = layout[left_edge];
-            let b = layout[left_edge + 1];
-            let old_left = sparse_profile_overlap(&profiles[a], &profiles[b]);
-            let max_right = (left_edge + window).min(layout.len() - 2);
-            let mut best_right = None;
-            let mut best_gain = 0usize;
-            for right_edge in left_edge + 2..=max_right {
-                let c = layout[right_edge];
-                let d = layout[right_edge + 1];
-                let old_score = old_left + sparse_profile_overlap(&profiles[c], &profiles[d]);
-                let new_score = sparse_profile_overlap(&profiles[a], &profiles[c])
-                    + sparse_profile_overlap(&profiles[b], &profiles[d]);
-                let gain = new_score.saturating_sub(old_score);
-                if new_score > old_score && gain > best_gain {
-                    best_gain = gain;
-                    best_right = Some(right_edge);
-                }
-            }
-            if let Some(right_edge) = best_right {
-                layout[left_edge + 1..=right_edge].reverse();
-                reversals += 1;
-                score_gain += best_gain;
-                changed = true;
-                left_edge += 1;
-            } else {
-                left_edge += 1;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    if let Some(started) = started {
-        eprintln!(
-            "[glrmask/profile][local_profile_2opt] groups={} window={} passes={} reversals={} score_gain={} total_ms={:.3}",
-            layout.len(),
-            window,
-            passes,
-            reversals,
-            score_gain,
-            elapsed_ms(started),
-        );
     }
 }
 
