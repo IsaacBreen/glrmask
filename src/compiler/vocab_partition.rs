@@ -12,7 +12,7 @@ use crate::compiler::pipeline::{
 };
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::compiler::stages::id_map_and_terminal_dwa::{
-    build_global_max_length_state_map_with_initial,
+    build_global_max_length_state_map,
     build_vocab_partition_from_static_id_maps,
     build_vocab_equivalence_partition_with_precomputed_global_max_length,
     l1,
@@ -280,7 +280,6 @@ pub(crate) fn compile_vocab_partition_owned(
         let (
             (
                 tokenizer,
-                initial_state_map,
                 partition_local_synthesis_plan,
                 direct_mask_tokenizer,
                 flat_trans,
@@ -296,7 +295,6 @@ pub(crate) fn compile_vocab_partition_owned(
                 let context_started = std::time::Instant::now();
                 let (
                     tokenizer,
-                    initial_state_map,
                     partition_local_synthesis_plan,
                     direct_mask_tokenizer,
                 ) =
@@ -319,16 +317,14 @@ pub(crate) fn compile_vocab_partition_owned(
                 let flat_ms = flat_started.elapsed().as_secs_f64() * 1000.0;
 
                 let max_length_started = std::time::Instant::now();
-                let global_max_length_state_map = build_global_max_length_state_map_with_initial(
+                let global_max_length_state_map = build_global_max_length_state_map(
                     &tokenizer,
                     vocab,
                     &flat_trans,
-                    initial_state_map.as_ref(),
                 );
                 let max_length_ms = max_length_started.elapsed().as_secs_f64() * 1000.0;
                 (
                     tokenizer,
-                    initial_state_map,
                     partition_local_synthesis_plan,
                     direct_mask_tokenizer,
                     flat_trans,
