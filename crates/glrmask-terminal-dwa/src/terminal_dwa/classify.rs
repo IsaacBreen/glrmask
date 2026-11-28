@@ -14,7 +14,7 @@ use crate::ds::u8set::U8Set;
 use crate::Vocab;
 
 use super::l2p::equivalence_analysis::compat::{FlatDfa, compute_tokenizer_byte_classes};
-use crate::automata::lexer::observation::column_representatives;
+use crate::automata::lexer::observation::{column_representatives, ConfigInterner};
 use super::l2p::equivalence_analysis::state_equivalence::nfa::{
     TokenBoundedAnalysisTrie,
     build_bounded_analysis_view_from_combined_starts_prefix_only_with_trie,
@@ -3523,6 +3523,43 @@ fn exact_terminal_path_two_plus_finite_literals(
     Some(ExactTerminalPathTwoPlus { two_plus, witnesses })
 }
 
+/// A canonical configuration has one owner and one memo row. When the
+/// physical column proof is available, every byte in a class shares the
+/// same image, including epsilon closure and subsequent active filtering.
+struct PrefixConfigCache {
+    configs: ConfigInterner,
+    classes: [u8; 256],
+    columns: usize,
+    transitions: Vec<u32>,
+}
+
+impl PrefixConfigCache {
+    fn new(index: Option<&ByteTransitionIndex>) -> Self {
+        let classes = index.map_or_else(|| std::array::from_fn(|byte| byte as u8), |index| index.classes);
+        let columns = classes.iter().copied().max().unwrap() as usize + 1;
+        Self { configs: ConfigInterner::default(), classes, columns, transitions: Vec::new() }
+    }
+
+    fn intern(&mut self, mut states: Vec<u32>) -> (u32, bool) {
+        if states.is_empty() { return (PREFIX_DEAD_STATE, false); }
+        states.sort_unstable();
+        states.dedup();
+        let before = self.configs.len();
+        let state = self.configs.intern(states);
+        assert!(state < PREFIX_UNKNOWN_STATE, "prefix configuration ID exhausted");
+        let inserted = self.configs.len() != before;
+        if inserted {
+            self.transitions.resize(self.configs.len() * self.columns, PREFIX_UNKNOWN_STATE);
+        }
+        (state, inserted)
+    }
+
+    #[inline]
+    fn slot(&self, state: u32, byte: u8) -> usize {
+        state as usize * self.columns + self.classes[byte as usize] as usize
+    }
+}
+
 struct CandidatePrefixPowerset<'a> {
     tokenizer: &'a Tokenizer,
     words_per_mask: usize,
@@ -3531,10 +3568,8 @@ struct CandidatePrefixPowerset<'a> {
     singleton_epsilon_closures: Option<Vec<Option<Box<[u32]>>>>,
     closure_marks: Vec<u32>,
     closure_generation: u32,
-    configs: Vec<Box<[u32]>>,
+    cache: PrefixConfigCache,
     config_membership_words: Vec<Box<[u64]>>,
-    config_ids: FxHashMap<Vec<u32>, u32>,
-    transitions: Vec<[u32; 256]>,
     matched_masks: Vec<u64>,
     future_masks: Vec<u64>,
 }
@@ -3549,9 +3584,7 @@ struct ActivePrefixPowerset<'a> {
     active: &'a BitSet,
     active_language: Vec<bool>,
     words_per_mask: usize,
-    configs: Vec<Box<[u32]>>,
-    config_ids: FxHashMap<Vec<u32>, u32>,
-    transitions: Vec<[u32; 256]>,
+    cache: PrefixConfigCache,
     matched_masks: Vec<u64>,
 }
 
@@ -3579,29 +3612,20 @@ impl<'a> ActivePrefixPowerset<'a> {
             active,
             active_language,
             words_per_mask,
-            configs: Vec::new(),
-            config_ids: FxHashMap::default(),
-            transitions: Vec::new(),
+            cache: PrefixConfigCache::new(None),
             matched_masks: Vec::new(),
         };
         let start = scanner.intern(start_states);
         (scanner, start)
     }
 
-    fn intern(&mut self, mut states: Vec<u32>) -> u32 {
-        if states.is_empty() {
-            return PREFIX_DEAD_STATE;
-        }
-        states.sort_unstable();
-        states.dedup();
-        if let Some(&state) = self.config_ids.get(&states) {
-            return state;
-        }
-        let state = self.configs.len() as u32;
-        self.config_ids.insert(states.clone(), state);
+    fn intern(&mut self, states: Vec<u32>) -> u32 {
+        let (state, inserted) = self.cache.intern(states);
+        if !inserted { return state; }
+        let states = self.cache.configs[state as usize].as_ref();
         let mask_base = self.matched_masks.len();
         self.matched_masks.resize(mask_base + self.words_per_mask, 0);
-        for &raw_state in &states {
+        for &raw_state in states {
             for terminal in self.tokenizer.matched_terminal_bitset(raw_state).iter() {
                 if self.active.contains(terminal) {
                     self.matched_masks[mask_base + (terminal >> 6)] |=
@@ -3609,8 +3633,6 @@ impl<'a> ActivePrefixPowerset<'a> {
                 }
             }
         }
-        self.configs.push(states.into_boxed_slice());
-        self.transitions.push([PREFIX_UNKNOWN_STATE; 256]);
         state
     }
 
@@ -3619,20 +3641,19 @@ impl<'a> ActivePrefixPowerset<'a> {
         if state == PREFIX_DEAD_STATE {
             return PREFIX_DEAD_STATE;
         }
-        let cached = self.transitions[state as usize][byte as usize];
+        let slot = self.cache.slot(state, byte);
+        let cached = self.cache.transitions[slot];
         if cached != PREFIX_UNKNOWN_STATE {
             return cached;
         }
-        let mut targets = self
+        let targets = self
             .tokenizer
-            .step_all(self.configs[state as usize].as_ref(), byte)
+            .step_all(self.cache.configs[state as usize].as_ref(), byte)
             .into_iter()
             .filter(|&target| self.active_language[target as usize])
             .collect::<Vec<_>>();
-        targets.sort_unstable();
-        targets.dedup();
         let target = self.intern(targets);
-        self.transitions[state as usize][byte as usize] = target;
+        self.cache.transitions[slot] = target;
         target
     }
 
@@ -3664,10 +3685,8 @@ impl<'a> CandidatePrefixPowerset<'a> {
                 Vec::new()
             },
             closure_generation: 0,
-            configs: Vec::new(),
+            cache: PrefixConfigCache::new(sparse_transitions_by_byte),
             config_membership_words: Vec::new(),
-            config_ids: FxHashMap::default(),
-            transitions: Vec::new(),
             matched_masks: Vec::new(),
             future_masks: Vec::new(),
         };
@@ -3699,23 +3718,16 @@ impl<'a> CandidatePrefixPowerset<'a> {
             .any(|terminal| self.local_terminal(terminal).is_some())
     }
 
-    fn intern(&mut self, mut states: Vec<u32>) -> u32 {
-        if states.is_empty() {
-            return PREFIX_DEAD_STATE;
-        }
-        states.sort_unstable();
-        states.dedup();
-        if let Some(&state) = self.config_ids.get(&states) {
-            return state;
-        }
-        let state = self.configs.len() as u32;
-        self.config_ids.insert(states.clone(), state);
+    fn intern(&mut self, states: Vec<u32>) -> u32 {
+        let (state, inserted) = self.cache.intern(states);
+        if !inserted { return state; }
+        let states = self.cache.configs[state as usize].as_ref();
         let mask_base = self.matched_masks.len();
         self.matched_masks
             .resize(mask_base + self.words_per_mask, 0);
         self.future_masks
             .resize(mask_base + self.words_per_mask, 0);
-        for &raw_state in &states {
+        for &raw_state in states {
             for terminal in self.tokenizer.matched_terminal_bitset(raw_state).iter() {
                 if let Some(local) = self.local_terminal(terminal) {
                     self.matched_masks[mask_base + (local >> 6)] |= 1u64 << (local & 63);
@@ -3729,7 +3741,7 @@ impl<'a> CandidatePrefixPowerset<'a> {
         }
         if self.sparse_transitions_by_byte.is_some() {
             let mut membership = vec![0u64; (self.tokenizer.num_states() as usize).div_ceil(64)];
-            for &raw_state in &states {
+            for &raw_state in states {
                 membership[raw_state as usize >> 6] |= 1u64 << (raw_state as usize & 63);
             }
             self.config_membership_words
@@ -3737,8 +3749,6 @@ impl<'a> CandidatePrefixPowerset<'a> {
         } else {
             self.config_membership_words.push(Box::new([]));
         }
-        self.configs.push(states.into_boxed_slice());
-        self.transitions.push([PREFIX_UNKNOWN_STATE; 256]);
         state
     }
 
@@ -3747,7 +3757,8 @@ impl<'a> CandidatePrefixPowerset<'a> {
         if state == PREFIX_DEAD_STATE {
             return PREFIX_DEAD_STATE;
         }
-        let cached = self.transitions[state as usize][byte as usize];
+        let slot = self.cache.slot(state, byte);
+        let cached = self.cache.transitions[slot];
         if cached != PREFIX_UNKNOWN_STATE {
             return cached;
         }
@@ -3755,7 +3766,7 @@ impl<'a> CandidatePrefixPowerset<'a> {
             self.sparse_transitions_by_byte
         {
             let sparse = sparse_transitions_by_byte.sparse(byte);
-            let config = self.configs[state as usize].as_ref();
+            let config = self.cache.configs[state as usize].as_ref();
             if sparse.len() < config.len() {
                 let membership = self.config_membership_words[state as usize].as_ref();
                 sparse
@@ -3777,7 +3788,7 @@ impl<'a> CandidatePrefixPowerset<'a> {
                     .collect::<Vec<_>>()
             }
         } else {
-            self.configs[state as usize]
+            self.cache.configs[state as usize]
                 .iter()
                 .filter_map(|&raw_state| {
                     let target = self.tokenizer.get_transition(raw_state, byte);
@@ -3785,7 +3796,7 @@ impl<'a> CandidatePrefixPowerset<'a> {
                 })
                 .collect::<Vec<_>>()
         };
-        let mut targets = if let Some(singleton_closures) =
+        let targets = if let Some(singleton_closures) =
             self.singleton_epsilon_closures.as_mut()
         {
             // Every interned configuration is epsilon-closed. Follow visible
@@ -3813,10 +3824,8 @@ impl<'a> CandidatePrefixPowerset<'a> {
         } else {
             direct_targets
         };
-        targets.sort_unstable();
-        targets.dedup();
         let target = self.intern(targets);
-        self.transitions[state as usize][byte as usize] = target;
+        self.cache.transitions[slot] = target;
         target
     }
 
