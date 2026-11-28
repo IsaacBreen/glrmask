@@ -19,6 +19,22 @@ pub fn common_internal_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
     reconcile::build_common_internal_id_map(inputs)
 }
 
+/// Select an existing exact refinement when possible; otherwise build the
+/// common observation classes in the supplied source order.
+pub fn joint_observation_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
+    assert!(!inputs.is_empty(), "a joint observation coordinate needs a source");
+    if let Some(finer) = inputs.iter().copied().find(|candidate| {
+        inputs.iter().all(|other| {
+            same_internal_id_maps(candidate, other)
+                || reconcile::internal_id_map_refines(candidate, other)
+        })
+    }) {
+        finer.clone()
+    } else {
+        reconcile::build_common_internal_id_map(inputs)
+    }
+}
+
 pub trait WeightRefs {
     fn weight_refs(&self) -> Vec<&Weight>;
     fn weight_refs_mut(&mut self) -> Vec<&mut Weight>;
@@ -396,6 +412,19 @@ impl<T: WeightRefs> MappedArtifact<T> {
         left_id_map.clone()
     }
 
+    /// Consume the local artifact while transporting its weights into a
+    /// caller-owned common coordinate. The destination map is not cloned.
+    pub fn into_common_artifact(mut self, common: &InternalIdMap) -> T {
+        if !same_internal_id_maps(self.id_map(), common) {
+            let (artifact, local) = self.parts_mut();
+            let mut weights = artifact.weight_refs_mut();
+            debug_assert!(weights.is_empty() || reconcile::internal_id_map_refines(common, local),
+                "common coordinate must refine every weighted source");
+            reconcile::remap_weights_into_existing_common(&mut weights, local, common);
+        }
+        self.into_artifact()
+    }
+
     /// Remap this artifact into an already-computed exact common refinement.
     ///
     /// The supplied map must refine this artifact's current coordinates. This
@@ -532,14 +561,7 @@ where
                 maps.push(inputs[0].id_map());
             }
             if !sparse {
-                if let Some(finer) = maps.iter().copied().find(|candidate|
-                    maps.iter().all(|other|
-                        reconcile::internal_id_map_refines(candidate, other)))
-                {
-                    finer.clone()
-                } else {
-                    reconcile::build_common_internal_id_map(&maps)
-                }
+                joint_observation_id_map(&maps)
             } else {
                 reconcile::build_common_internal_id_map_preserving_unmapped_tokenizer(&maps)
             }
