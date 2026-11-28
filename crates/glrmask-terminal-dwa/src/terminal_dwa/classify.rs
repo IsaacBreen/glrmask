@@ -6167,7 +6167,7 @@ fn exact_terminal_path_two_plus_bounded_view_from_starts(
     );
     let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
     let scanner = FlatExactBoundaryScanner {
-        dfa: bounded.tokenizer_view.dfa(),
+        dfa: &bounded.tokenizer_view,
     };
     let mut view_start_states = raw_start_states
         .iter()
@@ -6342,7 +6342,7 @@ fn tokens_have_exact_active_l2p_boundary(
         prebuilt_token_trie.filter(|trie| trie.is_reasonable_superset_for(tokens.len())),
     );
     let view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
-    let dfa = bounded.tokenizer_view.dfa();
+    let dfa = &bounded.tokenizer_view;
     let scanner = FlatExactBoundaryScanner { dfa };
     let mut view_start_states = raw_start_states
         .iter()

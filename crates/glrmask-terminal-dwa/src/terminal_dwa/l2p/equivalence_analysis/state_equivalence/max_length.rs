@@ -6,7 +6,7 @@ use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
 use super::build_state_map_from_subset_representatives;
-use super::super::compat::TokenizerView;
+use super::super::compat::FlatDfa;
 
 #[derive(Debug, Clone, Copy)]
 pub enum MaxLengthMode {
@@ -159,7 +159,7 @@ pub fn compute_state_map(
     initial_state_map: Option<&ManyToOneIdMap>,
     active_groups: Option<&[bool]>,
     mode: MaxLengthMode,
-    kbounded_tokenizer_view: Option<&TokenizerView>,
+    kbounded_tokenizer_view: Option<&FlatDfa>,
     kbounded_byte_to_class: Option<&[u8; 256]>,
 ) -> ManyToOneIdMap {
     let relevant_bytes = vocab.relevant_byte_mask();
@@ -210,12 +210,12 @@ pub fn compute_state_map(
         MaxLengthMode::KBoundedByteRestricted => {
             let owned_tokenizer_view;
             let tokenizer_view = if let Some(tokenizer_view) = kbounded_tokenizer_view {
-                debug_assert_eq!(tokenizer_view.dfa().states.len(), num_states);
+                debug_assert_eq!(tokenizer_view.states.len(), num_states);
                 tokenizer_view
             } else {
                 owned_tokenizer_view = match active_groups {
-                    Some(active_groups) => TokenizerView::new_filtered(tokenizer, active_groups),
-                    None => TokenizerView::new(tokenizer),
+                    Some(active_groups) => FlatDfa::new_filtered(tokenizer, active_groups),
+                    None => FlatDfa::new(tokenizer),
                 };
                 &owned_tokenizer_view
             };

@@ -3,7 +3,7 @@
 //! Each token is classified by its match positions, suffix structure, and end
 //! states across all tokenizer starts.
 
-use super::super::compat::{byte_classes_from_column_hashes, conservative_byte_classes, scan_byte_columns, ByteRows, FlatDfa, TokenizerView, BYTE_COLUMN_HASH_MULTIPLIER};
+use super::super::compat::{byte_classes_from_column_hashes, conservative_byte_classes, scan_byte_columns, ByteRows, FlatDfa, BYTE_COLUMN_HASH_MULTIPLIER};
 #[cfg(test)]
 use super::super::compat::compute_byte_classes;
 use ahash::{AHasher, RandomState};
@@ -260,11 +260,11 @@ fn pack_active_groups(active_groups: Option<&[bool]>, default_len: usize) -> (us
 
 impl AnalysisDfaCacheKey {
     fn for_analysis_view(
-        tokenizer: &TokenizerView,
+        tokenizer: &FlatDfa,
         active_groups: Option<&[bool]>,
         effective_disallowed_follows: &BTreeMap<u32, BitSet>,
     ) -> Self {
-        let num_groups = dfa_num_groups(tokenizer.dfa());
+        let num_groups = dfa_num_groups(tokenizer);
         let (active_group_len, active_group_words) = pack_active_groups(active_groups, num_groups);
         Self {
             num_groups,
@@ -949,7 +949,7 @@ fn hash_filtered_group_list(groups: &[usize], disallowed: &BitSet) -> u64 {
 }
 
 fn build_dfa(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     byte_to_class_override: Option<&[u8; 256]>,
 ) -> Dfa {
@@ -966,16 +966,16 @@ fn build_dfa(
 /// first call and reuses it for subsequent calls. This avoids redundant
 /// computation of transition tables and self-loop bytes across partitions.
 fn build_dfa_with_group_filter(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     disallowed_follows: &BTreeMap<u32, BitSet>,
     byte_to_class_override: Option<&[u8; 256]>,
     active_groups: Option<&[bool]>,
     shared_cache: Option<&SharedVocabDfaCache>,
 ) -> Dfa {
-    let dfa = tokenizer.dfa();
+    let dfa = tokenizer;
     assert!(dfa.states.len() <= u32::MAX as usize, "DFA too large");
 
-    // Lazily initialize the shared base from this TokenizerView's DFA.
+    // Lazily initialize the shared base from the observation DFA.
     let shared_base: Option<&SharedVocabDfaBase> = shared_cache.map(|cache| {
         cache.get_or_init(|| SharedVocabDfaBase::build_from_dfa(dfa))
     });
@@ -3715,11 +3715,11 @@ fn first_transition_factor_parallel_buckets_default(
 /// bytes.  Keeping the start root also preserves the suffix observations used
 /// by the trellis hash.
 fn compact_tokenizer_view_for_tokens<S: AsRef<[u8]>>(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     initial_states: &[usize],
     strings: &[S],
-) -> Option<(TokenizerView, Vec<usize>, Vec<usize>)> {
-    let source = tokenizer.dfa();
+) -> Option<(FlatDfa, Vec<usize>, Vec<usize>)> {
+    let source = tokenizer;
     if source.states.len() < INPUT_VIEW_COMPACT_MIN_STATES || strings.is_empty() {
         return None;
     }
@@ -3798,12 +3798,10 @@ fn compact_tokenizer_view_for_tokens<S: AsRef<[u8]>>(
         .collect();
     let start_state = original_to_compact[source.start_state] as usize;
     Some((
-        TokenizerView {
-            flat_dfa: FlatDfa {
-                states,
-                start_state,
-                transitions: ByteRows::new(Arc::from(transitions), classes),
-            },
+        FlatDfa {
+            states,
+            start_state,
+            transitions: ByteRows::new(Arc::from(transitions), classes),
         },
         compact_initial,
         compact_to_original,
@@ -3811,7 +3809,7 @@ fn compact_tokenizer_view_for_tokens<S: AsRef<[u8]>>(
 }
 
 fn raw_states_by_transition_diversity<S: AsRef<[u8]>>(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     initial_states: &[usize],
     strings: &[S],
 ) -> Vec<usize> {
@@ -3821,7 +3819,7 @@ fn raw_states_by_transition_diversity<S: AsRef<[u8]>>(
             relevant_bytes.insert(byte);
         }
     }
-    let source = tokenizer.dfa();
+    let source = tokenizer;
     let mut ranked = initial_states
         .iter()
         .copied()
@@ -3854,11 +3852,11 @@ fn raw_states_by_transition_diversity<S: AsRef<[u8]>>(
 /// the signature algorithm, so arbitrary closure under the union of token
 /// bytes would add irrelevant cross-product states.
 fn finite_token_probe_view<S: AsRef<[u8]>>(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     initial_states: &[usize],
     strings: &[S],
-) -> (TokenizerView, Vec<usize>) {
-    let source = tokenizer.dfa();
+) -> (FlatDfa, Vec<usize>) {
+    let source = tokenizer;
     let mut reached = vec![false; source.states.len()];
     let mut compact_to_original = Vec::new();
     let visit = |state: usize, reached: &mut [bool], compact_to_original: &mut Vec<usize>| {
@@ -3957,12 +3955,10 @@ fn finite_token_probe_view<S: AsRef<[u8]>>(
     let start_state = original_to_compact[source.start_state] as usize;
 
     (
-        TokenizerView {
-            flat_dfa: FlatDfa {
-                states,
-                start_state,
-                transitions: ByteRows::dense(Arc::from(transitions)),
-            },
+        FlatDfa {
+            states,
+            start_state,
+            transitions: ByteRows::dense(Arc::from(transitions)),
         },
         compact_initial,
     )
@@ -4006,7 +4002,7 @@ fn token_signatures_are_pairwise_distinct<S: AsRef<[u8]>>(
 /// initial states is a sound distinguishing witness: adding states can only
 /// refine token classes, never merge two signatures that already differ.
 fn try_pre_dfa_singleton_identity_probe<S: AsRef<[u8]>>(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -4018,7 +4014,7 @@ fn try_pre_dfa_singleton_identity_probe<S: AsRef<[u8]>>(
         || initial_states.len() < PRE_DFA_SINGLETON_PROBE_MIN_INITIAL_STATES
         || initial_states.len().saturating_mul(strings.len())
             < PRE_DFA_SINGLETON_PROBE_MIN_WORK
-        || tokenizer.dfa().states.len() < INPUT_VIEW_COMPACT_MIN_STATES
+        || tokenizer.states.len() < INPUT_VIEW_COMPACT_MIN_STATES
     {
         return None;
     }
@@ -4056,7 +4052,7 @@ fn try_pre_dfa_singleton_identity_probe<S: AsRef<[u8]>>(
             "[glrmask/profile][vocab_identity_probe] strings={} probe_states={} finite_states={} distinct={} state_order_ms={:.3} view_ms={:.3} build_dfa_ms={:.3} signature_ms={:.3} total_ms={:.3}",
             strings.len(),
             probe_states.len(),
-            probe_view.dfa().states.len(),
+            probe_view.states.len(),
             distinct,
             state_order_ms,
             view_ms,
@@ -4209,7 +4205,7 @@ fn compact_dfa_for_tokens<S: AsRef<[u8]>>(
 /// When `active_groups` is provided, the DFA only tracks groups marked `true`.
 /// L1 terminal groups can be excluded this way for a L2+-only analysis.
 pub fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef<[u8]> + Sync>(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -4241,7 +4237,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef<[u8]> 
 pub fn find_vocab_first_transition_preclasses_with_group_filter_profiled<
     S: AsRef<[u8]> + Sync,
 >(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -4275,7 +4271,7 @@ pub fn find_vocab_equivalence_classes_with_factor_state_refinement_profiled<
     S: AsRef<[u8]> + Sync,
     F: FnMut(&[usize]) -> Vec<usize>,
 >(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -4335,7 +4331,7 @@ fn refine_token_partition(
 }
 
 fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]> + Sync>(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -4347,7 +4343,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     mut factor_state_refiner: Option<&mut dyn FnMut(&[usize]) -> Vec<usize>>,
     return_factor_prepartition: bool,
 ) -> (VocabEquivalenceResult, f64) {
-    let input_state_count = tokenizer.dfa().states.len();
+    let input_state_count = tokenizer.states.len();
     if let Some((position, &state)) = initial_states
         .iter()
         .enumerate()
@@ -4389,7 +4385,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
         None
     };
     let (tokenizer_for_dfa, initial_states_for_dfa, input_compact_to_original): (
-        &TokenizerView,
+        &FlatDfa,
         &[usize],
         Option<&Vec<usize>>,
     ) = if let Some((ref compact_view, ref compact_initial, ref compact_to_original)) = input_compacted {
@@ -5143,7 +5139,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
 /// Result-only compatibility entry point. Callers that need precise phase
 /// accounting should use the profiled sibling above.
 pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     strings: &[S],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -5169,7 +5165,7 @@ pub fn find_vocab_equivalence_classes_with_group_filter<S: AsRef<[u8]> + Sync>(
 mod shared_base_tests {
     use super::*;
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::{
-        FlatDfa, FlatDfaState, TokenizerView,
+        FlatDfaState,
     };
     use std::sync::Arc;
 
@@ -5204,34 +5200,32 @@ mod shared_base_tests {
 
     #[test]
     fn byte_classes_from_unpruned_view_are_not_valid_for_bounded_view() {
-        fn view(include_bang: bool) -> TokenizerView {
+        fn view(include_bang: bool) -> FlatDfa {
             let mut transitions = vec![u32::MAX; 2 * 256];
             transitions[b'a' as usize] = 1;
             if include_bang {
                 transitions[b'!' as usize] = 1;
             }
-            TokenizerView {
-                flat_dfa: FlatDfa {
-                    start_state: 0,
-                    transitions: ByteRows::dense(Arc::from(transitions)),
-                    states: vec![
-                        FlatDfaState {
-                            finalizers: vec![],
-                            possible_future_group_ids: vec![0],
-                        },
-                        FlatDfaState {
-                            finalizers: vec![0],
-                            possible_future_group_ids: vec![],
-                        },
-                    ],
-                },
+            FlatDfa {
+                start_state: 0,
+                transitions: ByteRows::dense(Arc::from(transitions)),
+                states: vec![
+                    FlatDfaState {
+                        finalizers: vec![],
+                        possible_future_group_ids: vec![0],
+                    },
+                    FlatDfaState {
+                        finalizers: vec![0],
+                        possible_future_group_ids: vec![],
+                    },
+                ],
             }
         }
 
         let full = view(true);
         let bounded = view(false);
-        let full_classes = compute_byte_classes(full.dfa());
-        let bounded_classes = compute_byte_classes(bounded.dfa());
+        let full_classes = compute_byte_classes(&full);
+        let bounded_classes = compute_byte_classes(&bounded);
 
         assert_eq!(
             full_classes[b'!' as usize],
@@ -5239,8 +5233,8 @@ mod shared_base_tests {
             "the bytes are genuinely equivalent in the full view",
         );
         assert_ne!(
-            bounded.dfa().trans(0, b'!' as usize),
-            bounded.dfa().trans(0, b'a' as usize),
+            bounded.trans(0, b'!' as usize),
+            bounded.trans(0, b'a' as usize),
             "relevant-byte pruning splits that class in the bounded view",
         );
         assert_ne!(
@@ -5590,15 +5584,13 @@ mod shared_base_tests {
 
     #[test]
     fn first_transition_factor_matches_ordinary_exact_partition() {
-        let view = TokenizerView {
-            flat_dfa: first_transition_factor_dfa(),
-        };
+        let view = first_transition_factor_dfa();
         let tokens: Vec<&[u8]> = vec![
             b"a", b"A", b"aa", b"Aa", b"ax", b"Ax", b"ay", b"Ay", b"b", b"bx",
             b"by", b"p", b"q", b"pp", b"qq", b"c", b"d", b"ax", b"x", b"x",
         ];
-        let states = (0..view.dfa().states.len()).collect::<Vec<_>>();
-        let byte_classes = compute_byte_classes(view.dfa());
+        let states = (0..view.states.len()).collect::<Vec<_>>();
+        let byte_classes = compute_byte_classes(&view);
         let mut blocked = BitSet::new(2);
         blocked.set(1);
         let disallowed = BTreeMap::from([(0u32, blocked)]);
@@ -5720,12 +5712,10 @@ mod shared_base_tests {
                     }
                 })
                 .collect::<Vec<_>>();
-            let view = TokenizerView {
-                flat_dfa: FlatDfa {
-                    states,
-                    start_state: next(&mut random) as usize % state_count,
-                    transitions: ByteRows::dense(Arc::from(transitions)),
-                },
+            let view = FlatDfa {
+                states,
+                start_state: next(&mut random) as usize % state_count,
+                transitions: ByteRows::dense(Arc::from(transitions)),
             };
             let mut tokens = vec![
                 b"a".to_vec(),
@@ -5758,7 +5748,7 @@ mod shared_base_tests {
                     disallowed.insert(gid as u32, row);
                 }
             }
-            let byte_classes = compute_byte_classes(view.dfa());
+            let byte_classes = compute_byte_classes(&view);
             let (ordinary, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
                 &view,
                 &tokens,
@@ -5840,12 +5830,10 @@ mod shared_base_tests {
 
     #[test]
     fn first_transition_factor_falls_back_for_empty_tokens() {
-        let view = TokenizerView {
-            flat_dfa: first_transition_factor_dfa(),
-        };
+        let view = first_transition_factor_dfa();
         let tokens: Vec<&[u8]> = vec![b"", b"a", b"A", b"ax", b"ax"];
-        let states = (0..view.dfa().states.len()).collect::<Vec<_>>();
-        let byte_classes = compute_byte_classes(view.dfa());
+        let states = (0..view.states.len()).collect::<Vec<_>>();
+        let byte_classes = compute_byte_classes(&view);
         let disallowed = BTreeMap::new();
         let (ordinary, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
             &view,
@@ -5891,9 +5879,7 @@ mod shared_base_tests {
 
     #[test]
     fn finite_token_probe_view_preserves_exact_witness_signatures() {
-        let view = TokenizerView {
-            flat_dfa: padded_sample_dfa(),
-        };
+        let view = padded_sample_dfa();
         let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa", b"ba"];
         let initial_states = vec![0usize, 1, 2];
         let disallowed = BTreeMap::<u32, BitSet>::new();
@@ -5911,7 +5897,7 @@ mod shared_base_tests {
 
     #[test]
     fn singleton_identity_probe_requires_pairwise_distinct_signatures() {
-        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let view = sample_dfa();
         let disallowed = BTreeMap::<u32, BitSet>::new();
         let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
         let states = vec![0usize, 1, 2];
@@ -5928,7 +5914,7 @@ mod shared_base_tests {
 
     #[test]
     fn trie_live_frontier_signatures_match_independent_token_scans() {
-        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let view = sample_dfa();
         let disallowed = BTreeMap::<u32, BitSet>::new();
         let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
         let states = vec![0usize, 1, 2];
@@ -5975,7 +5961,7 @@ mod shared_base_tests {
         let mut transitions = flat_dfa.transitions.values.to_vec();
         transitions[b'a' as usize] = 0;
         flat_dfa.transitions = ByteRows::dense(Arc::from(transitions));
-        let view = TokenizerView { flat_dfa };
+        let view = flat_dfa;
         let disallowed = BTreeMap::<u32, BitSet>::new();
         let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
         assert!(dfa.finalizers[0].is_empty());
@@ -6014,7 +6000,7 @@ mod shared_base_tests {
 
     #[test]
     fn sparse_live_clean_signature_matches_dense_fold() {
-        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let view = sample_dfa();
         let disallowed = BTreeMap::<u32, BitSet>::new();
         let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
         let state_count = 6usize;
@@ -6047,7 +6033,7 @@ mod shared_base_tests {
 
     #[test]
     fn sparse_dirty_signature_matches_dense_fold_with_live_and_dead_dirty_states() {
-        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let view = sample_dfa();
         let disallowed = BTreeMap::<u32, BitSet>::new();
         let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
         let state_count = 6usize;
@@ -6158,9 +6144,7 @@ mod shared_base_tests {
 
     #[test]
     fn tiny_vocab_input_compaction_matches_uncompacted_analysis() {
-        let view = TokenizerView {
-            flat_dfa: padded_sample_dfa(),
-        };
+        let view = padded_sample_dfa();
         let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa", b"ba"];
         let initial_states = vec![0usize, 1, 2];
         let disallowed = BTreeMap::<u32, BitSet>::new();
@@ -6192,9 +6176,7 @@ mod shared_base_tests {
 
     #[test]
     fn invalid_sentinel_initial_state_is_a_structured_invariant_error() {
-        let view = TokenizerView {
-            flat_dfa: sample_dfa(),
-        };
+        let view = sample_dfa();
         let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa"];
         let disallowed = BTreeMap::<u32, BitSet>::new();
         let error = crate::error::catch_internal_invariant(|| {
@@ -6217,10 +6199,8 @@ mod shared_base_tests {
 
     #[test]
     fn dead_transition_sentinel_remains_a_valid_dfa_edge_encoding() {
-        let view = TokenizerView {
-            flat_dfa: sample_dfa(),
-        };
-        assert!(view.dfa().transitions.values.contains(&u32::MAX));
+        let view = sample_dfa();
+        assert!(view.transitions.values.contains(&u32::MAX));
 
         let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa"];
         let disallowed = BTreeMap::<u32, BitSet>::new();
@@ -6242,7 +6222,7 @@ mod shared_base_tests {
 
     #[test]
     fn shared_analysis_dfa_cache_matches_uncached_vocab_equivalence() {
-        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let view = sample_dfa();
         let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa", b"ba"];
         let initial_states = vec![0usize, 1, 2];
         let disallowed = BTreeMap::<u32, BitSet>::new();
@@ -6286,7 +6266,7 @@ mod shared_base_tests {
 
     #[test]
     fn shared_analysis_dfa_cache_keys_filtered_views_and_normalized_follows() {
-        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let view = sample_dfa();
         let tokens: Vec<&[u8]> = vec![b"a", b"b", b"aa", b"ba"];
         let initial_states = vec![0usize, 1, 2];
         let cache = SharedVocabAnalysisDfaCache::default();
@@ -6419,7 +6399,7 @@ mod shared_base_tests {
 
     #[test]
     fn dense_trie_suffix_dag_matches_generic_and_precomputed_root() {
-        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let view = sample_dfa();
         let disallowed = BTreeMap::<u32, BitSet>::new();
         let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
         let token = b"abba";
@@ -6558,7 +6538,7 @@ mod shared_base_tests {
 
     #[test]
     fn reusable_single_target_disallowed_matches_fresh_root_and_fallback() {
-        let view = TokenizerView { flat_dfa: sample_dfa() };
+        let view = sample_dfa();
         let disallowed = BTreeMap::<u32, BitSet>::new();
         let dfa = build_dfa_with_group_filter(&view, &disallowed, None, None, None);
 

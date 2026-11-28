@@ -1364,7 +1364,7 @@ mod tests {
     use crate::automata::lexer::compile::build_regex_monolithic;
     use crate::automata::regex::{byte, bytes, choice, repeat, seq};
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::{
-        TokenizerView, compute_byte_classes,
+        FlatDfa, compute_byte_classes,
     };
 
     fn tokenizer_for(exprs: Vec<Expr>) -> Tokenizer {
@@ -1503,9 +1503,9 @@ mod tests {
         let preclasses = try_find_common_atom_preclasses(&tokenizer, Some(&active), &tokens)
             .expect("active common-atom family should ignore unrelated lexer topology");
 
-        let view = TokenizerView::new_filtered(&tokenizer, &active);
-        let byte_to_class = compute_byte_classes(view.dfa());
-        let initial_states = (0..view.dfa().states.len()).collect::<Vec<_>>();
+        let view = FlatDfa::new_filtered(&tokenizer, &active);
+        let byte_to_class = compute_byte_classes(&view);
+        let initial_states = (0..view.states.len()).collect::<Vec<_>>();
         let (exact_classes, _) =
             super::super::fast::find_vocab_equivalence_classes_with_group_filter_profiled(
                 &view,

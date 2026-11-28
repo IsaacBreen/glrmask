@@ -20,7 +20,7 @@ use crate::ds::bitset::BitSet;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
-use super::l2p::equivalence_analysis::compat::TokenizerView;
+use super::l2p::equivalence_analysis::compat::FlatDfa;
 use super::l2p::equivalence_analysis::state::fast::find_state_equivalence_classes_with_state_resets;
 use super::l2p::equivalence_analysis::state_equivalence::max_length::{
     self, MaxLengthMode,
@@ -1686,7 +1686,7 @@ pub fn certify_vocabulary_exact_state_candidates(
     let active = active_terminals
         .map(<[bool]>::to_vec)
         .unwrap_or_else(|| vec![true; full.num_terminals() as usize]);
-    let view = TokenizerView::new_filtered(&union.tokenizer, &active);
+    let view = FlatDfa::new_filtered(&union.tokenizer, &active);
     let tokens = vocab
         .entries_map()
         .values()

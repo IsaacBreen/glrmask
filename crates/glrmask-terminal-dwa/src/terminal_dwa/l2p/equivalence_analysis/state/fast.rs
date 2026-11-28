@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use rayon::prelude::*;
 
-use super::super::compat::TokenizerView;
+use super::super::compat::FlatDfa;
 use super::super::vocab::fast::SharedVocabDfaBase;
 use crate::ds::bitset::BitSet;
 
@@ -645,7 +645,7 @@ fn build_start_state_suffix_nodes(
 }
 
 pub fn find_state_equivalence_classes_with_disallowed<S: AsRef<[u8]> + Sync>(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     disallowed_follows: &[BitSet],
@@ -660,7 +660,7 @@ pub fn find_state_equivalence_classes_with_disallowed<S: AsRef<[u8]> + Sync>(
 }
 
 pub fn find_state_equivalence_classes_with_disallowed_and_shared_base<S: AsRef<[u8]> + Sync>(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     disallowed_follows: &[BitSet],
@@ -689,7 +689,7 @@ pub fn find_state_equivalence_classes_with_disallowed_and_shared_base<S: AsRef<[
 pub fn find_state_equivalence_classes_with_disallowed_and_shared_base_with_initial_finalizers<
     S: AsRef<[u8]> + Sync,
 >(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     disallowed_follows: &[BitSet],
@@ -718,7 +718,7 @@ pub fn find_state_equivalence_classes_with_disallowed_and_shared_base_with_initi
 pub fn find_state_equivalence_classes_with_sparse_disallowed_and_shared_base<
     S: AsRef<[u8]> + Sync,
 >(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -745,7 +745,7 @@ pub fn find_state_equivalence_classes_with_sparse_disallowed_and_shared_base<
 pub fn find_state_equivalence_classes_with_borrowed_disallowed_and_shared_base<
     S: AsRef<[u8]> + Sync,
 >(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     disallowed_follows: &[Option<&BitSet>],
@@ -773,7 +773,7 @@ pub fn find_state_equivalence_classes_with_borrowed_disallowed_and_shared_base<
 pub fn find_state_equivalence_classes_with_sparse_disallowed_and_raw_transitions<
     S: AsRef<[u8]> + Sync,
 >(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -800,7 +800,7 @@ pub fn find_state_equivalence_classes_with_sparse_disallowed_and_raw_transitions
 pub fn find_state_equivalence_classes_with_sparse_disallowed_and_raw_transitions_with_initial_finalizers<
     S: AsRef<[u8]> + Sync,
 >(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -824,7 +824,7 @@ pub fn find_state_equivalence_classes_with_sparse_disallowed_and_raw_transitions
 pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed<
     S: AsRef<[u8]> + Sync,
 >(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     disallowed_follows: &[BitSet],
@@ -847,7 +847,7 @@ pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed<
 pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base<
     S: AsRef<[u8]> + Sync,
 >(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     disallowed_follows: &[BitSet],
@@ -878,7 +878,7 @@ pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_an
 pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_and_shared_base_with_initial_finalizers<
     S: AsRef<[u8]> + Sync,
 >(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     disallowed_follows: &[BitSet],
@@ -906,7 +906,7 @@ pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_disallowed_an
 pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_sparse_disallowed_and_shared_base<
     S: AsRef<[u8]> + Sync,
 >(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -934,7 +934,7 @@ pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_sparse_disall
 pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_borrowed_disallowed_and_shared_base<
     S: AsRef<[u8]> + Sync,
 >(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     disallowed_follows: &[Option<&BitSet>],
@@ -960,7 +960,7 @@ pub fn find_state_equivalence_classes_ex_with_rep_confirmation_and_borrowed_disa
 }
 
 fn find_state_equivalence_classes_ex_inner<S: AsRef<[u8]> + Sync>(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     skip_groups: &[bool],
@@ -1002,7 +1002,7 @@ fn find_state_equivalence_classes_ex_inner<S: AsRef<[u8]> + Sync>(
 pub fn find_state_equivalence_classes_with_state_resets<
     S: AsRef<[u8]> + Sync,
 >(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     disallowed_follows: &[BitSet],
@@ -1046,7 +1046,7 @@ pub fn find_state_equivalence_classes_with_state_resets<
 }
 
 fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     skip_groups: &[bool],
@@ -1062,7 +1062,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
 ) -> Vec<usize> {
     use std::collections::{hash_map::Entry, HashMap};
 
-    let dfa = tokenizer.dfa();
+    let dfa = tokenizer;
 
     const NONE_STATE: u32 = u32::MAX;
 
@@ -1173,7 +1173,7 @@ fn find_state_equivalence_classes_token_based<S: AsRef<[u8]> + Sync>(
         vec![true; total_tokens]
     };
 
-    let default_reset = tokenizer.initial_state_id();
+    let default_reset = tokenizer.start_state;
     let reset_states = reset_states.unwrap_or(&[]);
     let mut unique_reset_states = Vec::<usize>::new();
     let mut reset_index_by_state = HashMap::<usize, usize>::new();
@@ -1679,7 +1679,7 @@ pub fn mapping_to_equivalence_classes(
 #[cfg(test)]
 mod state_batch_scratch_pool_tests {
     use super::*;
-    use super::super::super::compat::{ByteRows, FlatDfa, FlatDfaState, TokenizerView};
+    use super::super::super::compat::{ByteRows, FlatDfaState};
     use std::sync::Arc;
 
     #[test]
@@ -1809,33 +1809,31 @@ mod state_batch_scratch_pool_tests {
         let state_count = 5usize;
         let mut transitions = vec![u32::MAX; state_count * 256];
         transitions[b't' as usize] = 3;
-        let view = TokenizerView {
-            flat_dfa: FlatDfa {
-                start_state: 0,
-                transitions: ByteRows::dense(Arc::from(transitions)),
-                states: vec![
-                    FlatDfaState {
-                        finalizers: vec![],
-                        possible_future_group_ids: vec![1],
-                    },
-                    FlatDfaState {
-                        finalizers: vec![0],
-                        possible_future_group_ids: vec![],
-                    },
-                    FlatDfaState {
-                        finalizers: vec![],
-                        possible_future_group_ids: vec![],
-                    },
-                    FlatDfaState {
-                        finalizers: vec![],
-                        possible_future_group_ids: vec![1],
-                    },
-                    FlatDfaState {
-                        finalizers: vec![],
-                        possible_future_group_ids: vec![],
-                    },
-                ],
-            },
+        let view = FlatDfa {
+            start_state: 0,
+            transitions: ByteRows::dense(Arc::from(transitions)),
+            states: vec![
+                FlatDfaState {
+                    finalizers: vec![],
+                    possible_future_group_ids: vec![1],
+                },
+                FlatDfaState {
+                    finalizers: vec![0],
+                    possible_future_group_ids: vec![],
+                },
+                FlatDfaState {
+                    finalizers: vec![],
+                    possible_future_group_ids: vec![],
+                },
+                FlatDfaState {
+                    finalizers: vec![],
+                    possible_future_group_ids: vec![1],
+                },
+                FlatDfaState {
+                    finalizers: vec![],
+                    possible_future_group_ids: vec![],
+                },
+            ],
         };
         let states = [1usize, 2usize];
         let tokens = [b"t".as_slice()];

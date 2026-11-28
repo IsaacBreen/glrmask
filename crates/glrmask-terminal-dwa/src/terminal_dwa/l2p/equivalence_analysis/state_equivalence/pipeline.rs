@@ -4,7 +4,7 @@ use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::Vocab;
 use std::time::Instant;
 
-use super::super::compat::TokenizerView;
+use super::super::compat::FlatDfa;
 use super::{identity_state_map, nfa, restricted_observation};
 
 /// The local quotient either preserves the incoming coordinate, observes
@@ -62,7 +62,7 @@ pub fn local_observation_map(
     active_groups: Option<&[bool]>,
     observation: LocalObservation,
     prebuilt: Option<&nfa::PrebuiltSparsePowersetRefinement<'_>>,
-    view: Option<&TokenizerView>,
+    view: Option<&FlatDfa>,
     byte_to_class: Option<&[u8; 256]>,
     certified: bool,
 ) -> (ManyToOneIdMap, StateEquivalencePipelineProfile) {
@@ -123,7 +123,7 @@ mod tests {
             (0, b"a".to_vec()), (1, b"b".to_vec()),
             (2, b"ab".to_vec()), (3, b"ba".to_vec()),
         ]);
-        let view = TokenizerView::new(&tokenizer);
+        let view = FlatDfa::new(&tokenizer);
         let (map, profile) = local_observation_map(
             &tokenizer, &vocab, None, None, LocalObservation::SourceAndDestinations,
             None, Some(&view), None, false,

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::compat::TokenizerView;
+use super::compat::FlatDfa;
 use super::vocab::fast::VocabEquivalenceResult;
 
 /// Child-vocabulary entry positions in the parent vocabulary's byte-lexical order.
@@ -71,9 +71,8 @@ pub fn representative_tokens_for_vocab_classes<'a>(
         .collect()
 }
 
-pub fn tokenizer_group_count(tokenizer: &TokenizerView) -> usize {
+pub fn tokenizer_group_count(tokenizer: &FlatDfa) -> usize {
     tokenizer
-        .dfa()
         .states
         .iter()
         .flat_map(|state| {

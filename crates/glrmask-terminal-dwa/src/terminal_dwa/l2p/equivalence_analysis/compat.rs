@@ -221,7 +221,7 @@ impl FlatDfa {
         self.transitions.row(state)
     }
 
-    fn from_tokenizer_parts(tokenizer: &Tokenizer, active: Option<&[bool]>, flat: Option<&Arc<[u32]>>) -> Self {
+    pub fn from_tokenizer_parts(tokenizer: &Tokenizer, active: Option<&[bool]>, flat: Option<&Arc<[u32]>>) -> Self {
         let num_states = tokenizer.num_states() as usize;
         let states: Vec<_> = (0..num_states).map(|state| tokenizer_state(tokenizer, state as u32, active)).collect();
         let transitions = if let Some(flat) = flat.filter(|_| active.is_none()) {
@@ -252,74 +252,16 @@ impl FlatDfa {
         Self { states, start_state: tokenizer.start_state() as usize, transitions: ByteRows::dense(transitions) }
     }
 
-    pub fn from_tokenizer(tokenizer: &Tokenizer) -> Self {
+    pub fn new(tokenizer: &Tokenizer) -> Self {
         Self::from_tokenizer_parts(tokenizer, None, None)
     }
 
-    pub fn from_tokenizer_filtered(tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
+    pub fn new_filtered(tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
         Self::from_tokenizer_parts(tokenizer, Some(active_groups), None)
     }
 
-    pub fn from_flat_trans(flat_trans: &Arc<[u32]>, tokenizer: &Tokenizer) -> Self {
-        Self::from_tokenizer_parts(tokenizer, None, Some(flat_trans))
-    }
-
-    pub fn from_flat_trans_filtered(flat_trans: &Arc<[u32]>, tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
+    pub fn new_filtered_from_flat_trans(flat_trans: &Arc<[u32]>, tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
         Self::from_tokenizer_parts(tokenizer, Some(active_groups), Some(flat_trans))
-    }
-}
-/// A thin wrapper around glrmask's `Tokenizer` that exposes the flattened DFA.
-///
-/// The equivalence-analysis code calls `dfa()` and accesses `.states` and
-/// `.start_state` directly.
-/// This wrapper pre-extracts all data into `FlatDfa` on construction.
-pub struct TokenizerView {
-    pub flat_dfa: FlatDfa,
-}
-
-impl TokenizerView {
-    pub fn new(tokenizer: &Tokenizer) -> Self {
-        TokenizerView {
-            flat_dfa: FlatDfa::from_tokenizer(tokenizer),
-        }
-    }
-
-    /// Build a view that filters finalizers and futures to only active groups.
-    pub fn new_filtered(tokenizer: &Tokenizer, active_groups: &[bool]) -> Self {
-        TokenizerView {
-            flat_dfa: FlatDfa::from_tokenizer_filtered(tokenizer, active_groups),
-        }
-    }
-
-    /// Build a view using a pre-built shared flat transition table (no group filtering).
-    /// Shares transition data via Arc — zero-copy.
-    pub fn new_from_flat_trans(
-        flat_trans: &Arc<[u32]>,
-        tokenizer: &Tokenizer,
-    ) -> Self {
-        TokenizerView {
-            flat_dfa: FlatDfa::from_flat_trans(flat_trans, tokenizer),
-        }
-    }
-
-    /// Build an active-terminal view using a pre-built shared raw transition
-    /// table. The projected transition table is owned by this view.
-    pub fn new_filtered_from_flat_trans(
-        flat_trans: &Arc<[u32]>,
-        tokenizer: &Tokenizer,
-        active_groups: &[bool],
-    ) -> Self {
-        TokenizerView {
-            flat_dfa: FlatDfa::from_flat_trans_filtered(flat_trans, tokenizer, active_groups),
-        }
-    }
-
-    pub fn dfa(&self) -> &FlatDfa {
-        &self.flat_dfa
-    }
-
-    pub fn initial_state_id(&self) -> usize {
-        self.flat_dfa.start_state
     }
 
     /// Materialize the same certified quotient in either the dense byte
@@ -366,8 +308,8 @@ impl TokenizerView {
         let start_state = state_map.original_to_internal[tokenizer.start_state() as usize];
         assert_ne!(start_state, u32::MAX, "quotient start state must be mapped");
         (
-            Self { flat_dfa: FlatDfa { states, start_state: start_state as usize,
-                transitions: ByteRows::new(Arc::from(rows), classes) } },
+            Self { states, start_state: start_state as usize,
+                transitions: ByteRows::new(Arc::from(rows), classes) },
             started_at.map(|start| start.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0),
         )
     }
@@ -379,7 +321,7 @@ impl TokenizerView {
         state_map: &ManyToOneIdMap,
         relevant_bytes: &[bool; 256],
     ) -> bool {
-        let dfa = self.dfa();
+        let dfa = self;
         if state_map.original_to_internal.len() != dfa.states.len() {
             return false;
         }
@@ -435,7 +377,7 @@ impl TokenizerView {
 
     /// Materialize the certified quotient without changing the byte coordinate.
     pub fn quotient_by_state_map(&self, state_map: &ManyToOneIdMap) -> Self {
-        let dfa = self.dfa();
+        let dfa = self;
         let states: Vec<_> = state_map.representative_original_ids.iter()
             .map(|&raw| dfa.states[raw as usize].clone()).collect();
         let alive: Vec<_> = states.iter().map(state_has_active_language).collect();
@@ -452,8 +394,8 @@ impl TokenizerView {
         }
         let start_state = state_map.original_to_internal[dfa.start_state];
         assert_ne!(start_state, u32::MAX, "quotient start state must be mapped");
-        Self { flat_dfa: FlatDfa { states, start_state: start_state as usize,
-            transitions: ByteRows::new(Arc::from(rows), dfa.transitions.byte_to_column) } }
+        Self { states, start_state: start_state as usize,
+            transitions: ByteRows::new(Arc::from(rows), dfa.transitions.byte_to_column) }
     }
 }
 #[cfg(test)]
@@ -511,13 +453,13 @@ mod sparse_transition_cache_tests {
         ]);
         let active_only = tokenizer(vec![Expr::U8Seq(b"ab".to_vec())]);
 
-        let filtered = TokenizerView::new_filtered(&with_inactive, &[true, false, false]);
-        let reference = TokenizerView::new(&active_only);
-        let filtered_classes = compute_byte_classes(filtered.dfa());
-        let reference_classes = compute_byte_classes(reference.dfa());
+        let filtered = FlatDfa::new_filtered(&with_inactive, &[true, false, false]);
+        let reference = FlatDfa::new(&active_only);
+        let filtered_classes = compute_byte_classes(&filtered);
+        let reference_classes = compute_byte_classes(&reference);
 
-        assert_eq!(filtered.dfa().trans(filtered.dfa().start_state, b'x' as usize), u32::MAX);
-        assert_eq!(filtered.dfa().trans(filtered.dfa().start_state, b'y' as usize), u32::MAX);
+        assert_eq!(filtered.trans(filtered.start_state, b'x' as usize), u32::MAX);
+        assert_eq!(filtered.trans(filtered.start_state, b'y' as usize), u32::MAX);
         assert_eq!(filtered_classes[b'x' as usize], filtered_classes[b'y' as usize]);
         assert!(
             same_partition(&filtered_classes, &reference_classes),
@@ -553,8 +495,8 @@ mod sparse_transition_cache_tests {
             &active,
             flat.as_ref(),
         );
-        let materialized = TokenizerView::new_filtered_from_flat_trans(&flat, &tokenizer, &active);
-        let materialized_classes = compute_byte_classes(materialized.dfa());
+        let materialized = FlatDfa::new_filtered_from_flat_trans(&flat, &tokenizer, &active);
+        let materialized_classes = compute_byte_classes(&materialized);
         assert!((0..256).all(|left| {
             (0..256).all(|right| {
                 (direct[left] == direct[right])

@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
-use super::super::compat::TokenizerView;
+use super::super::compat::FlatDfa;
 use super::max_length::active_byte_representatives;
 
 const NO_CANDIDATE: usize = usize::MAX;
@@ -39,8 +39,8 @@ struct RawObservationIds {
 
 /// Intern visible terminal observations already normalized in the shared
 /// analysis view. This avoids a second raw-tokenizer scan and active-mask pass.
-fn target_label_ids(tokenizer: &TokenizerView) -> Vec<u32> {
-    let dfa = tokenizer.dfa();
+fn target_label_ids(tokenizer: &FlatDfa) -> Vec<u32> {
+    let dfa = tokenizer;
     let mut ids = vec![0u32; dfa.states.len()];
     let mut order: Vec<usize> = (0..dfa.states.len()).collect();
     order.sort_unstable_by(|&left, &right| {
@@ -124,9 +124,9 @@ fn candidate_partition_by_source_observation(
     num_states: usize,
     initial_state_map: Option<&ManyToOneIdMap>,
     target_labels: &[u32],
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
 ) -> (Vec<Vec<u32>>, Vec<usize>, Vec<usize>) {
-    let dfa = tokenizer.dfa();
+    let dfa = tokenizer;
     let mut members = Vec::<Vec<u32>>::new();
     let mut representatives = Vec::<usize>::new();
     let mut raw_to_candidate = vec![NO_CANDIDATE; num_states];
@@ -203,13 +203,13 @@ fn map_from_candidate_classes(
 /// filtered only by `active_groups`.  They are intentionally not recomputed
 /// from the byte-restricted transition relation.
 pub fn compute_state_map(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     relevant_bytes: &[bool; 256],
     initial_state_map: Option<&ManyToOneIdMap>,
     byte_to_class: Option<&[u8; 256]>,
     include_source_observation: bool,
 ) -> ManyToOneIdMap {
-    let dfa = tokenizer.dfa();
+    let dfa = tokenizer;
     let num_states = dfa.states.len();
     if num_states == 0 {
         return ManyToOneIdMap::from_original_to_internal_allowing_unmapped(Vec::new(), 0);
@@ -596,7 +596,7 @@ mod tests {
         let mut only_c = [false; 256];
         only_c[b'c' as usize] = true;
 
-        let all_active_view = TokenizerView::new_filtered(&tokenizer, &[true, true]);
+        let all_active_view = FlatDfa::new_filtered(&tokenizer, &[true, true]);
         let all_active = compute_state_map(&all_active_view, &only_c, None, None, false);
         assert_ne!(
             class_of(&all_active, after_a),
@@ -604,7 +604,7 @@ mod tests {
             "frozen future-terminal labels after `c` must remain observable even though x/y are restricted out",
         );
 
-        let none_active_view = TokenizerView::new_filtered(&tokenizer, &[false, false]);
+        let none_active_view = FlatDfa::new_filtered(&tokenizer, &[false, false]);
         let none_active = compute_state_map(&none_active_view, &only_c, None, None, false);
         assert_eq!(
             class_of(&none_active, after_a),

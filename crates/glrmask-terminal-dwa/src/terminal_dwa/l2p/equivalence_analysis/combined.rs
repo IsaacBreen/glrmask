@@ -23,7 +23,7 @@ use super::state_equivalence::nfa::{
     build_relevant_powerset_view_budgeted, powerset_output_class_ids,
 };
 use crate::ds::bitset::BitSet;
-use super::compat::TokenizerView;
+use super::compat::FlatDfa;
 use super::disallowed_follows::normalize_disallowed_follows;
 use super::shared::{
     TokenDedup, VocabLexicalEntryOrder,
@@ -141,7 +141,7 @@ struct FirstByteVocabFactorProfile {
 /// source states and one representative per preliminary class merges classes
 /// that are equivalent across different first-byte buckets.
 fn first_byte_factored_vocab_classes(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[&[u8]],
     initial_states: &[usize],
     disallowed_follows: &BTreeMap<u32, BitSet>,
@@ -187,7 +187,7 @@ fn first_byte_factored_vocab_classes(
             let first_byte = tokens[bucket[0]][0] as usize;
             let mut source_for_target = BTreeMap::<u32, usize>::new();
             for &source in initial_states {
-                let target = tokenizer.dfa().trans(source, first_byte);
+                let target = tokenizer.trans(source, first_byte);
                 source_for_target.entry(target).or_insert(source);
             }
             let reduced_sources = source_for_target.into_values().collect::<Vec<_>>();
@@ -1134,12 +1134,12 @@ fn try_analyze_equivalences_with_token_position_partition(
         )
     });
     let raw_analysis_view = bounded_analysis.is_none().then(|| match compatible_flat_trans {
-        Some(transitions) => TokenizerView::new_filtered_from_flat_trans(
+        Some(transitions) => FlatDfa::new_filtered_from_flat_trans(
             transitions,
             tokenizer,
             active_groups,
         ),
-        None => TokenizerView::new_filtered(tokenizer, active_groups),
+        None => FlatDfa::new_filtered(tokenizer, active_groups),
     });
     let tokenizer_view = bounded_analysis
         .as_ref()
@@ -1162,7 +1162,7 @@ fn try_analyze_equivalences_with_token_position_partition(
         vocab_equivalence_analysis::SharedVocabAnalysisDfaCache::default();
     let compatible_shared_base = Some(local_vocab_dfa_cache.get_or_init(|| {
         vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa_relevant(
-            tokenizer_view.dfa(),
+            tokenizer_view,
             &relevant_bytes,
         )
     }));
@@ -1182,7 +1182,7 @@ fn try_analyze_equivalences_with_token_position_partition(
     let byte_class_started_at = Instant::now();
     let byte_to_class = compatible_shared_base
         .map(vocab_equivalence_analysis::SharedVocabDfaBase::byte_to_class)
-        .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer_view.dfa()));
+        .unwrap_or_else(|| super::compat::compute_byte_classes(&tokenizer_view));
     let byte_class_setup_ms = byte_class_started_at.elapsed().as_secs_f64() * 1000.0;
     let token_dedup_started_at = Instant::now();
     let dedup = deduplicate_tokens_by_byte_class(&prepared.token_bytes, &byte_to_class, prepared.lexical_entry_indices());
@@ -1218,7 +1218,7 @@ fn try_analyze_equivalences_with_token_position_partition(
         let mut prefix_targets = BTreeSet::<usize>::new();
         let mut target_by_source = Vec::<u32>::with_capacity(query_states.len());
         for &source in &query_states {
-            let target = tokenizer_view.dfa().trans(source, common_first as usize);
+            let target = tokenizer_view.trans(source, common_first as usize);
             target_by_source.push(target);
             if target != u32::MAX {
                 prefix_targets.insert(target as usize);
@@ -1528,7 +1528,7 @@ fn try_analyze_equivalences_with_raw_quotient(
             .collect();
         debug_assert!(suffix_tokens.iter().all(|suffix| !suffix.is_empty()));
         let view_started_at = Instant::now();
-        let analysis_view = TokenizerView::new_filtered_from_flat_trans(
+        let analysis_view = FlatDfa::new_filtered_from_flat_trans(
             flat_trans,
             tokenizer,
             active_groups,
@@ -1671,7 +1671,7 @@ fn try_analyze_equivalences_with_raw_quotient(
     let use_compact_quotient_view = !super::super::l2p_terminal_interchangeability_strict_reference_enabled();
     let view_build_started_at = Instant::now();
     let (analysis_view, active_mask_filter_ms) =
-        TokenizerView::new_filtered_quotient_from_flat_trans_with_observation_cache(
+        FlatDfa::new_filtered_quotient_from_flat_trans_with_observation_cache(
             flat_trans, tokenizer, active_groups, &pre_state_map,
             &raw_observation_ids, &observation_representatives,
             use_compact_quotient_view.then_some(&raw_relevant_bytes),
@@ -1682,12 +1682,12 @@ fn try_analyze_equivalences_with_raw_quotient(
     // rows. It replaces the previous 18k-state shared-base cold setup.
     let byte_class_setup_started_at = Instant::now();
     let local_shared_base = super::vocab::fast::SharedVocabDfaBase::build_from_dfa_for_relevant_bytes(
-        analysis_view.dfa(), &raw_relevant_bytes,
+        &analysis_view, &raw_relevant_bytes,
     );
     let byte_to_class = local_shared_base
         .as_ref()
         .map(|base| base.byte_to_class())
-        .unwrap_or_else(|| super::compat::compute_byte_classes(analysis_view.dfa()));
+        .unwrap_or_else(|| super::compat::compute_byte_classes(&analysis_view));
     let byte_class_setup_ms = byte_class_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let token_dedup_started_at = Instant::now();
@@ -2172,14 +2172,7 @@ fn analyze_vocab_first_transition_prepartition(
     } else {
         let compatible_flat_trans =
             flat_trans.filter(|ft| ft.len() == tokenizer.num_states() as usize * 256);
-        owned_view = match (active_groups, compatible_flat_trans) {
-            (Some(groups), Some(ft)) => {
-                TokenizerView::new_filtered_from_flat_trans(ft, tokenizer, groups)
-            }
-            (Some(groups), None) => TokenizerView::new_filtered(tokenizer, groups),
-            (None, Some(ft)) => TokenizerView::new_from_flat_trans(ft, tokenizer),
-            _ => TokenizerView::new(tokenizer),
-        };
+        owned_view = FlatDfa::from_tokenizer_parts(tokenizer, active_groups, compatible_flat_trans);
         &owned_view
     };
     let analysis_view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -2355,8 +2348,8 @@ fn analyze_equivalences_impl(
                             flat_trans.as_ref(),
                         )
                     } else {
-                        let view = TokenizerView::new_filtered(tokenizer, active_groups);
-                        super::compat::compute_byte_classes(view.dfa())
+                        let view = FlatDfa::new_filtered(tokenizer, active_groups);
+                        super::compat::compute_byte_classes(&view)
                     }
                 })
             })
@@ -2808,7 +2801,7 @@ fn analyze_equivalences_impl(
         if use_local_shared_base {
             let _ = local_vocab_dfa_cache.set(
                 vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa_relevant(
-                    analysis_view.dfa(),
+                    &analysis_view,
                     &relevant_bytes,
                 ),
             );
@@ -2817,7 +2810,7 @@ fn analyze_equivalences_impl(
         let local_shared_cache = local_shared_base.map(|_| &local_vocab_dfa_cache);
         let byte_to_class = local_shared_base
             .map(vocab_equivalence_analysis::SharedVocabDfaBase::byte_to_class)
-            .unwrap_or_else(|| super::compat::compute_byte_classes(analysis_view.dfa()));
+            .unwrap_or_else(|| super::compat::compute_byte_classes(&analysis_view));
         let byte_class_setup_ms = byte_class_started_at.elapsed().as_secs_f64() * 1000.0;
 
         let follows_normalize_started_at = Instant::now();
@@ -2849,7 +2842,7 @@ fn analyze_equivalences_impl(
                 active_buckets += 1;
                 let mut targets = query_view_states
                     .iter()
-                    .map(|&state| analysis_view.dfa().trans(state, byte))
+                    .map(|&state| analysis_view.trans(state, byte))
                     .collect::<Vec<_>>();
                 targets.sort_unstable();
                 targets.dedup();
@@ -3417,12 +3410,7 @@ fn analyze_equivalences_impl(
         ft.len() == tokenizer.num_states() as usize * 256
     });
     let analysis_view_build_started_at = Instant::now();
-    let tokenizer_view = match (active_groups, compatible_flat_trans) {
-        (Some(active_groups), Some(ft)) => TokenizerView::new_filtered_from_flat_trans(ft, tokenizer, active_groups),
-        (Some(active_groups), None) => TokenizerView::new_filtered(tokenizer, active_groups),
-        (None, Some(ft)) => TokenizerView::new_from_flat_trans(ft, tokenizer),
-        _ => TokenizerView::new(tokenizer),
-    };
+    let tokenizer_view = FlatDfa::from_tokenizer_parts(tokenizer, active_groups, compatible_flat_trans);
     let analysis_view_build_ms = analysis_view_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let prepare_inputs_started_at = Instant::now();
@@ -3432,7 +3420,7 @@ fn analyze_equivalences_impl(
 
     let raw_analysis_base_started_at = Instant::now();
     if let Some(cache) = shared_vocab_dfa_cache {
-        cache.get_or_init(|| vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(tokenizer_view.dfa()));
+        cache.get_or_init(|| vocab_equivalence_analysis::SharedVocabDfaBase::build_from_dfa(&tokenizer_view));
     }
     let raw_analysis_base_init_ms = shared_base_setup_ms
         + raw_analysis_base_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -3440,10 +3428,10 @@ fn analyze_equivalences_impl(
     let byte_class_setup_started_at = Instant::now();
     let compatible_cache = shared_vocab_dfa_cache
         .and_then(|cache| cache.get())
-        .filter(|base| base.is_compatible_with_dfa(tokenizer_view.dfa()));
+        .filter(|base| base.is_compatible_with_dfa(&tokenizer_view));
     let byte_to_class = compatible_cache
         .map(|base| base.byte_to_class())
-        .unwrap_or_else(|| super::compat::compute_byte_classes(tokenizer_view.dfa()));
+        .unwrap_or_else(|| super::compat::compute_byte_classes(&tokenizer_view));
     let byte_class_setup_ms = byte_class_setup_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let token_dedup_started_at = Instant::now();
@@ -3507,7 +3495,7 @@ fn analyze_equivalences_impl(
             partition_label,
             pipeline_profile.relevant_byte_congruence_certified,
             quotient_certified,
-            tokenizer_view.dfa().states.len(),
+            tokenizer_view.states.len(),
             pre_state_map.num_internal_ids(),
             quotient_cert_ms,
             quotient_materialize_ms,
@@ -3794,7 +3782,7 @@ fn analyze_equivalences_impl(
 mod prepass_selection_tests {
     use super::*;
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::{
-        ByteRows, FlatDfa, FlatDfaState,
+        ByteRows, FlatDfaState,
     };
     use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::shared::representative_tokens_for_vocab_classes;
     use std::sync::Arc;
@@ -3884,7 +3872,7 @@ mod prepass_selection_tests {
         by_representative.into_values().collect()
     }
 
-    fn synthetic_view() -> TokenizerView {
+    fn synthetic_view() -> FlatDfa {
         let state_count = 5usize;
         let mut transitions = vec![u32::MAX; state_count * 256];
         let set = |transitions: &mut [u32], state: usize, byte: u8, target: u32| {
@@ -3902,33 +3890,31 @@ mod prepass_selection_tests {
         set(&mut transitions, 4, b'a', 4);
         set(&mut transitions, 4, b'b', 3);
 
-        TokenizerView {
-            flat_dfa: FlatDfa {
-                start_state: 0,
-                transitions: ByteRows::dense(Arc::from(transitions)),
-                states: vec![
-                    FlatDfaState {
-                        finalizers: vec![],
-                        possible_future_group_ids: vec![0, 1],
-                    },
-                    FlatDfaState {
-                        finalizers: vec![0],
-                        possible_future_group_ids: vec![0, 1],
-                    },
-                    FlatDfaState {
-                        finalizers: vec![1],
-                        possible_future_group_ids: vec![0, 1],
-                    },
-                    FlatDfaState {
-                        finalizers: vec![0, 1],
-                        possible_future_group_ids: vec![0, 1],
-                    },
-                    FlatDfaState {
-                        finalizers: vec![0],
-                        possible_future_group_ids: vec![0, 1],
-                    },
-                ],
-            },
+        FlatDfa {
+            start_state: 0,
+            transitions: ByteRows::dense(Arc::from(transitions)),
+            states: vec![
+                FlatDfaState {
+                    finalizers: vec![],
+                    possible_future_group_ids: vec![0, 1],
+                },
+                FlatDfaState {
+                    finalizers: vec![0],
+                    possible_future_group_ids: vec![0, 1],
+                },
+                FlatDfaState {
+                    finalizers: vec![1],
+                    possible_future_group_ids: vec![0, 1],
+                },
+                FlatDfaState {
+                    finalizers: vec![0, 1],
+                    possible_future_group_ids: vec![0, 1],
+                },
+                FlatDfaState {
+                    finalizers: vec![0],
+                    possible_future_group_ids: vec![0, 1],
+                },
+            ],
         }
     }
 
@@ -3938,8 +3924,8 @@ mod prepass_selection_tests {
         let tokens: Vec<&[u8]> = vec![
             b"a", b"b", b"aa", b"ab", b"ba", b"bb", b"x", b"y",
         ];
-        let states: Vec<usize> = (0..view.dfa().states.len()).collect();
-        let byte_to_class = super::super::compat::compute_byte_classes(view.dfa());
+        let states: Vec<usize> = (0..view.states.len()).collect();
+        let byte_to_class = super::super::compat::compute_byte_classes(&view);
         let disallowed = BTreeMap::<u32, BitSet>::new();
         let normalized = normalize_disallowed_follows(2, &disallowed);
 
@@ -3999,8 +3985,8 @@ mod prepass_selection_tests {
         let tokens: Vec<&[u8]> = vec![
             b"a", b"b", b"ax", b"ay", b"bx", b"by", b"x", b"y",
         ];
-        let states: Vec<usize> = (0..view.dfa().states.len()).collect();
-        let byte_to_class = super::super::compat::compute_byte_classes(view.dfa());
+        let states: Vec<usize> = (0..view.states.len()).collect();
+        let byte_to_class = super::super::compat::compute_byte_classes(&view);
         let mut disallowed = BTreeMap::<u32, BitSet>::new();
         let mut blocked = BitSet::new(2);
         blocked.set(1);
@@ -4034,7 +4020,7 @@ mod prepass_selection_tests {
         let view = synthetic_view();
         let tokens: Vec<&[u8]> = vec![b"aa", b"ab", b"aaa", b"abb"];
         let suffix_tokens: Vec<&[u8]> = tokens.iter().map(|token| &token[1..]).collect();
-        let states: Vec<usize> = (0..view.dfa().states.len()).collect();
+        let states: Vec<usize> = (0..view.states.len()).collect();
         let normalized = normalize_disallowed_follows(2, &BTreeMap::new());
 
         let full = state_equivalence_analysis::find_state_equivalence_classes_with_disallowed(
@@ -4047,7 +4033,7 @@ mod prepass_selection_tests {
         let mut prefix_targets = BTreeSet::<usize>::new();
         let targets = states
             .iter()
-            .map(|&source| view.dfa().trans(source, b'a' as usize))
+            .map(|&source| view.trans(source, b'a' as usize))
             .collect::<Vec<_>>();
         for &target in &targets {
             if target != u32::MAX {

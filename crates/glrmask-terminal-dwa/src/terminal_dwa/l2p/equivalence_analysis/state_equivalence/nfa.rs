@@ -8,7 +8,7 @@ use crate::automata::lexer::observation::{ConfigInterner, EpsilonImageScratch};
 use crate::automata::lexer::tokenizer::{SingletonEpsilonClosures, Tokenizer};
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 
-use super::super::compat::{ByteRows, FlatDfa, FlatDfaState, TokenizerView, conservative_byte_classes};
+use super::super::compat::{ByteRows, FlatDfa, FlatDfaState, conservative_byte_classes};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RawPowersetTargetMode {
@@ -23,7 +23,7 @@ pub enum RefinementDepth {
 }
 
 pub struct BoundedAnalysisView {
-    pub tokenizer_view: TokenizerView,
+    pub tokenizer_view: FlatDfa,
     raw_start_to_view: Vec<u32>,
 }
 
@@ -138,14 +138,12 @@ impl RelevantPowersetView {
         ByteRows::new(Arc::from(transitions), classes)
     }
 
-    pub fn into_tokenizer_view(self) -> TokenizerView {
+    pub fn into_tokenizer_view(self) -> FlatDfa {
         let transitions = self.byte_rows();
-        TokenizerView {
-            flat_dfa: FlatDfa {
-                states: self.states,
-                start_state: self.start_state,
-                transitions,
-            },
+        FlatDfa {
+            states: self.states,
+            start_state: self.start_state,
+            transitions,
         }
     }
 }
@@ -271,12 +269,10 @@ pub fn build_bounded_analysis_view_from_relevant_powerset(
     let start_state = old_to_new[view.start_state];
     assert_ne!(start_state, u32::MAX);
     BoundedAnalysisView {
-        tokenizer_view: TokenizerView {
-            flat_dfa: FlatDfa {
-                states,
-                start_state: start_state as usize,
-                transitions: ByteRows::new(Arc::from(transitions), rows.byte_to_column),
-            },
+        tokenizer_view: FlatDfa {
+            states,
+            start_state: start_state as usize,
+            transitions: ByteRows::new(Arc::from(transitions), rows.byte_to_column),
         },
         raw_start_to_view,
     }
@@ -369,7 +365,7 @@ impl BoundedAnalysisView {
         );
         let state = state as usize;
         assert!(
-            state < self.tokenizer_view.dfa().states.len(),
+            state < self.tokenizer_view.states.len(),
             "bounded raw-start map produced an invalid view state",
         );
         state
@@ -1494,12 +1490,10 @@ fn materialize_bounded_analysis_view(
         })
         .collect();
     BoundedAnalysisView {
-        tokenizer_view: TokenizerView {
-            flat_dfa: FlatDfa {
-                states,
-                start_state,
-                transitions,
-            },
+        tokenizer_view: FlatDfa {
+            states,
+            start_state,
+            transitions,
         },
         raw_start_to_view,
     }
@@ -3357,8 +3351,8 @@ mod tests {
         );
 
         assert_eq!(
-            dense.tokenizer_view.dfa().states.len(),
-            scalar.tokenizer_view.dfa().states.len(),
+            dense.tokenizer_view.states.len(),
+            scalar.tokenizer_view.states.len(),
         );
         for &raw_state in &raw_start_states {
             let scalar_start = scalar.view_state_for_raw_start(raw_state);
@@ -3374,11 +3368,11 @@ mod tests {
     }
 
     fn view_trace(
-        view: &TokenizerView,
+        view: &FlatDfa,
         start_state: usize,
         token: &[u8],
     ) -> Vec<(Vec<usize>, Vec<usize>, bool)> {
-        let dfa = view.dfa();
+        let dfa = &view;
         let mut state = start_state;
         let mut trace = vec![(
             dfa.states[state].finalizers.clone(),
@@ -3626,7 +3620,7 @@ mod tests {
         let topology =
             build_token_bounded_analysis_topology(&tokenizer, &raw_start_states, &tokens);
         let projected = topology.materialize(&tokenizer, Some(&[true, false, false]));
-        let dfa = projected.tokenizer_view.dfa();
+        let dfa = &projected.tokenizer_view;
 
         assert_ne!(dfa.trans(dfa.start_state, b'a' as usize), u32::MAX);
         assert_eq!(dfa.trans(dfa.start_state, b'x' as usize), u32::MAX);
@@ -3776,12 +3770,12 @@ mod tests {
                 assert_eq!(
                     view_trace(
                         &factored.tokenizer_view,
-                        factored.tokenizer_view.dfa().start_state,
+                        factored.tokenizer_view.start_state,
                         &token[offset..],
                     ),
                     view_trace(
                         &reference.tokenizer_view,
-                        reference.tokenizer_view.dfa().start_state,
+                        reference.tokenizer_view.start_state,
                         &token[offset..],
                     ),
                 );
@@ -3939,12 +3933,12 @@ mod tests {
                 assert_eq!(
                     view_trace(
                         &restricted.tokenizer_view,
-                        restricted.tokenizer_view.dfa().start_state,
+                        restricted.tokenizer_view.start_state,
                         &token[offset..],
                     ),
                     view_trace(
                         &direct.tokenizer_view,
-                        direct.tokenizer_view.dfa().start_state,
+                        direct.tokenizer_view.start_state,
                         &token[offset..],
                     ),
                     "reset suffix={:?}",
@@ -4026,12 +4020,12 @@ mod tests {
                         assert_eq!(
                             view_trace(
                                 &restricted.tokenizer_view,
-                                restricted.tokenizer_view.dfa().start_state,
+                                restricted.tokenizer_view.start_state,
                                 &token[offset..],
                             ),
                             view_trace(
                                 &direct.tokenizer_view,
-                                direct.tokenizer_view.dfa().start_state,
+                                direct.tokenizer_view.start_state,
                                 &token[offset..],
                             ),
                             "active_groups={active_groups:?} reset suffix={:?}",
@@ -4108,12 +4102,12 @@ mod tests {
                 assert_eq!(
                     view_trace(
                         &raw_bounded.tokenizer_view,
-                        raw_bounded.tokenizer_view.dfa().start_state,
+                        raw_bounded.tokenizer_view.start_state,
                         &token[offset..],
                     ),
                     view_trace(
                         &quotient_bounded.tokenizer_view,
-                        quotient_bounded.tokenizer_view.dfa().start_state,
+                        quotient_bounded.tokenizer_view.start_state,
                         &token[offset..],
                     ),
                     "reset suffix={:?}",
@@ -4546,7 +4540,7 @@ mod tests {
             None,
             None,
         );
-        let dfa = bounded.tokenizer_view.dfa();
+        let dfa = &bounded.tokenizer_view;
         let start_state = dfa.start_state;
         let trans_a = dfa.trans(start_state, b'a' as usize);
         assert_ne!(

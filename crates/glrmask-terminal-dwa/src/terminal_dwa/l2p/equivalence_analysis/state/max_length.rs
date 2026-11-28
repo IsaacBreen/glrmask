@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, OnceLock};
 
-use super::super::compat::{FlatDfa, TokenizerView};
+use super::super::compat::FlatDfa;
 
 const MISSING_BLOCK: u32 = u32::MAX;
 
@@ -638,14 +638,14 @@ fn build_full_canonical_mapping(
 /// caller needs a family of progressively coarser quotients as its remaining
 /// input horizon shrinks.
 fn find_canonical_state_maps_by_depth_from_labels_impl(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     k: usize,
     label_ids: &[u32],
     relevant_bytes: Option<&[bool; 256]>,
     byte_to_class: Option<&[u8; 256]>,
     singleton_pruning: bool,
 ) -> Vec<Arc<[u32]>> {
-    let dfa = tokenizer.dfa();
+    let dfa = tokenizer;
     let n = dfa.states.len();
     assert_eq!(label_ids.len(), n);
     if n == 0 {
@@ -738,7 +738,7 @@ fn find_canonical_state_maps_by_depth_from_labels_impl(
 /// observation after every active-byte string of length at most `d`. The
 /// supplied labels are the depth-zero observations.
 pub fn find_canonical_state_maps_by_depth_from_labels(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     k: usize,
     label_ids: &[u32],
     relevant_bytes: Option<&[bool; 256]>,
@@ -756,7 +756,7 @@ pub fn find_canonical_state_maps_by_depth_from_labels(
 
 #[cfg(test)]
 pub fn find_canonical_state_maps_by_depth_from_labels_reference(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     k: usize,
     label_ids: &[u32],
     relevant_bytes: Option<&[bool; 256]>,
@@ -773,7 +773,7 @@ pub fn find_canonical_state_maps_by_depth_from_labels_reference(
 }
 
 pub fn find_state_equivalence_classes_kbounded(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     states: &[usize],
     k: usize,
     active_groups: Option<&[bool]>,
@@ -787,7 +787,7 @@ pub fn find_state_equivalence_classes_kbounded(
 
     let profile_enabled = max_length_profile_enabled();
     let total_started_at = profile_enabled.then(std::time::Instant::now);
-    let dfa = tokenizer.dfa();
+    let dfa = tokenizer;
     let active_bytes_started_at = profile_enabled.then(std::time::Instant::now);
     let active_bytes = active_byte_representatives(relevant_bytes, byte_to_class);
     let active_bytes_ms = active_bytes_started_at
@@ -826,7 +826,7 @@ pub fn find_state_equivalence_classes_kbounded(
 }
 
 pub fn find_state_equivalence_classes_byte_restricted<S: AsRef<[u8]>>(
-    tokenizer: &TokenizerView,
+    tokenizer: &FlatDfa,
     tokens: &[S],
     states: &[usize],
     byte_to_class: Option<&[u8; 256]>,
