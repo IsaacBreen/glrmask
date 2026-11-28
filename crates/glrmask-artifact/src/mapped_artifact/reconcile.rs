@@ -881,7 +881,7 @@ impl<'a> AxisImage<'a> {
         let mut monotone = true;
         let mut adjacent = true;
         let mut singleton = true;
-        let mut previous = None;
+        let mut previous: Option<u32> = None;
         for row in fanout {
             offsets.push(runs.len());
             singleton &= row.len() <= 1;

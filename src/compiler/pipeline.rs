@@ -4127,8 +4127,8 @@ impl FlatTransitionsStage {
                     tokenizer, Arc::clone(&self.flat_trans),
                 )
             }).byte_to_class;
-            cpm::compute_constraint_possible_matches_for_vocab_with_raw_byte_classes(
-                tokenizer, vocab, cpm::ConstraintPossibleMatchesConfig::EAGER, &classes,
+            cpm::compute_constraint_possible_matches_for_vocab_with_byte_observations(
+                tokenizer, vocab, cpm::ConstraintPossibleMatchesConfig::EAGER, &classes, &self.flat_trans,
             )
         } else {
             cpm::compute_constraint_possible_matches_for_vocab(

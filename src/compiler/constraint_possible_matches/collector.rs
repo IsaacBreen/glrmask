@@ -15,11 +15,51 @@ use rustc_hash::FxHashMap;
 
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::compiler::pm_profile::{elapsed_ms, profile_summary_enabled, PossibleMatchesProfile};
-use crate::compiler::stages::id_map_and_terminal_dwa::l2p::equivalence_analysis::compat::TokenizerView;
+use crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table;
 use crate::ds::u8set::U8Set;
 use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::grammar::flat::TerminalID;
 
+/// Physical byte observations are shared with terminal construction.
+/// Subset states store only distinct relevant byte-class targets.
+pub(super) struct ClassedTransitions {
+    pub(super) byte_to_column: [u16; 256],
+    pub(super) width: usize,
+    pub(super) targets: Vec<u32>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ByteTransitions<'a> {
+    Raw(&'a [u32]),
+    Projected {
+        raw: &'a [u32],
+        local_to_raw: &'a [u32],
+        raw_to_local: &'a [u32],
+    },
+    Classed(&'a ClassedTransitions),
+}
+
+impl ByteTransitions<'_> {
+    #[inline]
+    pub(super) fn target(self, state: u32, byte: u8) -> u32 {
+        match self {
+            Self::Raw(raw) => raw[state as usize * 256 + byte as usize],
+            Self::Projected { raw, local_to_raw, raw_to_local } => {
+                let source = local_to_raw[state as usize];
+                let target = raw[source as usize * 256 + byte as usize];
+                if target == u32::MAX { target } else { raw_to_local[target as usize] }
+            }
+            Self::Classed(classes) => {
+                let column = classes.byte_to_column[byte as usize];
+                if column == u16::MAX {
+                    u32::MAX
+                } else {
+                    classes.targets[state as usize * classes.width + column as usize]
+                }
+            }
+        }
+    }
+}
 pub(crate) type TokenRange = (u32, u32);
 
 /// A possible-match row that applies the same token ranges to a whole terminal
@@ -431,7 +471,7 @@ fn segment_outcomes_for_states(
     segment: &[u8],
     matched_terminals: &[Box<[TerminalID]>],
     matched_terminal_masks: Option<&[u128]>,
-    byte_transitions: &[Vec<u32>],
+    byte_transitions: ByteTransitions<'_>,
     terminal_sets: &mut TerminalSetInterner,
     empty_terminals_id: u32,
     terminal_stamps: &mut [u32],
@@ -450,7 +490,7 @@ fn segment_outcomes_for_states(
         timings.segment_single_byte_calls += 1;
         let byte = segment[0] as usize;
         for &start_state in needed_states {
-            let next_state = byte_transitions[byte][start_state as usize];
+            let next_state = byte_transitions.target(start_state, byte as u8);
             outcomes.push(if next_state == u32::MAX {
                 SegmentOutcome { terminals_id: empty_terminals_id, end_state: None }
             } else {
@@ -501,7 +541,7 @@ fn segment_outcomes_for_states(
             let mut terminal_mask = 0u128;
             for &byte in segment {
                 timings.segment_bytes_scanned += 1;
-                let next_state = byte_transitions[byte as usize][current_state as usize];
+                let next_state = byte_transitions.target(current_state, byte);
                 if next_state == u32::MAX { blocked = true; break; }
                 current_state = next_state;
                 let state_mask = matched_terminal_masks[current_state as usize];
@@ -517,7 +557,7 @@ fn segment_outcomes_for_states(
             let mut terminal_list = Vec::new();
             for &byte in segment {
                 timings.segment_bytes_scanned += 1;
-                let next_state = byte_transitions[byte as usize][current_state as usize];
+                let next_state = byte_transitions.target(current_state, byte);
                 if next_state == u32::MAX { blocked = true; break; }
                 current_state = next_state;
                 timings.segment_terminal_iters += matched_terminals[current_state as usize].len();
@@ -643,7 +683,7 @@ fn build_node(
     node_terminal_ids: &[u32],
     empty_terminals_id: u32,
     is_end: &[bool],
-    byte_transitions: &[Vec<u32>],
+    byte_transitions: ByteTransitions<'_>,
     self_loop_bytes: &[U8Set],
     canonical_state: Option<&[u32]>,
     terminal_sets: &mut TerminalSetInterner,
@@ -1260,14 +1300,12 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_precomputed(
     num_terminals: usize,
     matched_terminals: &[Box<[TerminalID]>],
     is_end: &[bool],
-    byte_transitions: &[Vec<u32>],
+    byte_transitions: ByteTransitions<'_>,
     self_loop_bytes: &[U8Set],
 ) -> (TrieClassBuildResult, PossibleMatchesProfile) {
     debug_assert_eq!(matched_terminals.len(), num_states);
     debug_assert_eq!(is_end.len(), num_states);
     debug_assert_eq!(self_loop_bytes.len(), num_states);
-    debug_assert_eq!(byte_transitions.len(), 256);
-    debug_assert!(byte_transitions.iter().all(|column| column.len() == num_states));
 
     let matched_terminal_masks: Option<Vec<u128>> = if num_terminals <= 128 {
         Some(
@@ -1387,6 +1425,7 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_precomputed(
 
 pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     tokenizer: &Tokenizer,
+    raw_transitions: Option<&[u32]>,
     root: &VocabPrefixTreeNode,
     entries: &[u32],
     canonical_state: Option<&[u32]>,
@@ -1404,12 +1443,14 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
     let is_end: Vec<bool> = (0..tokenizer.num_states())
         .map(|state| tokenizer.is_end(state))
         .collect();
-    let mut byte_transitions = vec![vec![u32::MAX; num_states]; 256];
-    for state_idx in 0..num_states {
-        for (byte, target) in tokenizer.transitions_from(state_idx as u32) {
-            byte_transitions[byte as usize][state_idx] = target;
+    let owned;
+    let raw = match raw_transitions {
+        Some(raw) => raw,
+        None => {
+            owned = build_flat_transition_table(tokenizer);
+            &owned
         }
-    }
+    };
     let self_loop_bytes: Vec<U8Set> = (0..num_states)
         .map(|state_idx| tokenizer.self_loop_bytes(state_idx as u32))
         .collect();
@@ -1421,53 +1462,8 @@ pub(crate) fn collect_possible_matches_interval_trie_class_build_with_classes(
         num_terminals,
         &matched_terminals,
         &is_end,
-        &byte_transitions,
+        ByteTransitions::Raw(raw),
         &self_loop_bytes,
     )
 }
 
-pub(crate) fn collect_possible_matches_interval_trie_class_build_for_flat_view(
-    tokenizer_view: &TokenizerView,
-    num_terminals: usize,
-    is_end: &[bool],
-    root: &VocabPrefixTreeNode,
-    entries: &[u32],
-    canonical_state: Option<&[u32]>,
-) -> (TrieClassBuildResult, PossibleMatchesProfile) {
-    let dfa = tokenizer_view.dfa();
-    let num_states = dfa.states.len();
-    let matched_terminals = dfa
-        .states
-        .iter()
-        .map(|state| {
-            state
-                .finalizers
-                .iter()
-                .map(|&terminal| terminal as TerminalID)
-                .collect::<Vec<_>>()
-                .into_boxed_slice()
-        })
-        .collect::<Vec<_>>();
-    let mut byte_transitions = vec![vec![u32::MAX; num_states]; 256];
-    for state in 0..num_states {
-        for byte in 0..256usize {
-            byte_transitions[byte][state] = dfa.trans(state, byte);
-        }
-    }
-    let self_loop_bytes = (0..num_states)
-        .map(|state| {
-            U8Set::from_predicate(|byte| dfa.trans(state, byte as usize) == state as u32)
-        })
-        .collect::<Vec<_>>();
-    collect_possible_matches_interval_trie_class_build_precomputed(
-        root,
-        entries,
-        canonical_state,
-        num_states,
-        num_terminals,
-        &matched_terminals,
-        is_end,
-        &byte_transitions,
-        &self_loop_bytes,
-    )
-}

@@ -13,7 +13,7 @@ use smallvec::SmallVec;
 use crate::automata::lexer::tokenizer::Tokenizer;
 use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_possible_matches::collector::{
-    IntervalPossibleMatchMap, TerminalRangeGroup, TrieClassBuildResult,
+    ByteTransitions, ClassedTransitions, IntervalPossibleMatchMap, TerminalRangeGroup, TrieClassBuildResult,
 };
 use crate::compiler::pm_profile::elapsed_ms;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
@@ -1417,7 +1417,7 @@ fn nfa_powerset_collect_enabled(state_count: usize, root_terminal_union: usize) 
 struct PossibleMatchPowersetView {
     num_states: usize,
     matched_terminals: Vec<Box<[TerminalID]>>,
-    byte_transitions: Vec<Vec<u32>>,
+    byte_transitions: ClassedTransitions,
     self_loop_bytes: Vec<U8Set>,
     raw_start_to_view: Vec<u32>,
     boundary_state: Vec<u32>,
@@ -1577,7 +1577,16 @@ fn build_possible_match_powerset_view(
             .collect::<Vec<_>>()
     };
     let mut matched_terminals = Vec::<Box<[TerminalID]>>::new();
-    let mut byte_transitions = (0..256).map(|_| Vec::<u32>::new()).collect::<Vec<_>>();
+    let mut byte_transitions = ClassedTransitions {
+        byte_to_column: [u16::MAX; 256],
+        width: active_byte_classes.len(),
+        targets: Vec::new(),
+    };
+    for (column, (_, members)) in active_byte_classes.iter().enumerate() {
+        for &byte in members {
+            byte_transitions.byte_to_column[byte as usize] = column as u16;
+        }
+    }
     let mut self_loop_bytes = Vec::<U8Set>::new();
     let mut boundary_state = Vec::<u32>::new();
     let mut is_end = Vec::<bool>::new();
@@ -1614,7 +1623,7 @@ fn build_possible_match_powerset_view(
             .unwrap_or(u32::MAX),
         );
 
-        let mut row = Box::new([u32::MAX; 256]);
+        let mut self_loops = U8Set::empty();
         let source_is_closed = config_is_closed[config_index];
         for &(byte, ref class_members) in &active_byte_classes {
             target_generation = target_generation.wrapping_add(1);
@@ -1652,23 +1661,18 @@ fn build_possible_match_powerset_view(
                 }
             }
             target_config.sort_unstable();
-            if let Some(target) = intern_possible_match_canonical_config(
+            let target = intern_possible_match_canonical_config(
                 &target_config,
                 true,
                 &mut config_ids,
                 &mut configs,
                 &mut config_is_closed,
-            ) {
-                for &class_byte in class_members {
-                    row[class_byte as usize] = target;
-                }
-            }
-        }
-        let mut self_loops = U8Set::empty();
-        for (byte, &target) in row.iter().enumerate() {
-            byte_transitions[byte].push(target);
+            ).unwrap_or(u32::MAX);
+            byte_transitions.targets.push(target);
             if target == config_index as u32 {
-                self_loops.insert(byte as u8);
+                for &class_byte in class_members {
+                    self_loops.insert(class_byte);
+                }
             }
         }
         self_loop_bytes.push(self_loops);
@@ -1677,7 +1681,7 @@ fn build_possible_match_powerset_view(
 
     let num_states = configs.len();
     debug_assert_eq!(matched_terminals.len(), num_states);
-    debug_assert!(byte_transitions.iter().all(|column| column.len() == num_states));
+    debug_assert_eq!(byte_transitions.targets.len(), byte_transitions.width * num_states);
     debug_assert_eq!(self_loop_bytes.len(), num_states);
     debug_assert_eq!(config_is_closed.len(), configs.len());
     debug_assert_eq!(boundary_state.len(), num_states);
@@ -1876,7 +1880,7 @@ fn collect_sparse_root_possible_matches(
 }
 
 struct BatchedDemandView<'a> {
-    byte_transitions: &'a [Vec<u32>],
+    byte_transitions: ByteTransitions<'a>,
     matched_masks: Vec<u128>,
     /// Conservative demanded-terminal reachability over byte transitions and
     /// optional token-boundary projection edges. `None` keeps the reference
@@ -2001,14 +2005,13 @@ fn append_batched_demand_matches(
 
 fn batched_future_matched_masks(
     matched_masks: &[u128],
-    byte_transitions: &[Vec<u32>],
+    byte_transitions: &ClassedTransitions,
     boundary_state: Option<&[u32]>,
 ) -> Vec<u128> {
     let num_states = matched_masks.len();
     let mut predecessors = vec![Vec::<u32>::new(); num_states];
-    for column in byte_transitions {
-        debug_assert_eq!(column.len(), num_states);
-        for (source, &target) in column.iter().enumerate() {
+    for (source, row) in byte_transitions.targets.chunks(byte_transitions.width.max(1)).enumerate() {
+        for &target in row {
             if target != u32::MAX {
                 predecessors[target as usize].push(source as u32);
             }
@@ -2088,7 +2091,7 @@ fn collect_batched_demand_node(
             let mut live = true;
             for &byte in segment {
                 profile.transition_steps += 1;
-                let target_index = view.byte_transitions[byte as usize][state_index as usize];
+                let target_index = view.byte_transitions.target(state_index, byte);
                 if target_index == u32::MAX {
                     live = false;
                     break;
@@ -2281,6 +2284,7 @@ fn collect_batched_demand_view(
 
 fn collect_batched_demand_possible_matches(
     tokenizer: &Tokenizer,
+    raw_transitions: Option<&[u32]>,
     root: &VocabPrefixTreeNode,
     entries: &[u32],
     demand: &DelayedTerminalDemand,
@@ -2292,13 +2296,17 @@ fn collect_batched_demand_possible_matches(
     for (index, &state) in relevant_states.iter().enumerate() {
         raw_state_to_index[state as usize] = index as u32;
     }
-    let mut byte_transitions = vec![vec![u32::MAX; relevant_states.len()]; 256];
+    let owned;
+    let raw = match raw_transitions {
+        Some(raw) => raw,
+        None => {
+            owned = crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table(tokenizer);
+            &owned
+        }
+    };
     let mut matched_masks = Vec::with_capacity(relevant_states.len());
     let mut is_end = Vec::with_capacity(relevant_states.len());
-    for (state_index, &state) in relevant_states.iter().enumerate() {
-        for (byte, target) in tokenizer.transitions_from(state) {
-            byte_transitions[byte as usize][state_index] = raw_state_to_index[target as usize];
-        }
+    for &state in &relevant_states {
         matched_masks.push(tokenizer.matched_terminals_iter(state)
             .fold(0u128, |mask, terminal| mask | terminal_to_bit[terminal as usize]));
         is_end.push(tokenizer.is_end(state));
@@ -2306,7 +2314,7 @@ fn collect_batched_demand_possible_matches(
     let self_loop_bytes = relevant_states.iter()
         .map(|&state| tokenizer.self_loop_bytes(state)).collect::<Vec<_>>();
     let view = BatchedDemandView {
-        byte_transitions: &byte_transitions,
+        byte_transitions: ByteTransitions::Projected { raw, local_to_raw: &relevant_states, raw_to_local: &raw_state_to_index },
         matched_masks,
         future_matched_masks: None,
         is_end: &is_end,
@@ -2324,7 +2332,7 @@ fn collect_batched_demand_possible_matches_precomputed(
     num_terminals: usize,
     matched_terminals: &[Box<[TerminalID]>],
     is_end: &[bool],
-    byte_transitions: &[Vec<u32>],
+    byte_transitions: &ClassedTransitions,
     self_loop_bytes: &[U8Set],
     boundary_state: &[u32],
     demand: &DelayedTerminalDemand,
@@ -2341,7 +2349,7 @@ fn collect_batched_demand_possible_matches_precomputed(
     let future_matched_masks = use_future_prune.then(||
         batched_future_matched_masks(&matched_masks, byte_transitions, Some(boundary_state)));
     let view = BatchedDemandView {
-        byte_transitions,
+        byte_transitions: ByteTransitions::Classed(byte_transitions),
         matched_masks,
         future_matched_masks,
         is_end,
@@ -2950,6 +2958,7 @@ fn compute_constraint_possible_matches_with_artifacts(
     original_token_count: usize,
     artifacts_and_profile: (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile),
     raw_byte_to_class: Option<&[u8; 256]>,
+    raw_transitions: Option<&[u32]>,
     demand: DelayedTerminalDemand,
 ) -> ConstraintPossibleMatchesComputation {
     let pm_started_at = Instant::now();
@@ -3026,6 +3035,7 @@ fn compute_constraint_possible_matches_with_artifacts(
         let started_at = Instant::now();
         let result = collect_batched_demand_possible_matches(
             tokenizer,
+            raw_transitions,
             &trie.root,
             &trie_build_states,
             &demand,
@@ -3101,7 +3111,7 @@ fn compute_constraint_possible_matches_with_artifacts(
                 tokenizer.num_terminals() as usize,
                 &powerset.matched_terminals,
                 &powerset.is_end,
-                &powerset.byte_transitions,
+                ByteTransitions::Classed(&powerset.byte_transitions),
                 &powerset.self_loop_bytes,
             )
             .0
@@ -3119,7 +3129,7 @@ fn compute_constraint_possible_matches_with_artifacts(
                     tokenizer.num_terminals() as usize,
                     &powerset.matched_terminals,
                     &powerset.is_end,
-                    &powerset.byte_transitions,
+                    ByteTransitions::Classed(&powerset.byte_transitions),
                     &powerset.self_loop_bytes,
                 );
             for &state in &view_entries {
@@ -3248,6 +3258,7 @@ fn compute_constraint_possible_matches_with_artifacts(
     } else {
         collector::collect_possible_matches_interval_trie_class_build_with_classes(
             tokenizer,
+            raw_transitions,
             &trie.root,
             &trie_build_states,
             None,
@@ -3303,6 +3314,7 @@ fn compute_constraint_possible_matches_for_vocab_impl(
     vocab: &Vocab,
     config: ConstraintPossibleMatchesConfig,
     raw_byte_to_class: Option<&[u8; 256]>,
+    raw_transitions: Option<&[u32]>,
 ) -> ConstraintPossibleMatchesComputation {
     if config.defer_to_dynamic_mask {
         let (full_artifacts, full_profile) = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
@@ -3336,6 +3348,7 @@ fn compute_constraint_possible_matches_for_vocab_impl(
         vocab.entries_map().len(),
         get_ordered_vocab_trie_artifacts_for_vocab(vocab),
         raw_byte_to_class,
+        raw_transitions,
         demand,
     )
 }
@@ -3345,20 +3358,22 @@ pub(crate) fn compute_constraint_possible_matches_for_vocab(
     vocab: &Vocab,
     config: ConstraintPossibleMatchesConfig,
 ) -> ConstraintPossibleMatchesComputation {
-    compute_constraint_possible_matches_for_vocab_impl(tokenizer, vocab, config, None)
+    compute_constraint_possible_matches_for_vocab_impl(tokenizer, vocab, config, None, None)
 }
 
-pub(crate) fn compute_constraint_possible_matches_for_vocab_with_raw_byte_classes(
+pub(crate) fn compute_constraint_possible_matches_for_vocab_with_byte_observations(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     config: ConstraintPossibleMatchesConfig,
     raw_byte_to_class: &[u8; 256],
+    raw_transitions: &[u32],
 ) -> ConstraintPossibleMatchesComputation {
     compute_constraint_possible_matches_for_vocab_impl(
         tokenizer,
         vocab,
         config,
         Some(raw_byte_to_class),
+        Some(raw_transitions),
     )
 }
 
@@ -3746,7 +3761,7 @@ mod tests {
                 tokenizer.num_terminals() as usize,
                 &powerset.matched_terminals,
                 &powerset.is_end,
-                &powerset.byte_transitions,
+                ByteTransitions::Classed(&powerset.byte_transitions),
                 &powerset.self_loop_bytes,
             );
         let sparse_expanded = expand_interval_class_maps(&sparse.class_maps);
