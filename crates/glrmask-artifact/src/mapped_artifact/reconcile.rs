@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+#[cfg(test)]
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
@@ -10,7 +11,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::equiv_types::{InternalIdMap, ManyToOneIdMap};
 use crate::ds::weight::{SharedTokenSet, Weight, finalize_weight_map, shared_rangeset};
 
-pub(super) fn reconcile_weight_id_maps(
+#[cfg(test)]
+fn reconcile_weight_id_maps(
     left_weights: &mut [&mut Weight],
     left_id_map: &mut InternalIdMap,
     right_weights: &mut [&mut Weight],
@@ -732,6 +734,8 @@ pub enum TokenAxisMap<'a> {
     Explicit(&'a [Vec<u32>]),
     /// Proven injection, with u32::MAX denoting an absent local class.
     Injection(&'a [u32]),
+    /// A proved surjective total coordinate quotient, including permutations.
+    Quotient(&'a [u32]),
     /// Destination classes refine the source partition (including absent originals).
     Refinement { local: &'a ManyToOneIdMap, common: &'a ManyToOneIdMap },
     Offset { offset: u32, local_token_count: u32 },
@@ -744,6 +748,9 @@ enum AxisImage<'a> {
     Contiguous { first: Vec<u32>, last: Vec<u32> },
     Singleton { destinations: Cow<'a, [u32]>, monotone: bool },
     Disjoint { offsets: Vec<usize>, runs: Vec<(u32, u32)>, monotone: bool },
+    /// Inclusive source run ends and their single destination; repeated
+    /// destinations can overlap across source ranges.
+    Quotient { runs: Vec<(u32, u32)>, count: usize },
     Overlapping { fanout: &'a [Vec<u32>], destination_count: usize },
 }
 
@@ -911,9 +918,37 @@ impl<'a> AxisImage<'a> {
         Self::Disjoint { offsets, runs, monotone }
     }
 
+    fn quotient(destinations: &'a [u32], destination_count: usize) -> Self {
+        debug_assert!({
+            let mut seen = vec![false; destination_count];
+            for &id in destinations { seen[id as usize] = true; }
+            seen.into_iter().all(|covered| covered)
+        }, "quotient must cover its destination coordinate");
+        if destinations.is_empty() {
+            return Self::Affine { offset: 0, count: 0 };
+        }
+        if destinations.len() == destination_count {
+            // Quotient construction proves surjectivity. An equal-size total
+            // quotient is therefore a bijection, including the empty case.
+            return Self::tokens(TokenAxisMap::Injection(destinations), destination_count);
+        }
+        let mut runs = Vec::<(u32, u32)>::new();
+        for (source, &target) in destinations.iter().enumerate() {
+            if let Some(last) = runs.last_mut()
+                && last.1 == target
+            {
+                last.0 = source as u32;
+            } else {
+                runs.push((source as u32, target));
+            }
+        }
+        Self::Quotient { runs, count: destinations.len() }
+    }
+
     fn tokens(map: TokenAxisMap<'a>, destination_count: usize) -> Self {
         match map {
             TokenAxisMap::Explicit(fanout) => Self::explicit(fanout, destination_count),
+            TokenAxisMap::Quotient(destinations) => Self::quotient(destinations, destination_count),
             TokenAxisMap::Refinement { local, common } => {
                 assert_eq!(common.internal_to_originals.len(), destination_count);
                 Self::refinement(local, common)
@@ -949,6 +984,7 @@ impl<'a> AxisImage<'a> {
             Self::Contiguous { first, .. } => first.len(),
             Self::Singleton { destinations, .. } => destinations.len(),
             Self::Disjoint { offsets, .. } => offsets.len() - 1,
+            Self::Quotient { count, .. } => *count,
             Self::Overlapping { fanout, .. } => fanout.len(),
         }
     }
@@ -961,12 +997,12 @@ impl<'a> AxisImage<'a> {
         match self {
             Self::Affine { .. } | Self::Contiguous { .. } => true,
             Self::Singleton { monotone, .. } | Self::Disjoint { monotone, .. } => *monotone,
-            Self::Overlapping { .. } => false,
+            Self::Quotient { .. } | Self::Overlapping { .. } => false,
         }
     }
 
     fn is_disjoint(&self) -> bool {
-        !matches!(self, Self::Overlapping { .. })
+        !matches!(self, Self::Quotient { .. } | Self::Overlapping { .. })
     }
 
     #[inline]
@@ -994,6 +1030,15 @@ impl<'a> AxisImage<'a> {
             Self::Disjoint { offsets, runs, .. } => {
                 for &(a, b) in &runs[offsets[start]..offsets[end + 1]] {
                     visit(a, b);
+                }
+            }
+            Self::Quotient { runs, .. } => {
+                let first = runs.partition_point(|&(source_end, _)| source_end < start as u32);
+                for &(source_end, target) in &runs[first..] {
+                    visit(target, target);
+                    if source_end >= end as u32 {
+                        break;
+                    }
                 }
             }
             Self::Overlapping { fanout, destination_count } => {
@@ -1056,18 +1101,13 @@ fn remap_relation(
     common_tsid_count: usize,
     identity_states: bool,
     mapped_sets: Option<&FxHashMap<usize, SharedTokenSet>>,
+    full_image: &Weight,
 ) -> Weight {
     if weight.is_empty() {
         return weight.clone();
     }
     if weight.is_full() {
-        let all_tokens = shared_rangeset(tokens.full_image());
-        if all_tokens.is_empty() {
-            return Weight::empty();
-        }
-        return weight_from_sorted_disjoint_runs(states.full_image().ranges().map(|r| {
-            (*r.start(), *r.end(), Arc::clone(&all_tokens))
-        }));
+        return full_image.clone();
     }
 
     let mapped = |source: &SharedTokenSet| {
@@ -1077,6 +1117,20 @@ fn remap_relation(
     };
     if identity_states {
         return weight.remap_token_sets_preserving_tsid_ranges(mapped);
+    }
+    if matches!(states, AxisImage::Quotient { .. }) {
+        // A functional quotient produces only point destinations. Sparse
+        // sorting avoids a destination-sized scratch allocation for each
+        // coefficient, including when it occupies only one source run.
+        let mut points = Vec::new();
+        for (start, end, source) in weight.range_entries() {
+            let set = mapped(source);
+            if !set.is_empty() {
+                states.visit_runs(start, end, |a, _| points.push((a, Arc::clone(&set))));
+            }
+        }
+        points.sort_unstable_by_key(|(state, _)| *state);
+        return Weight::union_sorted_point_entries(points);
     }
     if states.is_disjoint() {
         let mut runs = Vec::new();
@@ -1141,6 +1195,147 @@ pub fn remap_weights_with_token_axis(
     );
 }
 
+/// Prepared rectangular relation image. Constructing it before collecting
+/// source weights keeps unchanged-coordinate reconciliation allocation-free.
+pub(super) struct RelationImage<'a> {
+    states: AxisImage<'a>,
+    tokens: AxisImage<'a>,
+    state_count: usize,
+    identity_states: bool,
+    identity_tokens: bool,
+    total_quotient: bool,
+}
+
+impl<'a> RelationImage<'a> {
+    pub(super) fn new(
+        state_map: TokenAxisMap<'a>,
+        token_map: TokenAxisMap<'a>,
+        state_count: usize,
+        token_count: usize,
+    ) -> Self {
+        let states = AxisImage::tokens(state_map, state_count);
+        let tokens = AxisImage::tokens(token_map, token_count);
+        Self {
+            identity_states: states.identity(state_count),
+            identity_tokens: tokens.identity(token_count),
+            total_quotient: matches!(state_map, TokenAxisMap::Quotient(_))
+                && matches!(token_map, TokenAxisMap::Quotient(_)),
+            states, tokens, state_count,
+        }
+    }
+
+    fn is_identity(&self) -> bool {
+        self.identity_states && self.identity_tokens
+    }
+}
+
+/// Source weights stay pinned until publication. The same unique batch
+/// supplies compaction's observations and the final relation transport.
+pub(super) struct WeightBatch {
+    pub(super) unique: Vec<Weight>,
+    indices: Vec<usize>,
+}
+
+impl WeightBatch {
+    pub(super) fn new(weights: &[&mut Weight]) -> Self {
+        let mut by_weight = FxHashMap::<usize, usize>::default();
+        let mut unique = Vec::<Weight>::new();
+        let indices = weights.iter().map(|weight| {
+            *by_weight.entry(weight.ptr_key()).or_insert_with(|| {
+                let index = unique.len();
+                unique.push((**weight).clone());
+                index
+            })
+        }).collect();
+        Self { unique, indices }
+    }
+
+    pub(super) fn publish(
+        self,
+        weights: &mut [&mut Weight],
+        image: RelationImage<'_>,
+    ) {
+        if image.is_identity() { return; }
+        let RelationImage {
+            states, tokens, state_count: common_tsid_count,
+            identity_states, identity_tokens, total_quotient,
+        } = image;
+        let profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
+        let started = profiling.then(Instant::now);
+        let Self { unique, indices } = self;
+        // Full coefficients are relative to the source coordinate, not all
+        // possible destination IDs. Quotients are surjective by construction.
+        let full_image = if unique.iter().any(Weight::is_full) {
+            if total_quotient {
+                Weight::all()
+            } else {
+                let all_tokens = shared_rangeset(tokens.full_image());
+                weight_from_sorted_disjoint_runs(states.full_image().ranges().map(|r| {
+                    (*r.start(), *r.end(), Arc::clone(&all_tokens))
+                }))
+            }
+        } else {
+            Weight::empty()
+        };
+
+        let mut by_set = FxHashMap::<usize, SharedTokenSet>::default();
+        for weight in &unique {
+            if weight.is_full() || weight.is_empty() { continue; }
+            for (_, _, set) in weight.range_entries() {
+                by_set.entry(Arc::as_ptr(set) as usize).or_insert_with(|| Arc::clone(set));
+            }
+        }
+        let sources = by_set.into_iter().collect::<Vec<_>>();
+        let range_cache = if matches!(tokens, AxisImage::Disjoint { .. } | AxisImage::Singleton { .. } | AxisImage::Quotient { .. })
+            && sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
+        {
+            let total_tokens = sources.iter().map(|(_, set)| set.len() as usize).sum::<usize>();
+            let total_ranges = sources.iter().map(|(_, set)| set.ranges().count()).sum::<usize>();
+            if total_tokens >= 8192 && total_ranges.saturating_mul(4) < total_tokens {
+                let ranges = sources.iter().flat_map(|(_, set)| {
+                    set.ranges().map(|r| (*r.start(), *r.end()))
+                }).collect::<FxHashSet<_>>().into_iter().collect::<Vec<_>>();
+                Some(map_batch(&ranges, |&(a, b)| {
+                    ((a, b), tokens.image(std::iter::once((a, b))))
+                }).into_iter().collect::<FxHashMap<_, _>>())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mapped_sets = map_batch(&sources, |(key, set)| {
+            let image = if identity_tokens {
+                Arc::clone(set)
+            } else {
+                remap_token_set(set, &tokens, range_cache.as_ref())
+            };
+            (*key, image)
+        }).into_iter().collect::<FxHashMap<_, _>>();
+        let remapped = map_batch(&unique, |weight| {
+            remap_relation(weight, &states, &tokens, common_tsid_count, identity_states, Some(&mapped_sets), &full_image)
+        });
+
+        if std::env::var_os("GLRMASK_VALIDATE_GLOBAL_TOKEN_REMAP_CACHE").is_some() {
+            for (source, result) in unique.iter().zip(&remapped) {
+                assert_eq!(*result, remap_relation(
+                    source, &states, &tokens, common_tsid_count, identity_states, None, &full_image,
+                ), "global token remap cache changed a weight");
+            }
+        }
+        for (weight, index) in weights.iter_mut().zip(indices) {
+            **weight = remapped[index].clone();
+        }
+        if let Some(started) = started {
+            eprintln!(
+                "[glrmask/profile][token_run_reconcile] weights={} unique_weights={} unique_token_sets={} identity_tsids={} identity_tokens={} total_ms={:.3}",
+                weights.len(), unique.len(), mapped_sets.len(), identity_states, identity_tokens,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+    }
+}
 /// Lift both dimensions directly from their certified coordinate images.
 pub fn remap_weights_with_axes(
     weights: &mut [&mut Weight],
@@ -1149,86 +1344,14 @@ pub fn remap_weights_with_axes(
     common_tsid_count: usize,
     common_token_count: usize,
 ) {
-    if weights.is_empty() {
-        return;
-    }
-    let profiling = std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
-        || std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
-    let started = profiling.then(Instant::now);
-    let states = AxisImage::tokens(local_to_common_tsids, common_tsid_count);
-    let tokens = AxisImage::tokens(local_to_common_tokens, common_token_count);
-    let identity_states = states.identity(common_tsid_count);
-    let identity_tokens = tokens.identity(common_token_count);
-    if identity_states && identity_tokens {
-        return;
-    }
-
-    // Both source objects stay alive until publication, so pointer keys are
-    // exact identities. Deduplicate the work across the entire artifact.
-    let mut by_weight = FxHashMap::<usize, usize>::default();
-    let mut unique = Vec::<Weight>::new();
-    let indices = weights.iter().map(|weight| {
-        *by_weight.entry(weight.ptr_key()).or_insert_with(|| {
-            let index = unique.len();
-            unique.push((**weight).clone());
-            index
-        })
-    }).collect::<Vec<_>>();
-    let mut by_set = FxHashMap::<usize, SharedTokenSet>::default();
-    for weight in &unique {
-        for (_, _, set) in weight.range_entries() {
-            by_set.entry(Arc::as_ptr(set) as usize).or_insert_with(|| Arc::clone(set));
-        }
-    }
-    let sources = by_set.into_iter().collect::<Vec<_>>();
-    let range_cache = if matches!(tokens, AxisImage::Disjoint { .. } | AxisImage::Singleton { .. })
-        && sources.len() >= PARALLEL_UNIQUE_WEIGHT_THRESHOLD
-    {
-        let total_tokens = sources.iter().map(|(_, set)| set.len() as usize).sum::<usize>();
-        let total_ranges = sources.iter().map(|(_, set)| set.ranges().count()).sum::<usize>();
-        if total_tokens >= 8192 && total_ranges.saturating_mul(4) < total_tokens {
-            let ranges = sources.iter().flat_map(|(_, set)| {
-                set.ranges().map(|r| (*r.start(), *r.end()))
-            }).collect::<FxHashSet<_>>().into_iter().collect::<Vec<_>>();
-            Some(map_batch(&ranges, |&(a, b)| {
-                ((a, b), tokens.image(std::iter::once((a, b))))
-            }).into_iter().collect::<FxHashMap<_, _>>())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let mapped_sets = map_batch(&sources, |(key, set)| {
-        let image = if identity_tokens {
-            Arc::clone(set)
-        } else {
-            remap_token_set(set, &tokens, range_cache.as_ref())
-        };
-        (*key, image)
-    }).into_iter().collect::<FxHashMap<_, _>>();
-    let remapped = map_batch(&unique, |weight| {
-        remap_relation(weight, &states, &tokens, common_tsid_count, identity_states, Some(&mapped_sets))
-    });
-
-    if std::env::var_os("GLRMASK_VALIDATE_GLOBAL_TOKEN_REMAP_CACHE").is_some() {
-        for (source, result) in unique.iter().zip(&remapped) {
-            assert_eq!(*result, remap_relation(
-                source, &states, &tokens, common_tsid_count, identity_states, None,
-            ), "global token remap cache changed a weight");
-        }
-    }
-    for (weight, index) in weights.iter_mut().zip(indices) {
-        **weight = remapped[index].clone();
-    }
-    if let Some(started) = started {
-        eprintln!(
-            "[glrmask/profile][token_run_reconcile] weights={} unique_weights={} unique_token_sets={} identity_tsids={} identity_tokens={} total_ms={:.3}",
-            weights.len(), unique.len(), mapped_sets.len(), identity_states, identity_tokens,
-            started.elapsed().as_secs_f64() * 1000.0,
-        );
+    if weights.is_empty() { return; }
+    let image = RelationImage::new(local_to_common_tsids, local_to_common_tokens,
+        common_tsid_count, common_token_count);
+    if !image.is_identity() {
+        WeightBatch::new(weights).publish(weights, image);
     }
 }
+
 #[cfg(test)]
 fn remap_weight_general(
     weight: &Weight,
@@ -1604,6 +1727,40 @@ mod tests {
     }
 
     #[test]
+    fn quotient_batch_preserves_shared_images_and_universal_weight() {
+        let source = shared_rangeset(RangeSetBlaze::from_iter([0..=2]));
+        let original = Weight::from_tsid_ranges_shared([
+            (0, 0, Arc::clone(&source)),
+            (2, 2, Arc::clone(&source)),
+        ]);
+        let mut first = original.clone();
+        let mut second = original;
+        let mut full = Weight::all();
+        let mut empty = Weight::empty();
+        remap_weights_with_axes(
+            &mut [&mut first, &mut second, &mut full, &mut empty],
+            TokenAxisMap::Quotient(&[0, 1, 2]),
+            TokenAxisMap::Quotient(&[1, 1, 0]),
+            3, 2,
+        );
+        assert_eq!(first.ptr_key(), second.ptr_key());
+        let sets = first.range_entries().map(|(_, _, set)| set).collect::<Vec<_>>();
+        assert_eq!(sets.len(), 2);
+        assert!(Arc::ptr_eq(sets[0], sets[1]));
+        assert_eq!(sets[0].as_ref(), &RangeSetBlaze::from_iter([0..=1]));
+        assert!(full.is_full());
+        assert!(empty.is_empty());
+        // A destination with extra unmapped IDs is not universally covered.
+        remap_weights_with_axes(
+            &mut [&mut full],
+            TokenAxisMap::Quotient(&[0, 1, 2]),
+            TokenAxisMap::Injection(&[1, 2]),
+            3, 4,
+        );
+        assert_eq!(full, Weight::from_uniform(0..=2, RangeSetBlaze::from_iter([1..=2])));
+    }
+
+    #[test]
     fn contiguous_disjoint_tsid_range_remap_matches_general() {
         let tokens_a = Arc::new(RangeSetBlaze::from_iter([0..=1]));
         let tokens_b = Arc::new(RangeSetBlaze::from_iter([2..=3]));
@@ -1661,7 +1818,7 @@ mod tests {
         let tokens = Arc::new(RangeSetBlaze::from_iter([0..=2, 4..=4]));
         let token_map = vec![vec![4, 5], vec![0, 1], vec![2, 3], vec![], vec![7, 8, 9]];
         let run_map = AxisImage::explicit(&token_map, 10);
-        assert!(!run_map.destination_order_is_monotone);
+        assert!(!run_map.monotone());
 
         let fast = remap_token_set(&tokens, &run_map, None);
         let general = shared_rangeset(RangeSetBlaze::from_iter(tokens.iter().flat_map(|id| token_map[id as usize].iter().copied())));
