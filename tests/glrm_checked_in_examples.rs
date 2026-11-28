@@ -110,7 +110,7 @@ fn documented_glrm_blocks_import() {
             count += 1;
         }
     }
-    assert_eq!(count, 7);
+    assert_eq!(count, 5);
 }
 
 #[test]
@@ -124,9 +124,8 @@ fn shipped_example_sources_import() {
         ("bindings/node/examples/tool_calls.cjs", include_str!("../bindings/node/examples/tool_calls.cjs"), "fromGlrm(\x60", "\x60"),
         ("python/examples_module_expr.py", include_str!("../python/examples_module_expr.py"), "from_glrm(\n    '", "'"),
         ("GUIDE.md call", include_str!("../GUIDE.md"), "from_glrm('''", "'''"),
-        ("reference call", include_str!("../docs/content/reference.md"), "from_glrm('''", "'''"),
         ("README.md", include_str!("../README.md"), "from_glrm('''", "'''"),
-        ("usage details", include_str!("../docs/content/usage-details.md"), "from_glrm('''", "'''"),
+        ("Python composition", include_str!("../docs/content/python-composition.md"), "from_glrm('''", "'''"),
         ("token sets", include_str!("../docs/token-sets.md"), "from_glrm('''", "'''"),
         ("C++ README", include_str!("../bindings/cpp/README.md"), "from_glrm(R\"(", ")\""),
         ("C++ details", include_str!("../docs/content/cpp-details.md"), "from_glrm(R\"(", ")\""),
@@ -149,7 +148,7 @@ fn shipped_example_sources_import() {
         }
         assert!(found > 0, "{name}: example literal not found");
     }
-    assert_eq!(count, 18);
+    assert_eq!(count, 17);
 }
 
 #[test]

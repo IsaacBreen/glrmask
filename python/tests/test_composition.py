@@ -421,3 +421,15 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
     assert state.commit_token(2)
     assert state.commit_token(1)
     assert state.is_accepting()
+
+
+def test_documented_tool_composition():
+    from pathlib import Path
+
+    doc = Path(__file__).resolve().parents[2] / "docs/content/python-composition.md"
+    code = doc.read_text(encoding="utf-8").split("```python\n", 1)[1].split("\n```", 1)[0]
+    scope = {}
+    exec(code, scope)
+    state = scope["constraint"].start()
+    assert state.commit_bytes(b'<weather>{"city": "Perth"}</weather>')
+    assert state.is_accepting()

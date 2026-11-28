@@ -14,8 +14,6 @@ GLRMask supports general context-free grammars, including ambiguous ones. It acc
 cargo add glrmask
 ```
 
-For the release candidate: `cargo add glrmask@1.0.0-rc.1`.
-
 GLRMask needs Rust 1.89 or later. A minor release may raise the minimum Rust version; a patch release won't.
 
 ## Usage
@@ -23,9 +21,9 @@ GLRMask needs Rust 1.89 or later. A minor release may raise the minimum Rust ver
 GLRMask has four core types:
 
 - `Grammar`: a grammar, written as source text or built from an expression.
-- `Module`: a partially compiled grammar.
 - `Constraint`: a compiled grammar, ready to use.
 - `ConstraintState`: the state of one generated sequence.
+- `Module`: a partially compiled grammar ([see below](#composing-grammars)).
 
 ## Quickstart
 
@@ -70,6 +68,26 @@ fn main() -> glrmask::Result<()> {
 
 fn model(output: &[u8]) -> Vec<f32> {
     (0..257).map(|t| ((t * 7919 + output.len() * 104_729) % 1000) as f32).collect()
+}
+```
+
+## Composing grammars
+
+GLRMask compiles grammars in parts and links them later. A `Module` is a grammar with named slots. Bind each slot to another grammar, a compiled constraint or a token set, then compile. Parts that are already compiled are reused, so linking only does work where the parts meet.
+
+```rust
+use glrmask::{Grammar, Module, Vocab};
+fn main() -> glrmask::Result<()> {
+    let vocab = Vocab::new((0..=255u32).map(|b| (b, vec![b as u8])).collect::<Vec<_>>())?;
+    let weather = Grammar::from_json_schema(
+        r#"{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}"#,
+    )?.compile(&vocab)?;
+    let mut call = Module::new(&Grammar::from_glrm(r#"extern grammar ARGS
+        start call
+        nt call = "<weather>" ARGS "</weather>""#)?);
+    call.bind("ARGS", &weather)?;
+    let _constraint = call.compile(&vocab)?;
+    Ok(())
 }
 ```
 

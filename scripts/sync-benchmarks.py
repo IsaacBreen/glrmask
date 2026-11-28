@@ -96,13 +96,14 @@ def website_measurements():
     return records
 
 
-def website_markdown(data, js):
-    names = ('GLRMask', 'GLRMask dynamic', 'llguidance', 'XGrammar')
+def website_markdown(data, js, guide=False):
+    engines = (0, 1, 2, 3) if guide else (0, 2, 3)
+    names = tuple(('GLRMask', 'GLRMask dynamic', 'llguidance', 'XGrammar')[i] for i in engines)
     def fmt(v):
         return '<0.1' if 0 < v < 0.1 else f'{v:,.1f}'
     def render(rows):
         return '\n'.join(['| Statistic | ' + ' | '.join(names) + ' |', '|---|' + '---:|' * len(names)] +
-                         ['| ' + r['label'] + ' | ' + ' | '.join(map(fmt, r['values'])) + ' |' for r in rows])
+                         ['| ' + r['label'] + ' | ' + ' | '.join(fmt(r['values'][i]) for i in engines) + ' |' for r in rows])
     sections = []
     for record, label, slug in [(data, 'JSON Schema', 'json'), (js, 'JavaScript', 'javascript')]:
         tbm = [r for r in record['tables']['tbm'] if r['label'].lower() != 'p99.5']
@@ -110,14 +111,14 @@ def website_markdown(data, js):
         if slug == 'javascript':
             ttfm = [dict(r, label='JavaScript') for r in ttfm if r['label'] == 'mean']
         sections.append(f'### {label}\n\nTime between masks. Lower is better.\n\n{{{{{slug}-plot}}}}\n\n**Time between masks (µs)**\n\n' + render(tbm) + '\n\n**Time to first mask (ms)**\n\n' + render(ttfm))
-    return '\n\n'.join(sections) + '\n\n{{dynamic}}\n\n19 October 2026 campaign · AWS c7i.16xlarge, Llama 3.1 8B Instruct vocabulary; GLRMask 3d65c7a, llguidance 1.9.1, XGrammar 0.2.8; matched valid trajectories (JSON: 1,570,228 positions; JavaScript: 2,370); JavaScript TTFM is a single cold observation. [Measurement details](https://glrmask.com/#benchmarks).\n'
+    return '\n\n'.join(sections) + ('\n\n{{dynamic}}' if guide else '') + '\n\n19 October 2026 campaign · AWS c7i.16xlarge, Llama 3.1 8B Instruct vocabulary; GLRMask 3d65c7a, llguidance 1.9.1, XGrammar 0.2.8; matched valid trajectories (JSON: 1,570,228 positions; JavaScript: 2,370); JavaScript TTFM is a single cold observation. [Measurement details](https://glrmask.com/#benchmarks).\n'
 
 
-def website_svg(record, spec, dark, label):
-    # New figures show the same three series as the interactive front page.
+def website_svg(record, spec, dark, label, guide=False):
+    # The guide adds dynamic to the three front-page series.
     import copy
     spec = copy.deepcopy(spec)
-    spec['display_modes'] = ['static', 'llguidance', 'xgrammar']
+    spec['display_modes'] = ['static', 'dynamic', 'llguidance', 'xgrammar'] if guide else ['static', 'llguidance', 'xgrammar']
     for palette in spec['palette'].values():
         palette['xgrammar'] = '#267b56' if not dark else '#72c39a'
     if label == 'JavaScript':
@@ -136,7 +137,10 @@ def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dyn
     curve_description='Straight segments join observed tail samples; no smoothing or extrapolation.'
     series_description=('Measured GLRMask, GLRMask dynamic and llguidance curves. GLRMask is faded for context.'
                         if include_dynamic else 'Measured GLRMask Static and llguidance 1.8.0 curves.')
-    if website: series_description = 'Measured GLRMask, llguidance 1.9.1 and XGrammar 0.2.8 curves.'
+    if website:
+        series_description = 'Measured GLRMask, llguidance 1.9.1 and XGrammar 0.2.8 curves.'
+        if 'dynamic' in spec['display_modes']:
+            series_description = series_description.replace('GLRMask,', 'GLRMask, GLRMask dynamic,')
     x=lambda v:left+(math.log10(xmax)-math.log10(v))/(math.log10(xmax)-math.log10(xmin))*(right-left)
     y=lambda v:bottom-(math.log10(v)-math.log10(ymin))/(math.log10(ymax)-math.log10(ymin))*(bottom-top)
     out=[f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" role="img" aria-labelledby="title description">',
@@ -229,11 +233,14 @@ def main():
             assert record == json.loads((args.website_root/f'src/data/glrmask-aws-{dataset}-five-frameworks.json').read_text(encoding='utf-8'))
     spec=json.loads((CONTENT/'tail-chart.json').read_text(encoding="utf-8"))
     web_data, web_js = website_measurements()
-    files={CONTENT/'benchmarks.md':website_markdown(web_data,web_js)}
+    files={CONTENT/'benchmarks.md':website_markdown(web_data,web_js),
+           CONTENT/'guide-benchmarks.md':website_markdown(web_data,web_js,guide=True)}
     for slug, record, label in [('json',web_data,'JSON Schema'),('javascript',web_js,'JavaScript')]:
         stem=ROOT/f'docs/assets/benchmark-tbm-{slug}-2026-10-19'
         for dark in [False, True]:
             files[Path(str(stem)+('-dark' if dark else '')+'.svg')]=website_svg(record,spec,dark,label)
+            guide_stem=ROOT/f'docs/assets/benchmark-tbm-{slug}-guide-2026-10-19'
+            files[Path(str(guide_stem)+('-dark' if dark else '')+'.svg')]=website_svg(record,spec,dark,label,guide=True)
     for dataset,measured,tail,label in [('json','2026-10-14',data['tail'],'JSON Schema'),('json-dynamic','2026-10-14',data['tail'],'JSON Schema · Dynamic'),('javascript','2026-10-14',js['tail'],'JavaScript')]:
         stem=ROOT/f'docs/assets/benchmark-tbm-{dataset}-{measured}'
         for dark in [False,True]:files=files|{Path(str(stem)+('-dark' if dark else '')+'.svg'):svg(tail,spec,dark,label,'json' if dataset=='json-dynamic' else dataset,dataset=='json-dynamic')}

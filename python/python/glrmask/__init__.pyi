@@ -8,16 +8,14 @@ GLRMask supports general context-free grammars, including ambiguous ones. It acc
 python -m pip install glrmask
 ```
 
-For the release candidate: `pip install --pre glrmask` or `pip install glrmask==1.0.0rc1`.
-
 ## Usage
 
 GLRMask has four core types:
 
 - `Grammar`: a grammar, written as source text or built from an expression.
-- `Module`: a partially compiled grammar.
 - `Constraint`: a compiled grammar, ready to use.
 - `ConstraintState`: the state of one generated sequence.
+- `Module`: a partially compiled grammar ([see below](#composing-grammars)).
 
 ## Quickstart
 
@@ -58,6 +56,23 @@ while True:
 if not state.is_accepting():
     raise RuntimeError("incomplete output")
 print(bytes(output).decode())  # e.g. {"color": "blue"}
+```
+
+## Composing grammars
+
+GLRMask compiles grammars in parts and links them later. A `Module` is a grammar with named slots. Bind each slot to another grammar, a compiled constraint or a token set, then compile. Parts that are already compiled are reused, so linking only does work where the parts meet.
+
+```python
+import glrmask
+vocab = glrmask.Vocab({i: bytes([i]) for i in range(256)})
+weather = glrmask.Grammar.from_json_schema(
+    '{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}'
+).compile(vocab)
+call = glrmask.Module(glrmask.Grammar.from_glrm('''extern grammar ARGS
+    start call
+    nt call = "<weather>" ARGS "</weather>"'''))
+call.bind("ARGS", weather)
+constraint = call.compile(vocab)
 ```
 
 ## Learn more
