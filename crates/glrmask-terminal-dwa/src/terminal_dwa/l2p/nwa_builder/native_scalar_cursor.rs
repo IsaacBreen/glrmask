@@ -3,16 +3,16 @@ use super::*;
 
 impl NfaTrieScanCache<'_> {
     pub(super) fn execute_native_scalar_into(
-        &mut self, input: &[u8], start: u32, matches: &mut Vec<TokenizerMatch>,
+        &mut self, action: &mut LexicalStateAction<'_>, input: &[u8], start: u32, matches: &mut Vec<TokenizerMatch>,
         flat: Option<&[u32]>, validate: bool,
     ) -> SmallVec<[u32; 1]> {
         let source = RawCursorSource {
             tokenizer: self.tokenizer,
             flat: flat.filter(|table| table.len() == self.tokenizer.num_states() as usize * 256),
         };
-        let ends = self.execute_cursor::<true, _>(&source, input, start, matches);
+        let ends = self.execute_cursor::<true, _>(action, &source, input, start, matches);
         if validate || self.strict_reference {
-            self.verify_scalar_reference(input, start, matches, &ends);
+            self.verify_scalar_reference(action, input, start, matches, &ends);
         }
         ends
     }
@@ -38,13 +38,15 @@ mod tests{
                 let active=(0..6).map(|t|case%3!=1||t!=4).collect::<Vec<_>>();
                 let mut ordinary=NfaTrieScanCache::new(&tokenizer,Some(active.clone()));
                 let mut candidate=NfaTrieScanCache::new(&tokenizer,Some(active));
+                let mut ordinary_action=LexicalStateAction::new(&tokenizer);
+                let mut candidate_action=LexicalStateAction::new(&tokenizer);
                 if case==0{ordinary.match_stamp=u32::MAX-1;candidate.match_stamp=u32::MAX-1;}
                 let mut words=vec![vec![],b"a".to_vec(),b"abc!".to_vec(),b"ab !a".to_vec(),b"bc".to_vec(),vec![0,255,128]];
                 for _ in 0..16{let n=next()%16;words.push((0..n).map(|_|b"abc! \0\xff\x80"[next()%8]).collect());}
                 for start in 0..tokenizer.num_states(){for word in &words{for supplied in [None,Some(flat.as_slice()),Some(&flat[..flat.len()-1])]{
                     let mut a=Vec::new();let mut b=Vec::new();
-                    let x=ordinary.execute_into(word,start,&mut a);
-                    let y=candidate.execute_native_scalar_into(word,start,&mut b,supplied,false);
+                    let x=ordinary.execute_into(&mut ordinary_action,word,start,&mut a);
+                    let y=candidate.execute_native_scalar_into(&mut candidate_action,word,start,&mut b,supplied,false);
                     candidate.verify_reference(word,start,&b,&y);
                     assert_eq!(x,y,"end case={case} part={partitioned} start={start} word={word:?}");
                     assert_eq!(a,b,"matches case={case} part={partitioned} start={start} word={word:?}");comparisons+=1;

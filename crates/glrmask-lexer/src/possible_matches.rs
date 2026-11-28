@@ -1,6 +1,7 @@
 //! Possible-match tables for tokenizer states and vocab-prefix subtrees.
 
 use crate::automata::lexer::Lexer;
+use crate::automata::lexer::observation::LexicalStateAction;
 use std::rc::Rc;
 
 use range_set_blaze::RangeSetBlaze;
@@ -45,6 +46,7 @@ pub struct PossibleMatchesComputer<'a> {
     self_loop_bytes: FxHashMap<u32, U8Set>,
     flat_transitions: Vec<Option<Box<[u32; 256]>>>,
     scalar_deterministic_scan: bool,
+    state_action: Option<Box<LexicalStateAction<'a>>>,
 }
 
 impl<'a> PossibleMatchesComputer<'a> {
@@ -65,7 +67,96 @@ impl<'a> PossibleMatchesComputer<'a> {
             flat_transitions: vec![None; tokenizer.num_states() as usize],
             scalar_deterministic_scan: !tokenizer.has_epsilon_transitions()
                 || tokenizer.has_scalar_deterministic_dispatch(),
+            state_action: None,
         }
+    }
+
+    /// The NWA walk and its possible-match queries must share the exact
+    /// source tokenizer, never merely a shape-compatible induced coordinate.
+    /// PM-only sparse callers retain their allocation-free scalar/state-set
+    /// path; a trie builder enables this shared lazy action when needed.
+    pub fn state_action(&mut self, tokenizer: &Tokenizer) -> &mut LexicalStateAction<'a> {
+        assert!(std::ptr::eq(self.tokenizer, tokenizer), "lexical action source mismatch");
+        let source = self.tokenizer;
+        self.state_action.get_or_insert_with(|| Box::new(LexicalStateAction::new(source)))
+    }
+
+    fn initial_states(&mut self, state: u32) -> TokenizerStateSet {
+        if let Some(action) = &mut self.state_action {
+            let config = action.start(state);
+            TokenizerStateSet::from_slice(action.states(config))
+        } else {
+            let mut states = self.tokenizer.execute_from_state_end_only(&[], state);
+            states.sort_unstable();
+            states.dedup();
+            states
+        }
+    }
+
+    #[inline]
+    fn advance(&mut self, states: &[u32], byte: u8) -> TokenizerStateSet {
+        if states.len() == 1 && self.scalar_deterministic_scan {
+            match self.fast_step(states[0], byte) {
+                Some(next) => SmallVec::from_buf([next]),
+                None => TokenizerStateSet::new(),
+            }
+        } else if let Some(action) = &mut self.state_action {
+            let config = action.intern_boundary(states);
+            let target = action.step(config, byte);
+            TokenizerStateSet::from_slice(action.states(target))
+        } else {
+            self.tokenizer.step_all(states, byte)
+        }
+    }
+
+    /// Observe all completed terminals along a segment, independently of its
+    /// final survival. The node's descendants share every byte in this edge.
+    fn observe_segment(
+        &mut self, mut states: TokenizerStateSet, bytes: &[u8],
+        reachable: &RangeSetBlaze<u32>, result: &mut PossibleMatchMap,
+    ) -> TokenizerStateSet {
+        // Retain the shared configuration coordinate across an entire edge.
+        // Scalar dispatch keeps its direct row action; cold PM-only callers
+        // keep the ordinary state-set representation without forcing a memo.
+        let mut config = if self.scalar_deterministic_scan {
+            None
+        } else {
+            self.state_action.as_mut().map(|action| action.intern_boundary(&states))
+        };
+        let tokenizer = self.tokenizer;
+        for &byte in bytes {
+            let observed = if let Some(config) = &mut config {
+                let action = self.state_action.as_mut().expect("shared configuration action");
+                *config = action.step(*config, byte);
+                action.states(*config)
+            } else {
+                states = self.advance(&states, byte);
+                states.as_slice()
+            };
+            if observed.is_empty() { break; }
+            for &state in observed {
+                for terminal in tokenizer.matched_terminals_iter(state) {
+                    merge_token_ids(result.entry(terminal).or_default(), reachable);
+                }
+            }
+        }
+        if let Some(config) = config {
+            TokenizerStateSet::from_slice(self.state_action.as_ref().unwrap().states(config))
+        } else {
+            states
+        }
+    }
+
+    fn project_boundary(&self, mut states: TokenizerStateSet) -> TokenizerStateSet {
+        states.retain(|state| !self.tokenizer.is_end(*state));
+        if let Some(map) = self.canonical_state {
+            for state in &mut states {
+                *state = map.get(*state as usize).copied().unwrap_or(*state);
+            }
+            states.sort_unstable();
+            states.dedup();
+        }
+        states
     }
 
     #[inline]
@@ -109,9 +200,7 @@ impl<'a> PossibleMatchesComputer<'a> {
         node: VocabPrefixTreeNode<'_>,
         tokenizer_state: u32,
     ) -> Rc<PossibleMatchMap> {
-        let states = self
-            .tokenizer
-            .execute_from_state_end_only(&[], tokenizer_state);
+        let states = self.initial_states(tokenizer_state);
         self.possible_matches_for_node_states(node, states)
     }
 
@@ -132,49 +221,15 @@ impl<'a> PossibleMatchesComputer<'a> {
             return self.possible_matches_for_node(node, tokenizer_state);
         }
 
-        let mut states = self
-            .tokenizer
-            .execute_from_state_end_only(&[], tokenizer_state);
-        states.sort_unstable();
-        states.dedup();
-
+        let states = self.initial_states(tokenizer_state);
         let mut result = PossibleMatchMap::default();
         let reachable = self.reachable_for_node(node);
-
-        for &byte in suffix {
-            states = if states.len() == 1 && self.scalar_deterministic_scan {
-                match self.fast_step(states[0], byte) {
-                    Some(next) => SmallVec::from_buf([next]),
-                    None => TokenizerStateSet::new(),
-                }
-            } else {
-                self.tokenizer.step_all(&states, byte)
-            };
-            if states.is_empty() {
-                return Rc::new(result);
-            }
-
-            for &state in &states {
-                for terminal in self.tokenizer.matched_terminals_iter(state) {
-                    let existing = result.entry(terminal).or_default();
-                    merge_token_ids(existing, reachable.as_ref());
-                }
-            }
-        }
-
-        states.retain(|state| !self.tokenizer.is_end(*state));
+        let states = self.observe_segment(states, suffix, reachable.as_ref(), &mut result);
+        let states = self.project_boundary(states);
         if !states.is_empty() {
-            if let Some(map) = self.canonical_state {
-                for state in &mut states {
-                    *state = map.get(*state as usize).copied().unwrap_or(*state);
-                }
-                states.sort_unstable();
-                states.dedup();
-            }
             let descendant_matches = self.possible_matches_for_node_states(node, states);
             merge_possible_match_maps(&mut result, descendant_matches.as_ref());
         }
-
         Rc::new(result)
     }
 
@@ -208,40 +263,12 @@ impl<'a> PossibleMatchesComputer<'a> {
         }
 
         for (segment_bytes, child) in node.iter_children() {
-            let mut current_states = tokenizer_states.clone();
             let reachable = self.reachable_for_node(child);
-
-            for &byte in segment_bytes {
-                current_states = if current_states.len() == 1
-                    && self.scalar_deterministic_scan
-                {
-                    match self.fast_step(current_states[0], byte) {
-                        Some(next) => SmallVec::from_buf([next]),
-                        None => TokenizerStateSet::new(),
-                    }
-                } else {
-                    self.tokenizer.step_all(&current_states, byte)
-                };
-                if current_states.is_empty() {
-                    break;
-                }
-                for &current_state in &current_states {
-                    for terminal in self.tokenizer.matched_terminals_iter(current_state) {
-                        let existing = result.entry(terminal).or_default();
-                        merge_token_ids(existing, reachable.as_ref());
-                    }
-                }
-            }
-
-            current_states.retain(|state| !self.tokenizer.is_end(*state));
+            let states = self.observe_segment(
+                tokenizer_states.clone(), segment_bytes, reachable.as_ref(), &mut result,
+            );
+            let current_states = self.project_boundary(states);
             if !current_states.is_empty() {
-                if let Some(map) = self.canonical_state {
-                    for state in &mut current_states {
-                        *state = map.get(*state as usize).copied().unwrap_or(*state);
-                    }
-                    current_states.sort_unstable();
-                    current_states.dedup();
-                }
                 if current_states.len() == 1
                     && self.can_skip_self_loop_subtree(child, current_states[0])
                 {

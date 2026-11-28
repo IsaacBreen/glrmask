@@ -4,6 +4,7 @@
 //! and constructs NWA transitions for each (byte, tokenizer-state) pair.
 
 use crate::automata::lexer::Lexer;
+use crate::automata::lexer::observation::{ConfigActionCache, LexicalStateAction};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
@@ -35,9 +36,6 @@ type LeafTokenIds = SmallVec<[u32; 8]>;
 type DeferredFutureStateGroups = SmallVec<[(TokenizerState, LeafTokenIds); 4]>;
 type DeferredUncoloredFutureLeafBuffer = Vec<DeferredFutureStateGroups>;
 type FutureTerminalColorGroups = SmallVec<[(ColorId, SmallVec<[TerminalID; 4]>); 8]>;
-
-const NFA_CONFIG_UNKNOWN: u32 = u32::MAX;
-const NFA_CONFIG_DEAD: u32 = u32::MAX - 1;
 
 /// Scalar access is an acceleration of the same epsilon-closed byte action.
 /// A borrowed induced view must additionally prove that every observed raw
@@ -78,22 +76,14 @@ impl CursorSource for RawCursorSource<'_> {
     }
 }
 
-/// On-demand powerset scanner used only by the trie walker for epsilon-NFA
-/// tokenizers. Configurations are canonical epsilon-closed raw-state sets.
-///
-/// The generic tokenizer executor rebuilds epsilon closures and longest-match
-/// hash maps for every `(trie segment, start state)` scan. The trie walker
-/// revisits the same scanner configurations and byte transitions heavily, so
-/// cache those exact scanner operations locally instead. Raw TSIDs remain the
-/// NWA coordinate; configuration IDs never leave this cache.
+/// Ordered longest-match projection over the same source-pinned action used
+/// by possible-match pruning. The active-terminal observation cache belongs
+/// to this projection, not to the unrestricted epsilon action. Raw TSIDs
+/// remain the NWA coordinate; configuration IDs are local memo keys.
 struct NfaTrieScanCache<'tok> {
     tokenizer: &'tok Tokenizer,
     active_terminals: Option<Vec<bool>>,
-    config_ids: FxHashMap<Vec<u32>, u32>,
-    configs: Vec<Box<[u32]>>,
-    transitions: Vec<Option<Box<[u32; 256]>>>,
     observations: Vec<Option<Box<[(TerminalID, u32)]>>>,
-    raw_start_config: Vec<u32>,
     match_seen_stamp: Vec<u32>,
     match_width: Vec<usize>,
     match_end_states: Vec<SmallVec<[u32; 1]>>,
@@ -108,11 +98,7 @@ impl<'tok> NfaTrieScanCache<'tok> {
         Self {
             tokenizer,
             active_terminals,
-            config_ids: FxHashMap::default(),
-            configs: Vec::new(),
-            transitions: Vec::new(),
             observations: Vec::new(),
-            raw_start_config: vec![NFA_CONFIG_UNKNOWN; tokenizer.num_states() as usize],
             match_seen_stamp: vec![0; terminal_count],
             match_width: vec![0; terminal_count],
             match_end_states: (0..terminal_count).map(|_| SmallVec::new()).collect(),
@@ -125,81 +111,16 @@ impl<'tok> NfaTrieScanCache<'tok> {
         }
     }
 
-    fn intern_config(&mut self, mut states: Vec<u32>) -> u32 {
-        states.sort_unstable();
-        states.dedup();
-        if let Some(&id) = self.config_ids.get(states.as_slice()) {
-            return id;
-        }
-        let id = self.configs.len() as u32;
-        self.config_ids.insert(states.clone(), id);
-        self.configs.push(states.into_boxed_slice());
-        self.transitions.push(None);
-        self.observations.push(None);
-        id
-    }
-
-    fn config_for_raw_start(&mut self, state: u32) -> u32 {
-        let slot = state as usize;
-        let cached = self.raw_start_config[slot];
-        if cached != NFA_CONFIG_UNKNOWN {
-            return cached;
-        }
-        let closure = self
-            .tokenizer
-            .execute_from_state_end_only(&[], state)
-            .into_vec();
-        let config = self.intern_config(closure);
-        self.raw_start_config[slot] = config;
-        config
-    }
-
-    fn step_config(&mut self, config: u32, byte: u8) -> Option<u32> {
+    fn ensure_observations(&mut self, action: &LexicalStateAction<'_>, config: u32) {
         let config_index = config as usize;
-        if let Some(row) = self.transitions[config_index].as_ref() {
-            let cached = row[byte as usize];
-            if cached != NFA_CONFIG_UNKNOWN {
-                return (cached != NFA_CONFIG_DEAD).then_some(cached);
-            }
+        if config_index >= self.observations.len() {
+            self.observations.resize_with(config_index + 1, || None);
         }
-
-        let direct_targets = {
-            let states = &self.configs[config_index];
-            let mut targets = SmallVec::<[u32; 8]>::new();
-            for &state in states.iter() {
-                if let Some(target) = self.tokenizer.step(state, byte) {
-                    targets.push(target);
-                }
-            }
-            targets.sort_unstable();
-            targets.dedup();
-            targets
-        };
-
-        let target = if direct_targets.is_empty() {
-            NFA_CONFIG_DEAD
-        } else {
-            let mut closed_targets = Vec::<u32>::new();
-            for target in direct_targets {
-                let target_config = self.config_for_raw_start(target);
-                closed_targets.extend_from_slice(&self.configs[target_config as usize]);
-            }
-            self.intern_config(closed_targets)
-        };
-
-        let row = self.transitions[config_index]
-            .get_or_insert_with(|| Box::new([NFA_CONFIG_UNKNOWN; 256]));
-        row[byte as usize] = target;
-        (target != NFA_CONFIG_DEAD).then_some(target)
-    }
-
-    fn ensure_observations(&mut self, config: u32) {
-        let config_index = config as usize;
         if self.observations[config_index].is_some() {
             return;
         }
         let mut observations = Vec::<(TerminalID, u32)>::new();
-        for &state in self.configs[config_index].iter() {
+        for &state in action.states(config) {
             observations.extend(
                 self.tokenizer
                     .matched_terminals_iter(state)
@@ -238,7 +159,8 @@ impl<'tok> NfaTrieScanCache<'tok> {
     /// One ordered longest-match observation recurrence. Scalar mode merely
     /// represents a singleton epsilon-free configuration without interning it.
     fn execute_cursor<const SCALAR: bool, S: CursorSource>(
-        &mut self, source: &S, input: &[u8], start: u32, matches: &mut Vec<TokenizerMatch>,
+        &mut self, action: &mut LexicalStateAction<'_>, source: &S,
+        input: &[u8], start: u32, matches: &mut Vec<TokenizerMatch>,
     ) -> SmallVec<[u32; 1]> {
         self.match_stamp = self.match_stamp.wrapping_add(1);
         if self.match_stamp == 0 {
@@ -251,11 +173,11 @@ impl<'tok> NfaTrieScanCache<'tok> {
 
         let mut scalar = (SCALAR && !source.has_epsilon(start)).then_some(start);
         let mut config = if scalar.is_none() {
-            self.config_for_raw_start(start)
+            action.start(start)
         } else {
-            NFA_CONFIG_UNKNOWN
+            ConfigActionCache::DEAD
         };
-        if scalar.is_none() && !source.check_config(&self.configs[config as usize]) {
+        if scalar.is_none() && !source.check_config(action.states(config)) {
             return SmallVec::new();
         }
 
@@ -268,17 +190,17 @@ impl<'tok> NfaTrieScanCache<'tok> {
                 };
                 if source.has_epsilon(target) {
                     scalar = None;
-                    config = self.config_for_raw_start(target);
+                    config = action.start(target);
                 } else {
                     scalar = Some(target);
                 }
             } else {
-                let Some(next) = self.step_config(config, byte) else {
+                config = action.step(config, byte);
+                if config == ConfigActionCache::DEAD {
                     alive = false;
                     break;
-                };
-                config = next;
-                let states = &self.configs[config as usize];
+                }
+                let states = action.states(config);
                 if !source.check_config(states) {
                     alive = false;
                     break;
@@ -300,11 +222,11 @@ impl<'tok> NfaTrieScanCache<'tok> {
                     break;
                 }
             } else {
-                if !source.check_config(&self.configs[config as usize]) {
+                if config == ConfigActionCache::DEAD || !source.check_config(action.states(config)) {
                     alive = false;
                     break;
                 }
-                self.ensure_observations(config);
+                self.ensure_observations(action, config);
                 let observations = self.observations[config as usize]
                     .as_ref().expect("configuration observations initialized").len();
                 for i in 0..observations {
@@ -326,7 +248,7 @@ impl<'tok> NfaTrieScanCache<'tok> {
         } else if let Some(state) = scalar {
             SmallVec::from_buf([state])
         } else {
-            SmallVec::from_slice(&self.configs[config as usize])
+            SmallVec::from_slice(action.states(config))
         }
     }
 
@@ -346,10 +268,10 @@ impl<'tok> NfaTrieScanCache<'tok> {
     }
 
     fn verify_scalar_reference(
-        &mut self, input: &[u8], start: u32, matches: &[TokenizerMatch], ends: &[u32],
+        &mut self, action: &mut LexicalStateAction<'_>, input: &[u8], start: u32, matches: &[TokenizerMatch], ends: &[u32],
     ) {
         let mut reference = Vec::new();
-        let reference_ends = self.execute_into(input, start, &mut reference);
+        let reference_ends = self.execute_into(action, input, start, &mut reference);
         assert_eq!(ends, reference_ends.as_slice(), "scalar cursor changed ordered end states");
         assert_eq!(matches, reference.as_slice(), "scalar cursor changed ordered longest matches");
         if !self.strict_reference {
@@ -358,10 +280,10 @@ impl<'tok> NfaTrieScanCache<'tok> {
     }
 
     fn execute_into(
-        &mut self, input: &[u8], start: u32, matches: &mut Vec<TokenizerMatch>,
+        &mut self, action: &mut LexicalStateAction<'_>, input: &[u8], start: u32, matches: &mut Vec<TokenizerMatch>,
     ) -> SmallVec<[u32; 1]> {
         let source = RawCursorSource { tokenizer: self.tokenizer, flat: None };
-        let ends = self.execute_cursor::<false, _>(&source, input, start, matches);
+        let ends = self.execute_cursor::<false, _>(action, &source, input, start, matches);
         if self.strict_reference {
             self.verify_reference(input, start, matches, &ends);
         }
@@ -1371,6 +1293,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         .as_mut()
                         .expect("epsilon tokenizer must initialize NFA trie scan cache")
                         .execute_into(
+                            self.possible_matches.state_action(self.tokenizer),
                             remaining,
                             tokenizer_state,
                             &mut matches_buf,

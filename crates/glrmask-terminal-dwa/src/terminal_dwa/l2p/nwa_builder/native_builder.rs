@@ -952,12 +952,13 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 let end_states = if self.has_epsilon_transitions {
                     let raw=self.original_state(tokenizer_state);
                     let cache=self.nfa_scan_cache.as_mut().expect("epsilon tokenizer must initialize NFA trie scan cache");
+                    let action = self.possible_matches.state_action(self.tokenizer);
                     let mut ends=if let Some(prepared)=self.borrowed_cursor.as_ref(){
-                        cache.execute_native_borrowed_into(remaining,raw,&mut matches_buf,prepared,self.validate_scalar_cursor)
+                        cache.execute_native_borrowed_into(action,remaining,raw,&mut matches_buf,prepared,self.validate_scalar_cursor)
                     }else if self.scalar_cursor {
-                        cache.execute_native_scalar_into(remaining,raw,&mut matches_buf,
+                        cache.execute_native_scalar_into(action,remaining,raw,&mut matches_buf,
                             self.shared_flat_transitions,self.validate_scalar_cursor)
-                    }else{cache.execute_into(remaining,raw,&mut matches_buf)};
+                    }else{cache.execute_into(action,remaining,raw,&mut matches_buf)};
                     if let Some(map)=self.borrowed_map {
                         let mut failed=false;
                         matches_buf.retain_mut(|matched|{if let Some(q)=map.logical(matched.end_state){matched.end_state=q;true}else{failed=true;false}});

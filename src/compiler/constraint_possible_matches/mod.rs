@@ -3181,6 +3181,49 @@ mod tests {
     }
 
     #[test]
+    fn shared_lexical_action_preserves_raw_and_projected_prefix_observations() {
+        let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
+        let vocab = Vocab::from_entries_unchecked(vec![
+            (0, b"".to_vec()), (1, b"a".to_vec()), (2, b"ab".to_vec()),
+            (3, b"ba".to_vec()), (7, b"aba".to_vec()), (9, b"x".to_vec()),
+        ]);
+        let tree = vocab.lexical_vocabulary().trie();
+        let mut plain = PossibleMatchesComputer::new(&tokenizer);
+        let mut shared = PossibleMatchesComputer::new(&tokenizer);
+        {
+            let action = shared.state_action(&tokenizer);
+            for raw in 0..tokenizer.num_states() {
+                let config = action.start(raw);
+                let expected = tokenizer.execute_from_state_end_only(&[], raw);
+                assert_eq!(action.states(config), expected.as_slice());
+                // A singleton boundary need not be epsilon-closed. Its
+                // zero-byte observation must remain that exact singleton.
+                let boundary = action.intern_boundary(&[raw]);
+                assert_eq!(action.states(boundary), &[raw]);
+                for byte in [b'a', b'b', b'x'] {
+                    let target = action.step(boundary, byte);
+                    let expected = tokenizer.step_all(&[raw], byte);
+                    assert_eq!(action.states(target), expected.as_slice());
+                    let target = action.step(config, byte);
+                    let expected = tokenizer.step_all(action.states(config), byte);
+                    assert_eq!(action.states(target), expected.as_slice());
+                }
+            }
+        }
+        // Exercise PM after longest-match-style action queries have already
+        // populated the memo; both consumers must retain their own endpoint
+        // and terminal-selection semantics.
+        for raw in 0..tokenizer.num_states() {
+            for suffix in [b"".as_slice(), b"a", b"ab", b"bax", b"x"] {
+                assert_eq!(
+                    shared.possible_matches_for_suffix_and_node(suffix, tree.root(), raw),
+                    plain.possible_matches_for_suffix_and_node(suffix, tree.root(), raw),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn epsilon_powerset_interval_collector_matches_sparse_nfa_rows() {
         let tokenizer = arbitrary_epsilon_l1_test_tokenizer();
         assert!(tokenizer.has_epsilon_transitions());

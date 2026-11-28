@@ -65,12 +65,12 @@ impl CursorSource for BorrowedScalarCache<'_> {
 
 impl NfaTrieScanCache<'_> {
     pub(super) fn execute_native_borrowed_into(
-        &mut self, input: &[u8], start: u32, matches: &mut Vec<TokenizerMatch>,
+        &mut self, action: &mut LexicalStateAction<'_>, input: &[u8], start: u32, matches: &mut Vec<TokenizerMatch>,
         prepared: &BorrowedScalarCache<'_>, validate: bool,
     ) -> SmallVec<[u32; 1]> {
-        let ends = self.execute_cursor::<true, _>(prepared, input, start, matches);
+        let ends = self.execute_cursor::<true, _>(action, prepared, input, start, matches);
         if !prepared.failed.get() && (validate || self.strict_reference) {
-            self.verify_scalar_reference(input, start, matches, &ends);
+            self.verify_scalar_reference(action, input, start, matches, &ends);
         }
         ends
     }

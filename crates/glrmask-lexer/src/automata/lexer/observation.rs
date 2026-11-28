@@ -1,5 +1,7 @@
 //! Shared exact byte-action layouts for compiler observations.
 use std::sync::Arc;
+use super::{Lexer, tokenizer::{Tokenizer, TokenizerStateSet}};
+use smallvec::SmallVec;
 /// An exact byte action on the represented alphabet. Dense physical rows and
 /// finite-vocabulary quotient rows differ only in their column map. The rows
 /// always exist; derived transposes must never stand in for missing topology.
@@ -209,7 +211,12 @@ pub struct ConfigActionCache {
     configs: ConfigInterner,
     byte_slot: [u16; 256],
     width: usize,
-    transitions: Vec<u32>,
+    transitions: ConfigMemoRows,
+}
+
+enum ConfigMemoRows {
+    Flat(Vec<u32>),
+    Lazy(Vec<Option<Box<[u32]>>>),
 }
 
 impl ConfigActionCache {
@@ -220,6 +227,22 @@ impl ConfigActionCache {
         bytes: impl IntoIterator<Item = u8>,
         physical_class: impl Fn(u8) -> usize,
         singleton_state_count: Option<usize>,
+    ) -> Self {
+        Self::new_with_layout(bytes, physical_class, singleton_state_count, false)
+    }
+
+    pub fn new_lazy(
+        bytes: impl IntoIterator<Item = u8>,
+        physical_class: impl Fn(u8) -> usize,
+    ) -> Self {
+        Self::new_with_layout(bytes, physical_class, None, true)
+    }
+
+    fn new_with_layout(
+        bytes: impl IntoIterator<Item = u8>,
+        physical_class: impl Fn(u8) -> usize,
+        singleton_state_count: Option<usize>,
+        lazy: bool,
     ) -> Self {
         let mut byte_slot = [u16::MAX; 256];
         let mut physical_slots = [u16::MAX; 256];
@@ -237,7 +260,11 @@ impl ConfigActionCache {
         );
         Self {
             configs, byte_slot, width,
-            transitions: Vec::with_capacity(singleton_state_count.unwrap_or(0).saturating_mul(width)),
+            transitions: if lazy {
+                ConfigMemoRows::Lazy(Vec::new())
+            } else {
+                ConfigMemoRows::Flat(Vec::with_capacity(singleton_state_count.unwrap_or(0).saturating_mul(width)))
+            },
         }
     }
 
@@ -247,7 +274,10 @@ impl ConfigActionCache {
         assert!(id < Self::UNKNOWN, "configuration ID exhausted");
         let inserted = self.configs.len() != before;
         if inserted {
-            self.transitions.resize(self.configs.len() * self.width, Self::UNKNOWN);
+            match &mut self.transitions {
+                ConfigMemoRows::Flat(rows) => rows.resize(self.configs.len() * self.width, Self::UNKNOWN),
+                ConfigMemoRows::Lazy(rows) => rows.resize_with(self.configs.len(), || None),
+            }
         }
         (id, inserted)
     }
@@ -271,22 +301,123 @@ impl ConfigActionCache {
     }
 
     #[inline]
-    fn slot(&self, state: u32, byte: u8) -> Option<usize> {
+    fn column(&self, byte: u8) -> Option<usize> {
         let slot = self.byte_slot[byte as usize];
-        if slot == u16::MAX { None } else { Some(state as usize * self.width + slot as usize) }
+        (slot != u16::MAX).then_some(slot as usize)
     }
 
     #[inline]
     pub fn get(&self, state: u32, byte: u8) -> Option<u32> {
-        let target = self.transitions[self.slot(state, byte)?];
+        let column = self.column(byte)?;
+        let target = match &self.transitions {
+            ConfigMemoRows::Flat(rows) => rows[state as usize * self.width + column],
+            ConfigMemoRows::Lazy(rows) => rows[state as usize].as_ref()?[column],
+        };
         (target != Self::UNKNOWN).then_some(target)
     }
 
     #[inline]
     pub fn set(&mut self, state: u32, byte: u8, target: u32) {
-        if let Some(slot) = self.slot(state, byte) {
-            self.transitions[slot] = target;
+        let Some(column) = self.column(byte) else { return; };
+        match &mut self.transitions {
+            ConfigMemoRows::Flat(rows) => rows[state as usize * self.width + column] = target,
+            ConfigMemoRows::Lazy(rows) => {
+                let row = rows[state as usize].get_or_insert_with(||
+                    vec![Self::UNKNOWN; self.width].into_boxed_slice());
+                row[column] = target;
+            }
         }
+    }
+}
+
+/// Source-pinned, unrestricted epsilon action shared by lexical observations.
+/// Boundary pruning may supply a nonclosed set; the closed bit is only an
+/// acceleration certificate, not part of its semantic identity. Every byte
+/// step denotes closure(move(closure(S), byte)).
+pub struct LexicalStateAction<'a> {
+    tokenizer: &'a Tokenizer,
+    memo: ConfigActionCache,
+    closed: Vec<bool>,
+    raw_start: Vec<u32>,
+}
+
+impl<'a> LexicalStateAction<'a> {
+    pub fn new(tokenizer: &'a Tokenizer) -> Self {
+        Self {
+            tokenizer,
+            memo: ConfigActionCache::new_lazy(0..=u8::MAX, |byte| byte as usize),
+            closed: Vec::new(),
+            raw_start: vec![ConfigActionCache::DEAD; tokenizer.num_states() as usize],
+        }
+    }
+
+    pub fn states(&self, config: u32) -> &[u32] {
+        if config == ConfigActionCache::DEAD { &[] }
+        else { &self.memo.configs()[config as usize] }
+    }
+
+    fn publish(&mut self, id: u32, inserted: bool, closed: bool) -> u32 {
+        if id == ConfigActionCache::DEAD { return id; }
+        if inserted { self.closed.push(closed); }
+        else { self.closed[id as usize] |= closed; }
+        id
+    }
+
+    /// Arbitrary projected roots may need closure again before their first
+    /// byte. Their membership is preserved exactly for endpoint observations.
+    pub fn intern_boundary(&mut self, states: &[u32]) -> u32 {
+        let mut states = TokenizerStateSet::from_slice(states);
+        states.sort_unstable();
+        states.dedup();
+        self.intern_sorted(&states, false)
+    }
+
+    fn intern_sorted(&mut self, states: &[u32], closed: bool) -> u32 {
+        let (id, inserted) = self.memo.intern_canonical_slice(states);
+        self.publish(id, inserted, closed)
+    }
+
+    pub fn start(&mut self, state: u32) -> u32 {
+        let cached = self.raw_start[state as usize];
+        if cached != ConfigActionCache::DEAD { return cached; }
+        let mut closure = self.tokenizer.execute_from_state_end_only(&[], state);
+        closure.sort_unstable();
+        closure.dedup();
+        let config = self.intern_sorted(&closure, true);
+        self.raw_start[state as usize] = config;
+        config
+    }
+
+    pub fn step(&mut self, config: u32, byte: u8) -> u32 {
+        if config == ConfigActionCache::DEAD { return config; }
+        if let Some(target) = self.memo.get(config, byte) { return target; }
+        let target = if self.closed[config as usize] {
+            // Preserve the lazy raw-closure cache: large disjoint lexers must
+            // not materialize every singleton closure for a small trie.
+            let mut direct = SmallVec::<[u32; 8]>::new();
+            for &state in self.states(config) {
+                if let Some(target) = self.tokenizer.step(state, byte) {
+                    direct.push(target);
+                }
+            }
+            direct.sort_unstable();
+            direct.dedup();
+            let mut closure = TokenizerStateSet::new();
+            for state in direct {
+                let config = self.start(state);
+                closure.extend_from_slice(self.states(config));
+            }
+            closure.sort_unstable();
+            closure.dedup();
+            self.intern_sorted(&closure, true)
+        } else {
+            let mut closure = self.tokenizer.step_all(self.states(config), byte);
+            closure.sort_unstable();
+            closure.dedup();
+            self.intern_sorted(&closure, true)
+        };
+        self.memo.set(config, byte, target);
+        target
     }
 }
 
