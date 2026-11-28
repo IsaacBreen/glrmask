@@ -86,6 +86,13 @@ impl NativeModule {
         })
     }
     #[napi]
+    pub fn bind_constraint(&self, name: String, value: &NativeConstraint) -> napi::Result<()> {
+        call(|| {
+            let child = live(&value.inner)?.as_ref().clone();
+            self.bind_value(&name, child)
+        })
+    }
+    #[napi]
     pub fn bind_expr(&self, name: String, value: &NativeExpr) -> napi::Result<()> {
         call(|| {
             let child = live(&value.inner)?.clone();

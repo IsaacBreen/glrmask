@@ -47,7 +47,7 @@ def test_public_types_exist_without_exposing_backend_selection():
         assert not hasattr(strategy, "TOKEN_TRIE")
 
 
-def test_source_child_uses_immutable_bind_and_compiled_child_is_rejected():
+def test_source_child_uses_immutable_bind_and_compiled_child_is_accepted():
     v = vocab()
     parent = glrmask.Grammar.from_glrm(HOST)
     child = glrmask.Grammar.from_lark('start: "a"')
@@ -60,8 +60,12 @@ def test_source_child_uses_immutable_bind_and_compiled_child_is_rejected():
     assert accepting(state)
     with pytest.raises((glrmask.GLRMaskError, RuntimeError)):
         parent.compile(v)
-    with pytest.raises(TypeError):
-        _bound_snapshot(parent, "child", child.compile(v))
+    compiled = child.compile(v)
+    direct = _bound_snapshot(parent, "child", compiled).compile(v).start()
+    wrapped = _bound_snapshot(parent, "child", glrmask.Expr.sequence(compiled)).compile(v).start()
+    assert direct.mask().tolist() == wrapped.mask().tolist()
+    assert direct.commit_token(4) and wrapped.commit_token(4)
+    assert direct.is_accepting() and wrapped.is_accepting()
 
 
 def test_module_save_load_remains_open_and_immutable():

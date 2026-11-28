@@ -511,6 +511,28 @@ void precompile_vocab_lock() {
     }
 }
 
+void direct_constraint_binding() {
+    Vocab v({{0,"x"},{1,"a"},{2,"y"}});
+    Module body(Grammar::from_glrm("start s extern grammar item nt s = item"));
+    body.bind("item", Expr::sequence({Grammar::from_lark(R"(start: "a")"), TokenSet({63})}));
+    for(auto child_mode : {MaskStrategy::Auto, MaskStrategy::FastCompile, MaskStrategy::FastMasks}) {
+        CompileOptions child_options; child_options.mask_strategy=child_mode;
+        auto child=body.compile(v, child_options);
+        auto host=Grammar::from_glrm(R"(start s extern grammar item nt s = "x" item "y")");
+        Module direct(host), wrapped(host);
+        direct.bind("item",child); wrapped.bind("item",Expr::sequence({child}));
+        for(auto mode : {MaskStrategy::Auto, MaskStrategy::FastCompile, MaskStrategy::FastMasks}) {
+            CompileOptions options; options.mask_strategy=mode;
+            auto a=direct.compile(v,options).start(), b=wrapped.compile(v,options).start();
+            for(TokenId id : {0u,1u,63u,2u}) {
+                CHECK(a.mask()==b.mask()); CHECK(allowed(a.mask(),id));
+                CHECK(a.commit_token(id)); CHECK(b.commit_token(id));
+            }
+            CHECK(a.mask()==b.mask()); CHECK(a.is_accepting() && b.is_accepting());
+        }
+    }
+}
+
 void mask_bit_domain_lengths() {
     for (std::size_t n : {0u,33u,63u,64u}) {
         std::vector<VocabEntry> entries;
@@ -542,6 +564,7 @@ int main(int argc, char** argv) {
         if (argc==3 && std::string(argv[1])=="--check") { artifacts(argv[2], true); return 0; }
         CHECK(argc==1);
         canonical_modules();
+        direct_constraint_binding();
         precompile_vocab_lock();
         basic();
         mask_bit_domain_lengths();

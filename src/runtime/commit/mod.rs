@@ -9143,7 +9143,7 @@ impl ConstraintState {
         true
     }
 
-    /// Consumes the input. Returns true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first.
+    /// Advances the state by the token. If it isn't allowed, returns `false` and terminates the state.
     /// Panics on an internal failure; discard the affected state.
     #[must_use]
     pub fn commit_token(
@@ -9439,7 +9439,7 @@ impl ConstraintState {
         result
     }
 
-    /// Consumes the input. Returns true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable.
+    /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
     /// Panics on an internal failure; discard the affected state.
     #[must_use]
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> bool {

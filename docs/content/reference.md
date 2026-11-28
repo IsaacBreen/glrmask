@@ -25,7 +25,7 @@ mask_on_device = bitmask.to(device, non_blocking=True)
 # buffer until the asynchronous transfer completes.
 ```
 
-`commit_token` and `commit_bytes` consume the input. Text never matches a token set. They return true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable.
+`commit_token` and `commit_bytes` consume the input. Text never matches a token set. If the input isn't allowed, they return false and terminate the state.
 
 `is_accepting()` says whether the output so far could end here. More may still be allowed: `1+2` is complete, but
 `1+23` is too. `is_terminated()` says whether nothing more can be committed. Together they distinguish in progress (false, false), may stop (true, false), complete (true, true), and dead (false, true). Treat EOS as a caller-side stop decision; committing an unknown EOS token rejects even an accepting state.
@@ -96,6 +96,8 @@ constraint = call.compile(vocab)
 ```
 
 
+`Module.bind(name, value)` accepts a grammar, module, constraint, expression or token set.
+
 `module.save()` returns bytes, and `Module.load(data)` restores the module with its bindings and precompiled work. A
 module can be saved with externs unbound. Precompiled work is for one vocabulary; compiling or precompiling it with another is an error.
 
@@ -105,8 +107,8 @@ and `load` checks that you pass the one it was compiled for. Bytes saved by one 
 ### Expressions
 
 `Expr.choice(*parts)` matches any one of its parts, `Expr.sequence(*parts)` matches them one after another, and
-`Expr.literal(text)` matches exactly `text`, with no whitespace skipped. Parts can be grammars, modules, expressions and
-token sets. `Grammar.from_expr` makes a grammar from an expression that contains neither modules nor token sets, including nested parts. Expressions containing either can be bound to a `Module`.
+`Expr.literal(text)` matches exactly `text`, with no whitespace skipped. Parts can be grammars, modules, constraints, expressions and
+token sets. `Grammar.from_expr` makes a grammar from an expression that contains no modules, constraints or token sets, including nested parts. Expressions containing any of these can be bound to a `Module`.
 
 ## Token sets
 
@@ -134,7 +136,7 @@ constraint = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_MASK
 ## Errors
 
 Creating, binding, compiling and loading grammars can fail. Commits return `false` only on rejection; internal failures panic in Rust and surface as errors in foreign bindings. Discard a state after an internal failure.
-Each error message says what went wrong. It may also include a location in the grammar source. The message text is for humans; its format is not stable.
+Each error message says what went wrong. It may also include a location in the grammar source.
 In Rust, `Error::kind()` gives the kind of error: `Syntax`, `InvalidInput`, `Compilation`, `ResourceLimit`, `StrategyUnsupported`, `Serialization`, `VocabMismatch`, `BufferTooSmall` or `Internal`.
 Python raises `GLRMaskError` (an `Exception`) with a `kind` string: one of `"syntax"`, `"invalid_input"`, `"compilation"`, `"resource_limit"`, `"strategy_unsupported"`, `"serialization"`, `"vocab_mismatch"`, `"buffer_too_small"`, `"internal"`. Node.js throws a `GLRMaskError` with a `code`, C returns a status and sets `glrmask_error_message()`, and C++ throws `glrmask::Error`.
 

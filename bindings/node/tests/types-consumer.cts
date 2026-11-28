@@ -10,6 +10,8 @@ const trie: api.MaskStrategy = api.MaskStrategy.FastCompile;
 const endModule = new api.Module(api.Grammar.fromGlrm('extern grammar VALUE start root nt root = VALUE'));
 endModule.bind('VALUE',api.Expr.sequence(g, new api.TokenSet([99])));
 const c = endModule.compileSync(v, {maskStrategy: trie});
+const direct = new api.Module(api.Grammar.fromGlrm('extern grammar VALUE start root nt root = VALUE'));
+direct.bind('VALUE', c);
 const s = c.start(); const words: Uint32Array = s.mask(); s.fillMask(words); s.commitToken(0);
 const accepted: boolean = s.isAccepting();
 const saved: Uint8Array = c.saveSync(); api.Constraint.loadSync(saved, v);

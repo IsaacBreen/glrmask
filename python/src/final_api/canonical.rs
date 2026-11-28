@@ -321,6 +321,7 @@ impl Drop for PyModule {
 
 enum ModuleBinding {
     Module(glrmask::Module),
+    Constraint(glrmask::Constraint),
     Grammar(glrmask::Grammar),
     Expr(glrmask::Expr),
     TokenSet(glrmask::TokenSet),
@@ -330,6 +331,7 @@ impl ModuleBinding {
     fn bind(self, module: &mut glrmask::Module, name: &str) -> glrmask::Result<()> {
         match self {
             Self::Module(value) => module.bind(name, value),
+            Self::Constraint(value) => module.bind(name, value),
             Self::Grammar(value) => module.bind(name, value),
             Self::Expr(value) => module.bind(name, value),
             Self::TokenSet(value) => module.bind(name, value),
@@ -338,6 +340,9 @@ impl ModuleBinding {
 }
 
 fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<ModuleBinding> {
+    if let Ok(c) = value.extract::<PyRef<'_, PyConstraint>>() {
+        return Ok(ModuleBinding::Constraint(c.inner.as_ref().clone()));
+    }
     if let Ok(m) = value.extract::<PyRef<'_, PyModule>>() {
         return Ok(ModuleBinding::Module(m.snapshot()));
     }
@@ -351,7 +356,7 @@ fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<ModuleBinding> {
         return Ok(ModuleBinding::TokenSet(et.inner.clone()));
     }
     Err(PyTypeError::new_err(
-        "Module.bind accepts a Grammar, Module, Expr, or TokenSet",
+        "Module.bind accepts a Grammar, Module, Constraint, Expr, or TokenSet",
     ))
 }
 

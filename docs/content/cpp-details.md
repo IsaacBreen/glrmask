@@ -45,7 +45,7 @@ call.bind("ARGS", weather);
 auto constraint = call.compile(vocab);
 ```
 
-On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Expr`, or `TokenSet`. It changes the module in
+On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Constraint`, `Expr`, or `TokenSet`. It changes the module in
 place; if it fails, nothing changes. Copy a module first to bind the same one in different ways. `externs().unbound()` lists the unbound names.
 
 `Expr::choice`, `Expr::sequence` and `Expr::literal` combine grammars without writing a new one:
@@ -90,7 +90,7 @@ bool allowed = (mask[id / 32] >> (id % 32)) & 1;
 A mask contains packed uint32 words: token i is bit i % 32 of word i / 32. `fill_mask` writes it
 into a buffer you reuse; `mask()` returns a new one.
 
-`commit_token` and `commit_bytes` consume the input. They return true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable. Commit special tokens and token sets with `commit_token`;
+`commit_token` and `commit_bytes` consume the input. If the input isn't allowed, they return false and terminate the state. Commit special tokens and token sets with `commit_token`;
 bytes never match them.
 
 `is_accepting()` says whether the output so far could end here, and `is_terminated()` whether nothing more can be
@@ -119,7 +119,7 @@ Empty ranges are no-ops; reversed ranges are invalid. Bindings capture their val
 
 ## Errors
 
-Operations that can fail throw `glrmask::Error`, a `std::runtime_error`. `what()` is the message; its format is not stable. `status()` is one of:
+Operations that can fail throw `glrmask::Error`, a `std::runtime_error`. `what()` is the message. `status()` is one of:
 
 | Status | |
 | --- | --- |
@@ -145,7 +145,7 @@ threads at once.
 ## C
 
 `glrmask.h` is the C interface; the C++ header is built on it. Each function returns a `glrmask_status`, and on failure
-`glrmask_error_message()` gives the message, valid until the next GLRMask call on the same thread (except the message accessor); empty when no error is recorded. C commits return a status and write viability to an out-parameter; a dead state is reported as `GLRMASK_OK` with zero viability. Free each object once
+`glrmask_error_message()` gives the message, valid until the next GLRMask call on the same thread (except the message accessor); empty when no error is recorded. C commits return a status and write 0 to the out-parameter if the input is not allowed, terminating the state. Free each object once
 with its `_free` function. Initialize a `glrmask_compile_options options` with `glrmask_compile_options_init(&options, sizeof(options))`, or pass a null pointer for the
 defaults. The header documents ownership in full.
 

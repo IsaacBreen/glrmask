@@ -29,7 +29,6 @@ impl fmt::Display for SourceSpan {
     }
 }
 
-/// The message text is for humans; its format is not stable.
 #[derive(Debug, Clone)]
 pub struct Error {
     kind: ErrorKind,

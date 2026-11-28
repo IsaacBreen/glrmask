@@ -214,6 +214,29 @@ int main(void) {
         glrmask_grammar_free(parent);
     }
     glrmask_expr_free(expr);
+    {
+        const char src[]="start s extern grammar item nt s = item";
+        glrmask_grammar* parent=NULL; glrmask_module* direct=NULL; glrmask_module* wrapped=NULL;
+        glrmask_constraint* a=NULL; glrmask_constraint* b=NULL; glrmask_expr* e=NULL;
+        glrmask_state* sa=NULL; glrmask_state* sb=NULL;
+        CHECK(glrmask_grammar_from_source(GLRMASK_GLRM,src,strlen(src),&parent)==GLRMASK_OK);
+        CHECK(glrmask_module_new(parent,&direct)==GLRMASK_OK);
+        CHECK(glrmask_module_new(parent,&wrapped)==GLRMASK_OK);
+        const glrmask_expr_operand operand={GLRMASK_OPERAND_CONSTRAINT,constraint};
+        CHECK(glrmask_expr_sequence(&operand,1,&e)==GLRMASK_OK);
+        CHECK(glrmask_module_bind_constraint(direct,"item",4,constraint)==GLRMASK_OK);
+        CHECK(glrmask_module_bind_expr(wrapped,"item",4,e)==GLRMASK_OK);
+        CHECK(glrmask_module_compile(direct,vocab,NULL,&a)==GLRMASK_OK);
+        CHECK(glrmask_module_compile(wrapped,vocab,NULL,&b)==GLRMASK_OK);
+        CHECK(glrmask_constraint_start(a,&sa)==GLRMASK_OK && glrmask_constraint_start(b,&sb)==GLRMASK_OK);
+        uint32_t ma[1],mb[1],va=0,vb=0;
+        CHECK(glrmask_state_fill_mask(sa,ma,1)==GLRMASK_OK && glrmask_state_fill_mask(sb,mb,1)==GLRMASK_OK);
+        CHECK(ma[0]==mb[0] && (ma[0]&1));
+        CHECK(glrmask_state_commit_token(sa,0,&va)==GLRMASK_OK && glrmask_state_commit_token(sb,0,&vb)==GLRMASK_OK && va && vb);
+        CHECK(glrmask_state_is_accepting(sa,&va)==GLRMASK_OK && glrmask_state_is_accepting(sb,&vb)==GLRMASK_OK && va && vb);
+        glrmask_state_free(sa);glrmask_state_free(sb);glrmask_constraint_free(a);glrmask_constraint_free(b);
+        glrmask_expr_free(e);glrmask_module_free(direct);glrmask_module_free(wrapped);glrmask_grammar_free(parent);
+    }
     glrmask_expr* literal=NULL;CHECK(glrmask_expr_literal((const uint8_t*)"x",1,&literal)==GLRMASK_OK);glrmask_expr_free(literal);
     glrmask_constraint* canonical=NULL;CHECK(glrmask_module_compile(loaded,vocab,NULL,&canonical)==GLRMASK_OK);
     glrmask_module_free(loaded);glrmask_constraint_free(canonical);

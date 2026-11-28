@@ -128,7 +128,6 @@ GLRMASK_API uint32_t glrmask_abi_version(void);
 GLRMASK_API const char *glrmask_version(void);
 /// The last error on this thread (empty string if none). Valid until the next
 /// GLRMask call on this thread, except this error-message accessor.
-/// The message text is for humans; its format is not stable.
 GLRMASK_API const char *glrmask_error_message(void);
 /// Initializes the caller-owned options buffer with defaults and its size in bytes.
 GLRMASK_API glrmask_status glrmask_compile_options_init(glrmask_compile_options* opts,size_t struct_size);
@@ -161,6 +160,8 @@ GLRMASK_API void glrmask_module_free(glrmask_module* module);
 GLRMASK_API glrmask_status glrmask_module_bind_grammar(glrmask_module* module,const char* name,size_t name_len,const glrmask_grammar* value);
 /// Binds an extern by name.
 GLRMASK_API glrmask_status glrmask_module_bind_module(glrmask_module* module,const char* name,size_t name_len,const glrmask_module* value);
+/// Binds an extern by name.
+GLRMASK_API glrmask_status glrmask_module_bind_constraint(glrmask_module* module,const char* name,size_t name_len,const glrmask_constraint* value);
 /// Binds an extern by name.
 GLRMASK_API glrmask_status glrmask_module_bind_expr(glrmask_module* module,const char* name,size_t name_len,const glrmask_expr* value);
 /// Binds an extern by name.
@@ -208,15 +209,12 @@ GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* state
 GLRMASK_API glrmask_status glrmask_state_fill_mask(const glrmask_state* state,uint32_t* out,size_t word_count);
 /// Whether nothing more can be committed. Writes 1 or 0 to `out`.
 GLRMASK_API glrmask_status glrmask_state_is_terminated(const glrmask_state* state,uint32_t* out);
-/// Consumes the input. GLRMASK_OK means the call ran; the accepted out-parameter
-/// is 1 if the state is viable afterwards (not necessarily accepting), or 0 if dead.
-/// Zero does not mean the commit was rolled back.
-/// A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit writes 0 to the accepted out-parameter. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first.
-/// A non-OK status reports a native failure; a valid accepted out-parameter is zeroed.
+/// Advances the state by the token. If it isn't allowed, writes 0 to `accepted` and terminates the state.
+/// Returns `GLRMASK_OK` on ordinary rejection; a non-OK status reports a native failure.
 GLRMASK_API glrmask_status glrmask_state_commit_token(glrmask_state* state,uint32_t id,uint32_t* accepted);
 
-/// Consumes the input, with the same status and viability contract as `glrmask_state_commit_token`.
-/// Empty bytes leave the state unchanged and the accepted out-parameter reports viability.
+/// Advances the state by the bytes. If they aren't allowed, writes 0 to `accepted` and terminates the state.
+/// Returns `GLRMASK_OK` on ordinary rejection; a non-OK status reports a native failure.
 GLRMASK_API glrmask_status glrmask_state_commit_bytes(glrmask_state* state,const uint8_t* bytes,size_t n,uint32_t* accepted);
 /// The bytes that must come next.
 GLRMASK_API glrmask_status glrmask_state_forced_bytes(const glrmask_state* state,glrmask_bytes** out);

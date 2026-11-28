@@ -72,6 +72,9 @@ bind_handle!(glrmask_module_bind_grammar, glrmask_grammar);
 bind_handle!(glrmask_module_bind_module, glrmask_module);
 bind_handle!(glrmask_module_bind_expr, glrmask_expr);
 bind_handle!(glrmask_module_bind_tokens, glrmask_token_set);
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_bind_constraint(p:*mut glrmask_module,name:*const c_char,n:usize,child:*const glrmask_constraint)->i32 {
+    ffi(||unsafe{let child=read(child)?.0.as_ref().clone();let name=text(name,n)?;write(p)?.0.bind(name,child)?;Ok(())})
+}
 
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_precompile(p: *mut glrmask_module, v: *const glrmask_vocab, o: *const glrmask_compile_options) -> i32 {

@@ -68,8 +68,7 @@ fn with_state_mut<S, R>(state: &mut S, f: impl FnOnce(&mut S) -> R) -> R { f(sta
 // Helpers
 // ---------------------------------------------------------------------------
 
-pyo3::create_exception!(glrmask, GLRMaskError, pyo3::exceptions::PyException,
-    "Raised when GLRMask can't do what was asked. The message text is for humans; its format is not stable. Wrong argument types still raise TypeError, and a missing Externs key raises KeyError, as usual in Python. The `kind` attribute: one of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"internal\"`.");
+pyo3::create_exception!(glrmask, GLRMaskError, pyo3::exceptions::PyException);
 
 fn catch_python_panic<T>(f: impl FnOnce() -> T) -> PyResult<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|p| {
@@ -1062,7 +1061,7 @@ impl PyConstraintState {
         }))?
     }
 
-    /// Consumes the input. Returns True if the state is viable after the commit (this does not imply it is accepting); False means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns False. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first.
+    /// Advances the state by the token. If it isn't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (token_id, /))]
     fn commit_token(&mut self, token_id: &Bound<'_, PyAny>) -> PyResult<bool> {
         let Some(id) = resolve_token_id(token_id)? else {
@@ -1073,7 +1072,7 @@ impl PyConstraintState {
     }
 
 
-    /// Consumes the input. Returns True if the state is viable after the commit (this does not imply it is accepting); False means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns False. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable.
+    /// Advances the state by the bytes. If they aren't allowed, returns `False` and terminates the state.
     #[pyo3(signature = (data, /))]
     fn commit_bytes(&mut self, data: &[u8]) -> PyResult<bool> {
         catch_python_panic(|| with_state_mut(&mut self.inner, |state| state.commit_bytes(data)))

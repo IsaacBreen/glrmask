@@ -289,6 +289,24 @@ test('Grammar: reject direct and nested TokenSet; Module accepts',()=>{
   const m=new Module(t);m.bind('T',token);assert.ok(m.compileSync(v).start().commitToken(5));
 });
 
+test('Module.bind accepts compiled Constraint with trailing token set',()=>{
+  const v=vocab(), body=new Module(Grammar.fromGlrm('start s extern grammar item nt s = item'));
+  body.bind('item',Expr.sequence(source(),new TokenSet([63])));
+  for(const childMode of Object.values(MaskStrategy)){
+    const child=body.compileSync(v,{maskStrategy:childMode});
+    const direct=new Module(host()), wrapped=new Module(host());
+    direct.bind('child',child); wrapped.bind('child',Expr.sequence(child));
+    for(const maskStrategy of Object.values(MaskStrategy)){
+      const a=direct.compileSync(v,{maskStrategy}).start(), b=wrapped.compileSync(v,{maskStrategy}).start();
+      for(const id of [0,1,63,3]){
+        assert.deepEqual(a.mask(),b.mask());assert.ok(allowed(a,id));
+        assert.ok(a.commitToken(id));assert.ok(b.commitToken(id));
+      }
+      assert.deepEqual(a.mask(),b.mask());assert.ok(a.isAccepting()&&b.isAccepting());
+    }
+  }
+});
+
 test('Externs inspect includes unbound names',()=>{
   const m=new Module(host()), before=m.externs;
   assert.match(require('node:util').inspect(before),/unbound=.*child/);

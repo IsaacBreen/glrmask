@@ -361,16 +361,28 @@ fn compiled_expr_preserves_explicit_trailing_event_across_strategies() {
         let loaded = Constraint::load(&child.save(), &v).unwrap();
         assert!(Grammar::from_expr(&Expr::from(&loaded)).is_err());
         let mut host = Module::new(&Grammar::from_glrm(HOST).unwrap());
-        host.bind("child", Expr::from(loaded)).unwrap();
+        host.bind("child", Expr::from(&loaded)).unwrap();
+        let mut direct = Module::new(&Grammar::from_glrm(HOST).unwrap());
+        direct.bind("child", &loaded).unwrap();
+        let mut owned = Module::new(&Grammar::from_glrm(HOST).unwrap());
+        owned.bind("child", loaded).unwrap();
         let saved = Module::load(&host.save()).unwrap();
         let wrong = Vocab::new(vec![(0, b"z".to_vec())]).unwrap();
         assert_eq!(saved.compile(&wrong).unwrap_err().kind(), glrmask::ErrorKind::VocabMismatch);
         for parent_mode in modes {
-            for m in [&host, &saved] {
+            let baseline = host.compile_with(&v, CompileOptions::default().mask_strategy(parent_mode)).unwrap();
+            for m in [&host, &saved, &direct, &owned] {
                 let compiled = m.compile_with(&v, CompileOptions::default().mask_strategy(parent_mode)).unwrap();
                 assert!(accepts(&compiled, &[0, 1, 99, 3]));
                 assert!(!accepts(&compiled, &[0, 1, 3]));
                 assert!(!accepts(&compiled, &[0, 1, 99]));
+                let (mut a, mut b) = (baseline.start(), compiled.start());
+                for id in [0, 1, 99, 3] {
+                    assert_eq!(a.mask(), b.mask());
+                    assert_eq!(a.commit_token(id), b.commit_token(id));
+                }
+                assert_eq!(a.mask(), b.mask());
+                assert_eq!(a.is_accepting(), b.is_accepting());
             }
         }
     }

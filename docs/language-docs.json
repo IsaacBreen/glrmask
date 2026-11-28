@@ -47,8 +47,8 @@
     "ConstraintState.mask": "Packed uint32 words: token i is bit i % 32 of word i // 32.",
     "ConstraintState.fill_mask": "Like `mask()`, but writes the words into `bitmask`. May release the GIL.",
     "ConstraintState.mask_bit_len": "The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs.",
-    "ConstraintState.commit_token": "Consumes the input. Returns True if the state is viable after the commit (this does not imply it is accepting); False means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns False. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first.",
-    "ConstraintState.commit_bytes": "Consumes the input. Returns True if the state is viable after the commit (this does not imply it is accepting); False means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns False. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable.",
+    "ConstraintState.commit_token": "Advances the state by the token. If it isn't allowed, returns `False` and terminates the state.",
+    "ConstraintState.commit_bytes": "Advances the state by the bytes. If they aren't allowed, returns `False` and terminates the state.",
     "ConstraintState.forced_bytes": "The bytes that must come next.",
     "ConstraintState.is_accepting": "Whether the output so far could end here.",
     "ConstraintState.is_terminated": "Whether nothing more can be committed.",
@@ -62,7 +62,7 @@
     "Extern": "A named placeholder in a grammar.",
     "Extern.name": "",
     "Extern.kind": "",
-    "GLRMaskError": "The message text is for humans; its format is not stable.",
+    "GLRMaskError": "",
     "GLRMaskError.kind": "One of `\"syntax\"`, `\"invalid_input\"`, `\"compilation\"`, `\"resource_limit\"`, `\"strategy_unsupported\"`, `\"serialization\"`, `\"vocab_mismatch\"`, `\"buffer_too_small\"`, `\"internal\"`."
   },
   "python_releases": {
@@ -169,8 +169,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "0777a060c988a21b81b2b9529fbd7adde99919efffd2e79153d8f9366156e56e",
-    "bindings/node/README.md": "dac73eeb848eb8ead45d5d7dfcc0c5a1a7b81b559ef9321c6e1fb35807eff3d9",
+    "bindings/cpp/README.md": "58c2e973708478fc2064d112070a602f8c9a74091e43b62e5b65aea7d8d87f06",
+    "bindings/node/README.md": "f89d4a9c956c76b2a2a6894acfbc864b6f117fbfd7045477b8b4e220ff1d5897",
     "docs/content/releases/0.3/cpp.md": "be210c50b92906fe2a988af24d798b46585857275b1072d9ae874a918ec8be7c",
     "docs/content/releases/0.3/javascript.md": "4a8891a7013c9e1461b7818759705f1ca8d2a594838701f160aa556663c4cace"
   },
@@ -178,5 +178,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "996b7e4926e030f7cd3a3389f1dd4f921ed56c2b4e8d6f8933019171e756859e"
+  "content_sha256": "83b9f69b079051629163b29af92e80a97aae5e4acd6227aa15a2fae81f5296a9"
 }

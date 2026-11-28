@@ -102,11 +102,11 @@ impl InternalMaskStrategy {
 }
 
 /// A value accepted by [Module::bind].
-#[diagnostic::on_unimplemented(message = "`{Self}` cannot be bound on a Module; use a Grammar, Module, Expr or TokenSet")]
+#[diagnostic::on_unimplemented(message = "`{Self}` cannot be bound on a Module; use a Grammar, Module, Constraint, Expr or TokenSet")]
 pub trait IntoBinding: sealed::ModuleValue {}
 
 pub(super) mod sealed {
-    use super::{CompiledPart, Expr, Grammar, Module, TokenSet};
+    use super::{CompiledPart, Constraint, Expr, Grammar, Module, TokenSet};
 
     pub enum Binding {
         Module(Module),
@@ -134,6 +134,12 @@ pub(super) mod sealed {
     module_value!(Grammar);
     module_value!(Expr);
     module_value!(TokenSet);
+    impl ModuleValue for Constraint {
+        fn into_binding(self) -> Binding { Binding::Expr(Expr::from(self)) }
+    }
+    impl ModuleValue for &Constraint {
+        fn into_binding(self) -> Binding { Binding::Expr(Expr::from(self)) }
+    }
 
 }
 
@@ -141,6 +147,8 @@ use sealed::Binding;
 
 impl IntoBinding for Module {}
 impl IntoBinding for &Module {}
+impl IntoBinding for Constraint {}
+impl IntoBinding for &Constraint {}
 impl IntoBinding for Grammar {}
 impl IntoBinding for &Grammar {}
 impl IntoBinding for Expr {}

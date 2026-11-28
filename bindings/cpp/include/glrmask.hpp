@@ -37,7 +37,6 @@ enum class ExternKind : std::uint32_t {
     Grammar = GLRMASK_EXTERN_GRAMMAR
 };
 
-/// The message text is for humans; its format is not stable.
 class Error : public std::runtime_error {
     glrmask_status status_;
 public:
@@ -319,6 +318,8 @@ public:
         detail::check(glrmask_module_bind_grammar(native_handle(), name.data(), name.size(), value.native_handle()));
     }
     /// Binds an extern by name.
+    void bind(std::string_view name, const Constraint& value);
+    /// Binds an extern by name.
     void bind(std::string_view name, const Expr& value) {
         detail::check(glrmask_module_bind_expr(native_handle(), name.data(), name.size(), value.native_handle()));
     }
@@ -373,6 +374,10 @@ public:
 
 inline ExprOperand::ExprOperand(const Constraint& value) : value{5, value.native_handle()} {}
 
+inline void Module::bind(std::string_view name, const Constraint& value) {
+    detail::check(glrmask_module_bind_constraint(native_handle(), name.data(), name.size(), value.native_handle()));
+}
+
 class ConstraintState : public detail::Owned<glrmask_state, glrmask_state_free, glrmask_state_clone> {
     using Base = detail::Owned<glrmask_state, glrmask_state_free, glrmask_state_clone>;
     explicit ConstraintState(glrmask_state* p) : Base(p) {}
@@ -388,13 +393,13 @@ public:
     void fill_mask(std::vector<std::uint32_t>& output) const { fill_mask(output.data(), output.size()); }
     /// The mask's length in bits: the largest token ID in the constraint (including special and end tokens) plus one, or zero if there are no token IDs.
     std::size_t mask_bit_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_bit_len(native_handle(), &n)); return n; }
-    /// Consumes the input. Returns true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first.
+    /// Advances the state by the token. If it isn't allowed, returns `false` and terminates the state.
     [[nodiscard]] bool commit_token(TokenId id) { uint32_t accepted = 0; detail::check(glrmask_state_commit_token(native_handle(), id, &accepted)); return accepted != 0; }
-    /// Consumes the input. Returns true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable.
+    /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
     [[nodiscard]] bool commit_bytes(const std::uint8_t* bytes, std::size_t size) { uint32_t accepted = 0; detail::check(glrmask_state_commit_bytes(native_handle(), bytes, size, &accepted)); return accepted != 0; }
-    /// Consumes the input. Returns true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable.
+    /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
     [[nodiscard]] bool commit_bytes(const Bytes& bytes) { return commit_bytes(bytes.data(), bytes.size()); }
-    /// Consumes the input. Returns true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable.
+    /// Advances the state by the bytes. If they aren't allowed, returns `false` and terminates the state.
     [[nodiscard]] bool commit_bytes(std::string_view bytes) { return commit_bytes(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()); }
     /// The bytes that must come next.
     Bytes forced_bytes() const { glrmask_bytes* p = nullptr; detail::check(glrmask_state_forced_bytes(native_handle(), &p)); return detail::take_bytes(p); }

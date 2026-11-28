@@ -4,6 +4,10 @@
 
 Release workflow: [`.github/workflows/release.yml`](../../.github/workflows/release.yml).
 
+## Before 1.0 final
+
+- [ ] Remove the release-candidate installation notes from the module documentation and shared guide sources, then regenerate the guides.
+
 ## What publishes, and what does not
 
 Publishing a GitHub Release with a stable tag (`vMAJOR.MINOR.PATCH`) or a release-candidate

@@ -270,6 +270,28 @@ def test_stronger_preparation_survives_fast_compile():
         assert list(a.mask()) == list(b.mask())
         assert a.is_accepting() == b.is_accepting()
 
+def test_direct_constraint_bind_preserves_trailing_token_set():
+    v = vocab()
+    body = g.Module(g.Grammar.from_glrm('start s extern grammar item nt s = item'))
+    body.bind('item', g.Expr.sequence(source(), g.TokenSet([63])))
+    modes = (g.MaskStrategy.AUTO, g.MaskStrategy.FAST_COMPILE, g.MaskStrategy.FAST_MASKS)
+    for child_mode in modes:
+        child = body.compile(v, mask_strategy=child_mode)
+        direct = g.Module(g.Grammar.from_glrm(HOST))
+        wrapped = direct.copy()
+        direct.bind('child', child)
+        wrapped.bind('child', g.Expr.sequence(child))
+        for mode in modes:
+            a = direct.compile(v, mask_strategy=mode).start()
+            b = wrapped.compile(v, mask_strategy=mode).start()
+            for token in (0, 1, 63, 3):
+                assert a.mask().tolist() == b.mask().tolist()
+                assert token_allowed(a.mask(), token)
+                assert a.commit_token(token) and b.commit_token(token)
+            assert a.mask().tolist() == b.mask().tolist()
+            assert a.is_accepting() and b.is_accepting()
+
+
 def test_externs_equality_uses_name_order_and_kind():
     def externs(first, second, kind="grammar"):
         return g.Grammar.from_glrm(

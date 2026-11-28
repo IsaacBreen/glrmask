@@ -119,7 +119,7 @@ call.bind('ARGS', weather);
 const constraint = await call.compile(vocab);
 ```
 
-On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Expr`, or `TokenSet`. `bind` changes the module in place, so `clone()` it first to bind the
+On a Module, `bind(name, value)` takes a `Grammar`, `Module`, `Constraint`, `Expr`, or `TokenSet`. `bind` changes the module in place, so `clone()` it first to bind the
 same one in different ways. `externs.unbound` lists the unbound names.
 
 `Expr.choice(...parts)`, `Expr.sequence(...parts)` and `Expr.literal(text)` combine grammars without writing a new one:
@@ -156,7 +156,7 @@ const allowed = (id) => ((mask[id >>> 5] >>> (id & 31)) & 1) === 1;
 A mask contains packed uint32 words: token i is bit i % 32 of word Math.floor(i / 32).
 `fillMask` writes it into an array you reuse; `mask()` returns a new one.
 
-`commitToken` and `commitBytes` consume the input. They return true if the state is viable after the commit (this does not imply it is accepting); false means the state is dead, not that the commit was rolled back. A dead state is not accepting, is terminated, has an all-zero mask and empty forced bytes, and every later non-empty commit returns false. A dead state can also arise from a grammar whose language is empty. To try input without risking the state, clone it first. Committing empty bytes leaves the state unchanged and returns whether it is viable. Commit special tokens and token sets with `commitToken`;
+`commitToken` and `commitBytes` consume the input. If the input isn't allowed, they return false and terminate the state. Commit special tokens and token sets with `commitToken`;
 bytes never match them.
 
 `isAccepting()` says whether the output so far could end here, and `isTerminated()` whether nothing more can be
@@ -194,7 +194,7 @@ Empty ranges are no-ops; reversed ranges are invalid. Bindings capture their val
 ## Errors
 
 Arguments of the wrong type throw `TypeError`. Native GLRMask errors throw a
-`GLRMaskError`. The message text is for humans; its format is not stable. Its `code` is one of:
+`GLRMaskError`, whose `code` is one of:
 
 | Code | |
 | --- | --- |

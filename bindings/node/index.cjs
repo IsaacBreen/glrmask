@@ -240,9 +240,10 @@ class Module extends Owned {
         }
         target.bindModule(name, handle(value, Module));
       }
+      else if (value instanceof Constraint) target.bindConstraint(name, handle(value, Constraint));
       else if (value instanceof Expr) target.bindExpr(name, handle(value, Expr));
       else if (value instanceof TokenSet) target.bindTokens(name, handle(value, TokenSet));
-      else throw new TypeError('Module.bind requires a Grammar, Module, Expr, or TokenSet');
+      else throw new TypeError('Module.bind requires a Grammar, Module, Constraint, Expr, or TokenSet');
     });
   }
 
