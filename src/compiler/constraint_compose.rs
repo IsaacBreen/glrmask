@@ -3,6 +3,7 @@
 //! Leaf providers retain their own parser and lexer coordinates. Composition
 //! links those providers and publishes only the cross-boundary relations.
 
+use crate::compiler::stages::mapped_artifact::CompactLayout;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -905,7 +906,7 @@ pub(super) fn prepared_leaf_possible_matches(
     let mut mapped=MappedArtifact::new(possible,id_map);
     // Remove component parser-only distinctions before B is reconciled. This
     // exact PM observation quotient avoids inflating the boundary artifact.
-    mapped.compact_dimensions_fast();
+    mapped.compact_dimensions(CompactLayout::Sketch);
     if compose_profile_enabled() {
         eprintln!("[glrmask/profile][prepared_leaf_possible_matches] leaves={} rows={} tsids={} tokens={} coordinate_ms={coordinate_ms:.3} remap_ms={remap_ms:.3} compact_ms={:.3} total_ms={:.3}",
             leaves.len(),mapped.artifact().len(),mapped.id_map().num_tsids(),mapped.id_map().num_internal_tokens(),

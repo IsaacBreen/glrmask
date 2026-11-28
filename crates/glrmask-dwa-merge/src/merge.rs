@@ -4,6 +4,7 @@
 //! and disjoint vocabs (e.g., different character-type partitions) uniformly
 //! via composite-key refinement.
 
+use crate::compiler::stages::mapped_artifact::CompactLayout;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
 
@@ -254,7 +255,7 @@ pub fn merge_local_id_maps_and_terminal_dwas(
     });
     let compact_started_at = Instant::now();
     let mut mapped_dwa = MappedArtifact::new(minimize_owned(pre_minimize), global_id_map);
-    mapped_dwa.compact_dimensions_fast();
+    mapped_dwa.compact_dimensions(CompactLayout::Sketch);
     let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
     let (dwa, id_map) = mapped_dwa.into_parts();
 
@@ -1283,17 +1284,12 @@ fn merge_id_maps_and_terminal_dwas_impl(
     let before_num_tsids = profiling.then(|| mapped_dwa.id_map().num_tsids());
     let before_num_tokens = profiling.then(|| mapped_dwa.id_map().num_internal_tokens());
     let compact_enabled = compact_merged_terminal_dwa_enabled(!used_direct_global);
-    let (compact_report, compact_ms) = if compact_enabled {
+    let compact_ms = if compact_enabled {
         let compact_started_at = Instant::now();
-        let compact_report = if profiling {
-            mapped_dwa.compact_dimensions_fast_with_stats()
-        } else {
-            mapped_dwa.compact_dimensions_fast()
-        };
-        let compact_ms = compact_started_at.elapsed().as_secs_f64() * 1000.0;
-        (Some(compact_report), compact_ms)
+        mapped_dwa.compact_dimensions(CompactLayout::Sketch);
+        compact_started_at.elapsed().as_secs_f64() * 1000.0
     } else {
-        (None, 0.0)
+        0.0
     };
     let after_compact_stats = profiling.then(|| mapped_dwa.artifact().stats());
     let after_compact_range_counts = profiling.then(|| mapped_dwa.interned_range_counts());
@@ -1307,7 +1303,6 @@ fn merge_id_maps_and_terminal_dwas_impl(
         let before_num_tokens = before_num_tokens.unwrap();
         let after_compact_stats = after_compact_stats.unwrap();
         let after_compact_range_counts = after_compact_range_counts.unwrap();
-        let profile_stats = compact_report.and_then(|report| report.profile_stats);
         eprintln!(
             "[glrmask/profile][terminal_dwa_global_merge] inputs={} build_unified_global_id_map_ms={:.3} remap_and_union_ms={:.3} determinize_ms={:.3} minimize_ms={:.3} compact_ms={:.3} total_ms={:.3} nwa_states_before_determinize={} nwa_transitions_before_determinize={} det_states={} det_transitions={} dwa_states_before_compact={} dwa_transitions_before_compact={} dwa_states_after_compact={} dwa_transitions_after_compact={}",
             inputs.len(),
@@ -1339,9 +1334,9 @@ fn merge_id_maps_and_terminal_dwas_impl(
             after_compact_stats.interned_ranges,
             after_compact_range_counts.token_ranges,
             before_num_tsids,
-            profile_stats.map(|stats| stats.tsids_after).unwrap_or(before_num_tsids as usize),
+            id_map.num_tsids(),
             before_num_tokens,
-            profile_stats.map(|stats| stats.tokens_after).unwrap_or(before_num_tokens as usize),
+            id_map.num_internal_tokens(),
             compact_ms,
         );
     }

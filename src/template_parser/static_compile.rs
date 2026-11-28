@@ -5,6 +5,7 @@
 //! admission facts. The supplied stack relations then make the parser product
 //! exact. Possible-match and terminal equivalence are reconciled independently.
 
+use crate::compiler::stages::mapped_artifact::CompactLayout;
 use super::*;
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::automata::weighted::dwa::DWA;
@@ -643,7 +644,7 @@ pub(super) fn compile(
         MappedArtifact::new(parser_dwa, terminal_ids),
         possible.mapped_possible_matches,
     ));
-    mapped.compact_dimensions();
+    mapped.compact_dimensions(CompactLayout::Adaptive);
     let ((parser_dwa, possible_matches), ids) = mapped.into_parts();
     let mut tokenizer = source.tokenizer;
     let ignore_expr = ignore_terminal.and_then(|terminal| tokenizer.terminal_expr(terminal).cloned());

@@ -11,7 +11,7 @@
 //! valid representation of the same relations under the updated `InternalIdMap`.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -22,45 +22,18 @@ use crate::ds::weight::{SharedTokenSet, Weight, shared_rangeset};
 
 mod default_layout;
 
-use default_layout::{ProfileOrder, ProfileContexts, order_profiles, mix64};
+use default_layout::{ProfileOrder, order_profiles, mix64};
 
 const DEFAULT_LAYOUT_SKETCH_WORDS: usize = 4;
 
-/// Keep the source allocation address reserved for the cache lifetime.
-/// Weak ownership does not retain the source token-set contents after their
-/// last real owner disappears, but prevents a later allocation from
-/// spuriously matching a stale pointer key.
-#[derive(Clone, Debug)]
-struct CachedTokenRemap {
-    _source: Weak<RangeSetBlaze<u32>>,
-    mapped: SharedTokenSet,
-}
+/// The cache lives only during publication, with all source weights retained.
+type TokenRemapCache = HashMap<usize, SharedTokenSet>;
 
-impl CachedTokenRemap {
-    fn entry(source: &SharedTokenSet, mapped: SharedTokenSet) -> (usize, Self) {
-        (Arc::as_ptr(source) as usize, Self {
-            _source: Arc::downgrade(source),
-            mapped,
-        })
-    }
-}
-
-type TokenRemapCache = HashMap<usize, CachedTokenRemap>;
-
-#[derive(Clone, Debug)]
-pub struct CompactReport {
-    pub tsid_perm: Vec<u32>,
-    pub token_perm: Vec<u32>,
-    pub profile_stats: Option<CompactProfileStats>,
-}
-
-#[derive(Clone, Debug)]
-pub struct CompactPlan {
-    tsid_perm: Vec<u32>,
-    ordered_num_tsids: usize,
-    token_perm: Vec<u32>,
-    ordered_num_tokens: usize,
-    token_remaps: Arc<TokenRemapCache>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactLayout {
+    MergeOnly,
+    Sketch,
+    Adaptive,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -70,43 +43,9 @@ pub struct InternedRangeCounts {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct CompactProfileStats {
-    pub tsids_before: usize,
-    pub tsids_after: usize,
-    pub tokens_before: usize,
-    pub tokens_after: usize,
-    pub token_ranges_before: usize,
-    pub token_ranges_after: usize,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct UniqueStorageCounts {
     weight_ranges: usize,
     token_ranges: usize,
-}
-
-impl CompactPlan {
-    fn is_identity(&self, num_tsids: usize, num_tokens: usize) -> bool {
-        self.tsid_perm_is_identity(num_tsids) && self.token_perm_is_identity(num_tokens)
-    }
-
-    fn tsid_perm_is_identity(&self, num_tsids: usize) -> bool {
-        self.ordered_num_tsids == num_tsids
-            && self
-                .tsid_perm
-                .iter()
-                .enumerate()
-                .all(|(idx, &mapped)| mapped == idx as u32)
-    }
-
-    fn token_perm_is_identity(&self, num_tokens: usize) -> bool {
-        self.ordered_num_tokens == num_tokens
-            && self
-                .token_perm
-                .iter()
-                .enumerate()
-                .all(|(idx, &mapped)| mapped == idx as u32)
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -222,156 +161,62 @@ fn elapsed_ms(started_at: Instant) -> f64 {
     started_at.elapsed().as_secs_f64() * 1000.0
 }
 
+/// Discover and publish a joint exact quotient in one operation. Neither the
+/// permutation nor any pointer-indexed remap cache can outlive its sources.
 pub(super) fn compact_weights_with_id_map(
     weights: &mut [&mut Weight],
     id_map: &mut InternalIdMap,
-    collect_profile_stats: bool,
-    allow_expensive_layout: bool,
-    use_default_layout: bool,
-) -> CompactReport {
-    let weight_refs = weight_ref_slice(weights);
-    let plan = plan_compaction_for_weight_refs(
-        &weight_refs,
-        id_map,
-        allow_expensive_layout,
-        use_default_layout,
-        false,
-        false,
-    );
-    apply_compaction_plan_to_weight_refs(weights, id_map, collect_profile_stats, &plan)
-}
-
-pub(super) fn plan_compaction_for_weight_refs(
-    weights: &[&Weight],
-    id_map: &InternalIdMap,
-    allow_expensive_layout: bool,
-    use_default_layout: bool,
-    keep_unmerged_tsid_identity: bool,
-    tsids_proven_irredundant: bool,
-) -> CompactPlan {
-    let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
-    let total_started_at = profile_compaction.then(Instant::now);
+    layout: CompactLayout,
+) {
+    let profiling = env_flag("GLRMASK_PROFILE_COMPILE");
+    let started = profiling.then(Instant::now);
     let num_tsids = id_map.num_tsids() as usize;
     let num_tokens = id_map.num_internal_tokens() as usize;
 
-    let unique_started_at = profile_compaction.then(Instant::now);
-    let unique_weights = collect_unique_weights_from_weight_refs(weights);
-    let unique_ms = unique_started_at.map_or(0.0, elapsed_ms);
-    let build_started_at = profile_compaction.then(Instant::now);
-    let use_thread_pool = allow_expensive_layout;
-    let build_compaction = || {
-        build_dimension_compaction(
-            &unique_weights,
-            weights.len(),
-            num_tsids,
-            num_tokens,
-            allow_expensive_layout,
-            use_default_layout,
-            keep_unmerged_tsid_identity,
-            tsids_proven_irredundant,
-        )
-    };
-    let compaction = if use_thread_pool {
-        run_with_compaction_thread_pool(build_compaction)
-    } else {
-        build_compaction()
-    };
-    let build_ms = build_started_at.map_or(0.0, elapsed_ms);
-
-    if let Some(total_started_at) = total_started_at {
-        eprintln!(
-            "[glrmask/profile][mapped_compaction_plan] weights={} unique_weights={} tsids_before={} tsids_after={} tokens_before={} tokens_after={} expensive_layout={} unique_ms={:.3} build_ms={:.3} total_ms={:.3}",
-            weights.len(),
-            unique_weights.len(),
-            num_tsids,
-            compaction.ordered_num_tsids,
-            num_tokens,
-            compaction.ordered_num_tokens,
-            allow_expensive_layout,
-            unique_ms,
-            build_ms,
-            elapsed_ms(total_started_at),
-        );
-    }
-
-    compaction
-}
-
-pub(super) fn apply_compaction_plan_to_weight_refs(
-    weights: &mut [&mut Weight],
-    id_map: &mut InternalIdMap,
-    collect_profile_stats: bool,
-    plan: &CompactPlan,
-) -> CompactReport {
-    let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
-    let total_started_at = profile_compaction.then(Instant::now);
-    let num_tsids = id_map.num_tsids() as usize;
-    let num_tokens = id_map.num_internal_tokens() as usize;
-    let storage_before_started_at = profile_compaction.then(Instant::now);
-    let storage_before = if collect_profile_stats && weights.len() <= 4096 {
-        Some(count_unique_storage_for_weight_refs(&weight_ref_slice(weights)))
-    } else {
-        None
-    };
-    let storage_before_ms = storage_before_started_at.map_or(0.0, elapsed_ms);
-
-    let unique_started_at = profile_compaction.then(Instant::now);
     let unique_weights = collect_unique_weights_from_refs(weights);
-    let unique_ms = unique_started_at.map_or(0.0, elapsed_ms);
+    let unique_ms = started.map_or(0.0, elapsed_ms);
+    let order = match layout {
+        CompactLayout::MergeOnly => ProfileOrder::FirstSeen,
+        CompactLayout::Adaptive if weights.len() > unique_weights.len().saturating_mul(4) =>
+            ProfileOrder::Lexical,
+        _ => ProfileOrder::Sketch,
+    };
+    let build = || {
+        let refs = weight_refs(&unique_weights);
+        let token_started = profiling.then(Instant::now);
+        let (token_perm, token_count) = build_token_partition(&refs, num_tokens, order);
+        let token_ms = token_started.map_or(0.0, elapsed_ms);
+        let state_started = profiling.then(Instant::now);
+        let (tsid_perm, tsid_count) = build_state_partition(&refs, num_tsids, order);
+        let state_ms = state_started.map_or(0.0, elapsed_ms);
+        (token_perm, token_count, tsid_perm, tsid_count, token_ms, state_ms)
+    };
+    let (token_perm, token_count, tsid_perm, tsid_count, token_ms, state_ms) =
+        if layout == CompactLayout::Adaptive {
+            run_with_compaction_thread_pool(build)
+        } else {
+            build()
+        };
 
-    let apply_weights_started_at = profile_compaction.then(Instant::now);
-    if !plan.is_identity(num_tsids, num_tokens) {
-        apply_permutations_to_weight_refs(
-            weights, &unique_weights, &plan.tsid_perm, &plan.token_perm,
-            &plan.token_remaps,
-        );
+    let apply_started = profiling.then(Instant::now);
+    let tsid_identity = is_identity_perm(&tsid_perm);
+    let token_identity = is_identity_perm(&token_perm);
+    if !tsid_identity || !token_identity {
+        apply_permutations_to_weight_refs(weights, &unique_weights, &tsid_perm, &token_perm);
     }
-    let apply_weights_ms = apply_weights_started_at.map_or(0.0, elapsed_ms);
-    let apply_id_map_started_at = profile_compaction.then(Instant::now);
-    if !plan.tsid_perm_is_identity(num_tsids) {
-        id_map.tokenizer_states.relabel_classes(&plan.tsid_perm, plan.ordered_num_tsids);
+    let apply_ms = apply_started.map_or(0.0, elapsed_ms);
+    if !tsid_identity {
+        id_map.tokenizer_states.relabel_classes(&tsid_perm, tsid_count);
     }
-    if !plan.token_perm_is_identity(num_tokens) {
-        id_map.vocab_tokens.relabel_classes(&plan.token_perm, plan.ordered_num_tokens);
+    if !token_identity {
+        id_map.vocab_tokens.relabel_classes(&token_perm, token_count);
     }
-    let apply_id_map_ms = apply_id_map_started_at.map_or(0.0, elapsed_ms);
-
-    let storage_after_started_at = profile_compaction.then(Instant::now);
-    let profile_stats = storage_before.map(|storage_before| {
-        let storage_after = count_unique_storage_for_weight_refs(&weight_ref_slice(weights));
-        CompactProfileStats {
-            tsids_before: num_tsids,
-            tsids_after: plan.ordered_num_tsids,
-            tokens_before: num_tokens,
-            tokens_after: plan.ordered_num_tokens,
-            token_ranges_before: storage_before.token_ranges,
-            token_ranges_after: storage_after.token_ranges,
-        }
-    });
-    let storage_after_ms = storage_after_started_at.map_or(0.0, elapsed_ms);
-
-    if let Some(total_started_at) = total_started_at {
+    if let Some(started) = started {
         eprintln!(
-            "[glrmask/profile][mapped_compaction_apply] weights={} unique_weights={} tsids_before={} tsids_after={} tokens_before={} tokens_after={} storage_before_ms={:.3} unique_ms={:.3} apply_weights_ms={:.3} apply_id_map_ms={:.3} storage_after_ms={:.3} total_ms={:.3}",
-            weights.len(),
-            unique_weights.len(),
-            num_tsids,
-            plan.ordered_num_tsids,
-            num_tokens,
-            plan.ordered_num_tokens,
-            storage_before_ms,
-            unique_ms,
-            apply_weights_ms,
-            apply_id_map_ms,
-            storage_after_ms,
-            elapsed_ms(total_started_at),
+            "[glrmask/profile][mapped_compaction] weights={} unique_weights={} tsids_before={} tsids_after={} tokens_before={} tokens_after={} layout={layout:?} unique_ms={:.3} token_partition_ms={:.3} state_partition_ms={:.3} apply_ms={:.3} total_ms={:.3}",
+            weights.len(), unique_weights.len(), num_tsids, tsid_count, num_tokens, token_count,
+            unique_ms, token_ms, state_ms, apply_ms, elapsed_ms(started),
         );
-    }
-
-    CompactReport {
-        tsid_perm: plan.tsid_perm.clone(),
-        token_perm: plan.token_perm.clone(),
-        profile_stats,
     }
 }
 
@@ -380,88 +225,6 @@ pub(super) fn count_interned_ranges_for_weight_refs(weights: &[&Weight]) -> Inte
     InternedRangeCounts {
         tsid_ranges: counts.weight_ranges,
         token_ranges: counts.token_ranges,
-    }
-}
-
-fn build_dimension_compaction(
-    unique_weights: &[Weight],
-    weight_ref_count: usize,
-    num_tsids: usize,
-    num_tokens: usize,
-    allow_expensive_layout: bool,
-    use_default_layout: bool,
-    keep_unmerged_tsid_identity: bool,
-    tsids_proven_irredundant: bool,
-) -> CompactPlan {
-    let use_exact_profile_layout = use_default_layout
-        && allow_expensive_layout
-        && weight_ref_count > unique_weights.len().saturating_mul(4);
-    build_default_dimension_compaction(
-        unique_weights,
-        num_tsids,
-        num_tokens,
-        use_default_layout,
-        use_exact_profile_layout,
-        keep_unmerged_tsid_identity,
-        tsids_proven_irredundant,
-    )
-}
-
-fn build_default_dimension_compaction(
-    unique_weights: &[Weight],
-    num_tsids: usize,
-    num_tokens: usize,
-    use_default_layout: bool,
-    adaptive_layout: bool,
-    keep_unmerged_tsid_identity: bool,
-    tsids_proven_irredundant: bool,
-) -> CompactPlan {
-    let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
-    let total_started_at = profile_compaction.then(Instant::now);
-    let original_weight_refs = weight_refs(unique_weights);
-
-    let order = if !use_default_layout {
-        ProfileOrder::FirstSeen
-    } else if adaptive_layout {
-        ProfileOrder::Lexical
-    } else {
-        ProfileOrder::Sketch
-    };
-    let token_merge_started_at = profile_compaction.then(Instant::now);
-    let fused_token_compaction = tsids_proven_irredundant
-        && keep_unmerged_tsid_identity && !use_default_layout;
-    let (token_perm, merged_num_tokens, fused_token_remaps) =
-        build_token_partition(&original_weight_refs, num_tokens, order, fused_token_compaction);
-    let token_merge_ms = token_merge_started_at.map_or(0.0, elapsed_ms);
-
-    let token_remap_started_at = profile_compaction.then(Instant::now);
-    let token_remaps = fused_token_remaps
-        .unwrap_or_else(|| build_global_permuted_token_cache(unique_weights, &TokenPermutation::new(&token_perm)));
-    let token_remap_ms = token_remap_started_at.map_or(0.0, elapsed_ms);
-    let tsid_merge_started_at = profile_compaction.then(Instant::now);
-    let (tsid_perm, merged_num_tsids) = if tsids_proven_irredundant {
-        (identity_perm(num_tsids), num_tsids)
-    } else {
-        build_state_partition(
-            &original_weight_refs, num_tsids, order, keep_unmerged_tsid_identity,
-        )
-    };
-    let tsid_merge_ms = tsid_merge_started_at.map_or(0.0, elapsed_ms);
-
-    if let Some(total_started_at) = total_started_at {
-        eprintln!(
-            "[glrmask/profile][mapped_compaction_default_detail] unique_weights={} num_tsids={} num_tokens={} merged_tokens={} merged_tsids={} fused_token_compaction={} token_merge_ms={:.3} token_remap_ms={:.3} tsid_merge_ms={:.3} total_ms={:.3}",
-            unique_weights.len(), num_tsids, num_tokens, merged_num_tokens, merged_num_tsids,
-            fused_token_compaction, token_merge_ms, token_remap_ms, tsid_merge_ms,
-            elapsed_ms(total_started_at),
-        );
-    }
-    CompactPlan {
-        tsid_perm,
-        ordered_num_tsids: merged_num_tsids,
-        token_perm,
-        ordered_num_tokens: merged_num_tokens,
-        token_remaps: Arc::new(token_remaps),
     }
 }
 
@@ -633,15 +396,14 @@ fn build_token_partition(
     weights: &[&Weight],
     num_tokens: usize,
     order: ProfileOrder,
-    precompute_remaps: bool,
-) -> (Vec<u32>, usize, Option<TokenRemapCache>) {
+) -> (Vec<u32>, usize) {
     if num_tokens == 0 {
-        return (Vec::new(), 0, None);
+        return (Vec::new(), 0);
     }
 
     let mut seen = HashSet::new();
     let mut seen_contents = HashSet::new();
-    let mut sets = Vec::new();
+    let mut contexts = 0usize;
     let mut events = ObservationEvents::default();
     for weight in weights {
         if weight.is_full() || weight.is_empty() {
@@ -653,44 +415,29 @@ fn build_token_partition(
                 continue;
             }
             // Equal contexts need not count twice in a layout heuristic.
-            // Preserve every source pointer in the fused remap route.
             if order != ProfileOrder::FirstSeen && !seen_contents.insert(rangeset_key(tokens)) {
                 continue;
             }
-            let context = u32::try_from(sets.len()).expect("token observation context overflow");
-            sets.push(tokens);
+            let context = u32::try_from(contexts).expect("token observation context overflow");
+            contexts += 1;
             for range in tokens.ranges() {
                 events.push_range(*range.start(), *range.end(), context, num_tokens);
             }
         }
     }
-    if sets.len() <= 64 {
+    if contexts <= 64 {
         let (mut perm, profiles) = events.partition(num_tokens, 0u64);
         order_profiles(&mut perm, &profiles, order);
-        return (perm, profiles.len(), None);
+        return (perm, profiles.len());
     }
 
     let (mut perm, profiles) = events.partition(num_tokens, DenseMembership {
-        words: vec![0; sets.len().div_ceil(64)],
+        words: vec![0; contexts.div_ceil(64)],
         fingerprint: 0,
     });
     let count = profiles.len();
-    let remaps = (precompute_remaps && order == ProfileOrder::FirstSeen && count < num_tokens).then(|| {
-        // Invert the exact class profiles directly. Every profile has just
-        // one allocation, also used for collision resolution in the sweep.
-        let mut groups = vec![Vec::<u32>::new(); sets.len()];
-        for (group, profile) in profiles.iter().enumerate() {
-            for context in profile.contexts() {
-                groups[context as usize].push(group as u32);
-            }
-        }
-        sets.into_iter().zip(groups).map(|(source, ids)| {
-            let mapped = shared_rangeset(ids.into_iter().map(|id| id..=id).collect());
-            CachedTokenRemap::entry(source, mapped)
-        }).collect()
-    });
     order_profiles(&mut perm, &profiles, order);
-    (perm, count, remaps)
+    (perm, count)
 }
 
 /// Every observed token set is a union of exact token-equivalence classes.
@@ -698,7 +445,7 @@ fn build_token_partition(
 /// which TSIDs have equal rows. No token remap is needed to discover the
 /// exact state partition.
 fn build_state_partition(
-    weights: &[&Weight], num_tsids: usize, order: ProfileOrder, keep_unmerged_identity: bool,
+    weights: &[&Weight], num_tsids: usize, order: ProfileOrder,
 ) -> (Vec<u32>, usize) {
     let mut events = ObservationEvents::default();
     let mut next_context = 0u32;
@@ -723,9 +470,6 @@ fn build_state_partition(
 
     let (mut perm, profiles) = events.partition(num_tsids, SparseMembership::default());
     let count = profiles.len();
-    if count == num_tsids && keep_unmerged_identity {
-        return (identity_perm(num_tsids), count);
-    }
     // Unmerged states retain the original lexical-profile numbering.
     let order = if count < num_tsids && order == ProfileOrder::Sketch {
         ProfileOrder::Sketch
@@ -741,21 +485,18 @@ fn apply_permutations_to_weight_refs(
     unique_weights: &[Weight],
     tsid_perm: &[u32],
     token_perm: &[u32],
-    precomputed_token_remaps: &TokenRemapCache,
 ) {
     let profile_compaction = env_flag("GLRMASK_PROFILE_COMPILE");
     let total_started_at = profile_compaction.then(Instant::now);
     let perm_context = PermutationContext::new(tsid_perm, token_perm);
     let cache_started_at = profile_compaction.then(Instant::now);
-    let fallback_token_cache = build_missing_global_permuted_token_cache(
-        unique_weights, &perm_context.tokens, precomputed_token_remaps,
-    );
+    let token_cache = build_global_permuted_token_cache(unique_weights, &perm_context.tokens);
     let fallback_cache_ms = cache_started_at.map_or(0.0, elapsed_ms);
 
     let transform_started_at = profile_compaction.then(Instant::now);
     let permute_entry = |weight: &Weight| {
         let new_weight = permute_weight_with_caches(
-            weight, &perm_context, precomputed_token_remaps, &fallback_token_cache,
+            weight, &perm_context, &token_cache,
         );
         (weight.ptr_key(), new_weight)
     };
@@ -780,11 +521,10 @@ fn apply_permutations_to_weight_refs(
 
     if let Some(total_started_at) = total_started_at {
         eprintln!(
-            "[glrmask/profile][mapped_compaction_apply_detail] weights={} unique_weights={} planned_token_sets={} fallback_token_sets={} fallback_cache_ms={:.3} transform_ms={:.3} map_ms={:.3} writeback_ms={:.3} total_ms={:.3}",
+            "[glrmask/profile][mapped_compaction_apply_detail] weights={} unique_weights={} token_sets={} cache_ms={:.3} transform_ms={:.3} map_ms={:.3} writeback_ms={:.3} total_ms={:.3}",
             weights.len(),
             unique_weights.len(),
-            precomputed_token_remaps.len(),
-            fallback_token_cache.len(),
+            token_cache.len(),
             fallback_cache_ms,
             transform_ms,
             map_ms,
@@ -797,8 +537,7 @@ fn apply_permutations_to_weight_refs(
 fn permute_weight_with_caches(
     weight: &Weight,
     perm_context: &PermutationContext,
-    precomputed_token_remaps: &TokenRemapCache,
-    fallback_token_cache: &TokenRemapCache,
+    token_cache: &TokenRemapCache,
 ) -> Weight {
     if weight.is_empty() {
         return Weight::empty();
@@ -811,8 +550,7 @@ fn permute_weight_with_caches(
             Arc::clone(token_set)
         } else {
             lookup_permuted_token_set(
-                token_set, Arc::as_ptr(token_set) as usize, perm_context,
-                precomputed_token_remaps, fallback_token_cache,
+                token_set, Arc::as_ptr(token_set) as usize, perm_context, token_cache,
             )
         }
     };
@@ -847,27 +585,15 @@ fn lookup_permuted_token_set(
     token_set: &RangeSetBlaze<u32>,
     token_set_ptr: usize,
     perm_context: &PermutationContext,
-    precomputed_token_remaps: &TokenRemapCache,
-    fallback_token_cache: &TokenRemapCache,
+    token_cache: &TokenRemapCache,
 ) -> SharedTokenSet {
-    precomputed_token_remaps
-        .get(&token_set_ptr)
-        .or_else(|| fallback_token_cache.get(&token_set_ptr))
-        .map(|entry| Arc::clone(&entry.mapped))
+    token_cache.get(&token_set_ptr).cloned()
         .unwrap_or_else(|| shared_rangeset(permute_rangeset_with_runs(token_set, &perm_context.tokens.runs)))
 }
 
 fn build_global_permuted_token_cache(
     weights: &[Weight],
     permutation: &TokenPermutation,
-) -> TokenRemapCache {
-    build_missing_global_permuted_token_cache(weights, permutation, &TokenRemapCache::new())
-}
-
-fn build_missing_global_permuted_token_cache(
-    weights: &[Weight],
-    permutation: &TokenPermutation,
-    precomputed_token_remaps: &TokenRemapCache,
 ) -> TokenRemapCache {
     if permutation.identity {
         return TokenRemapCache::new();
@@ -881,9 +607,6 @@ fn build_missing_global_permuted_token_cache(
         }
         for (_tsid_range, token_set) in weight.raw_range_values() {
             let ptr = Arc::as_ptr(token_set) as usize;
-            if precomputed_token_remaps.contains_key(&ptr) {
-                continue;
-            }
             if seen.insert(ptr) {
                 token_sets.push((ptr, Arc::clone(token_set)));
             }
@@ -912,11 +635,8 @@ fn build_missing_global_permuted_token_cache(
             .sum::<usize>()
     });
     let remap_started_at = profile_compaction.then(Instant::now);
-    let permute_token_set = |(_, token_set): &(usize, SharedTokenSet)| {
-        CachedTokenRemap::entry(
-            token_set,
-            shared_rangeset(permute_rangeset_with_runs(token_set, &permutation.runs)),
-        )
+    let permute_token_set = |(ptr, token_set): &(usize, SharedTokenSet)| {
+        (*ptr, shared_rangeset(permute_rangeset_with_runs(token_set, &permutation.runs)))
     };
     let remaps: TokenRemapCache = if rayon::current_num_threads() == 1 {
         token_sets.iter().map(permute_token_set).collect()
@@ -924,7 +644,7 @@ fn build_missing_global_permuted_token_cache(
         token_sets.par_iter().map(permute_token_set).collect()
     };
     if let Some(remap_started_at) = remap_started_at {
-        let output_range_count: usize = remaps.values().map(|entry| entry.mapped.ranges().count()).sum();
+        let output_range_count: usize = remaps.values().map(|tokens| tokens.ranges().count()).sum();
         eprintln!(
             "[glrmask/profile][mapped_compaction_token_remap] token_sets={} source_ranges={} perm_runs={} overlap_runs={} output_ranges={} remap_ms={:.3}",
             token_sets.len(),
@@ -1029,17 +749,6 @@ fn collect_unique_weights_from_refs(weights: &[&mut Weight]) -> Vec<Weight> {
     unique
 }
 
-fn collect_unique_weights_from_weight_refs(weights: &[&Weight]) -> Vec<Weight> {
-    let mut seen = HashSet::new();
-    let mut unique = Vec::new();
-    for weight in weights {
-        if seen.insert(weight.ptr_key()) {
-            unique.push((**weight).clone());
-        }
-    }
-    unique
-}
-
 fn count_unique_storage_for_weight_refs(weights: &[&Weight]) -> UniqueStorageCounts {
     let mut seen_weights = HashSet::new();
     let mut seen_token_sets = HashSet::new();
@@ -1061,10 +770,6 @@ fn count_unique_storage_for_weight_refs(weights: &[&Weight]) -> UniqueStorageCou
 
 fn weight_refs(weights: &[Weight]) -> Vec<&Weight> {
     weights.iter().collect()
-}
-
-fn weight_ref_slice<'a>(weights: &'a [&'a mut Weight]) -> Vec<&'a Weight> {
-    weights.iter().map(|weight| &**weight).collect()
 }
 
 fn identity_perm(size: usize) -> Vec<u32> {
@@ -1100,7 +805,7 @@ mod tests {
             for tokens in [[1, 4, 0, 3, 2], [1, 0, 1, 2, 0], [0, 1, 2, 3, 4]] {
                 let context = PermutationContext::new(&states, &tokens);
                 let actual = permute_weight_with_caches(
-                    &weight, &context, &TokenRemapCache::new(), &TokenRemapCache::new(),
+                    &weight, &context, &TokenRemapCache::new(),
                 );
                 for dest_state in 0..5 {
                     for dest_token in 0..5 {
@@ -1130,12 +835,10 @@ mod tests {
             &weight,
             &context,
             &cache,
-            &TokenRemapCache::new(),
         );
         let fallback = permute_weight_with_caches(
             &weight,
             &context,
-            &TokenRemapCache::new(),
             &TokenRemapCache::new(),
         );
 
@@ -1144,7 +847,7 @@ mod tests {
             weight.raw_range_values().zip(cached.raw_range_values())
         {
             let source_ptr = Arc::as_ptr(source_tokens) as usize;
-            assert!(Arc::ptr_eq(cached_tokens, &cache.get(&source_ptr).unwrap().mapped));
+            assert!(Arc::ptr_eq(cached_tokens, cache.get(&source_ptr).unwrap()));
         }
     }
 
@@ -1168,8 +871,8 @@ mod tests {
 
         for count in [0, 1, 9, weights.len()] {
             let refs = weight_refs(&weights[..count]);
-            let (token_perm, token_count, fused) = build_token_partition(&refs, TOKENS, ProfileOrder::FirstSeen, true);
-            let (tsid_perm, tsid_count) = build_state_partition(&refs, STATES, ProfileOrder::Lexical, false);
+            let (token_perm, token_count) = build_token_partition(&refs, TOKENS, ProfileOrder::FirstSeen);
+            let (tsid_perm, tsid_count) = build_state_partition(&refs, STATES, ProfileOrder::Lexical);
 
             let token_signature = |token: usize| {
                 refs.iter().flat_map(|weight| {
@@ -1184,7 +887,7 @@ mod tests {
                     .collect::<Vec<_>>()
             };
             for order in [ProfileOrder::Lexical, ProfileOrder::Sketch] {
-                let (ordered, count, _) = build_token_partition(&refs, TOKENS, order, false);
+                let (ordered, count) = build_token_partition(&refs, TOKENS, order);
                 assert_eq!(count, token_count);
                 let mut image = vec![None; count];
                 for (&class, &mapped) in token_perm.iter().zip(&ordered) {
@@ -1193,7 +896,7 @@ mod tests {
                     *slot = Some(mapped);
                 }
                 assert_eq!(image.into_iter().flatten().collect::<HashSet<_>>().len(), count);
-                let (ordered, count) = build_state_partition(&refs, STATES, order, false);
+                let (ordered, count) = build_state_partition(&refs, STATES, order);
                 assert_eq!(count, tsid_count);
                 for left in 0..STATES {
                     for right in 0..STATES {
@@ -1215,22 +918,13 @@ mod tests {
             }
             assert_eq!(token_perm.iter().copied().collect::<HashSet<_>>().len(), token_count);
             assert_eq!(tsid_perm.iter().copied().collect::<HashSet<_>>().len(), tsid_count);
-            if let Some(fused) = fused {
-                let expected = build_global_permuted_token_cache(&weights[..count],
-                    &TokenPermutation::new(&token_perm));
-                assert_eq!(fused.len(), expected.len());
-                for (ptr, entry) in fused {
-                    assert_eq!(entry.mapped, expected[&ptr].mapped);
-                    assert_eq!(entry._source.as_ptr(), expected[&ptr]._source.as_ptr());
-                }
-            }
             let context = PermutationContext::new(&identity_perm(STATES), &token_perm);
             let materialized: Vec<_> = weights[..count].iter().map(|weight| {
                 permute_weight_with_caches(
-                    weight, &context, &TokenRemapCache::new(), &TokenRemapCache::new(),
+                    weight, &context, &TokenRemapCache::new(),
                 )
             }).collect();
-            let (remapped, _) = build_state_partition(&weight_refs(&materialized), STATES, ProfileOrder::Lexical, false);
+            let (remapped, _) = build_state_partition(&weight_refs(&materialized), STATES, ProfileOrder::Lexical);
             for left in 0..STATES {
                 for right in 0..STATES {
                     assert_eq!(tsid_perm[left] == tsid_perm[right], remapped[left] == remapped[right]);

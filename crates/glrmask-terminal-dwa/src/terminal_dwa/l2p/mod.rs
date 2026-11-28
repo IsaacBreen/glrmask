@@ -8,6 +8,7 @@
 //! The only structural difference from the old code is `active_terminals`
 //! filtering: terminals not in the L2+ set are skipped during the trie walk.
 
+use crate::compiler::stages::mapped_artifact::CompactLayout;
 use crate::automata::lexer::Lexer;
 pub mod equivalence_analysis;
 pub mod nwa_builder;
@@ -1864,16 +1865,12 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
             })
             .unwrap_or(false);
-    if skip_core_compact {
-        // No compaction: keep the Step-1 coordinate exactly.
-    } else if profiling && merge_only_core_compact {
-        mapped_dwa.compact_dimensions_merge_only_fast_with_stats();
-    } else if profiling {
-        mapped_dwa.compact_dimensions_fast_with_stats();
-    } else if merge_only_core_compact {
-        mapped_dwa.compact_dimensions_merge_only_fast();
-    } else {
-        mapped_dwa.compact_dimensions_fast();
+    if !skip_core_compact {
+        mapped_dwa.compact_dimensions(if merge_only_core_compact {
+            CompactLayout::MergeOnly
+        } else {
+            CompactLayout::Sketch
+        });
     }
     let core_compact_ms = if skip_core_compact {
         0.0
@@ -1990,11 +1987,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
         if force_precompact
             && !(used_follow_row_quotient && expanded_artifact.artifact().stats().states <= 64)
         {
-            if profiling {
-                expanded_artifact.compact_dimensions_fast_with_stats();
-            } else {
-                expanded_artifact.compact_dimensions_fast();
-            }
+            expanded_artifact.compact_dimensions(CompactLayout::Sketch);
         }
         ti_post_dwa_compact_ms = post_dwa_compact_started_at.elapsed().as_secs_f64() * 1000.0;
         let (expanded_dwa, final_id_map) = expanded_artifact.into_parts();
@@ -2022,11 +2015,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             })
             .unwrap_or(true);
         if !skip_final_compact {
-            if profiling {
-                minimized_artifact.compact_dimensions_merge_only_fast_with_stats();
-            } else {
-                minimized_artifact.compact_dimensions_merge_only_fast();
-            }
+            minimized_artifact.compact_dimensions(CompactLayout::MergeOnly);
         }
         ti_post_dwa_compact_ms += final_compact_started_at.elapsed().as_secs_f64() * 1000.0;
         let stats = minimized_artifact.artifact().stats();

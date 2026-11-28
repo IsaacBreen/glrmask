@@ -1,3 +1,4 @@
+use crate::compiler::stages::mapped_artifact::CompactLayout;
 use crate::ErrorExt as _;
 use crate::automata::lexer::Lexer;
 use std::collections::{BTreeMap, BTreeSet};
@@ -4142,11 +4143,7 @@ fn compile_prepared_with_profile_and_table_construction(
         let mut shared_id_reconcile_ms = 0.0;
         if compact_possible_matches_before_reconcile_enabled() {
             let compact_started_at = Instant::now();
-            if compile_profile_enabled() {
-                let _ = possible_matches.compact_dimensions_fast_with_stats();
-            } else {
-                let _ = possible_matches.compact_dimensions_fast();
-            }
+            possible_matches.compact_dimensions(CompactLayout::Sketch);
             profile.compact_ms += elapsed_ms(compact_started_at);
         }
         let collect_expensive_profile_stats = compile_profile_summary_enabled();
@@ -4211,7 +4208,7 @@ fn compile_prepared_with_profile_and_table_construction(
         shared_id_reconcile_ms += elapsed_ms(shared_id_reconcile_started_at);
         if compact_parser_pm {
             let compact_started_at = Instant::now();
-            parser_pm_pair.compact_dimensions();
+            parser_pm_pair.compact_dimensions(CompactLayout::Adaptive);
             profile.compact_ms += elapsed_ms(compact_started_at);
         }
         let ((mut parser_dwa_artifact, mut possible_matches_artifact), internal_ids) =

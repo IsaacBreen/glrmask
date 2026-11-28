@@ -11,7 +11,7 @@ use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::equiv_types::InternalIdMap;
 use crate::ds::weight::Weight;
 
-pub use compaction::{CompactPlan, CompactReport, InternedRangeCounts};
+pub use compaction::{CompactLayout, InternedRangeCounts};
 #[cfg(feature = "internal-api")]
 pub use reconcile::{remap_weights_with_maps, remap_weights_with_token_axis, remap_weights_with_axes, TokenAxisMap, refine_observation_classes, refine_vocab_observations, refine_sparse_memberships, local_to_refined_classes};
 
@@ -279,137 +279,13 @@ impl<T: WeightRefs> MappedArtifact<T> {
         self.artifact
     }
 
-    pub fn compact_dimensions_with_stats(&mut self) -> CompactReport {
-        let plan = self.plan_dimensions_compaction(true, true);
-        self.apply_compaction_plan_with_stats(&plan)
-    }
-
-    pub fn compact_dimensions(&mut self) -> CompactReport {
-        let plan = self.plan_dimensions_compaction(true, true);
-        self.apply_compaction_plan(&plan)
-    }
-
-    pub fn compact_dimensions_fast_with_stats(&mut self) -> CompactReport {
-        let plan = self.plan_dimensions_compaction(false, true);
-        self.apply_compaction_plan_with_stats(&plan)
-    }
-
-    /// Fast exact compaction for local L1 artifacts. When token compaction
-    /// does not merge any TSIDs, preserve their existing order so the already
-    /// planned token-remapped weights can be reused directly.
-    pub fn compact_dimensions_fast_l1_with_stats(&mut self) -> CompactReport {
-        // L1's preceding exact state quotient is a complete row distinction
-        // proof for this terminal relation. Exact token merging preserves every
-        // differing row bit, so a later TSID merge cannot succeed.
-        //
-        // Keep the exact token classes in first-occurrence order. For an L1
-        // terminal relation that order follows the byte-sorted vocabulary's
-        // local lexer topology; the generic sketch layout both costs extra work
-        // and can split those local runs into more token ranges.
-        let plan = self.plan_dimensions_compaction_with_options(false, false, true, true);
-        self.apply_compaction_plan_with_stats(&plan)
-    }
-
-    pub fn compact_dimensions_fast(&mut self) -> CompactReport {
-        let plan = self.plan_dimensions_compaction(false, true);
-        self.apply_compaction_plan(&plan)
-    }
-
-    pub fn compact_dimensions_fast_l1(&mut self) -> CompactReport {
-        let plan = self.plan_dimensions_compaction_with_options(false, false, true, true);
-        self.apply_compaction_plan(&plan)
-    }
-
-    pub fn compact_dimensions_merge_only_fast_with_stats(&mut self) -> CompactReport {
-        let plan = self.plan_dimensions_compaction(false, false);
-        self.apply_compaction_plan_with_stats(&plan)
-    }
-
-    pub fn compact_dimensions_merge_only_fast(&mut self) -> CompactReport {
-        let plan = self.plan_dimensions_compaction(false, false);
-        self.apply_compaction_plan(&plan)
-    }
-
-    pub fn plan_dimensions_compaction(
-        &self,
-        allow_expensive_layout: bool,
-        use_default_layout: bool,
-    ) -> CompactPlan {
-        self.plan_dimensions_compaction_with_options(
-            allow_expensive_layout,
-            use_default_layout,
-            false,
-            false,
-        )
-    }
-
-    fn plan_dimensions_compaction_with_options(
-        &self,
-        allow_expensive_layout: bool,
-        use_default_layout: bool,
-        keep_unmerged_tsid_identity: bool,
-        tsids_proven_irredundant: bool,
-    ) -> CompactPlan {
-        let weights = self.artifact.weight_refs();
-        compaction::plan_compaction_for_weight_refs(
-            &weights,
-            &self.id_map,
-            allow_expensive_layout,
-            use_default_layout,
-            keep_unmerged_tsid_identity,
-            tsids_proven_irredundant,
-        )
-    }
-
-    pub fn apply_compaction_plan_with_stats(
-        &mut self,
-        plan: &CompactPlan,
-    ) -> CompactReport {
-        self.apply_compaction_plan_collecting_stats(plan, true)
-    }
-
-    pub fn apply_compaction_plan(&mut self, plan: &CompactPlan) -> CompactReport {
-        self.apply_compaction_plan_collecting_stats(plan, false)
-    }
-
-    fn apply_compaction_plan_collecting_stats(
-        &mut self,
-        plan: &CompactPlan,
-        collect_profile_stats: bool,
-    ) -> CompactReport {
-        let (artifact, id_map) = self.parts_mut();
-        let mut weights = artifact.weight_refs_mut();
-        compaction::apply_compaction_plan_to_weight_refs(
-            &mut weights,
-            id_map,
-            collect_profile_stats,
-            plan,
-        )
+    pub fn compact_dimensions(&mut self, layout: CompactLayout) {
+        let mut weights = self.artifact.weight_refs_mut();
+        compaction::compact_weights_with_id_map(&mut weights, &mut self.id_map, layout);
     }
 
     pub fn interned_range_counts(&mut self) -> InternedRangeCounts {
         count_interned_ranges_for_weights(self.artifact.weight_refs())
-    }
-
-    pub fn num_interned_ranges(&mut self) -> usize {
-        self.interned_range_counts().total_ranges()
-    }
-
-    pub fn reconcile_with<U>(&mut self, other: &mut MappedArtifact<U>) -> InternalIdMap
-    where
-        U: WeightRefs,
-    {
-        let (left_artifact, left_id_map) = self.parts_mut();
-        let (right_artifact, right_id_map) = other.parts_mut();
-        let mut left_weights = left_artifact.weight_refs_mut();
-        let mut right_weights = right_artifact.weight_refs_mut();
-        reconcile::reconcile_weight_id_maps(
-            &mut left_weights,
-            left_id_map,
-            &mut right_weights,
-            right_id_map,
-        );
-        left_id_map.clone()
     }
 
     /// Consume the local artifact while transporting its weights into a
@@ -446,36 +322,6 @@ impl<T: WeightRefs> MappedArtifact<T> {
         self
     }
 
-    /// Reconcile into the exact common refinement even when one map already
-    /// refines the other. Input order controls the composite class ordering;
-    /// callers use this when preserving the first artifact's locality matters
-    /// more than avoiding a remap of the second artifact.
-    pub fn pair_forced_common<U>(
-        mut self,
-        mut other: MappedArtifact<U>,
-    ) -> MappedArtifact<(T, U)>
-    where
-        U: WeightRefs,
-    {
-        if same_internal_id_maps(self.id_map(), other.id_map()) {
-            let (left_artifact, id_map) = self.into_parts();
-            return MappedArtifact::new((left_artifact, other.into_artifact()), id_map.into_dense());
-        }
-        let common_id_map = {
-            let (left_artifact, left_id_map) = self.parts_mut();
-            let (right_artifact, right_id_map) = other.parts_mut();
-            let mut left_weights = left_artifact.weight_refs_mut();
-            let mut right_weights = right_artifact.weight_refs_mut();
-            reconcile::reconcile_weight_id_maps_into_forced_common(
-                &mut left_weights,
-                left_id_map,
-                &mut right_weights,
-                right_id_map,
-            )
-        };
-        MappedArtifact::new((self.into_artifact(), other.into_artifact()), common_id_map)
-    }
-
 }
 
 impl<T, U> From<(MappedArtifact<T>, MappedArtifact<U>)> for MappedArtifact<(T, U)>
@@ -509,20 +355,6 @@ where
 fn same_internal_id_maps(left: &InternalIdMap, right: &InternalIdMap) -> bool {
     left.tokenizer_states.same_coordinate(&right.tokenizer_states)
         && left.vocab_tokens.same_coordinate(&right.vocab_tokens)
-}
-
-impl<A, B> MappedArtifact<(A, B)>
-where
-    A: WeightRefs,
-    B: WeightRefs,
-{
-    pub fn split_pair(self) -> (MappedArtifact<A>, MappedArtifact<B>) {
-        let ((left, right), id_map) = self.into_parts();
-        (
-            MappedArtifact::new(left, id_map.clone()),
-            MappedArtifact::new(right, id_map),
-        )
-    }
 }
 
 impl<T> MappedArtifact<Vec<T>>
@@ -578,13 +410,6 @@ where
         MappedArtifact::new(artifacts, common)
     }
 
-    pub fn split_vec(self) -> Vec<MappedArtifact<T>> {
-        let (artifacts, id_map) = self.into_parts();
-        artifacts
-            .into_iter()
-            .map(|artifact| MappedArtifact::new(artifact, id_map.clone()))
-            .collect()
-    }
 }
 
 impl InternedRangeCounts {
