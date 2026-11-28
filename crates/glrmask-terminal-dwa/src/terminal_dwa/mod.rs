@@ -496,8 +496,6 @@ pub fn build_branch_active_state_map(
         }
     }
     let started_at = Instant::now();
-    let statistic =
-        l2p::equivalence_analysis::state_equivalence::max_length::cached_statistic(vocab);
     let requested_mode =
         std::env::var("GLRMASK_BRANCH_ACTIVE_STATE_MAP_MODE").unwrap_or_else(|_| "stable".into());
     let (state_map, mode_label) = match requested_mode.as_str() {
@@ -513,7 +511,7 @@ pub fn build_branch_active_state_map(
         "stable" => (
             l2p::equivalence_analysis::state_equivalence::max_length::compute_state_map(
                 tokenizer,
-                &statistic,
+                vocab,
                 initial_state_map,
                 Some(active),
                 l2p::equivalence_analysis::state_equivalence::max_length::MaxLengthMode::StableByteRestricted,
@@ -525,7 +523,7 @@ pub fn build_branch_active_state_map(
         "kbounded" => (
             l2p::equivalence_analysis::state_equivalence::max_length::compute_state_map(
                 tokenizer,
-                &statistic,
+                vocab,
                 initial_state_map,
                 Some(active),
                 l2p::equivalence_analysis::state_equivalence::max_length::MaxLengthMode::KBoundedByteRestricted,
@@ -552,7 +550,7 @@ pub fn build_branch_active_state_map(
             mode_label,
             active.iter().filter(|&&value| value).count(),
             vocab.len(),
-            statistic.max_token_len(),
+            vocab.max_token_byte_len(),
             source_reps,
             reps,
             100.0 * source_reps.saturating_sub(reps) as f64 / source_reps as f64,
@@ -1519,10 +1517,10 @@ fn global_max_length_stable_signature_cell_limit() -> usize {
 
 fn global_max_length_stable_signature_cells(
     tokenizer: &Tokenizer,
-    statistic: &l2p::equivalence_analysis::state_equivalence::max_length::MaxLengthStatistic,
+    relevant_byte_count: usize,
 ) -> usize {
     (tokenizer.num_states() as usize)
-        .saturating_mul(1 + statistic.relevant_byte_count())
+        .saturating_mul(1 + relevant_byte_count)
 }
 
 fn should_auto_use_global_max_length(
@@ -1536,7 +1534,7 @@ fn should_auto_use_global_max_length(
 
 fn use_global_max_length(
     tokenizer: &Tokenizer,
-    statistic: &l2p::equivalence_analysis::state_equivalence::max_length::MaxLengthStatistic,
+    relevant_byte_count: usize,
 ) -> bool {
     match global_max_length_env_override() {
         Some(enabled) => enabled,
@@ -1548,7 +1546,7 @@ fn use_global_max_length(
             // when even one signature matrix exceeds the structural budget.
             should_auto_use_global_max_length(
                 tokenizer.num_states() as usize,
-                statistic.relevant_byte_count(),
+                relevant_byte_count,
                 global_max_length_stable_signature_cell_limit(),
             )
         }
@@ -1608,21 +1606,20 @@ pub fn build_global_max_length_state_map_with_initial(
         }
     }
 
-    let global_statistic =
-        l2p::equivalence_analysis::state_equivalence::max_length::cached_statistic(vocab);
-    let max_token_len = global_statistic.max_token_len();
-    let stable_signature_cells = global_max_length_stable_signature_cells(tokenizer, &global_statistic);
+    let relevant_byte_count = vocab.relevant_bytes().len();
+    let max_token_len = vocab.max_token_byte_len();
+    let stable_signature_cells = global_max_length_stable_signature_cells(tokenizer, relevant_byte_count);
     let stable_signature_cell_limit = global_max_length_stable_signature_cell_limit();
 
     use l2p::equivalence_analysis::state_equivalence::{identity_state_map, max_length};
     let enabled = includes_source_observation(
         "GLRMASK_GLOBAL_STATE_EQUIV_PASSES",
-        use_global_max_length(tokenizer, &global_statistic),
+        use_global_max_length(tokenizer, relevant_byte_count),
     );
     let initial = initial_state_map.cloned().unwrap_or_else(|| identity_state_map(num_states));
     let state_map = if enabled {
         max_length::compute_state_map(
-            tokenizer, &global_statistic, Some(&initial), None,
+            tokenizer, vocab, Some(&initial), None,
             max_length::MaxLengthMode::StableByteRestricted, None, None,
         )
     } else {

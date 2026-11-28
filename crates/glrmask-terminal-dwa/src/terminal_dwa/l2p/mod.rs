@@ -1019,12 +1019,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     let num_original_states = tokenizer.num_states() as usize;
     let num_active_terminals = active_terminals.iter().filter(|&&active| active).count();
 
-    let mut relevant_bytes = [false; 256];
-    for bytes in vocab.entries_map().values() {
-        for &byte in bytes {
-            relevant_bytes[byte as usize] = true;
-        }
-    }
+    let relevant_bytes = vocab.relevant_byte_mask();
 
     let token_position_partition_started_at = l2p_timing_profile_enabled().then(Instant::now);
     // Global token-position partition C. C combines partial partitions over

@@ -14,28 +14,6 @@ pub enum MaxLengthMode {
     KBoundedByteRestricted,
 }
 
-#[derive(Debug, Clone)]
-pub struct MaxLengthStatistic {
-    max_token_len: usize,
-    relevant_bytes: [bool; 256],
-}
-
-impl crate::vocab::VocabDerivedArtifact for MaxLengthStatistic {}
-
-impl MaxLengthStatistic {
-    pub fn max_token_len(&self) -> usize {
-        self.max_token_len
-    }
-
-    pub fn relevant_byte_count(&self) -> usize {
-        self.relevant_bytes.iter().filter(|&&active| active).count()
-    }
-
-    pub fn relevant_bytes(&self) -> &[bool; 256] {
-        &self.relevant_bytes
-    }
-}
-
 fn is_active_group(group_id: usize, active_groups: Option<&[bool]>) -> bool {
     active_groups.is_none_or(|groups| {
         groups.get(group_id).copied().unwrap_or(false)
@@ -175,51 +153,27 @@ fn stable_representatives(
     states.iter().map(|&s| representatives[classes[s] as usize] as usize).collect()
 }
 
-pub fn compute_statistic(vocab: &Vocab) -> MaxLengthStatistic {
-    let mut relevant_bytes = [false; 256];
-    let mut max_token_len = 0usize;
-    for bytes in vocab.entries_map().values() {
-        max_token_len = max_token_len.max(bytes.len());
-        for &byte in bytes {
-            relevant_bytes[byte as usize] = true;
-        }
-    }
-    MaxLengthStatistic {
-        max_token_len,
-        relevant_bytes,
-    }
-}
-
-/// Return the vocabulary-only max-length statistic, reusing it across grammar compiles.
-/// Without this cache, every state-equivalence lane rescans every token byte.
-pub fn cached_statistic(vocab: &Vocab) -> std::sync::Arc<MaxLengthStatistic> {
-    if let Some(cached) = vocab.vocab_derived_cache_get::<MaxLengthStatistic>() {
-        return cached;
-    }
-    let statistic = std::sync::Arc::new(compute_statistic(vocab));
-    vocab.vocab_derived_cache_set(std::sync::Arc::clone(&statistic));
-    statistic
-}
-
 pub fn compute_state_map(
     tokenizer: &Tokenizer,
-    statistic: &MaxLengthStatistic,
+    vocab: &Vocab,
     initial_state_map: Option<&ManyToOneIdMap>,
     active_groups: Option<&[bool]>,
     mode: MaxLengthMode,
     kbounded_tokenizer_view: Option<&TokenizerView>,
     kbounded_byte_to_class: Option<&[u8; 256]>,
 ) -> ManyToOneIdMap {
+    let relevant_bytes = vocab.relevant_byte_mask();
+    let max_token_len = vocab.max_token_byte_len();
     if tokenizer.has_epsilon_transitions() {
         let depth = match mode {
             MaxLengthMode::StableByteRestricted => super::nfa::RefinementDepth::Stable,
             MaxLengthMode::KBoundedByteRestricted => {
-                super::nfa::RefinementDepth::Bounded(statistic.max_token_len)
+                super::nfa::RefinementDepth::Bounded(max_token_len)
             }
         };
         return super::nfa::compute_state_map(
             tokenizer,
-            &statistic.relevant_bytes,
+            &relevant_bytes,
             active_groups,
             initial_state_map,
             depth,
@@ -248,7 +202,7 @@ pub fn compute_state_map(
         &owned_byte_to_class
     };
     let active_bytes =
-        active_byte_representatives(Some(&statistic.relevant_bytes), Some(byte_to_class));
+        active_byte_representatives(Some(&relevant_bytes), Some(byte_to_class));
     let representative_states = match mode {
         MaxLengthMode::StableByteRestricted => {
             stable_representatives(tokenizer, active_groups, &active_bytes, &states)
@@ -268,9 +222,9 @@ pub fn compute_state_map(
             super::super::state::max_length::find_state_equivalence_classes_kbounded(
                 tokenizer_view,
                 &states,
-                statistic.max_token_len,
+                max_token_len,
                 active_groups,
-                Some(&statistic.relevant_bytes),
+                Some(&relevant_bytes),
                 Some(byte_to_class),
                 "pipeline_kbounded",
             )
@@ -283,30 +237,4 @@ pub fn compute_state_map(
         num_states,
         initial_state_map,
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn max_length_statistic_is_cached_per_vocab() {
-        let vocab = Vocab::from_entries_unchecked(vec![
-            (0, b"a".to_vec()),
-            (1, b"longer".to_vec()),
-            (2, vec![0xff, b'z']),
-        ]);
-
-        assert_eq!(vocab.compiler_cache_entry_count(), 0);
-        let first = cached_statistic(&vocab);
-        let second = cached_statistic(&vocab);
-
-        assert!(std::sync::Arc::ptr_eq(&first, &second));
-        assert_eq!(vocab.compiler_cache_entry_count(), 1);
-        assert_eq!(first.max_token_len(), 6);
-        assert!(first.relevant_bytes()[b'a' as usize]);
-        assert!(first.relevant_bytes()[b'z' as usize]);
-        assert!(first.relevant_bytes()[0xff]);
-        assert!(!first.relevant_bytes()[b'q' as usize]);
-    }
 }

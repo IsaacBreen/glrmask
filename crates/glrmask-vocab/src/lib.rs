@@ -5,7 +5,7 @@ use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::ops::{Bound, RangeBounds, RangeInclusive};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 mod error;
 pub use error::{Error, ErrorKind, SourceSpan};
@@ -90,12 +90,13 @@ impl TokenSet {
 use range_set_blaze::RangeSetBlaze;
 
 /// Each token ID and its bytes.
+#[derive(Clone)]
 pub struct Vocab {
     entries: Arc<BTreeMap<u32, Vec<u8>>>,
     compiler_cache: Arc<VocabCompilerCache>,
     event_token_ranges: Arc<[(u32, u32)]>,
     byte_token_ranges: Arc<[(u32, u32)]>,
-    max_token_byte_len: OnceLock<usize>,
+    max_token_byte_len: usize,
 }
 
 #[derive(Default)]
@@ -106,6 +107,8 @@ struct VocabCompilerCache {
 #[derive(Debug)]
 struct VocabRelevantBytes {
     bytes: Arc<[u8]>,
+    mask: [bool; 256],
+    total_bytes: usize,
 }
 
 impl VocabDerivedArtifact for VocabRelevantBytes {}
@@ -147,22 +150,6 @@ impl fmt::Debug for Vocab {
     }
 }
 
-impl Clone for Vocab {
-    fn clone(&self) -> Self {
-        let max_token_byte_len = OnceLock::new();
-        if let Some(&length) = self.max_token_byte_len.get() {
-            let _ = max_token_byte_len.set(length);
-        }
-        Self {
-            entries: Arc::clone(&self.entries),
-            compiler_cache: Arc::clone(&self.compiler_cache),
-            event_token_ranges: Arc::clone(&self.event_token_ranges),
-            byte_token_ranges: Arc::clone(&self.byte_token_ranges),
-            max_token_byte_len,
-        }
-    }
-}
-
 impl Vocab {
     /// Fails with `ErrorKind::InvalidInput` on a duplicate ID or an ID above `MAX_TOKEN_ID`.
     ///
@@ -197,8 +184,7 @@ impl Vocab {
             }
         }
         let entries: Arc<BTreeMap<u32, Vec<u8>>> = Arc::new(entries.into_iter().collect());
-        let max_token_byte_len = OnceLock::new();
-        let _ = max_token_byte_len.set(entries.values().map(Vec::len).max().unwrap_or(0));
+        let max_token_byte_len = entries.values().map(Vec::len).max().unwrap_or(0);
         let mut vocab = Self {
             event_token_ranges: Arc::from(Vec::new()),
             byte_token_ranges: Arc::from(Vec::new()),
@@ -263,40 +249,49 @@ impl Vocab {
     }
 
     /// Maximum byte length of any token in this vocabulary.
-    ///
-    /// Fresh vocabularies compute this while being constructed. Deserialized
-    /// vocabularies fill it lazily on first use, after which clones preserve the
-    /// value instead of rescanning every token for every grammar compilation.
     #[doc(hidden)]
     pub fn max_token_byte_len(&self) -> usize {
-        *self
-            .max_token_byte_len
-            .get_or_init(|| self.entries.values().map(Vec::len).max().unwrap_or(0))
+        self.max_token_byte_len
     }
 
     /// Sorted byte alphabet observed anywhere in the vocabulary.
     #[doc(hidden)]
     pub fn relevant_bytes(&self) -> Arc<[u8]> {
+        Arc::clone(&self.byte_facts().bytes)
+    }
+
+    /// Membership in that same alphabet, in physical byte coordinates.
+    #[doc(hidden)]
+    pub fn relevant_byte_mask(&self) -> [bool; 256] {
+        self.byte_facts().mask
+    }
+
+    /// Number of bytes across the original vocabulary entries, before
+    /// observational deduplication.
+    #[doc(hidden)]
+    pub fn total_token_bytes(&self) -> usize {
+        self.byte_facts().total_bytes
+    }
+
+    fn byte_facts(&self) -> Arc<VocabRelevantBytes> {
         if let Some(cached) = self.vocab_derived_cache_get_internal::<VocabRelevantBytes>() {
-            return Arc::clone(&cached.bytes);
+            return cached;
         }
-        let mut observed = [false; 256];
+        let mut mask = [false; 256];
+        let mut total_bytes = 0usize;
         for token in self.entries.values() {
+            total_bytes += token.len();
             for &byte in token {
-                observed[byte as usize] = true;
+                mask[byte as usize] = true;
             }
         }
-        let bytes = Arc::<[u8]>::from(
-            observed
-                .iter()
-                .enumerate()
-                .filter_map(|(byte, &present)| present.then_some(byte as u8))
-                .collect::<Vec<_>>(),
-        );
-        self.vocab_derived_cache_set_internal(Arc::new(VocabRelevantBytes {
-            bytes: Arc::clone(&bytes),
-        }));
-        bytes
+        let bytes = mask.iter().enumerate()
+            .filter_map(|(byte, &present)| present.then_some(byte as u8))
+            .collect::<Vec<_>>().into();
+        let facts = Arc::new(VocabRelevantBytes { bytes, mask, total_bytes });
+        self.vocab_derived_cache_set_internal(Arc::clone(&facts));
+        // Return the published instance if another compiler won the race.
+        self.vocab_derived_cache_get_internal::<VocabRelevantBytes>().unwrap_or(facts)
     }
 
     /// The number of tokens with bytes; special tokens are not counted.
@@ -446,11 +441,17 @@ mod tests {
     fn clones_share_pure_derived_artifact_cache() {
         let vocab = Vocab::from_entries_unchecked(vec![(0, b"ab".to_vec()), (1, b"bc".to_vec())]);
         assert_eq!(vocab.compiler_cache.artifacts.lock().unwrap().len(), 0);
-        let _ = vocab.relevant_bytes();
+        let bytes = vocab.relevant_bytes();
+        assert_eq!(bytes.as_ref(), b"abc");
+        assert_eq!(vocab.total_token_bytes(), 4);
+        assert_eq!(vocab.max_token_byte_len(), 2);
+        assert!(vocab.relevant_byte_mask()[b'b' as usize]);
+        assert!(!vocab.relevant_byte_mask()[b'z' as usize]);
         assert_eq!(vocab.compiler_cache.artifacts.lock().unwrap().len(), 1);
 
         let cloned = vocab.clone();
         assert!(Arc::ptr_eq(&vocab.compiler_cache, &cloned.compiler_cache));
+        assert!(Arc::ptr_eq(&bytes, &cloned.relevant_bytes()));
         assert_eq!(cloned.compiler_cache.artifacts.lock().unwrap().len(), 1);
     }
 

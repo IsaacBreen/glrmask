@@ -5,7 +5,7 @@ use crate::Vocab;
 use std::time::Instant;
 
 use super::super::compat::TokenizerView;
-use super::{identity_state_map, max_length, nfa, restricted_observation};
+use super::{identity_state_map, nfa, restricted_observation};
 
 /// The local quotient either preserves the incoming coordinate, observes
 /// destinations only, or also observes the source. The latter establishes
@@ -82,21 +82,21 @@ pub fn local_observation_map(
         return (initial, profile);
     }
     let started = Instant::now();
-    let statistic = max_length::cached_statistic(vocab);
+    let relevant_bytes = vocab.relevant_byte_mask();
     let epsilon = tokenizer.has_epsilon_transitions();
     let map = if epsilon {
         if let Some(prebuilt) = prebuilt {
             prebuilt.compute_state_map(tokenizer, Some(&initial), nfa::RefinementDepth::Stable)
         } else {
             nfa::compute_state_map(
-                tokenizer, statistic.relevant_bytes(), active_groups,
+                tokenizer, &relevant_bytes, active_groups,
                 Some(&initial), nfa::RefinementDepth::Stable,
             )
         }
     } else {
         restricted_observation::compute_state_map(
             view.expect("L2P restricted observation requires the shared analysis view"),
-            statistic.relevant_bytes(), Some(&initial), byte_to_class, includes_source,
+            &relevant_bytes, Some(&initial), byte_to_class, includes_source,
         )
     };
     profile.restricted_observation_state_equiv_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -129,7 +129,7 @@ mod tests {
             None, Some(&view), None, false,
         );
         assert!(profile.relevant_byte_congruence_certified);
-        assert!(view.is_relevant_byte_congruent(&map, max_length::cached_statistic(&vocab).relevant_bytes()));
+        assert!(view.is_relevant_byte_congruent(&map, &vocab.relevant_byte_mask()));
     }
 
     #[test]

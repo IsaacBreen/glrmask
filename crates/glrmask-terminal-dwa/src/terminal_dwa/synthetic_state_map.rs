@@ -62,7 +62,7 @@ pub fn materialize_active_tokenizer(
     }
     let quotient_states = state_map.num_internal_ids() as usize;
     let started_at = std::time::Instant::now();
-    let statistic = max_length::cached_statistic(vocab);
+    let relevant_bytes = vocab.relevant_byte_mask();
 
     let (compact, full_to_synthesized) = if tokenizer.has_epsilon_transitions() {
         // NFA state equivalence is defined over epsilon-closed configurations,
@@ -71,7 +71,7 @@ pub fn materialize_active_tokenizer(
         // attempting an invalid raw-edge quotient.
         let view = super::l2p::equivalence_analysis::state_equivalence::nfa::build_relevant_powerset_view(
             tokenizer,
-            statistic.relevant_bytes(),
+            &relevant_bytes,
             Some(active_terminals),
             Some(&state_map),
         );
@@ -117,7 +117,7 @@ pub fn materialize_active_tokenizer(
             &state_map.original_to_internal,
             &state_map.representative_original_ids,
             active_terminals,
-            statistic.relevant_bytes(),
+            &relevant_bytes,
         )?;
         (compact, state_map.original_to_internal)
     };
@@ -1852,10 +1852,9 @@ pub fn certify_full_to_synthesized_state_map(
         return Some(certified);
     }
     let union = Tokenizer::disjoint_union_for_analysis(full, synthesized);
-    let statistic = max_length::compute_statistic(vocab);
     let state_map = max_length::compute_state_map(
         &union.tokenizer,
-        &statistic,
+        vocab,
         None,
         active_terminals,
         MaxLengthMode::KBoundedByteRestricted,

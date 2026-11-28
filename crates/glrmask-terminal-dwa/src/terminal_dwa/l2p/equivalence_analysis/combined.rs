@@ -1156,12 +1156,7 @@ fn try_analyze_equivalences_with_token_position_partition(
     // The base is partition-local (its byte classes depend on this partition's
     // relevant bytes), so it uses local caches rather than the cross-partition
     // shared ones to avoid contaminating other partitions.
-    let mut relevant_bytes = [false; 256];
-    for token in &prepared.token_bytes {
-        for &byte in token.iter() {
-            relevant_bytes[byte as usize] = true;
-        }
-    }
+    let relevant_bytes = vocab.relevant_byte_mask();
     let local_vocab_dfa_cache = vocab_equivalence_analysis::SharedVocabDfaCache::new();
     let local_analysis_dfa_cache =
         vocab_equivalence_analysis::SharedVocabAnalysisDfaCache::default();
@@ -1452,16 +1447,9 @@ fn try_analyze_equivalences_with_raw_quotient(
     // The direct raw refinement sees every byte that can occur in this local
     // vocabulary. It is deliberately at least as fine as the later deduped
     // quotient analysis.
-    let mut raw_relevant_bytes = [false; 256];
-    let mut direct_token_bytes = 0usize;
-    let mut max_token_len = 0usize;
-    for token in &prepared.token_bytes {
-        direct_token_bytes += token.len();
-        max_token_len = max_token_len.max(token.len());
-        for &byte in *token {
-            raw_relevant_bytes[byte as usize] = true;
-        }
-    }
+    let raw_relevant_bytes = vocab.relevant_byte_mask();
+    let direct_token_bytes = vocab.total_token_bytes();
+    let max_token_len = vocab.max_token_byte_len();
     let active_byte_count = raw_relevant_bytes.iter().filter(|&&active| active).count();
     let projected_by_global = prepared.initial_states.len() < tokenizer.num_states() as usize;
     let skip_raw_quotient = should_skip_max_length_for_partition(
