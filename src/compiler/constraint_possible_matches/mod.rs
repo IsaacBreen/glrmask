@@ -23,7 +23,7 @@ use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
 use crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalDwaFamilies;
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
-use crate::ds::vocab_prefix_tree::{VocabPrefixTree, VocabPrefixTreeNode};
+use crate::ds::vocab_prefix_tree::VocabPrefixTreeNode;
 use crate::ds::weight::{shared_rangeset, Weight};
 use crate::grammar::flat::TerminalID;
 use crate::runtime::{DynamicMaskTrie, DynamicMaskVocab};
@@ -126,68 +126,38 @@ pub(crate) fn complete_single_use_terminal_possible_matches_from_l1(
 
 use crate::vocab::LexicalVocabulary as OrderedVocab;
 
-#[derive(Debug, Clone)]
-struct OrderedVocabTrieArtifacts {
+#[derive(Debug)]
+struct RuntimeVocabPreparation {
     ordered_vocab: Arc<OrderedVocab>,
-    trie: Arc<VocabPrefixTree>,
     /// Fully materialized vocabulary-only dynamic-mask template. Constraint
     /// builds clone its immutable indexes into fresh runtime-local caches.
-    runtime_dynamic_vocab: Arc<OnceLock<Arc<DynamicMaskVocab>>>,
+    runtime_dynamic_vocab: OnceLock<Arc<DynamicMaskVocab>>,
     /// Same vocabulary-only template with the llguidance slice residual tries
     /// materialized. Kept separate so non-slicer users never pay this one-time
     /// preparation cost, while every slicer-enabled constraint Arc-shares it.
-    runtime_dynamic_vocab_llg: Arc<OnceLock<Arc<DynamicMaskVocab>>>,
+    runtime_dynamic_vocab_llg: OnceLock<Arc<DynamicMaskVocab>>,
     /// Vocabulary-global byte support of whole tokens admitted by the exact
     /// llguidance safe-string language. Producer-side proof preparation needs
     /// only this tiny set; caching it avoids materializing the full runtime
     /// dynamic vocabulary just to select proof candidates.
-    llg_safe_slice_token_bytes: Arc<OnceLock<U8Set>>,
+    llg_safe_slice_token_bytes: OnceLock<U8Set>,
     /// Largest Unicode-scalar length of any whole token in the exact safe
     /// language. Bounded master proofs only need radii up to this value.
-    llg_master_max_safe_chars: Arc<OnceLock<u16>>,
+    llg_master_max_safe_chars: OnceLock<u16>,
 }
 
-impl VocabDerivedArtifact for OrderedVocabTrieArtifacts {}
+impl VocabDerivedArtifact for RuntimeVocabPreparation {}
 
-impl OrderedVocabTrieArtifacts {
-    fn new(ordered_vocab: Arc<OrderedVocab>, trie: Arc<VocabPrefixTree>) -> Self {
+impl RuntimeVocabPreparation {
+    fn new(ordered_vocab: Arc<OrderedVocab>) -> Self {
         Self {
             ordered_vocab,
-            trie,
-            runtime_dynamic_vocab: Arc::new(OnceLock::new()),
-            runtime_dynamic_vocab_llg: Arc::new(OnceLock::new()),
-            llg_safe_slice_token_bytes: Arc::new(OnceLock::new()),
-            llg_master_max_safe_chars: Arc::new(OnceLock::new()),
+            runtime_dynamic_vocab: OnceLock::new(),
+            runtime_dynamic_vocab_llg: OnceLock::new(),
+            llg_safe_slice_token_bytes: OnceLock::new(),
+            llg_master_max_safe_chars: OnceLock::new(),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OrderedVocabCacheStatus {
-    Disabled,
-    Hit,
-    Miss,
-}
-
-impl OrderedVocabCacheStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Disabled => "disabled",
-            Self::Hit => "hit",
-            Self::Miss => "miss",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct OrderedVocabCacheProfile {
-    status: OrderedVocabCacheStatus,
-    probe_ns: u128,
-    verify_ns: u128,
-    ordered_vocab_build_ns: u128,
-    trie_build_ns: u128,
-    cache_entries: usize,
-    capacity: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -211,93 +181,16 @@ struct SweepBuildStats {
     total_events: usize,
 }
 
-fn ordered_vocab_cache_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        crate::env::var("GLRMASK_PM_ORDERED_VOCAB_CACHE")
-            .map(|value| {
-                let trimmed = value.trim();
-                trimmed.is_empty() || (trimmed != "0" && !trimmed.eq_ignore_ascii_case("false"))
-            })
-            .unwrap_or(true)
-    })
-}
-
-fn ordered_vocab_cache_capacity() -> usize {
-    static CAPACITY: OnceLock<usize> = OnceLock::new();
-    *CAPACITY.get_or_init(|| {
-        crate::env::var("GLRMASK_PM_ORDERED_VOCAB_CACHE_CAPACITY")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(4)
-    })
-}
-
-fn compile_profile_requested() -> bool {
-    crate::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
-        || crate::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
-}
-
-fn emit_ordered_vocab_cache_profile(profile: OrderedVocabCacheProfile) {
-    if !compile_profile_requested() {
-        return;
+fn runtime_vocab_preparation(vocab: &Vocab) -> Arc<RuntimeVocabPreparation> {
+    if let Some(prepared) = vocab.vocab_derived_cache_get::<RuntimeVocabPreparation>() {
+        return prepared;
     }
-    eprintln!(
-        "[glrmask/profile][ordered_vocab_cache] status={} probe_ms={:.3} verify_ms={:.3} ordered_vocab_ms={:.3} vocab_prefix_tree_ms={:.3} cache_entries={} capacity={}",
-        profile.status.as_str(),
-        profile.probe_ns as f64 / 1_000_000.0,
-        profile.verify_ns as f64 / 1_000_000.0,
-        profile.ordered_vocab_build_ns as f64 / 1_000_000.0,
-        profile.trie_build_ns as f64 / 1_000_000.0,
-        profile.cache_entries,
-        profile.capacity,
-    );
+    let prepared = Arc::new(RuntimeVocabPreparation::new(vocab.lexical_vocabulary()));
+    vocab.vocab_derived_cache_set(Arc::clone(&prepared));
+    // Concurrent callers use the same published template and its lazy indexes.
+    vocab.vocab_derived_cache_get().unwrap_or(prepared)
 }
 
-fn get_ordered_vocab_trie_artifacts_for_vocab(
-    vocab: &Vocab,
-) -> (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile) {
-    let capacity = ordered_vocab_cache_capacity();
-    let enabled = ordered_vocab_cache_enabled() && capacity != 0;
-
-    let probe_started_at = Instant::now();
-    if let Some(artifacts) = enabled.then(|| vocab.vocab_derived_cache_get::<OrderedVocabTrieArtifacts>()).flatten() {
-        return (
-            artifacts.as_ref().clone(),
-            OrderedVocabCacheProfile {
-                status: OrderedVocabCacheStatus::Hit,
-                probe_ns: probe_started_at.elapsed().as_nanos(),
-                verify_ns: 0,
-                ordered_vocab_build_ns: 0,
-                trie_build_ns: 0,
-                cache_entries: 1,
-                capacity,
-            },
-        );
-    }
-
-    let ordered_vocab_started_at = Instant::now();
-    let ordered_vocab = if enabled { vocab.lexical_vocabulary() } else { Arc::new(OrderedVocab::build(vocab.entries_map())) };
-    let ordered_vocab_build_ns = ordered_vocab_started_at.elapsed().as_nanos();
-    let trie_started_at = Instant::now();
-    let trie = ordered_vocab.trie();
-    let trie_build_ns = trie_started_at.elapsed().as_nanos();
-    let artifacts = OrderedVocabTrieArtifacts::new(ordered_vocab, trie);
-    if enabled { vocab.vocab_derived_cache_set(Arc::new(artifacts.clone())); }
-
-    (
-        artifacts,
-        OrderedVocabCacheProfile {
-            status: if enabled { OrderedVocabCacheStatus::Miss } else { OrderedVocabCacheStatus::Disabled },
-            probe_ns: probe_started_at.elapsed().as_nanos(),
-            verify_ns: 0,
-            ordered_vocab_build_ns,
-            trie_build_ns,
-            cache_entries: usize::from(enabled),
-            capacity,
-        },
-    )
-}
 
 /// Exact proper-prefix ANY-byte query over vocabulary artifacts that ALREADY
 /// exist. Do not construct a trie/index here or change vocabulary preparation:
@@ -305,33 +198,25 @@ fn get_ordered_vocab_trie_artifacts_for_vocab(
 pub(crate) fn prepared_proper_prefix_byte_candidates(
     vocab: &Vocab, bytes: &[u64; 4],
 ) -> Option<Vec<u32>> {
-    if !ordered_vocab_cache_enabled() || ordered_vocab_cache_capacity() == 0 { return None; }
-    let artifacts = vocab.vocab_derived_cache_get::<OrderedVocabTrieArtifacts>()?;
+    let ordered = vocab.cached_lexical_vocabulary()?;
+    let trie = ordered.cached_trie()?;
     // Sparse interface-exit queries benefit; avoid spending a complete scan's
     // worth of tree work and then sorting a dense result on broad queries.
     let limit = (vocab.len() / 4).max(64);
-    let ordered_ids = artifacts.trie.token_ids_with_proper_prefix_byte(bytes, limit)?;
+    let ordered_ids = trie.token_ids_with_proper_prefix_byte(bytes, limit)?;
     // Byte-spelling aliases can make a sparse canonical query dense in the
     // original token domain. Preflight the full expansion before allocating.
     let mut count = 0usize;
     for &ordered_id in &ordered_ids {
-        count = count.checked_add(artifacts.ordered_vocab.ordered_to_originals.get(ordered_id)?.len())?;
+        count = count.checked_add(ordered.ordered_to_originals.get(ordered_id)?.len())?;
         if count > limit { return None; }
     }
     let mut ids = Vec::with_capacity(count);
     for ordered_id in ordered_ids {
-        ids.extend_from_slice(&artifacts.ordered_vocab.ordered_to_originals[ordered_id]);
+        ids.extend_from_slice(&ordered.ordered_to_originals[ordered_id]);
     }
     ids.sort_unstable(); ids.dedup();
     Some(ids)
-}
-
-#[allow(dead_code)]
-pub(crate) fn dense_word_count(token_slots: u32) -> usize { (token_slots as usize).div_ceil(64) }
-
-#[allow(dead_code)]
-pub(crate) fn max_original_token_slot(token_bytes: &BTreeMap<u32, Vec<u8>>) -> u32 {
-    token_bytes.keys().next_back().map(|token_id| token_id.saturating_add(1)).unwrap_or(0)
 }
 
 fn range_set_from_sorted_ids(ids: &[u32]) -> RangeSetBlaze<u32> {
@@ -1857,11 +1742,11 @@ fn attach_structured_dispatch_possible_matches(
 }
 
 fn prepared_runtime_dynamic_vocab(
-    artifacts: &OrderedVocabTrieArtifacts,
+    artifacts: &RuntimeVocabPreparation,
 ) -> &Arc<DynamicMaskVocab> {
     artifacts.runtime_dynamic_vocab.get_or_init(|| {
         let runtime_trie = Arc::new(DynamicMaskTrie::from_vocab_prefix_tree(
-            artifacts.trie.as_ref(),
+            artifacts.ordered_vocab.trie().as_ref(),
         ));
         Arc::new(DynamicMaskVocab::from_materialized_ordered(
             runtime_trie,
@@ -2077,7 +1962,7 @@ fn llg_safe_slice_token_bytes_for_ordered_vocab(ordered_vocab: &OrderedVocab) ->
     bytes
 }
 
-fn llg_safe_slice_token_bytes_for_artifacts(artifacts: &OrderedVocabTrieArtifacts) -> U8Set {
+fn llg_safe_slice_token_bytes_for_artifacts(artifacts: &RuntimeVocabPreparation) -> U8Set {
     *artifacts
         .llg_safe_slice_token_bytes
         .get_or_init(|| llg_safe_slice_token_bytes_for_ordered_vocab(&artifacts.ordered_vocab))
@@ -2087,11 +1972,11 @@ fn llg_safe_slice_token_bytes_for_artifacts(artifacts: &OrderedVocabTrieArtifact
 /// safe-slice containment candidates. This deliberately does not construct the
 /// dynamic-mask trie or the full llguidance slice runtime template.
 pub(crate) fn llg_safe_slice_token_bytes_for_vocab(vocab: &Vocab) -> U8Set {
-    let artifacts = get_ordered_vocab_trie_artifacts_for_vocab(vocab).0;
+    let artifacts = runtime_vocab_preparation(vocab);
     llg_safe_slice_token_bytes_for_artifacts(&artifacts)
 }
 
-fn llg_master_max_safe_chars_for_artifacts(artifacts: &OrderedVocabTrieArtifacts) -> u16 {
+fn llg_master_max_safe_chars_for_artifacts(artifacts: &RuntimeVocabPreparation) -> u16 {
     *artifacts.llg_master_max_safe_chars.get_or_init(|| {
         let safe_plus = VocabPartitionDfa::compile_utf8_regex(
             "llg-safe+",
@@ -2115,12 +2000,12 @@ fn llg_master_max_safe_chars_for_artifacts(artifacts: &OrderedVocabTrieArtifacts
 }
 
 pub(crate) fn llg_master_max_safe_chars_for_vocab(vocab: &Vocab) -> u16 {
-    let artifacts = get_ordered_vocab_trie_artifacts_for_vocab(vocab).0;
+    let artifacts = runtime_vocab_preparation(vocab);
     llg_master_max_safe_chars_for_artifacts(&artifacts)
 }
 
 fn prepared_runtime_dynamic_vocab_with_llg(
-    artifacts: &OrderedVocabTrieArtifacts,
+    artifacts: &RuntimeVocabPreparation,
 ) -> &Arc<DynamicMaskVocab> {
     artifacts.runtime_dynamic_vocab_llg.get_or_init(|| {
         let mut vocab = prepared_runtime_dynamic_vocab(artifacts).fresh_runtime_instance();
@@ -2134,7 +2019,7 @@ fn prepared_runtime_dynamic_vocab_with_llg(
 }
 
 fn runtime_dynamic_vocab_artifacts(
-    artifacts: &OrderedVocabTrieArtifacts,
+    artifacts: &RuntimeVocabPreparation,
 ) -> RuntimeDynamicMaskVocabArtifacts {
     let template = prepared_runtime_dynamic_vocab_with_llg(artifacts);
     RuntimeDynamicMaskVocabArtifacts {
@@ -2143,7 +2028,7 @@ fn runtime_dynamic_vocab_artifacts(
 }
 
 pub(crate) fn prepared_runtime_dynamic_vocab_for_vocab(vocab: &Vocab) -> Arc<DynamicMaskVocab> {
-    let artifacts = get_ordered_vocab_trie_artifacts_for_vocab(vocab).0;
+    let artifacts = runtime_vocab_preparation(vocab);
     Arc::clone(prepared_runtime_dynamic_vocab_with_llg(&artifacts))
 }
 
@@ -2154,7 +2039,7 @@ pub(crate) fn runtime_dynamic_vocab_for_vocab(vocab: &Vocab) -> DynamicMaskVocab
 // Recursive parser roots have no ordinary tokenizer-state coordinate. Keep the
 // complete token trie and aliases, without source-state LLG slice accelerators.
 pub(crate) fn runtime_dynamic_vocab_for_recursive_provider(vocab: &Vocab) -> DynamicMaskVocab {
-    let artifacts = get_ordered_vocab_trie_artifacts_for_vocab(vocab).0;
+    let artifacts = runtime_vocab_preparation(vocab);
     prepared_runtime_dynamic_vocab(&artifacts).fresh_runtime_instance()
 }
 
@@ -2292,7 +2177,7 @@ pub(crate) fn runtime_dynamic_vocab_for_partition(
 }
 
 pub(crate) fn prepare_vocab_for_dynamic_mask(vocab: &Vocab) {
-    let artifacts = get_ordered_vocab_trie_artifacts_for_vocab(vocab).0;
+    let artifacts = runtime_vocab_preparation(vocab);
     let _ = prepared_runtime_dynamic_vocab_with_llg(&artifacts);
 }
 
@@ -2373,18 +2258,16 @@ fn lazy_runtime_dynamic_vocab_artifacts() -> RuntimeDynamicMaskVocabArtifacts {
 fn compute_constraint_possible_matches_with_artifacts(
     tokenizer: &Tokenizer,
     original_token_count: usize,
-    artifacts_and_profile: (OrderedVocabTrieArtifacts, OrderedVocabCacheProfile),
+    artifacts: Arc<RuntimeVocabPreparation>,
     raw_byte_to_class: Option<&[u8; 256]>,
     raw_transitions: Option<&[u32]>,
     demand: DelayedTerminalDemand,
 ) -> ConstraintPossibleMatchesComputation {
     let pm_started_at = Instant::now();
 
-    let (artifacts, ordered_vocab_cache_profile) = artifacts_and_profile;
-    emit_ordered_vocab_cache_profile(ordered_vocab_cache_profile);
     let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&artifacts);
-    let ordered_vocab = artifacts.ordered_vocab;
-    let trie = artifacts.trie;
+    let ordered_vocab = Arc::clone(&artifacts.ordered_vocab);
+    let trie = ordered_vocab.trie();
 
     let structured_dispatch = tokenizer.has_deterministic_dispatch();
     let scalar_dispatch = tokenizer.has_scalar_deterministic_dispatch();
@@ -2731,8 +2614,7 @@ fn compute_constraint_possible_matches_for_vocab_impl(
     raw_transitions: Option<&[u32]>,
 ) -> ConstraintPossibleMatchesComputation {
     if config.defer_to_dynamic_mask {
-        let (full_artifacts, full_profile) = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
-        emit_ordered_vocab_cache_profile(full_profile);
+        let full_artifacts = runtime_vocab_preparation(vocab);
         let runtime_dynamic_vocab = runtime_dynamic_vocab_artifacts(&full_artifacts);
         return empty_possible_matches_computation(
             tokenizer,
@@ -2760,7 +2642,7 @@ fn compute_constraint_possible_matches_for_vocab_impl(
     compute_constraint_possible_matches_with_artifacts(
         tokenizer,
         vocab.entries_map().len(),
-        get_ordered_vocab_trie_artifacts_for_vocab(vocab),
+        runtime_vocab_preparation(vocab),
         raw_byte_to_class,
         raw_transitions,
         demand,
@@ -2796,25 +2678,9 @@ pub(crate) fn prepare_vocab_for_possible_matches(vocab: &Vocab) {
     // mask trie is substantially larger and is irrelevant to ordinary static
     // constraints with complete possible-match tables, so leave that second
     // representation lazy until a dynamic mask is actually requested.
-    let _ = get_ordered_vocab_trie_artifacts_for_vocab(vocab);
+    let _ = vocab.lexical_vocabulary().trie();
 }
 
-
-/// Read-only byte-ordered vocabulary data that compilation already prepared.
-/// A cold bounded-token query must not build or sort a whole new vocabulary.
-pub(crate) struct PreparedOrderedTokens { data:Arc<OrderedVocabTrieArtifacts> }
-impl PreparedOrderedTokens {
-    pub(crate) fn len(&self)->usize {self.data.ordered_vocab.ordered_token_bytes.len()}
-    pub(crate) fn bytes(&self,index:usize)->&[u8] {&self.data.ordered_vocab.ordered_token_bytes[index]}
-    pub(crate) fn originals(&self,index:usize)->&[u32] {&self.data.ordered_vocab.ordered_to_originals[index]}
-    pub(crate) fn child_end(&self,start:usize,end:usize,offset:usize)->usize {
-        let byte=self.bytes(start)[offset];
-        start+self.data.ordered_vocab.ordered_token_bytes[start..end].partition_point(|b|b[offset]==byte)
-    }
-}
-pub(crate) fn prepared_ordered_tokens(vocab:&Vocab)->Option<PreparedOrderedTokens> {
-    vocab.vocab_derived_cache_get::<OrderedVocabTrieArtifacts>().map(|data|PreparedOrderedTokens {data})
-}
 
 #[cfg(test)]
 mod tests {
@@ -2835,9 +2701,7 @@ mod tests {
         let before=vocab.compiler_cache_entry_count();
         assert!(prepared_proper_prefix_byte_candidates(&vocab,&query).is_none());
         assert_eq!(vocab.compiler_cache_entry_count(),before,"query must not shift cold work into preparation");
-        let ordered=Arc::new(OrderedVocab::build(vocab.entries_map()));
-        let trie=ordered.trie();
-        vocab.vocab_derived_cache_set(Arc::new(OrderedVocabTrieArtifacts::new(ordered,trie)));
+        let _ = vocab.lexical_vocabulary().trie();
         assert_eq!(prepared_proper_prefix_byte_candidates(&vocab,&query),Some(vec![1_003,9_000_001]));
         assert_eq!(prepared_proper_prefix_byte_candidates(&vocab.clone(),&query),Some(vec![1_003,9_000_001]));
         query=[0;4];query[b'a' as usize>>6]|=1u64<<(b'a'&63);
@@ -2851,9 +2715,7 @@ mod tests {
     fn prepared_prefix_byte_query_declines_dense_original_alias_expansion() {
         let entries=(0..130u32).map(|i|(i*97+3,b"ab".to_vec())).collect::<Vec<_>>();
         let vocab=Vocab::from_entries_unchecked(entries);
-        let ordered=Arc::new(OrderedVocab::build(vocab.entries_map()));
-        let trie=ordered.trie();
-        vocab.vocab_derived_cache_set(Arc::new(OrderedVocabTrieArtifacts::new(ordered,trie)));
+        let _ = vocab.lexical_vocabulary().trie();
         let mut query=[0u64;4];query[b'a' as usize>>6]|=1u64<<(b'a'&63);
         assert!(prepared_proper_prefix_byte_candidates(&vocab,&query).is_none(),
             "one canonical spelling must not hide an over-budget original-ID expansion");
@@ -3236,11 +3098,12 @@ mod tests {
                 (5, b"ba".to_vec()),
                 (6, b"x".to_vec()),
             ]);
-        let artifacts = get_ordered_vocab_trie_artifacts_for_vocab(&vocab).0;
+        let artifacts = runtime_vocab_preparation(&vocab);
+        let trie = artifacts.ordered_vocab.trie();
         let raw_states = (0..tokenizer.num_states()).collect::<Vec<_>>();
         let sparse = collect_sparse_root_possible_matches(
             &tokenizer,
-            artifacts.trie.root(),
+            trie.root(),
             &raw_states,
             None,
         );
@@ -3265,7 +3128,7 @@ mod tests {
         view_entries.dedup();
         let (powerset_rows, _) =
             collector::collect_possible_matches_interval_trie_class_build_precomputed(
-                artifacts.trie.root(),
+                trie.root(),
                 &view_entries,
                 Some(&powerset.boundary_state),
                 powerset.num_states,

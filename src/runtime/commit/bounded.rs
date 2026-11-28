@@ -9,7 +9,7 @@ use crate::ErrorExt as _;
 use crate::test_modes::MaskMode;
 use super::*;
 use crate::runtime::state::{MaskCacheData,frontier_is_accepting};
-use crate::compiler::constraint_possible_matches::PreparedOrderedTokens;
+use crate::vocab::LexicalVocabulary;
 use smallvec::SmallVec;
 use rustc_hash::FxHashSet;
 use std::sync::Mutex;
@@ -191,7 +191,7 @@ fn first_byte_bound(view:View<'_>)->[bool;256] {
 /// Skip whole sorted root ranges using the physical first-byte upper bound.
 /// In a singleton literal state this jumps directly to its one possible byte,
 /// rather than cloning/replaying a parser state for every root byte in vocab.
-fn ordered_skip_impossible_first_bytes(ordered:&PreparedOrderedTokens,mut lo:usize,hi:usize,bound:&[bool;256])->usize {
+fn ordered_skip_impossible_first_bytes(ordered:&LexicalVocabulary,mut lo:usize,hi:usize,bound:&[bool;256])->usize {
     while lo<hi {
         let Some(&first)=ordered.bytes(lo).first() else{return lo};
         if bound[first as usize]{return lo;}
@@ -206,8 +206,8 @@ fn ordered_skip_impossible_first_bytes(ordered:&PreparedOrderedTokens,mut lo:usi
     hi
 }
 
-fn probe_ordered(view:View<'_>,ordered:&PreparedOrderedTokens,buffers:&mut CommitBuffers,w:&mut Witnesses)->crate::Result<bool> {
-    if ordered.len()==0{return Ok(true);}
+fn probe_ordered(view:View<'_>,ordered:&LexicalVocabulary,buffers:&mut CommitBuffers,w:&mut Witnesses)->crate::Result<bool> {
+    if ordered.is_empty(){return Ok(true);}
     // Iterative radix traversal: at most one remainder frame per prefix.
     // Deep vocabulary prefixes cannot overflow the native thread stack.
     let initial_bound=first_byte_bound(view);
@@ -373,7 +373,7 @@ fn probe_owner(view:View<'_>,w:&mut Witnesses,scratch:Option<&mut CommitBuffers>
         c.lazy_dynamic_mask_vocab.get().filter(|v|v.is_initialized()&&!v.is_grammar_quotiented())
     };
     if let Some(vocab)=dynamic{return probe_dynamic_trie(view,vocab,buffers,w);}
-    if let Some(ordered)=c.token_bytes.vocab().and_then(crate::compiler::constraint_possible_matches::prepared_ordered_tokens) {
+    if let Some(ordered)=c.token_bytes.vocab().and_then(|vocab| vocab.cached_lexical_vocabulary()) {
         return probe_ordered(view,&ordered,buffers,w);
     }
     // No setup/index work is charged to a cold query. Enumerate real original

@@ -330,6 +330,22 @@ impl LexicalVocabulary {
         )))
     }
 
+    /// Reuse only an already prepared trie; a query must not force cold work.
+    pub fn cached_trie(&self) -> Option<Arc<vocab_prefix_tree::VocabPrefixTree>> {
+        self.trie.get().cloned()
+    }
+
+    pub fn len(&self) -> usize { self.ordered_token_bytes.len() }
+    pub fn is_empty(&self) -> bool { self.ordered_token_bytes.is_empty() }
+    pub fn bytes(&self, index: usize) -> &[u8] { &self.ordered_token_bytes[index] }
+    pub fn originals(&self, index: usize) -> &[u32] { &self.ordered_to_originals[index] }
+
+    /// End of the first byte child in a sorted interval with a common prefix.
+    pub fn child_end(&self, start: usize, end: usize, offset: usize) -> usize {
+        let byte = self.bytes(start)[offset];
+        start + self.ordered_token_bytes[start..end].partition_point(|b| b[offset] == byte)
+    }
+
     /// All positive proper-prefix split positions in lexical spelling order.
     pub fn split_offsets(&self) -> &[usize] {
         self.split_offsets.get_or_init(|| {
